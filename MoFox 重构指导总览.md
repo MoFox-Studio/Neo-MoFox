@@ -86,6 +86,7 @@ components：基本插件组件管理
     types.py：组件类型
     registry.py：组件注册管理
     state_manager.py：组件状态管理
+    loader.py：插件加载器
 prompt：提示词管理系统
     **init**.py：导出
     ...
@@ -2171,3 +2172,27 @@ managers是插件系统的管理器模块，负责管理和协调各种组件的
 
 #### Action Manager
 action manager负责管理所有的action组件，提供注册、加载、卸载和执行action的功能。
+
+除了基础的管理功能外，action manager还提供以下高级功能：
+- 生成标准schema：根据action的execute方法自动生成调用schema，方便LLM调用。
+- 统一激活判定：提供统一的go_activate调用接口，方便chatter获取action的激活状态。
+以及其他辅助功能。
+
+其他manager总体功能都类似，提供对应组件的管理功能。在此不再赘述。
+
+`types`:
+types模块定义了插件系统中使用的各种类型和数据结构，确保组件之间的数据交换和交互的一致性和可靠性。
+
+`registry`:
+registry模块负责插件系统中组件的注册和查找，提供统一的注册接口和查找机制，确保各类组件能够被正确识别和使用。
+
+`state_manager`:
+state manager负责管理插件系统的状态信息，提供状态的存储、更新和查询功能，确保插件系统能够正确维护和恢复其运行状态。
+
+`loader`:
+loader模块负责插件系统中组件的加载功能。它支持文件夹、zip包，.mfp等多种加载方式，确保插件系统能够灵活地加载和使用各种组件。
+
+### core\prompt
+prompt模块负责管理和处理与LLM交互相关的提示词和模板，确保插件系统能够有效地与LLM进行对话和交互。
+它提供提示词的存储、加载和渲染功能。
+
