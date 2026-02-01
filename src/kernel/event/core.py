@@ -176,7 +176,6 @@ class EventBus:
         event_name = event.name
 
         if event_name not in self._subscribers:
-            logger.debug(f"事件 '{event_name}' 没有订阅者")
             return 0
 
         handlers = list(self._subscribers[event_name])
