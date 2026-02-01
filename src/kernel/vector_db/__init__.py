@@ -12,7 +12,7 @@
     from src.kernel.vector_db import vector_db_service
 
     # 1. 获取或创建集合
-    vector_db_service.get_or_create_collection(name="semantic_cache")
+    await vector_db_service.get_or_create_collection(name="semantic_cache")
 
     # 2. 添加向量数据
     await vector_db_service.add(

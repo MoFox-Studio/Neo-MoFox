@@ -22,7 +22,14 @@ from typing import Any
 
 from src.kernel.logger import get_logger, COLOR
 
-logger = get_logger("event_bus", display="EventBus", color=COLOR.MAGENTA)
+# 注意：EventBus 自身的日志不应再通过事件总线进行广播，否则在订阅了
+# LOG_OUTPUT_EVENT 时可能出现递归发布/日志风暴。
+logger = get_logger(
+    "event_bus",
+    display="EventBus",
+    color=COLOR.MAGENTA,
+    enable_event_broadcast=False,
+)
 
 EventParams = dict[str, Any]
 

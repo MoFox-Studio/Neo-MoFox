@@ -17,6 +17,8 @@ from src.kernel.scheduler import (
     unified_scheduler,
 )
 
+from src.kernel.scheduler.time_utils import next_after
+
 
 class TestScheduler:
     """测试统一调度器"""
@@ -32,9 +34,11 @@ class TestScheduler:
     async def test_delayed_task(self):
         """测试延迟任务"""
         executed = []
+        done = asyncio.Event()
 
         async def delayed_task():
             executed.append(1)
+            done.set()
 
         # 创建延迟1秒的任务
         schedule_id = await unified_scheduler.create_schedule(
@@ -44,8 +48,8 @@ class TestScheduler:
             task_name="test_delayed",
         )
 
-        # 等待任务执行
-        await asyncio.sleep(2)
+        # 等待任务执行（避免依赖调度器 tick 抖动导致的偶发超时）
+        await asyncio.wait_for(done.wait(), timeout=3)
 
         # 验证任务已执行
         assert len(executed) == 1
@@ -278,6 +282,36 @@ class TestScheduler:
 
         # 清理
         await unified_scheduler.remove_schedule(schedule_id)
+
+
+class TestSchedulerTimeUtils:
+    @pytest.fixture(autouse=True)
+    async def setup_scheduler(self):
+        """在每个测试前后启动和停止调度器。
+
+        说明：该类包含大量依赖全局 unified_scheduler 的测试用例，需要保证调度器运行。
+        """
+        await unified_scheduler.start()
+        yield
+        await unified_scheduler.stop()
+
+    def test_next_after_returns_scheduled_when_in_future(self) -> None:
+        now = datetime(2026, 2, 2, 12, 0, 0)
+        scheduled = datetime(2026, 2, 2, 12, 0, 10)
+        assert next_after(now, scheduled, 1.0) == scheduled
+
+    def test_next_after_skips_multiple_intervals(self) -> None:
+        scheduled = datetime(2026, 2, 2, 12, 0, 0)
+        now = datetime(2026, 2, 2, 12, 0, 10)
+        out = next_after(now, scheduled, 3.0)
+        assert out > now
+        # 应该是 12 秒（0,3,6,9,12），严格晚于 now=10
+        assert out == datetime(2026, 2, 2, 12, 0, 12)
+
+    def test_next_after_interval_non_positive_returns_now(self) -> None:
+        now = datetime(2026, 2, 2, 12, 0, 10)
+        scheduled = datetime(2026, 2, 2, 12, 0, 0)
+        assert next_after(now, scheduled, 0.0) == now
 
     @pytest.mark.asyncio
     async def test_find_by_name(self):

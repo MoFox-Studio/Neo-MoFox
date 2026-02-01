@@ -17,12 +17,13 @@ import weakref
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
 from src.kernel.scheduler.types import TaskExecution, TaskStatus, TriggerType
+from src.kernel.scheduler.time_utils import next_after
 
 logger = get_logger("kernel.scheduler", display="调度器")
 
@@ -185,6 +186,8 @@ class UnifiedScheduler:
         # 后台任务（存储 TaskInfo）
         self._check_loop_task_id: str | None = None
         self._cleanup_task_id: str | None = None
+        # 防止主循环重复投递 check_and_trigger 导致堆积
+        self._check_trigger_task_id: str | None = None
 
         # 事件订阅追踪（预留，未来集成 event 模块）
         self._event_subscriptions: dict[str, set[str]] = defaultdict(set)  # event -> {task_ids}
@@ -245,6 +248,7 @@ class UnifiedScheduler:
         background_task_ids = [
             self._check_loop_task_id,
             self._cleanup_task_id,
+            self._check_trigger_task_id,
         ]
 
         for task_id in background_task_ids:
@@ -306,12 +310,22 @@ class UnifiedScheduler:
                 await asyncio.sleep(self.config.check_interval)
 
                 if not self._stopping:
-                    # 使用 task_manager 创建任务，避免阻塞循环
-                    self._task_manager.create_task(
+                    # 使用 task_manager 创建任务，避免阻塞循环；同时避免重入堆积
+                    if self._check_trigger_task_id is not None:
+                        try:
+                            existing = self._task_manager.get_task(self._check_trigger_task_id)
+                            if existing.task is not None and not existing.is_done():
+                                continue
+                        except Exception:
+                            # 任务可能已完成或已被清理
+                            pass
+
+                    task_info = self._task_manager.create_task(
                         self._check_and_trigger_tasks(),
                         name="check_trigger_tasks",
                         daemon=True,
                     )
+                    self._check_trigger_task_id = task_info.task_id
 
             except asyncio.CancelledError:
                 logger.debug("调度器主循环被取消")
@@ -372,63 +386,55 @@ class UnifiedScheduler:
         """检查时间触发条件"""
         config = task.trigger_config
 
-        # 对于循环任务，使用 delay_seconds 作为间隔
-        interval_key = "interval_seconds" if task.is_recurring and "interval_seconds" in config else "delay_seconds"
+        # 1) delay_seconds / interval_seconds：延迟触发与循环间隔
+        interval_key = (
+            "interval_seconds" if task.is_recurring and "interval_seconds" in config else "delay_seconds"
+        )
 
         if interval_key in config:
-            interval = config[interval_key]
+            interval = float(config[interval_key])
 
-            if task._scheduled_trigger_time is None:
-                # 首次触发：从创建时间算起
+            # 一次性任务：从创建时间算起
+            if not task.is_recurring:
                 elapsed = (current_time - task.created_at).total_seconds()
-                if elapsed >= interval:
-                    # 设置预定触发时间
-                    task._scheduled_trigger_time = task.created_at
-                    # 计算下一次预定触发时间
-                    from datetime import timedelta
+                return elapsed >= interval
 
-                    task._scheduled_trigger_time = task._scheduled_trigger_time + timedelta(seconds=interval)
-                    return True
-                return False
-            else:
-                # 后续触发：检查是否到达预定触发时间
-                if current_time >= task._scheduled_trigger_time:
-                    # 计算下一次预定触发时间
-                    from datetime import timedelta
+            # 循环任务：维护“下一次触发时间”以避免重复触发
+            if task._scheduled_trigger_time is None:
+                task._scheduled_trigger_time = task.created_at + timedelta(seconds=interval)
 
-                    # 如果已经过了多个周期，跳过中间的周期
-                    elapsed = (current_time - task._scheduled_trigger_time).total_seconds()
-                    while elapsed >= interval:
-                        task._scheduled_trigger_time = task._scheduled_trigger_time + timedelta(seconds=interval)
-                        elapsed = (current_time - task._scheduled_trigger_time).total_seconds()
+            if current_time >= task._scheduled_trigger_time:
+                task._scheduled_trigger_time = next_after(
+                    current_time,
+                    task._scheduled_trigger_time,
+                    interval,
+                )
+                return True
 
-                    return True
-                return False
+            return False
 
-        # 检查 trigger_at（指定时间触发）
+        # 2) trigger_at（指定时间触发）
         elif "trigger_at" in config:
             trigger_time = config["trigger_at"]
             if isinstance(trigger_time, str):
                 trigger_time = datetime.fromisoformat(trigger_time)
 
             if task.is_recurring and "interval_seconds" in config:
-                # 循环任务：检查是否达到间隔
-                if task._scheduled_trigger_time is None:
-                    if current_time >= trigger_time:
-                        task._scheduled_trigger_time = trigger_time
-                        return True
-                    return False
-                else:
-                    if current_time >= task._scheduled_trigger_time:
-                        from datetime import timedelta
+                # 循环任务：维护“下一次触发时间”
+                interval = float(config["interval_seconds"])
 
-                        interval = config["interval_seconds"]
-                        elapsed = (current_time - task._scheduled_trigger_time).total_seconds()
-                        while elapsed >= interval:
-                            task._scheduled_trigger_time = task._scheduled_trigger_time + timedelta(seconds=interval)
-                            elapsed = (current_time - task._scheduled_trigger_time).total_seconds()
-                        return True
-                    return False
+                if task._scheduled_trigger_time is None:
+                    task._scheduled_trigger_time = trigger_time
+
+                if current_time >= task._scheduled_trigger_time:
+                    task._scheduled_trigger_time = next_after(
+                        current_time,
+                        task._scheduled_trigger_time,
+                        interval,
+                    )
+                    return True
+
+                return False
             else:
                 # 一次性任务：检查是否到达触发时间
                 return current_time >= trigger_time
@@ -552,10 +558,11 @@ class UnifiedScheduler:
             if asyncio.iscoroutinefunction(task.callback):
                 result = await task.callback(*task.callback_args, **task.callback_kwargs)
             else:
-                # 同步函数在线程池中运行，避免阻塞事件循环
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None, lambda: task.callback(*task.callback_args, **task.callback_kwargs)
+                # 同步函数在线程中运行，避免阻塞事件循环
+                result = await asyncio.to_thread(
+                    task.callback,
+                    *task.callback_args,
+                    **task.callback_kwargs,
                 )
             return result
         except Exception as e:
@@ -656,9 +663,8 @@ class UnifiedScheduler:
                     if asyncio.iscoroutinefunction(task.callback):
                         await asyncio.wait_for(task.callback(*task.callback_args, **merged_kwargs), timeout=timeout)
                     else:
-                        loop = asyncio.get_running_loop()
                         await asyncio.wait_for(
-                            loop.run_in_executor(None, lambda: task.callback(*task.callback_args, **merged_kwargs)),
+                            asyncio.to_thread(task.callback, *task.callback_args, **merged_kwargs),
                             timeout=timeout,
                         )
 

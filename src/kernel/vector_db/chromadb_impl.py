@@ -70,13 +70,11 @@ class ChromaDBImpl(VectorDBBase):
                 return
 
             try:
-                # ChromaDB 的初始化是同步的，需要在单独的线程中执行
-                loop = asyncio.get_event_loop()
-                self._client = await loop.run_in_executor(
-                    None,
-                    lambda: chromadb.PersistentClient(
-                        path=path, settings=Settings(anonymized_telemetry=False)
-                    ),
+                # ChromaDB 的初始化是同步的，需要在线程中执行
+                self._client = await asyncio.to_thread(
+                    chromadb.PersistentClient,
+                    path=path,
+                    settings=Settings(anonymized_telemetry=False),
                 )
                 self._path = path
                 self._initialized = True
@@ -105,9 +103,10 @@ class ChromaDBImpl(VectorDBBase):
             return self._collections[name]
 
         try:
-            loop = asyncio.get_event_loop()
-            collection = await loop.run_in_executor(
-                None, lambda: self._client.get_or_create_collection(name, **kwargs)
+            collection = await asyncio.to_thread(
+                self._client.get_or_create_collection,
+                name,
+                **kwargs,
             )
             self._collections[name] = collection
             logger.info(f"成功获取或创建集合: '{name}'")
@@ -136,15 +135,12 @@ class ChromaDBImpl(VectorDBBase):
         collection = await self.get_or_create_collection(collection_name)
         if collection:
             try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda: collection.add(
-                        embeddings=embeddings,
-                        documents=documents,
-                        metadatas=metadatas,
-                        ids=ids,
-                    ),
+                await asyncio.to_thread(
+                    collection.add,
+                    embeddings=embeddings,
+                    documents=documents,
+                    metadatas=metadatas,
+                    ids=ids,
                 )
             except Exception as e:
                 logger.error(f"向集合 '{collection_name}' 添加数据失败: {e}")
@@ -186,10 +182,7 @@ class ChromaDBImpl(VectorDBBase):
                 if processed_where:
                     query_params["where"] = processed_where
 
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None, lambda: collection.query(**query_params)
-            )
+            return await asyncio.to_thread(collection.query, **query_params)
         except Exception as e:
             logger.error(f"查询集合 '{collection_name}' 失败: {e}")
         return {}
@@ -278,17 +271,14 @@ class ChromaDBImpl(VectorDBBase):
             if where:
                 processed_where = self._process_where_condition(where)
 
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None,
-                lambda: collection.get(
-                    ids=ids,
-                    where=processed_where,
-                    limit=limit,
-                    offset=offset,
-                    where_document=where_document,
-                    include=include or ["documents", "metadatas", "embeddings"],
-                ),
+            return await asyncio.to_thread(
+                collection.get,
+                ids=ids,
+                where=processed_where,
+                limit=limit,
+                offset=offset,
+                where_document=where_document,
+                include=include or ["documents", "metadatas", "embeddings"],
             )
         except Exception as e:
             logger.error(f"从集合 '{collection_name}' 获取数据失败: {e}")
@@ -310,10 +300,7 @@ class ChromaDBImpl(VectorDBBase):
         collection = await self.get_or_create_collection(collection_name)
         if collection:
             try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None, lambda: collection.delete(ids=ids, where=where)
-                )
+                await asyncio.to_thread(collection.delete, ids=ids, where=where)
             except Exception as e:
                 logger.error(f"从集合 '{collection_name}' 删除数据失败: {e}")
 
