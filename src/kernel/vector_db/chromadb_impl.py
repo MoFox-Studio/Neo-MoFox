@@ -10,6 +10,7 @@ from typing import Any
 
 import chromadb
 from chromadb.config import Settings
+from chromadb.api import ClientAPI
 
 from src.kernel.logger import get_logger
 
@@ -49,7 +50,7 @@ class ChromaDBImpl(VectorDBBase):
             with self._lock:
                 if not hasattr(self, "_initialized"):
                     self._path: str = path
-                    self._client: chromadb.PersistentClient | None = None
+                    self._client: ClientAPI | None = None
                     self._collections: dict[str, Any] = {}
                     self._initialized: bool = False
                     self._init_lock = asyncio.Lock()
@@ -191,19 +192,6 @@ class ChromaDBImpl(VectorDBBase):
             )
         except Exception as e:
             logger.error(f"查询集合 '{collection_name}' 失败: {e}")
-            # 回退：尝试不使用 where 条件重新查询
-            try:
-                fallback_params = {
-                    "query_embeddings": query_embeddings,
-                    "n_results": n_results,
-                }
-                logger.warning("使用回退查询模式（无where条件）")
-                loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(
-                    None, lambda: collection.query(**fallback_params)
-                )
-            except Exception as fallback_e:
-                logger.error(f"回退查询也失败: {fallback_e}")
         return {}
 
     def _process_where_condition(self, where: dict[str, Any]) -> dict[str, Any] | None:
@@ -254,13 +242,6 @@ class ChromaDBImpl(VectorDBBase):
 
         except Exception as e:
             logger.warning(f"处理where条件失败: {e}, 使用简化条件")
-            # 回退到只使用第一个条件
-            if where:
-                key, value = next(iter(where.items()))
-                if isinstance(value, list) and value:
-                    return {key: value[0]}
-                elif not isinstance(value, list):
-                    return {key: value}
             return None
 
     async def get(
@@ -311,22 +292,6 @@ class ChromaDBImpl(VectorDBBase):
             )
         except Exception as e:
             logger.error(f"从集合 '{collection_name}' 获取数据失败: {e}")
-            # 回退：尝试不使用 where 条件重新获取
-            try:
-                logger.warning("使用回退获取模式（无where条件）")
-                loop = asyncio.get_event_loop()
-                return await loop.run_in_executor(
-                    None,
-                    lambda: collection.get(
-                        ids=ids,
-                        limit=limit,
-                        offset=offset,
-                        where_document=where_document,
-                        include=include or ["documents", "metadatas", "embeddings"],
-                    ),
-                )
-            except Exception as fallback_e:
-                logger.error(f"回退获取也失败: {fallback_e}")
         return {}
 
     async def delete(
