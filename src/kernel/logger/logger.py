@@ -34,7 +34,7 @@ def _get_event_bus():
 
 
 # 日志广播事件名称
-LOG_OUTPUT_EVENT = "on_log_output"
+LOG_OUTPUT_EVENT = "log_output"
 
 
 class Logger:

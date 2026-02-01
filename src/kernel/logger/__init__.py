@@ -26,6 +26,8 @@ Logger 模块
     async def on_log(event):
         log_data = event.data
         print(f"[{log_data['level']}] {log_data['message']}")
+        from src.kernel.event import EventDecision
+        return (EventDecision.SUCCESS, None)
 
     logger = get_logger("my_logger", enable_event_broadcast=True)
     event_bus.subscribe(LOG_OUTPUT_EVENT, on_log)

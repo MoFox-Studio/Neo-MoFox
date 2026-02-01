@@ -7,7 +7,7 @@ import asyncio
 
 import pytest
 
-from src.kernel.event import Event, EventBus
+from src.kernel.event import Event, EventBus, EventDecision
 
 
 class TestEvent:
@@ -71,8 +71,8 @@ class TestEventBus:
         """测试订阅处理器。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         unsubscribe = bus.subscribe("test_event", handler)
         assert bus.event_count == 1
@@ -85,11 +85,11 @@ class TestEventBus:
         """测试订阅多个处理器到同一事件。"""
         bus = EventBus()
 
-        async def handler1(event: Event):
-            pass
+        async def handler1(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
-        async def handler2(event: Event):
-            pass
+        async def handler2(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler1)
         bus.subscribe("test_event", handler2)
@@ -102,8 +102,8 @@ class TestEventBus:
         """测试订阅多个不同事件。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("event1", handler)
         bus.subscribe("event2", handler)
@@ -117,13 +117,15 @@ class TestEventBus:
         bus = EventBus()
         received_events = []
 
-        async def handler(event: Event):
+        async def handler(event: Event, shared):
             received_events.append(event)
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler)
-        count = await bus.publish(Event(name="test_event", data="test"))
+        decision, shared = await bus.publish(Event(name="test_event", data="test"), shared={})
 
-        assert count == 1
+        assert decision == EventDecision.SUCCESS
+        assert shared == {}
         assert len(received_events) == 1
         assert received_events[0].name == "test_event"
         assert received_events[0].data == "test"
@@ -134,28 +136,30 @@ class TestEventBus:
         bus = EventBus()
         results = []
 
-        async def handler1(event: Event):
+        async def handler1(event: Event, shared):
             results.append("handler1")
+            return (EventDecision.SUCCESS, shared)
 
-        async def handler2(event: Event):
+        async def handler2(event: Event, shared):
             results.append("handler2")
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler1)
         bus.subscribe("test_event", handler2)
 
-        count = await bus.publish(Event(name="test_event"))
+        decision, shared = await bus.publish(Event(name="test_event"), shared=None)
 
-        assert count == 2
-        assert len(results) == 2
-        assert "handler1" in results
-        assert "handler2" in results
+        assert decision == EventDecision.SUCCESS
+        assert shared is None
+        assert results == ["handler1", "handler2"]
 
     @pytest.mark.asyncio
     async def test_publish_event_no_subscribers(self):
         """测试发布到没有订阅者的事件。"""
         bus = EventBus()
-        count = await bus.publish(Event(name="nonexistent"))
-        assert count == 0
+        decision, shared = await bus.publish(Event(name="nonexistent"), shared={"x": 1})
+        assert decision == EventDecision.SUCCESS
+        assert shared == {"x": 1}
 
     @pytest.mark.asyncio
     async def test_publish_with_sync_handler(self):
@@ -163,13 +167,15 @@ class TestEventBus:
         bus = EventBus()
         results = []
 
-        def sync_handler(event: Event):
+        def sync_handler(event: Event, shared):
             results.append(event.name)
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", sync_handler)
-        count = await bus.publish(Event(name="test_event"))
+        decision, shared = await bus.publish(Event(name="test_event"), shared=None)
 
-        assert count == 1
+        assert decision == EventDecision.SUCCESS
+        assert shared is None
         assert len(results) == 1
         assert results[0] == "test_event"
 
@@ -179,18 +185,21 @@ class TestEventBus:
         bus = EventBus()
         results = []
 
-        def sync_handler(event: Event):
+        def sync_handler(event: Event, shared):
             results.append("sync")
+            return (EventDecision.SUCCESS, shared)
 
-        async def async_handler(event: Event):
+        async def async_handler(event: Event, shared):
             results.append("async")
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", sync_handler)
         bus.subscribe("test_event", async_handler)
 
-        count = await bus.publish(Event(name="test_event"))
+        decision, shared = await bus.publish(Event(name="test_event"), shared=None)
 
-        assert count == 2
+        assert decision == EventDecision.SUCCESS
+        assert shared is None
         assert len(results) == 2
         assert "sync" in results
         assert "async" in results
@@ -199,8 +208,8 @@ class TestEventBus:
         """测试取消订阅处理器。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler)
         assert bus.handler_count == 1
@@ -214,8 +223,8 @@ class TestEventBus:
         """测试从不存在的事件取消订阅。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         result = bus.unsubscribe("nonexistent", handler)
         assert result is False
@@ -224,11 +233,11 @@ class TestEventBus:
         """测试取消订阅不存在的处理器。"""
         bus = EventBus()
 
-        async def handler1(event: Event):
-            pass
+        async def handler1(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
-        async def handler2(event: Event):
-            pass
+        async def handler2(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler1)
         result = bus.unsubscribe("test_event", handler2)
@@ -240,8 +249,8 @@ class TestEventBus:
         """测试从所有事件取消订阅处理器。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("event1", handler)
         bus.subscribe("event2", handler)
@@ -258,8 +267,8 @@ class TestEventBus:
         """测试取消订阅没有订阅的处理器。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         count = bus.unsubscribe_all(handler)
         assert count == 0
@@ -268,8 +277,8 @@ class TestEventBus:
         """测试使用返回的取消订阅函数。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         unsubscribe = bus.subscribe("test_event", handler)
         assert bus.handler_count == 1
@@ -283,19 +292,21 @@ class TestEventBus:
         bus = EventBus()
         results = []
 
-        async def failing_handler(event: Event):
+        async def failing_handler(event: Event, shared):
             raise RuntimeError("Test error")
 
-        async def working_handler(event: Event):
+        async def working_handler(event: Event, shared):
             results.append("success")
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", failing_handler)
         bus.subscribe("test_event", working_handler)
 
-        count = await bus.publish(Event(name="test_event"))
+        decision, shared = await bus.publish(Event(name="test_event"), shared={})
 
-        # 两个处理器都被执行，即使一个失败了
-        assert count == 1  # 只有成功的处理器被计数
+        # 即使一个失败了，也不阻止后续处理器
+        assert decision == EventDecision.SUCCESS
+        assert shared == {}
         assert len(results) == 1
         assert results[0] == "success"
 
@@ -305,26 +316,29 @@ class TestEventBus:
         bus = EventBus()
         results = []
 
-        async def handler(event: Event):
+        async def handler(event: Event, shared):
             results.append(event.name)
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler)
         task = bus.publish_sync(Event(name="test_event"))
 
         assert isinstance(task, asyncio.Task)
         # 等待任务完成
-        await task
+        decision, shared = await task
+        assert decision == EventDecision.SUCCESS
+        assert shared is None
         assert len(results) == 1
 
     def test_clear_subscriptions(self):
         """测试清除所有订阅。"""
         bus = EventBus()
 
-        async def handler1(event: Event):
-            pass
+        async def handler1(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
-        async def handler2(event: Event):
-            pass
+        async def handler2(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("event1", handler1)
         bus.subscribe("event2", handler2)
@@ -341,11 +355,11 @@ class TestEventBus:
         """测试获取事件的订阅者列表。"""
         bus = EventBus()
 
-        async def handler1(event: Event):
-            pass
+        async def handler1(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
-        async def handler2(event: Event):
-            pass
+        async def handler2(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler1)
         bus.subscribe("test_event", handler2)
@@ -365,8 +379,8 @@ class TestEventBus:
         """测试事件数量属性。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         assert bus.event_count == 0
 
@@ -380,11 +394,11 @@ class TestEventBus:
         """测试处理器数量属性。"""
         bus = EventBus()
 
-        async def handler1(event: Event):
-            pass
+        async def handler1(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
-        async def handler2(event: Event):
-            pass
+        async def handler2(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         assert bus.handler_count == 0
 
@@ -401,8 +415,8 @@ class TestEventBus:
         """测试已订阅事件属性。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("event1", handler)
         bus.subscribe("event2", handler)
@@ -418,8 +432,8 @@ class TestEventBus:
         """测试字符串表示。"""
         bus = EventBus(name="test_bus")
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("event1", handler)
         bus.subscribe("event2", handler)
@@ -434,8 +448,8 @@ class TestEventBus:
         """测试订阅空事件名称引发错误。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         with pytest.raises(ValueError, match="事件名称不能为空"):
             bus.subscribe("", handler)
@@ -461,12 +475,13 @@ class TestEventBus:
         bus = EventBus()
         received_data = []
 
-        async def handler(event: Event):
+        async def handler(event: Event, shared):
             received_data.append(event.data)
+            return (EventDecision.SUCCESS, shared)
 
         test_data = {"key": "value", "number": 123}
         bus.subscribe("test_event", handler)
-        await bus.publish(Event(name="test_event", data=test_data))
+        await bus.publish(Event(name="test_event", data=test_data), shared=None)
 
         assert len(received_data) == 1
         assert received_data[0] == test_data
@@ -477,8 +492,9 @@ class TestEventBus:
         bus = EventBus()
         received_sources = []
 
-        async def handler(event: Event):
+        async def handler(event: Event, shared):
             received_sources.append(event.source)
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler)
         await bus.publish(
@@ -493,13 +509,14 @@ class TestEventBus:
         """测试处理器可以返回值。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            return "result"
+        async def handler(event: Event, shared):
+            return "result"  # 兼容旧式返回值
 
         bus.subscribe("test_event", handler)
-        # 即使处理器返回值，publish也应该正常工作
-        count = await bus.publish(Event(name="test_event"))
-        assert count == 1
+        # 即使处理器返回非二元组，publish 也应该正常工作
+        decision, shared = await bus.publish(Event(name="test_event"), shared={"x": 1})
+        assert decision == EventDecision.SUCCESS
+        assert shared == {"x": 1}
 
     @pytest.mark.asyncio
     async def test_handler_can_be_coroutine_function(self):
@@ -507,14 +524,16 @@ class TestEventBus:
         bus = EventBus()
         results = []
 
-        async def async_handler(event: Event):
+        async def async_handler(event: Event, shared):
             await asyncio.sleep(0.01)
             results.append("async_result")
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", async_handler)
-        count = await bus.publish(Event(name="test_event"))
+        decision, shared = await bus.publish(Event(name="test_event"), shared=None)
 
-        assert count == 1
+        assert decision == EventDecision.SUCCESS
+        assert shared is None
         assert len(results) == 1
         assert results[0] == "async_result"
 
@@ -524,18 +543,19 @@ class TestEventBus:
         bus = EventBus()
         results = []
 
-        async def handler(event: Event):
+        async def handler(event: Event, shared):
             results.append(event.data)
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", handler)
 
         # 并发发布多个事件
         tasks = [
-            bus.publish(Event(name="test_event", data=i)) for i in range(10)
+            bus.publish(Event(name="test_event", data=i), shared=None) for i in range(10)
         ]
-        counts = await asyncio.gather(*tasks)
+        results_list = await asyncio.gather(*tasks)
 
-        assert sum(counts) == 10
+        assert all(decision == EventDecision.SUCCESS and shared is None for decision, shared in results_list)
         assert len(results) == 10
         assert set(results) == set(range(10))
 
@@ -544,26 +564,26 @@ class TestEventBus:
         """测试协程处理器中的异常处理。"""
         bus = EventBus()
 
-        async def failing_handler(event: Event):
+        async def failing_handler(event: Event, shared):
             await asyncio.sleep(0.01)
             raise ValueError("Coroutine error")
 
-        async def working_handler(event: Event):
-            return "ok"
+        async def working_handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("test_event", failing_handler)
         bus.subscribe("test_event", working_handler)
 
-        count = await bus.publish(Event(name="test_event"))
-        # 只计算成功的处理器
-        assert count == 1
+        decision, shared = await bus.publish(Event(name="test_event"), shared=None)
+        assert decision == EventDecision.SUCCESS
+        assert shared is None
 
     def test_handler_subscriptions_tracking(self):
         """测试处理器订阅跟踪。"""
         bus = EventBus()
 
-        async def handler(event: Event):
-            pass
+        async def handler(event: Event, shared):
+            return (EventDecision.SUCCESS, shared)
 
         bus.subscribe("event1", handler)
         bus.subscribe("event2", handler)
@@ -575,3 +595,80 @@ class TestEventBus:
         assert bus.handler_count == 2
         assert "event1" in bus.subscribed_events
         assert "event3" in bus.subscribed_events
+
+    @pytest.mark.asyncio
+    async def test_priority_ordering(self):
+        bus = EventBus()
+        seen: list[str] = []
+
+        async def h_low(event: Event, shared):
+            seen.append("low")
+            return (EventDecision.SUCCESS, shared)
+
+        async def h_high(event: Event, shared):
+            seen.append("high")
+            return (EventDecision.SUCCESS, shared)
+
+        bus.subscribe("e", h_low, priority=0)
+        bus.subscribe("e", h_high, priority=10)
+
+        await bus.publish(Event(name="e"), shared=None)
+        assert seen == ["high", "low"]
+
+    @pytest.mark.asyncio
+    async def test_pass_ignores_next_shared(self):
+        bus = EventBus()
+
+        async def h1(event: Event, shared: dict):
+            return (EventDecision.PASS, {"ignored": True})
+
+        async def h2(event: Event, shared: dict):
+            shared["x"] = 1
+            return (EventDecision.SUCCESS, shared)
+
+        bus.subscribe("e", h1, priority=10)
+        bus.subscribe("e", h2, priority=0)
+
+        decision, shared = await bus.publish(Event(name="e"), shared={})
+        assert decision == EventDecision.SUCCESS
+        assert shared == {"x": 1}
+
+    @pytest.mark.asyncio
+    async def test_stop_terminates_chain(self):
+        bus = EventBus()
+        seen: list[str] = []
+
+        async def h1(event: Event, shared: dict):
+            seen.append("h1")
+            return (EventDecision.SUCCESS, shared)
+
+        async def h2(event: Event, shared: dict):
+            seen.append("h2")
+            shared["stop"] = True
+            return (EventDecision.STOP, shared)
+
+        async def h3(event: Event, shared: dict):
+            seen.append("h3")
+            shared["should_not_run"] = True
+            return (EventDecision.SUCCESS, shared)
+
+        bus.subscribe("e", h1, priority=30)
+        bus.subscribe("e", h2, priority=20)
+        bus.subscribe("e", h3, priority=10)
+
+        decision, shared = await bus.publish(Event(name="e"), shared={})
+        assert decision == EventDecision.STOP
+        assert shared == {"stop": True}
+        assert seen == ["h1", "h2"]
+
+    @pytest.mark.asyncio
+    async def test_handler_signature_event_only_is_supported(self):
+        bus = EventBus()
+
+        async def handler(event: Event):
+            return (EventDecision.SUCCESS, {"ok": True})
+
+        bus.subscribe("e", handler)
+        decision, shared = await bus.publish(Event(name="e"), shared=None)
+        assert decision == EventDecision.SUCCESS
+        assert shared == {"ok": True}
