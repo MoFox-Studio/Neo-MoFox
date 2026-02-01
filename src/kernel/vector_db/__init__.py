@@ -34,15 +34,28 @@
     ```
 """
 
+import os
+from threading import Lock
+
 from .base import VectorDBBase
 from .chromadb_impl import ChromaDBImpl
 
 # 默认数据库路径
 _DEFAULT_DB_PATH = "data/chroma_db"
 
+_vector_db_lock = Lock()
+_vector_db_by_path: dict[str, VectorDBBase] = {}
+
+
+def _normalize_db_path(db_path: str) -> str:
+    # 统一相对路径/分隔符，避免同一路径被重复缓存
+    return os.path.normpath(os.path.abspath(db_path))
+
 
 def get_vector_db_service(
     db_path: str = _DEFAULT_DB_PATH,
+    *,
+    use_cache: bool = True,
 ) -> VectorDBBase:
     """获取向量数据库服务实例
 
@@ -53,18 +66,62 @@ def get_vector_db_service(
         向量数据库服务实例
 
     Note:
-        ChromaDBImpl 是一个单例，所以相同路径的调用会返回同一个实例
+        默认会按 db_path 缓存实例，便于多 profile/多配置并存。
+        若希望生命周期完全交给上层管理，可传入 use_cache=False。
     """
     # TODO: 未来可以从全局配置中读取数据库类型和路径
+    if not use_cache:
+        return ChromaDBImpl(path=db_path)
+
+    key = _normalize_db_path(db_path)
+    with _vector_db_lock:
+        instance = _vector_db_by_path.get(key)
+        if instance is None:
+            instance = ChromaDBImpl(path=db_path)
+            _vector_db_by_path[key] = instance
+        return instance
+
+
+def create_vector_db_service(db_path: str = _DEFAULT_DB_PATH) -> VectorDBBase:
+    """创建一个新的 VectorDB 实例（不走缓存）。"""
+
     return ChromaDBImpl(path=db_path)
 
 
-# 全局向量数据库服务实例
-vector_db_service: VectorDBBase = get_vector_db_service()
+async def close_vector_db_service(db_path: str = _DEFAULT_DB_PATH) -> None:
+    """关闭并移除指定 db_path 对应的缓存实例。"""
+
+    key = _normalize_db_path(db_path)
+    with _vector_db_lock:
+        instance = _vector_db_by_path.pop(key, None)
+
+    if instance is not None:
+        await instance.close()
+
+
+async def close_all_vector_db_services() -> None:
+    """关闭并清空所有缓存的 VectorDB 实例。"""
+
+    with _vector_db_lock:
+        instances = list(_vector_db_by_path.values())
+        _vector_db_by_path.clear()
+
+    for instance in instances:
+        await instance.close()
+
+
+def __getattr__(name: str):
+    if name == "vector_db_service":
+        instance = get_vector_db_service()
+        globals()["vector_db_service"] = instance
+        return instance
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 __all__ = [
     "VectorDBBase",
     "ChromaDBImpl",
-    "vector_db_service",
     "get_vector_db_service",
+    "create_vector_db_service",
+    "close_vector_db_service",
+    "close_all_vector_db_services",
 ]

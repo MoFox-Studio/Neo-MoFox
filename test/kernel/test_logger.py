@@ -969,8 +969,8 @@ class TestEventBroadcast:
             return (EventDecision.SUCCESS, params)
 
         # 订阅事件（通过 event 系统直接订阅）
-        from src.kernel.event import event_bus
-        unsubscribe = event_bus.subscribe(LOG_OUTPUT_EVENT, event_handler)
+        from src.kernel.event import get_event_bus
+        unsubscribe = get_event_bus().subscribe(LOG_OUTPUT_EVENT, event_handler)
 
         try:
             # 输出日志
@@ -1022,8 +1022,8 @@ class TestEventBroadcast:
             return (EventDecision.SUCCESS, params)
 
         # 通过 event 系统订阅
-        from src.kernel.event import event_bus
-        unsubscribe = event_bus.subscribe(LOG_OUTPUT_EVENT, log_handler)
+        from src.kernel.event import get_event_bus
+        unsubscribe = get_event_bus().subscribe(LOG_OUTPUT_EVENT, log_handler)
 
         try:
             # 设置全局元数据
@@ -1066,8 +1066,8 @@ class TestEventBroadcast:
             from src.kernel.event import EventDecision
             return (EventDecision.SUCCESS, params)
 
-        from src.kernel.event import event_bus
-        unsubscribe = event_bus.subscribe(LOG_OUTPUT_EVENT, log_handler)
+        from src.kernel.event import get_event_bus
+        unsubscribe = get_event_bus().subscribe(LOG_OUTPUT_EVENT, log_handler)
 
         try:
             logger.info("This should not be broadcasted")
@@ -1099,8 +1099,8 @@ class TestEventBroadcast:
             from src.kernel.event import EventDecision
             return (EventDecision.SUCCESS, params)
 
-        from src.kernel.event import event_bus
-        unsubscribe = event_bus.subscribe(LOG_OUTPUT_EVENT, log_handler)
+        from src.kernel.event import get_event_bus
+        unsubscribe = get_event_bus().subscribe(LOG_OUTPUT_EVENT, log_handler)
 
         try:
             logger.info("Timestamp test")

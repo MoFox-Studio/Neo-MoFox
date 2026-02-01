@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Coroutine
 
 from .task_info import TaskInfo
 from .exceptions import TaskGroupError
@@ -38,7 +38,7 @@ class TaskGroup:
     _exception: BaseException | None = None
     _active: bool = False
 
-    def create_task(self, coro: Any, name: str | None = None) -> TaskInfo:
+    def create_task(self, coro: Coroutine[Any, Any, Any], name: str | None = None) -> TaskInfo:
         """在组内创建一个新任务
 
         Args:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Coroutine
 from uuid import uuid4
 
 
@@ -33,7 +33,7 @@ class TaskInfo:
 
     task_id: str = field(default_factory=lambda: str(uuid4()))
     name: str | None = None
-    coro: Any = None
+    coro: Coroutine[Any, Any, Any] | None = None
     task: asyncio.Task[Any] | None = None
     daemon: bool = False
     timeout: float | None = None

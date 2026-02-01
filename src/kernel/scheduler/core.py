@@ -18,7 +18,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
@@ -69,8 +69,8 @@ class ScheduleTask:
     is_recurring: bool = False
 
     # 回调参数
-    callback_args: tuple = field(default_factory=tuple)
-    callback_kwargs: dict = field(default_factory=dict)
+    callback_args: tuple[Any, ...] = field(default_factory=tuple)
+    callback_kwargs: dict[str, Any] = field(default_factory=dict)
 
     # 状态信息
     status: TaskStatus = TaskStatus.PENDING
@@ -100,7 +100,7 @@ class ScheduleTask:
 
     # 运行时引用
     _asyncio_task_id: str | None = field(default=None, init=False, repr=False)  # 存储 task_manager 的 task_id
-    _weak_scheduler: Any = field(default=None, init=False, repr=False)
+    _weak_scheduler: Any = field(default=None, init=False, repr=False)  # weakref.ref[UnifiedScheduler]
 
     def __repr__(self) -> str:
         return (

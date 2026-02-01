@@ -17,7 +17,16 @@
 
 from src.kernel.event.core import EventBus, EventDecision
 
-# 全局事件总线实例
-event_bus: EventBus = EventBus(name="global")
+_event_bus: EventBus | None = None
 
-__all__ = ["EventBus", "EventDecision", "event_bus"]
+
+def get_event_bus() -> EventBus:
+    """获取全局事件总线（懒加载）。"""
+
+    global _event_bus
+    if _event_bus is None:
+        _event_bus = EventBus(name="global")
+    return _event_bus
+
+
+__all__ = ["EventBus", "EventDecision", "get_event_bus"]

@@ -1,11 +1,12 @@
 """ChromaDB 向量数据库实现
 
 基于 ChromaDB 的向量数据库具体实现。
-采用单例模式，确保全局只有一个 ChromaDB 客户端实例。
+
+注意：本实现本身不再做全局单例。
+如需复用实例，请在上层通过 get_vector_db_service(db_path) 做按路径缓存。
 """
 
 import asyncio
-from threading import Lock
 from typing import Any
 
 import chromadb
@@ -23,37 +24,22 @@ class ChromaDBImpl(VectorDBBase):
     """ChromaDB 的具体实现类
 
     遵循 VectorDBBase 接口规范，提供基于 ChromaDB 的向量存储能力。
-    采用单例模式，确保全局只有一个 ChromaDB 客户端实例。
+    本类是普通实例；实例复用/生命周期由上层管理。
     """
-
-    _instance: "ChromaDBImpl | None" = None
-    _lock = Lock()
-
-    def __new__(cls, *args: Any, **kwargs: Any):
-        """实现单例模式"""
-        if not cls._instance:
-            with cls._lock:
-                if not cls._instance:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
 
     def __init__(self, path: str = "data/chroma_db", **kwargs: Any):
         """初始化 ChromaDB 客户端
-
-        由于是单例，这个初始化只会执行一次。
 
         Args:
             path: 数据库存储路径
             **kwargs: 其他配置参数
         """
-        if not hasattr(self, "_initialized"):
-            with self._lock:
-                if not hasattr(self, "_initialized"):
-                    self._path: str = path
-                    self._client: ClientAPI | None = None
-                    self._collections: dict[str, Any] = {}
-                    self._initialized: bool = False
-                    self._init_lock = asyncio.Lock()
+        self._path: str = path
+        self._client: ClientAPI | None = None
+        self._collections: dict[str, Any] = {}
+        self._initialized: bool = False
+        self._init_lock = asyncio.Lock()
+        self._init_kwargs: dict[str, Any] = dict(kwargs)
 
     async def initialize(self, path: str, **kwargs: Any) -> None:
         """异步初始化 ChromaDB 客户端
@@ -67,6 +53,10 @@ class ChromaDBImpl(VectorDBBase):
         """
         async with self._init_lock:
             if self._initialized:
+                if path != self._path:
+                    raise ValueError(
+                        f"ChromaDBImpl 已初始化于 {self._path}，不能切换到 {path}。"
+                    )
                 return
 
             try:

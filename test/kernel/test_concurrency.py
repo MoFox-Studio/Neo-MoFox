@@ -1946,6 +1946,13 @@ class TestAdditionalCoverage:
 
         wd.stop()
 
+        # 清理：避免全局 TaskManager 被该用例污染（pytest-randomly 下会影响其他用例）
+        replacement_task = asyncio.create_task(asyncio.sleep(0))
+        await replacement_task
+        task_info.task = replacement_task
+        tm.cleanup_tasks()
+        tm.set_watchdog(None)
+
     @pytest.mark.asyncio
     async def test_task_info_is_failed_edge_case_with_mock(self) -> None:
         """测试 is_failed 当 is_done() 返回 True 但 task 为 None"""

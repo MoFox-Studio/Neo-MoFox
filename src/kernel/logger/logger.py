@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -20,17 +21,15 @@ from rich.traceback import install as install_rich_traceback
 from .color import COLOR, get_rich_color
 from .file_handler import FileHandler, RotationMode
 
-# 事件总线（延迟导入避免循环依赖）
-_event_bus = None
+if TYPE_CHECKING:
+    from src.kernel.event import EventBus
 
 
-def _get_event_bus():
-    """获取全局事件总线实例。"""
-    global _event_bus
-    if _event_bus is None:
-        from src.kernel.event import event_bus
-        _event_bus = event_bus
-    return _event_bus
+@lru_cache(maxsize=1)
+def _get_event_bus() -> EventBus:
+    """获取全局事件总线实例（使用 lru_cache 实现单例）。"""
+    from src.kernel.event import get_event_bus
+    return get_event_bus()
 
 
 # 日志广播事件名称

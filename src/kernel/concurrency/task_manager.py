@@ -9,12 +9,15 @@ from __future__ import annotations
 import asyncio
 import weakref
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any, Coroutine
 from uuid import uuid4
 
 from .task_info import TaskInfo
 from .task_group import TaskGroup
 from .exceptions import TaskNotFoundError
+
+if TYPE_CHECKING:
+    from .watchdog import WatchDog
 
 
 class TaskManager:
@@ -53,10 +56,10 @@ class TaskManager:
         self._task_ids_by_task: weakref.WeakKeyDictionary[asyncio.Task[Any], str] = (
             weakref.WeakKeyDictionary()
         )
-        self._watchdog: Any = None  # WatchDog 实例，稍后注入
+        self._watchdog: WatchDog | None = None  # WatchDog 实例，稍后注入
         self._initialized = True
 
-    def set_watchdog(self, watchdog: Any) -> None:
+    def set_watchdog(self, watchdog: WatchDog) -> None:
         """设置 WatchDog 实例
 
         Args:
@@ -66,7 +69,7 @@ class TaskManager:
 
     def create_task(
         self,
-        coro: Any,
+        coro: Coroutine[Any, Any, Any],
         name: str | None = None,
         daemon: bool = False,
         timeout: float | None = None,

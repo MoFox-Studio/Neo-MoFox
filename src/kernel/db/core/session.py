@@ -100,29 +100,30 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
     async with session_factory() as session:
         try:
-            # 应用数据库特定设置（从引擎推断，不读取用户配置）
-            try:
-                bind = getattr(session, "bind", None) or session.get_bind()
-                db_type = getattr(bind, "name", None)
-                if not db_type and hasattr(bind, "dialect"):
-                    db_type = getattr(bind.dialect, "name", None)
-            except Exception:
-                db_type = None
+            # 从 engine 配置获取 db_type（避免运行时反射）
+            from .engine import _engine_config
+            
+            db_type = None
+            if _engine_config:
+                db_type = _engine_config.db_type
+                if not db_type:
+                    # 从 URL 推断
+                    url = _engine_config.url.lower()
+                    if 'sqlite' in url:
+                        db_type = 'sqlite'
+                    elif 'postgresql' in url:
+                        db_type = 'postgresql'
 
-            if isinstance(db_type, str):
-                db_type = db_type.lower()
-
-            await _apply_session_settings(session, db_type or "")
+            if db_type:
+                await _apply_session_settings(session, db_type)
 
             yield session
 
             # 正常退出时提交事务
-            # 这对所有数据库都很重要，因为 SQLAlchemy 默认不是 autocommit 模式
-            # 检查事务是否活动，避免在已回滚的事务上提交
             if session.is_active:
                 await session.commit()
         except Exception:
-            # 检查是否需要回滚（事务是否活动）
+            # 发生异常时回滚
             if session.is_active:
                 await session.rollback()
             raise
