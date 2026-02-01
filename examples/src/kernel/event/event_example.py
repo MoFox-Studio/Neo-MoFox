@@ -10,11 +10,12 @@ from pathlib import Path
 # 添加项目根目录到Python路径
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent))
 
-from src.kernel.event import event_bus, EventDecision
+from src.kernel.event import get_event_bus, EventDecision
 from src.kernel.logger import get_logger, COLOR
 
 # 创建全局 logger
 logger = get_logger("event_example", display="Event", color=COLOR.MAGENTA)
+event_bus = get_event_bus()
 
 
 async def main():
