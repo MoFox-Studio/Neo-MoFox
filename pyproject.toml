@@ -8,6 +8,7 @@ dependencies = [
     "aiofiles>=25.1.0",
     "aiosqlite>=0.22.1",
     "chromadb>=1.4.1",
+    "openai>=2.16.0",
     "pydantic>=2.12.5",
     "rich>=14.3.1",
     "sqlalchemy[asyncio]>=2.0.46",

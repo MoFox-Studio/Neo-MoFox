@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Any, Self
+
+from .exceptions import LLMConfigurationError, classify_exception
+from .model_client import ModelClientRegistry
+from .monitor import RequestMetrics, RequestTimer, get_global_collector
+from .payload import LLMPayload, Text, Tool, ToolResult
+from .policy import RoundRobinPolicy
+from .policy.base import Policy
+from .response import LLMResponse
+from .roles import ROLE
+
+
+def _normalize_tool_result_payload(payload: LLMPayload) -> LLMPayload:
+    if payload.role != ROLE.TOOL_RESULT:
+        return payload
+
+    # 允许 ToolResult 或任意对象。
+    # 重要：ToolResult 需要保留 call_id（用于 OpenAI tool message 的 tool_call_id）。
+    out_content: list[Any] = []
+    for part in payload.content:
+        if isinstance(part, ToolResult):
+            out_content.append(part)
+        elif isinstance(part, Text):
+            out_content.append(part)
+        else:
+            out_content.append(Text(str(part)))
+
+    return LLMPayload(ROLE.TOOL_RESULT, out_content)  # type: ignore[arg-type]
+
+
+def _extract_tools(payloads: list[LLMPayload]) -> list[Tool]:
+    tools: list[Tool] = []
+    for payload in payloads:
+        if payload.role != ROLE.TOOL:
+            continue
+        for part in payload.content:
+            if isinstance(part, Tool):
+                tools.append(part)
+    return tools
+
+
+@dataclass(slots=True)
+class LLMRequest:
+    """LLMRequest：构建 payload 并执行请求。"""
+
+    model_set: Any
+    request_name: str = ""
+
+    payloads: list[LLMPayload] = None  # type: ignore[assignment]
+    policy: Policy | None = None
+    clients: ModelClientRegistry | None = None
+    enable_metrics: bool = True  # 是否启用指标收集
+
+    def __post_init__(self) -> None:
+        if self.payloads is None:
+            self.payloads = []
+        if self.policy is None:
+            self.policy = RoundRobinPolicy()
+        if self.clients is None:
+            self.clients = ModelClientRegistry()
+
+    def add_payload(self, payload: LLMPayload, position=None) -> Self:
+        if position is not None:
+            self.payloads.insert(int(position), payload)
+        else:
+            self.payloads.append(payload)
+        return self
+
+    async def send(self, auto_append_response: bool = True, *, stream: bool = True) -> LLMResponse:
+        model_set = _validate_model_set(self.model_set)
+
+        # TOOL_RESULT payload 规范化（确保 provider 端可读）
+        payloads = [_normalize_tool_result_payload(p) for p in self.payloads]
+        tools = _extract_tools(payloads)
+
+        assert self.policy is not None
+        session = self.policy.new_session(model_set=model_set, request_name=self.request_name)
+
+        last_error: BaseException | None = None
+        retry_count = 0
+        step = session.first()
+        
+        while step.model is not None:
+            model = _validate_model_entry(step.model)
+
+            model_identifier = model.get("model_identifier")
+            if not isinstance(model_identifier, str) or not model_identifier:
+                raise LLMConfigurationError("model.model_identifier 必须是非空字符串")
+
+            if step.delay_seconds and step.delay_seconds > 0:
+                await asyncio.sleep(step.delay_seconds)
+
+            assert self.clients is not None
+            client = self.clients.get_client_for_model(model)
+
+            # 开始计时
+            timer = RequestTimer()
+            success = False
+            collected_error: BaseException | None = None
+
+            try:
+                with timer:
+                    message, tool_calls, stream_iter = await client.create(
+                        model_name=model_identifier,
+                        payloads=payloads,
+                        tools=tools,
+                        request_name=self.request_name,
+                        model_set=model,
+                        stream=stream,
+                    )
+
+                success = True
+                resp = LLMResponse(
+                    _stream=stream_iter,
+                    _upper=self,
+                    _auto_append_response=auto_append_response,
+                    payloads=list(self.payloads),
+                    model_set=model_set,
+                    message=message,
+                    call_list=[],
+                )
+
+                # 非流：立即解析 tool_calls
+                if tool_calls:
+                    from .payload import ToolCall
+
+                    resp.call_list = [
+                        ToolCall(id=tc.get("id"), name=tc.get("name", ""), args=tc.get("args", {})) for tc in tool_calls
+                    ]
+
+                # 记录成功指标
+                if self.enable_metrics:
+                    metrics = RequestMetrics(
+                        model_name=model_identifier,
+                        request_name=self.request_name,
+                        latency=timer.elapsed,
+                        success=True,
+                        stream=stream,
+                        retry_count=retry_count,
+                        model_index=step.meta.get("model_index", 0) if step.meta else 0,
+                    )
+                    get_global_collector().record_request(metrics)
+
+                return resp
+                
+            except BaseException as e:
+                collected_error = e
+                # 将原始异常转换为标准化 LLM 异常
+                classified_error = classify_exception(e, model=model_identifier)
+                last_error = classified_error
+                
+                # 记录失败指标
+                if self.enable_metrics:
+                    metrics = RequestMetrics(
+                        model_name=model_identifier,
+                        request_name=self.request_name,
+                        latency=timer.elapsed,
+                        success=False,
+                        error=str(classified_error),
+                        error_type=type(classified_error).__name__,
+                        stream=stream,
+                        retry_count=retry_count,
+                        model_index=step.meta.get("model_index", 0) if step.meta else 0,
+                    )
+                    get_global_collector().record_request(metrics)
+                
+                retry_count += 1
+                step = session.next_after_error(classified_error)
+
+        assert last_error is not None
+        raise last_error
+
+
+def _validate_model_entry(model: dict[str, Any]) -> dict[str, Any]:
+    required = [
+        "api_provider",
+        "base_url",
+        "model_identifier",
+        "api_key",
+        "client_type",
+        "max_retry",
+        "timeout",
+        "retry_interval",
+        "price_in",
+        "price_out",
+        "temperature",
+        "max_tokens",
+        "extra_params",
+    ]
+
+    missing = [k for k in required if k not in model]
+    if missing:
+        raise LLMConfigurationError(f"model_set 元素缺少字段: {missing}")
+
+    if not isinstance(model.get("extra_params"), dict):
+        raise LLMConfigurationError("model.extra_params 必须是 dict")
+
+    return model
+
+
+def _validate_model_set(model_set: Any) -> list[dict[str, Any]]:
+    if not isinstance(model_set, list) or not model_set:
+        raise LLMConfigurationError("model_set 必须是非空 list[dict]")
+    if not all(isinstance(x, dict) for x in model_set):
+        raise LLMConfigurationError("model_set 必须是 list[dict]")
+    return [
+        _validate_model_entry(x) for x in model_set
+    ]

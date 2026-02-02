@@ -9,8 +9,9 @@ from __future__ import annotations
 import asyncio
 import threading
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -20,21 +21,19 @@ from rich.traceback import install as install_rich_traceback
 from .color import COLOR, get_rich_color
 from .file_handler import FileHandler, RotationMode
 
-# 事件总线（延迟导入避免循环依赖）
-_event_bus = None
+if TYPE_CHECKING:
+    from src.kernel.event import EventBus
 
 
-def _get_event_bus():
-    """获取全局事件总线实例。"""
-    global _event_bus
-    if _event_bus is None:
-        from src.kernel.event import event_bus
-        _event_bus = event_bus
-    return _event_bus
+@lru_cache(maxsize=1)
+def _get_event_bus() -> EventBus:
+    """获取全局事件总线实例（使用 lru_cache 实现单例）。"""
+    from src.kernel.event import get_event_bus
+    return get_event_bus()
 
 
 # 日志广播事件名称
-LOG_OUTPUT_EVENT = "on_log_output"
+LOG_OUTPUT_EVENT = "log_output"
 
 
 class Logger:
@@ -243,16 +242,12 @@ class Logger:
             # 获取事件总线
             event_bus = _get_event_bus()
 
-            # 创建事件
-            from src.kernel.event import Event
-            event = Event(name=LOG_OUTPUT_EVENT, data=log_data, source=self.name)
-
             # 尝试发布事件（即发即弃）
             try:
                 loop = asyncio.get_running_loop()
                 # 有运行中的事件循环
                 # 直接使用 ensure_future 安排任务
-                asyncio.ensure_future(event_bus.publish(event))
+                asyncio.ensure_future(event_bus.publish(LOG_OUTPUT_EVENT, log_data))
             except RuntimeError:
                 # 没有运行中的事件循环
                 # 事件广播是可选功能，静默忽略

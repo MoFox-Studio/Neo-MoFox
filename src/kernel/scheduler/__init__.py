@@ -4,7 +4,9 @@ Scheduler 模块
 统一的任务调度系统，支持时间触发、事件触发和自定义条件触发。
 
 用法示例:
-    from src.kernel.scheduler import unified_scheduler, TriggerType
+    from src.kernel.scheduler import get_unified_scheduler, TriggerType
+
+    unified_scheduler = get_unified_scheduler()
 
     # 30秒后执行一次任务
     async def my_task():
@@ -41,12 +43,20 @@ Scheduler 模块
 from .core import SchedulerConfig, UnifiedScheduler, ScheduleTask
 from .types import TaskStatus, TriggerType, TaskExecution
 
-# 全局调度器实例
-unified_scheduler = UnifiedScheduler()
+_unified_scheduler: UnifiedScheduler | None = None
+
+
+def get_unified_scheduler() -> UnifiedScheduler:
+    """获取全局 UnifiedScheduler（懒加载）。"""
+
+    global _unified_scheduler
+    if _unified_scheduler is None:
+        _unified_scheduler = UnifiedScheduler()
+    return _unified_scheduler
 
 __all__ = [
     # 主要接口
-    "unified_scheduler",
+    "get_unified_scheduler",
     "TriggerType",
     "TaskStatus",
     # 核心类

@@ -23,9 +23,10 @@ Logger 模块
     logger.print_panel("重要消息", title="通知")
 
     # 启用事件广播
-    async def on_log(event):
-        log_data = event.data
-        print(f"[{log_data['level']}] {log_data['message']}")
+    async def on_log(event_name, params):
+        print(f"[{params['level']}] {params['message']}")
+        from src.kernel.event import EventDecision
+        return (EventDecision.SUCCESS, params)
 
     logger = get_logger("my_logger", enable_event_broadcast=True)
     event_bus.subscribe(LOG_OUTPUT_EVENT, on_log)

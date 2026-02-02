@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from .task_manager import TaskManager
 from .exceptions import WatchDogError
+
+if TYPE_CHECKING:
+    from src.kernel.logger import Logger
 
 
 @dataclass
@@ -67,9 +71,9 @@ class WatchDog:
         self._stream_registry: dict[str, StreamHeartbeat] = {}
         self._last_tick_time: datetime | None = None
         self._task_manager: TaskManager | None = None
-        self._logger = self._get_logger()
+        self._logger: Logger | None = self._get_logger()
 
-    def _get_logger(self) -> Any:
+    def _get_logger(self) -> Logger | None:
         """获取 logger 实例"""
         try:
             from src.kernel.logger import get_logger, COLOR

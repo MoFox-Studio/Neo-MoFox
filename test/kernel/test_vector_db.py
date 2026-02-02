@@ -190,12 +190,23 @@ class TestChromaDBImpl:
         yield db
         await db.close()
 
-    def test_singleton_pattern(self) -> None:
-        """测试单例模式"""
+    def test_cached_by_db_path(self) -> None:
+        """测试按 db_path 缓存实例（推荐用法）"""
+        with tempfile.TemporaryDirectory() as tmpdir1:
+            db1 = get_vector_db_service(tmpdir1)
+            db2 = get_vector_db_service(tmpdir1)
+            assert db1 is db2
+
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            db3 = get_vector_db_service(tmpdir2)
+            assert db3 is not db1
+
+    def test_direct_instantiation_is_not_singleton(self) -> None:
+        """测试直接实例化不再是单例（更利于多 profile 生命周期由上层管理）"""
         with tempfile.TemporaryDirectory() as tmpdir:
             db1 = ChromaDBImpl(path=tmpdir)
             db2 = ChromaDBImpl(path=tmpdir)
-            assert db1 is db2
+            assert db1 is not db2
 
     @pytest.mark.asyncio
     async def test_initialize(self, temp_db_path: str) -> None:

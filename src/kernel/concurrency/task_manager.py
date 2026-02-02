@@ -7,13 +7,17 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Any, Coroutine
 from uuid import uuid4
 
 from .task_info import TaskInfo
 from .task_group import TaskGroup
 from .exceptions import TaskNotFoundError
+
+if TYPE_CHECKING:
+    from .watchdog import WatchDog
 
 
 class TaskManager:
@@ -49,10 +53,13 @@ class TaskManager:
         self._tasks: dict[str, TaskInfo] = {}
         self._groups: dict[str, TaskGroup] = {}
         self._lock = Lock()
-        self._watchdog: Any = None  # WatchDog 实例，稍后注入
+        self._task_ids_by_task: weakref.WeakKeyDictionary[asyncio.Task[Any], str] = (
+            weakref.WeakKeyDictionary()
+        )
+        self._watchdog: WatchDog | None = None  # WatchDog 实例，稍后注入
         self._initialized = True
 
-    def set_watchdog(self, watchdog: Any) -> None:
+    def set_watchdog(self, watchdog: WatchDog) -> None:
         """设置 WatchDog 实例
 
         Args:
@@ -62,7 +69,7 @@ class TaskManager:
 
     def create_task(
         self,
-        coro: Any,
+        coro: Coroutine[Any, Any, Any],
         name: str | None = None,
         daemon: bool = False,
         timeout: float | None = None,
@@ -105,8 +112,8 @@ class TaskManager:
             metadata=metadata or {},
         )
 
-        # 创建 asyncio.Task
-        task = asyncio.create_task(coro, name=name)
+        # 创建 asyncio.Task（始终使用解析后的 task_name，便于调试）
+        task = asyncio.create_task(coro, name=task_info.name)
         task_info.task = task
 
         # 添加回调，在任务完成时自动清理
@@ -115,6 +122,7 @@ class TaskManager:
         # 存储任务
         with self._lock:
             self._tasks[task_id] = task_info
+            self._task_ids_by_task[task] = task_id
 
         return task_info
 
@@ -124,22 +132,15 @@ class TaskManager:
         Args:
             task: 已完成的 asyncio.Task
         """
-        # 查找对应的 TaskInfo
-        task_info = None
         with self._lock:
-            for info in self._tasks.values():
-                if info.task == task:
-                    task_info = info
-                    break
+            task_id = self._task_ids_by_task.pop(task, None)
+            task_info = self._tasks.get(task_id) if task_id else None
+            group = self._groups.get(task_info.group_name) if task_info and task_info.group_name else None
 
-        if task_info and task_info.group_name:
-            # 如果任务属于某个组，记录异常
-            if not task.cancelled():
-                exc = task.exception()
-                if exc is not None:
-                    group = self._groups.get(task_info.group_name)
-                    if group:
-                        group._record_exception(exc)
+        if group is not None and not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                group._record_exception(exc)
 
     def get_task(self, task_id: str) -> TaskInfo:
         """获取任务信息
