@@ -68,10 +68,12 @@ class LLMRequest:
     enable_metrics: bool = True  # 是否启用指标收集
 
     def __post_init__(self) -> None:
+        if self.payloads is None:
+            object.__setattr__(self, "payloads", [])
         if self.policy is None:
-            self.policy = RoundRobinPolicy()
+            object.__setattr__(self, "policy", RoundRobinPolicy())
         if self.clients is None:
-            self.clients = ModelClientRegistry()
+            object.__setattr__(self, "clients", ModelClientRegistry())
 
     def add_payload(self, payload: LLMPayload, position=None) -> Self:
         if position is not None:

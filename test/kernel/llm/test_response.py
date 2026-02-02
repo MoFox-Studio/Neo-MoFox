@@ -51,7 +51,7 @@ async def mock_tool_call_stream() -> AsyncIterator[StreamEvent]:
     yield StreamEvent(tool_call_id=call_id, tool_args_delta='location"')
     yield StreamEvent(tool_call_id=call_id, tool_args_delta=': "')
     yield StreamEvent(tool_call_id=call_id, tool_args_delta='Tokyo')
-    yield StreamEvent(tool_call_id=call_id, tool_args_value='"}')
+    yield StreamEvent(tool_call_id=call_id, tool_args_delta='"}')
 
     # Tool call 2
     call_id2 = "call_456"
@@ -750,7 +750,7 @@ class TestToolCallAccumulator:
         accumulator.apply(StreamEvent(tool_call_id=call_id, tool_args_delta='{"'))
         accumulator.apply(StreamEvent(tool_call_id=call_id, tool_args_delta='location'))
         accumulator.apply(StreamEvent(tool_call_id=call_id, tool_args_delta='":"'))
-        accumulator.apply(StreamEvent(tool_call_id=call_id, tool_args_value='Tokyo"}'))
+        accumulator.apply(StreamEvent(tool_call_id=call_id, tool_args_delta='Tokyo"}'))
 
         calls = accumulator.finalize()
         assert len(calls) == 1

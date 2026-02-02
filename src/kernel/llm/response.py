@@ -38,9 +38,14 @@ class LLMResponse:
     model_set: "ModelSet"
 
     message: str | None = None
-    call_list: list[ToolCall] = field(default_factory=list)
+    call_list: list[ToolCall] | None = None
 
     _consumed: bool = False
+
+    def __post_init__(self) -> None:
+        """Initialize fields that need special handling."""
+        if self.call_list is None:
+            object.__setattr__(self, "call_list", [])
 
     def __await__(self):
         return self._collect_full_response().__await__()

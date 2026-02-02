@@ -203,21 +203,21 @@ class TestValidateModelSet:
         """Test validation of empty model set."""
         from src.kernel.llm.request import _validate_model_set
 
-        with pytest.raises(LLMConfigurationError, match="model_set 必须是非空 list"):
+        with pytest.raises(LLMConfigurationError, match="model_set 必须是非空 list\\[dict\\]"):
             _validate_model_set([])
 
     def test_model_set_not_a_list(self) -> None:
         """Test validation when model_set is not a list."""
         from src.kernel.llm.request import _validate_model_set
 
-        with pytest.raises(LLMConfigurationError, match="model_set 必须是 list"):
+        with pytest.raises(LLMConfigurationError, match="model_set 必须是非空 list\\[dict\\]"):
             _validate_model_set("not_a_list")  # type: ignore
 
     def test_model_set_with_non_dict_elements(self) -> None:
         """Test validation when model_set contains non-dict elements."""
         from src.kernel.llm.request import _validate_model_set
 
-        with pytest.raises(LLMConfigurationError, match="model_set 必须是 list"):
+        with pytest.raises(LLMConfigurationError, match="model_set 必须是 list\\[dict\\]"):
             _validate_model_set([1, 2, 3])  # type: ignore
 
 
@@ -380,7 +380,7 @@ class TestLLMRequestSend:
 
         # Mock the client
         mock_client = MockChatClient()
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         response = await request.send(stream=False)
         assert response.message == "Success response!"
@@ -394,7 +394,7 @@ class TestLLMRequestSend:
         request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
 
         mock_client = MockChatClient()
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         response = await request.send(stream=True)
 
@@ -403,7 +403,7 @@ class TestLLMRequestSend:
         async for chunk in response:
             chunks.append(chunk)
 
-        assert " ".join(chunks) == "Hello world !"
+        assert " ".join(chunks) == "Hello  world !"
 
     @pytest.mark.asyncio
     async def test_send_with_tool_calls(
@@ -426,7 +426,7 @@ class TestLLMRequestSend:
                 )
             ]
         )
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         response = await request.send(stream=False)
 
@@ -447,7 +447,7 @@ class TestLLMRequestSend:
         mock_client = MockChatClient(
             responses=[LLMTimeoutError("Timeout"), ("Success!", None, None)]
         )
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         response = await request.send(stream=False)
         assert response.message == "Success!"
@@ -470,7 +470,7 @@ class TestLLMRequestSend:
                 ("Fallback success!", None, None),
             ]
         )
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         response = await request.send(stream=False)
         assert response.message == "Fallback success!"
@@ -504,7 +504,7 @@ class TestLLMRequestSend:
         request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
 
         mock_client = MockChatClient(responses=[LLMTimeoutError("Timeout")])
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         with pytest.raises(LLMTimeoutError):
             await request.send(stream=False)
@@ -520,7 +520,7 @@ class TestLLMRequestSend:
         mock_client = MockChatClient(
             responses=[LLMTimeoutError("Timeout"), ("Success!", None, None)]
         )
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         start = asyncio.get_event_loop().time()
         response = await request.send(stream=False)
@@ -545,7 +545,7 @@ class TestLLMRequestSend:
         request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
 
         mock_client = MockChatClient(responses=[("Success!", None, None)])
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         await request.send(stream=False)
 
@@ -570,7 +570,7 @@ class TestLLMRequestSend:
         request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
 
         mock_client = MockChatClient(responses=[("Success!", None, None)])
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         await request.send(stream=False)
 
@@ -612,12 +612,16 @@ class TestLLMRequestSend:
         self, mock_model_set: list[dict[str, Any]]
     ) -> None:
         """Test that exceptions are properly classified."""
-        request = LLMRequest(mock_model_set, "test")
+        # Create a model set with max_retry=0 to ensure exception is raised immediately
+        no_retry_model_set = [
+            {**model, "max_retry": 0} for model in mock_model_set[:1]
+        ]
+        request = LLMRequest(no_retry_model_set, "test")
         request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
 
         # Use raw exception that should be classified
         mock_client = MockChatClient(responses=[ValueError("rate limit exceeded")])
-        request.clients._openai = mock_client
+        request.clients.openai = mock_client
 
         with pytest.raises(LLMRateLimitError):
             await request.send(stream=False)

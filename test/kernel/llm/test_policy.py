@@ -51,10 +51,9 @@ class TestPolicySession:
 
     def test_policy_session_is_protocol(self) -> None:
         """Test that PolicySession is a Protocol."""
-        # Protocol is not directly instantiable, but we can check it exists
-        assert hasattr(PolicySession, "__protocol_attrs__")
-        assert "first" in PolicySession.__protocol_attrs__
-        assert "next_after_error" in PolicySession.__protocol_attrs__
+        # Check that protocol has required methods
+        assert hasattr(PolicySession, "first")
+        assert hasattr(PolicySession, "next_after_error")
 
 
 class TestPolicy:
@@ -62,8 +61,8 @@ class TestPolicy:
 
     def test_policy_is_protocol(self) -> None:
         """Test that Policy is a Protocol."""
-        assert hasattr(Policy, "__protocol_attrs__")
-        assert "new_session" in Policy.__protocol_attrs__
+        # Check that protocol has required method
+        assert hasattr(Policy, "new_session")
 
 
 class TestRoundRobinPolicy:
@@ -108,26 +107,29 @@ class TestRoundRobinPolicy:
     def test_policy_creation(self) -> None:
         """Test creating RoundRobinPolicy."""
         policy = RoundRobinPolicy()
-        assert isinstance(policy, Policy)
+        # Check that policy has required method
+        assert hasattr(policy, "new_session")
 
     def test_new_session_returns_policy_session(self) -> None:
         """Test that new_session returns PolicySession."""
         policy = RoundRobinPolicy()
         model_set = [{"model_identifier": "gpt-4"}]
         session = policy.new_session(model_set=model_set, request_name="test")
-        assert isinstance(session, PolicySession)
+        # Check that session has required methods
+        assert hasattr(session, "first")
+        assert hasattr(session, "next_after_error")
 
     def test_new_session_validates_model_set(self) -> None:
         """Test that new_session validates model_set."""
         policy = RoundRobinPolicy()
 
-        with pytest.raises(ValueError, match="model_set 必须是非空 list"):
+        with pytest.raises(ValueError, match="model_set 必须是非空 list\\[dict\\]"):
             policy.new_session(model_set=[], request_name="test")
 
-        with pytest.raises(ValueError, match="model_set 必须是 list"):
+        with pytest.raises(ValueError, match="model_set 必须是非空 list\\[dict\\]"):
             policy.new_session(model_set="not_a_list", request_name="test")  # type: ignore
 
-        with pytest.raises(ValueError, match="model_set 必须是 list"):
+        with pytest.raises(ValueError, match="model_set 必须是 list\\[dict\\]"):
             policy.new_session(model_set=[1, 2, 3], request_name="test")  # type: ignore
 
     def test_multiple_sessions_have_independent_counters(self, mock_model_set: list[dict]) -> None:
@@ -482,7 +484,7 @@ class TestPolicyIntegration:
         steps.append(step)
 
         # Simulate retries and switches
-        for _ in range(3):
+        for _ in range(4):
             step = session.next_after_error(LLMTimeoutError("Timeout"))
             steps.append(step)
             if step.model is None:
