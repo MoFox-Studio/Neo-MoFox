@@ -1,12 +1,13 @@
 """插件管理器。
 
-本模块提供插件管理器，负责插件的发现、加载、卸载和生命周期管理。
-支持文件夹、ZIP 压缩包和 .MFP 格式的插件。
-使用 loader.py 中的依赖解析器进行拓扑排序，确保依赖顺序正确加载。
+本模块提供插件管理器，负责“单个插件”的导入执行、组件注册与生命周期钩子调用。
+
+宏观层面的插件发现、manifest 读取、依赖/版本检查与加载顺序计算由
+src.core.components.loader.PluginLoader 负责。
 """
 
 import importlib.util
-import json
+import inspect
 import sys
 import tempfile
 import zipfile
@@ -17,7 +18,6 @@ from src.kernel.logger import get_logger
 
 from src.core.components.loader import (
     PluginManifest,
-    PluginDependencyResolver,
     get_plugin_class,
 )
 from src.core.components.registry import get_global_registry
@@ -34,15 +34,11 @@ logger = get_logger("plugin_manager")
 class PluginManager:
     """插件管理器。
 
-    负责插件的发现、加载、卸载和生命周期管理。
-    支持文件夹、ZIP 压缩包和 .MFP 格式的插件。
-    使用 manifest.json 解析插件元数据和依赖关系。
-    使用拓扑排序确定插件加载顺序。
+    负责单个插件的导入、组件注册、卸载和生命周期管理。
 
     Attributes:
         _loaded_plugins: 已加载的插件实例字典
         _manifests: 插件清单字典
-        _resolver: 依赖解析器
         _plugin_paths: 插件路径字典
 
     Examples:
@@ -56,218 +52,83 @@ class PluginManager:
         """初始化插件管理器。"""
         self._loaded_plugins: dict[str, "BasePlugin"] = {}
         self._manifests: dict[str, PluginManifest] = {}
-        self._resolver = PluginDependencyResolver()
         self._plugin_paths: dict[str, str] = {}
         self._failed_plugins: dict[str, str] = {}
 
         logger.info("插件管理器初始化完成")
 
-    async def discover_plugins(self, plugins_dir: str) -> list[str]:
-        """发现插件目录下的所有插件。
+    async def load_plugin_from_manifest(self, plugin_path: str, manifest: PluginManifest) -> bool:
+        """加载单个插件（manifest 已由 loader 宏观层校验并提供）。"""
+        plugin_name = manifest.name
 
-        扫描指定目录，查找所有有效的插件（文件夹、ZIP 或 .MFP 文件）。
-        有效的插件必须包含 manifest.json 文件。
-
-        Args:
-            plugins_dir: 插件根目录路径
-
-        Returns:
-            list[str]: 发现的插件路径列表
-
-        Examples:
-            >>> discovered = await manager.discover_plugins("plugins")
-            >>> ['plugins/my_plugin', 'plugins/other_plugin.zip']
-        """
-        discovered = []
-        plugins_path = Path(plugins_dir)
-
-        if not plugins_path.exists():
-            logger.warning(f"插件目录不存在: {plugins_dir}")
-            return discovered
-
-        # 扫描文件夹
-        for item in plugins_path.iterdir():
-            if item.is_dir() and not item.name.startswith(".") and not item.name.startswith("__"):
-                manifest_path = item / "manifest.json"
-                if manifest_path.exists():
-                    discovered.append(str(item))
-                    logger.debug(f"发现插件文件夹: {item}")
-
-            # 扫描 .zip 和 .mfp 文件
-            elif item.suffix in (".zip", ".mfp"):
-                # 验证是否包含 manifest.json
-                try:
-                    with zipfile.ZipFile(item, 'r') as zf:
-                        if "manifest.json" in zf.namelist():
-                            discovered.append(str(item))
-                            logger.debug(f"发现插件压缩包: {item}")
-                except Exception as e:
-                    logger.warning(f"无法读取压缩包 {item}: {e}")
-
-        logger.info(f"在 {plugins_dir} 中发现 {len(discovered)} 个插件")
-        return discovered
-
-    async def load_plugin(self, plugin_path: str) -> bool:
-        """加载单个插件。
-
-        从指定路径加载插件。支持文件夹、ZIP 和 .MFP 格式。
-        首先加载 manifest.json，然后解析依赖，最后加载插件模块。
-
-        Args:
-            plugin_path: 插件路径（文件夹/ZIP/.MFP）
-
-        Returns:
-            bool: 是否加载成功
-
-        Examples:
-            >>> success = await manager.load_plugin("plugins/my_plugin")
-            >>> True
-        """
-        # 1. 解析 manifest.json
-        manifest = await self._load_manifest(plugin_path)
-        if not manifest:
-            error_msg = "无法加载 manifest.json"
-            self._failed_plugins[manifest.name if manifest else plugin_path] = error_msg
-            return False
-
-        # 2. 检查是否已加载
-        if manifest.name in self._loaded_plugins:
-            logger.warning(f"插件 '{manifest.name}' 已经加载")
+        # 1. 检查是否已加载
+        if plugin_name in self._loaded_plugins:
+            logger.warning(f"插件 '{plugin_name}' 已经加载")
             return True
 
-        # 3. 检查版本兼容性
-        if not self._check_version_compatibility(manifest):
-            error_msg = f"核心版本不兼容，需要 {manifest.min_core_version}"
-            self._failed_plugins[manifest.name] = error_msg
-            logger.error(f"插件 '{manifest.name}' 加载失败: {error_msg}")
-            return False
-
-        # 4. 加载插件模块
+        # 2. 加载插件模块（导入会触发 @register_plugin 执行）
         if plugin_path.endswith((".zip", ".mfp")):
-            # 从 ZIP/MFP 加载
             plugin_module = await self._load_from_archive(plugin_path, manifest)
         else:
-            # 从文件夹加载
             plugin_module = await self._load_from_folder(plugin_path, manifest)
 
         if not plugin_module:
             error_msg = "插件模块加载失败"
-            self._failed_plugins[manifest.name] = error_msg
+            self._failed_plugins[plugin_name] = error_msg
             return False
 
-        # 5. 查找 @register_plugin 注册的插件类
-        plugin_class = get_plugin_class(manifest.name)
+        # 3. 查找 @register_plugin 注册的插件类
+        plugin_class = get_plugin_class(plugin_name)
         if not plugin_class:
             error_msg = "插件类未注册（未使用 @register_plugin 装饰器）"
-            self._failed_plugins[manifest.name] = error_msg
-            logger.error(f"插件 '{manifest.name}' 加载失败: {error_msg}")
+            self._failed_plugins[plugin_name] = error_msg
+            logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
             return False
 
-        # 6. 加载插件配置
-        # TODO: 从 config/plugins/{plugin_name}/ 加载配置
-        # config = await self._load_plugin_config(manifest.name, plugin_path)
-
-        # 7. 实例化插件
+        # 4. 实例化插件
         try:
             plugin_instance = plugin_class(config=None)  # type: ignore
         except Exception as e:
             error_msg = f"插件实例化失败: {e}"
-            self._failed_plugins[manifest.name] = error_msg
-            logger.error(f"插件 '{manifest.name}' 加载失败: {error_msg}")
+            self._failed_plugins[plugin_name] = error_msg
+            logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
             return False
 
-        # 8. 注册组件到全局注册表
+        # 5. 注册组件到全局注册表
         await self._register_components(plugin_instance)
 
-        # 9. 调用生命周期钩子
+        # 6. 调用生命周期钩子
         try:
             await plugin_instance.on_plugin_loaded()
         except Exception as e:
-            logger.error(f"调用插件 '{manifest.name}' 的 on_plugin_loaded 钩子时出错: {e}")
+            logger.error(f"调用插件 '{plugin_name}' 的 on_plugin_loaded 钩子时出错: {e}")
 
-        # 10. 更新状态
-        self._loaded_plugins[manifest.name] = plugin_instance
-        self._manifests[manifest.name] = manifest
+        # 7. 记录并更新状态
+        self._loaded_plugins[plugin_name] = plugin_instance
+        self._manifests[plugin_name] = manifest
+        self._plugin_paths[plugin_name] = plugin_path
 
         state_manager = get_global_state_manager()
         await state_manager.set_state_async(
-            build_signature(manifest.name, ComponentType.PLUGIN, manifest.name),
-            ComponentState.ACTIVE
+            build_signature(plugin_name, ComponentType.PLUGIN, plugin_name),
+            ComponentState.ACTIVE,
         )
 
-        logger.info(f"✅ 插件加载成功: {manifest.name} v{manifest.version}")
+        logger.info(f"✅ 插件加载成功: {plugin_name} v{manifest.version}")
         return True
 
-    async def load_all_plugins(self, plugins_dir: str) -> dict[str, bool]:
-        """加载所有插件。
+    async def load_plugin(self, plugin_path: str) -> bool:
+        """兼容入口：仅用于直接按路径加载单插件。
 
-        发现指定目录下的所有插件，解析依赖关系，按拓扑排序顺序加载。
-
-        Args:
-            plugins_dir: 插件目录
-
-        Returns:
-            dict[str, bool]: 插件名到加载结果的映射
-
-        Raises:
-            ValueError: 如果检测到循环依赖
-
-        Examples:
-            >>> results = await manager.load_all_plugins("plugins")
-            >>> {'my_plugin': True, 'other_plugin': False}
+        宏观校验/依赖检查请使用 loader.PluginLoader。
         """
-        logger.info(f"开始加载插件目录: {plugins_dir}")
+        from src.core.components.loader import load_manifest
 
-        # 1. 发现所有插件
-        discovered = await self.discover_plugins(plugins_dir)
-
-        if not discovered:
-            logger.warning(f"在 {plugins_dir} 中未发现任何插件")
-            return {}
-
-        # 2. 加载所有 manifest
-        temp_resolver = PluginDependencyResolver()
-        manifests_to_load: dict[str, PluginManifest] = {}
-
-        for path in discovered:
-            manifest = await self._load_manifest(path)
-            if manifest:
-                temp_resolver.add_plugin(manifest)
-                manifests_to_load[manifest.name] = manifest
-                self._plugin_paths[manifest.name] = path
-
-        # 3. 检测循环依赖
-        cycle = temp_resolver.check_circular_dependency()
-        if cycle:
-            cycle_str = " -> ".join(cycle)
-            raise ValueError(f"检测到循环依赖: {cycle_str}")
-
-        # 4. 拓扑排序决定加载顺序
-        load_order = temp_resolver.resolve_load_order()
-        logger.info(f"插件加载顺序: {' -> '.join(load_order)}")
-
-        # 5. 按顺序加载
-        results = {}
-        for plugin_name in load_order:
-            plugin_path = manifests_to_load[plugin_name]._source_path
-            success = await self.load_plugin(plugin_path)
-            results[plugin_name] = success
-
-            # 更新解析器
-            if success:
-                self._resolver.add_plugin(manifests_to_load[plugin_name])
-
-        # 6. 显示加载统计
-        success_count = sum(1 for v in results.values() if v)
-        fail_count = len(results) - success_count
-        logger.info(f"插件加载完成: 成功 {success_count}, 失败 {fail_count}")
-
-        if self._failed_plugins:
-            logger.warning("加载失败的插件:")
-            for name, error in self._failed_plugins.items():
-                logger.warning(f"  - {name}: {error}")
-
-        return results
+        manifest = await load_manifest(plugin_path)
+        if not manifest:
+            self._failed_plugins[plugin_path] = "无法加载 manifest.json"
+            return False
+        return await self.load_plugin_from_manifest(plugin_path, manifest)
 
     async def unload_plugin(self, plugin_name: str) -> bool:
         """卸载插件。
@@ -304,7 +165,8 @@ class PluginManager:
                 ComponentState.UNLOADED
             )
 
-            # TODO: 从全局注册表中移除组件
+            # 从全局注册表中移除该插件的组件
+            await self._unregister_plugin_components(plugin_name)
 
             # 移除引用
             del self._loaded_plugins[plugin_name]
@@ -319,6 +181,28 @@ class PluginManager:
         except Exception as e:
             logger.error(f"❌ 插件卸载失败: {plugin_name} - {e}")
             return False
+
+    async def _unregister_plugin_components(self, plugin_name: str) -> None:
+        """从全局注册表中注销某插件的所有组件，并更新状态。"""
+        registry = get_global_registry()
+        state_manager = get_global_state_manager()
+
+        components = registry.get_by_plugin(plugin_name)
+        if not components:
+            return
+
+        for signature in list(components.keys()):
+            try:
+                registry.unregister(signature)
+            except Exception as e:
+                logger.warning(f"注销组件失败 '{signature}': {e}")
+                continue
+
+            try:
+                await state_manager.set_state_async(signature, ComponentState.UNLOADED)
+                state_manager.remove_runtime_data(signature)
+            except Exception as e:
+                logger.warning(f"更新组件状态失败 '{signature}': {e}")
 
     async def reload_plugin(self, plugin_name: str) -> bool:
         """重载插件。
@@ -419,62 +303,7 @@ class PluginManager:
 
     # === 私有方法 ===
 
-    async def _load_manifest(self, plugin_path: str) -> PluginManifest | None:
-        """加载 manifest.json。
-
-        Args:
-            plugin_path: 插件路径
-
-        Returns:
-            PluginManifest | None: 插件清单，如果加载失败则返回 None
-        """
-        try:
-            if plugin_path.endswith((".zip", ".mfp")):
-                # 从压缩包读取
-                with zipfile.ZipFile(plugin_path, 'r') as zf:
-                    manifest_data = json.loads(zf.read("manifest.json").decode('utf-8'))
-            else:
-                # 从文件夹读取
-                manifest_file = Path(plugin_path) / "manifest.json"
-                with open(manifest_file, 'r', encoding='utf-8') as f:
-                    manifest_data = json.load(f)
-
-            # 验证必需字段
-            required_fields = ["name", "version", "description", "author", "dependencies", "entry_point"]
-            for field in required_fields:
-                if field not in manifest_data:
-                    logger.error(f"manifest.json 缺少必需字段: {field}")
-                    return None
-
-            manifest = PluginManifest(
-                name=manifest_data["name"],
-                version=manifest_data["version"],
-                description=manifest_data.get("description", ""),
-                author=manifest_data.get("author", ""),
-                dependencies=manifest_data.get("dependencies", {"plugins": [], "components": []}),
-                entry_point=manifest_data.get("entry_point", "plugin.py"),
-                min_core_version=manifest_data.get("min_core_version", "3.0.0"),
-                _source_path=plugin_path
-            )
-
-            return manifest
-
-        except Exception as e:
-            logger.error(f"加载 manifest.json 失败 ({plugin_path}): {e}")
-            return None
-
-    def _check_version_compatibility(self, manifest: PluginManifest) -> bool:
-        """检查核心版本兼容性。
-
-        Args:
-            manifest: 插件清单
-
-        Returns:
-            bool: 是否版本兼容
-        """
-        # TODO: 实现版本比较逻辑
-        # 目前简单检查，未来可以使用 packaging.version 进行语义化版本比较
-        return True
+    # manifest 读取 / 版本校验 / 依赖解析：已迁移至 loader.PluginLoader
 
     async def _load_from_archive(self, archive_path: str, manifest: PluginManifest) -> Any | None:
         """从 ZIP/MFP 加载插件模块。
@@ -571,19 +400,108 @@ class PluginManager:
     async def _register_components(self, plugin_instance: "BasePlugin") -> None:
         """注册插件的所有组件到全局注册表。
 
+        通过 get_components() 获取插件的所有组件类，推断组件类型，
+        构建签名，注册到全局注册表，并通知对应的管理器。
+
         Args:
             plugin_instance: 插件实例
         """
         registry = get_global_registry()
+        state_manager = get_global_state_manager()
 
         # 获取插件的所有组件
         components = plugin_instance.get_components()
         plugin_name = plugin_instance.plugin_name
 
+        logger.debug(f"开始注册插件 '{plugin_name}' 的 {len(components)} 个组件")
+
         for component_cls in components:
-            # TODO: 注册组件到全局注册表
-            # 需要组件类提供签名信息
-            pass
+            # 推断组件类型和名称
+            component_type, component_name, dependencies = self._identify_component(component_cls)
+
+            if not component_type or not component_name:
+                logger.warning(
+                    f"跳过无法识别的组件: {component_cls.__name__} "
+                    f"(缺少类型标识或名称属性)"
+                )
+                continue
+
+            # 构建组件签名
+            signature = build_signature(plugin_name, component_type, component_name)
+
+            # 检查是否已注册
+            if signature in registry:
+                logger.warning(f"组件 '{signature}' 已经注册，跳过")
+                continue
+
+            try:
+                # 注册到全局注册表
+                registry.register(component_cls, signature, dependencies)
+                logger.debug(f"注册组件: {signature}")
+
+                # 设置组件状态
+                await state_manager.set_state_async(signature, ComponentState.ACTIVE)
+
+            except Exception as e:
+                logger.error(f"注册组件 '{signature}' 失败: {e}")
+                continue
+
+        logger.info(f"✅ 插件 '{plugin_name}' 的组件注册完成")
+
+    def _identify_component(
+        self, component_cls: type
+    ) -> tuple[ComponentType | None, str | None, list[str]]:
+        """识别组件的类型、名称和依赖。
+
+        通过检查组件类的基类推断组件类型，并获取对应的名称属性。
+        动态导入基类以避免循环导入问题。
+
+        Args:
+            component_cls: 组件类
+
+        Returns:
+            tuple[ComponentType | None, str | None, list[str]]:
+                (组件类型, 组件名称, 依赖列表)
+        """
+        # 动态导入基类以避免循环导入
+        from src.core.components.base.action import BaseAction
+        from src.core.components.base.adapter import BaseAdapter
+        from src.core.components.base.chatter import BaseChatter
+        from src.core.components.base.collection import BaseCollection
+        from src.core.components.base.command import BaseCommand
+        from src.core.components.base.event_handler import BaseEventHandler
+        from src.core.components.base.router import BaseRouter
+        from src.core.components.base.service import BaseService
+        from src.core.components.base.tool import BaseTool
+
+        # 组件类型到名称属性和基类的映射
+        type_mapping: dict[
+            ComponentType,
+            tuple[type, str],
+        ] = {
+            ComponentType.ACTION: (BaseAction, "action_name"),
+            ComponentType.TOOL: (BaseTool, "tool_name"),
+            ComponentType.ADAPTER: (BaseAdapter, "adapter_name"),
+            ComponentType.CHATTER: (BaseChatter, "chatter_name"),
+            ComponentType.COMMAND: (BaseCommand, "command_name"),
+            ComponentType.COLLECTION: (BaseCollection, "collection_name"),
+            ComponentType.EVENT_HANDLER: (BaseEventHandler, "handler_name"),
+            ComponentType.SERVICE: (BaseService, "service_name"),
+            ComponentType.ROUTER: (BaseRouter, "router_name"),
+        }
+
+        # 检查组件类型
+        for comp_type, (base_cls, name_attr) in type_mapping.items():
+            try:
+                if inspect.isclass(component_cls) and issubclass(component_cls, base_cls):
+                    component_name = getattr(component_cls, name_attr, None)
+                    dependencies = getattr(component_cls, "dependencies", [])
+                    return comp_type, component_name, dependencies
+            except TypeError:
+                # component_cls 不是类
+                continue
+
+        return None, None, []
 
 
 # 全局插件管理器实例

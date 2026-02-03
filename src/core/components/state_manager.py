@@ -249,7 +249,7 @@ class StateManager:
 
         async with self._lock:
             for sig in to_disable:
-                self._states[sig] = ComponentState.DISABLED
+                self._states[sig] = ComponentState.INACTIVE
 
         return to_disable
 
@@ -278,7 +278,7 @@ class StateManager:
         missing_or_disabled = []
         for dep_sig in dependencies:
             dep_state = self._states.get(dep_sig, ComponentState.UNLOADED)
-            if dep_state in (ComponentState.UNLOADED, ComponentState.DISABLED):
+            if dep_state in (ComponentState.UNLOADED, ComponentState.INACTIVE):
                 missing_or_disabled.append(dep_sig)
 
         if missing_or_disabled:

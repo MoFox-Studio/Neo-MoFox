@@ -1,14 +1,28 @@
 """插件加载器和注册系统。
 
-本模块提供插件注册装饰器和相关实用工具，用于管理插件发现和加载。
-支持插件类用于注册自身的 @register_plugin 装饰器。
+本模块包含两层职责：
+1) 运行时插件类注册：提供 @register_plugin 装饰器和注册表查询。
+2) 宏观插件加载入口：负责从插件目录发现插件、读取 manifest、检查依赖/版本、
+    计算加载顺序，并委托 PluginManager 执行单个插件的导入与组件注册。
+
+设计原则：宏观层面的依赖/版本/计划由 loader 负责；单插件加载由 PluginManager 负责。
 """
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+import json
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from src.kernel.logger import get_logger
+
+logger = get_logger("plugin_loader")
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
+    from src.core.components.managers.plugin_manager import PluginManager
 
 # 全局插件注册表
 _plugin_registry: dict[str, type["BasePlugin"]] = {}
@@ -189,11 +203,244 @@ class PluginManifest:
     version: str
     description: str
     author: str
-    dependencies: dict[str, list[str]]
-    include: list[ComponentInclude]
-    entry_point: str
-    min_core_version: str
-    _source_path: str  # 内部：清单加载来源路径
+    dependencies: dict[str, list[str]] = field(
+        default_factory=lambda: {"plugins": [], "components": []}
+    )
+    include: list[ComponentInclude] = field(default_factory=list)
+    entry_point: str = "plugin.py"
+    min_core_version: str = "1.0.0"
+    _source_path: str = ""  # 内部：清单加载来源路径
+
+
+async def load_manifest(plugin_path: str) -> PluginManifest | None:
+    """从插件路径读取并解析 manifest.json。
+
+    支持文件夹、ZIP 和 .MFP（本质为 ZIP）。
+    """
+    try:
+        if plugin_path.endswith((".zip", ".mfp")):
+            with zipfile.ZipFile(plugin_path, "r") as zf:
+                if "manifest.json" not in zf.namelist():
+                    logger.error(f"manifest.json 不存在: {plugin_path}")
+                    return None
+                manifest_data = json.loads(zf.read("manifest.json").decode("utf-8"))
+        else:
+            manifest_file = Path(plugin_path) / "manifest.json"
+            if not manifest_file.exists():
+                logger.error(f"manifest.json 不存在: {manifest_file}")
+                return None
+            with open(manifest_file, "r", encoding="utf-8") as f:
+                manifest_data = json.load(f)
+
+        required_fields = [
+            "name",
+            "version",
+            "description",
+            "author",
+            "dependencies",
+            "entry_point",
+        ]
+        for field_name in required_fields:
+            if field_name not in manifest_data:
+                logger.error(f"manifest.json 缺少必需字段: {field_name} ({plugin_path})")
+                return None
+
+        include_list: list[ComponentInclude] = []
+        for item in manifest_data.get("include", []) or []:
+            try:
+                include_list.append(
+                    ComponentInclude(
+                        component_type=item.get("component_type", ""),
+                        component_name=item.get("component_name", ""),
+                        dependencies=item.get("dependencies", []) or [],
+                        enabled=bool(item.get("enabled", True)),
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"解析 include 项失败 ({plugin_path}): {e}")
+
+        return PluginManifest(
+            name=manifest_data["name"],
+            version=manifest_data["version"],
+            description=manifest_data.get("description", ""),
+            author=manifest_data.get("author", ""),
+            dependencies=manifest_data.get("dependencies", {"plugins": [], "components": []})
+            or {"plugins": [], "components": []},
+            include=include_list,
+            entry_point=manifest_data.get("entry_point", "plugin.py"),
+            min_core_version=manifest_data.get("min_core_version", "3.0.0"),
+            _source_path=plugin_path,
+        )
+
+    except Exception as e:
+        logger.error(f"加载 manifest.json 失败 ({plugin_path}): {e}")
+        return None
+
+
+class PluginLoader:
+    """宏观插件加载器（入口点）。
+
+    负责：发现插件、读取清单、依赖/版本检查、计算加载顺序。
+    不负责：导入执行插件模块细节、组件注册细节（委托 PluginManager）。
+    """
+
+    def __init__(self) -> None:
+        self._failed_plugins: dict[str, str] = {}
+
+    def get_failed_plugins(self) -> dict[str, str]:
+        return self._failed_plugins.copy()
+
+    async def discover_plugins(self, plugins_dir: str) -> list[str]:
+        """扫描插件目录，返回可用插件路径列表。"""
+        discovered: list[str] = []
+        plugins_path = Path(plugins_dir)
+
+        if not plugins_path.exists():
+            logger.warning(f"插件目录不存在: {plugins_dir}")
+            return discovered
+
+        for item in plugins_path.iterdir():
+            if item.is_dir() and not item.name.startswith(".") and not item.name.startswith("__"):
+                manifest_path = item / "manifest.json"
+                if manifest_path.exists():
+                    discovered.append(str(item))
+                    logger.debug(f"发现插件文件夹: {item}")
+            elif item.suffix in (".zip", ".mfp"):
+                try:
+                    with zipfile.ZipFile(item, "r") as zf:
+                        if "manifest.json" in zf.namelist():
+                            discovered.append(str(item))
+                            logger.debug(f"发现插件压缩包: {item}")
+                except Exception as e:
+                    logger.warning(f"无法读取压缩包 {item}: {e}")
+
+        logger.info(f"在 {plugins_dir} 中发现 {len(discovered)} 个插件")
+        return discovered
+
+    def _check_version_compatibility(self, manifest: PluginManifest) -> bool:
+        """检查核心版本兼容性（宏观层面）。
+
+        TODO: 实现语义化版本比较。
+        """
+        return True
+
+    def _parse_plugin_ref(self, ref: str) -> str:
+        return ref.split(":")[0]
+
+    def _prune_unloadable_plugins(
+        self, manifests: dict[str, PluginManifest]
+    ) -> dict[str, PluginManifest]:
+        """剔除缺失依赖/版本不兼容的插件，返回最终可加载集合。"""
+        loadable = dict(manifests)
+
+        # 版本兼容性先筛一轮
+        for name in list(loadable.keys()):
+            manifest = loadable[name]
+            if not self._check_version_compatibility(manifest):
+                self._failed_plugins[name] = f"核心版本不兼容，需要 {manifest.min_core_version}"
+                del loadable[name]
+
+        changed = True
+        while changed:
+            changed = False
+            for name in list(loadable.keys()):
+                manifest = loadable[name]
+                deps = [
+                    self._parse_plugin_ref(dep_ref)
+                    for dep_ref in manifest.dependencies.get("plugins", [])
+                ]
+                missing: list[str] = []
+                for dep in deps:
+                    if dep not in loadable:
+                        missing.append(dep)
+
+                if missing:
+                    # 依赖可能是“未发现”或“因不兼容/缺失被剔除”
+                    self._failed_plugins[name] = (
+                        "依赖插件不可用: " + ", ".join(sorted(set(missing)))
+                    )
+                    del loadable[name]
+                    changed = True
+
+        return loadable
+
+    async def plan_plugins(self, plugins_dir: str) -> tuple[list[str], dict[str, PluginManifest]]:
+        """构建加载计划：返回 (load_order, manifests_to_load)。"""
+        self._failed_plugins.clear()
+
+        discovered = await self.discover_plugins(plugins_dir)
+        if not discovered:
+            return [], {}
+
+        manifests: dict[str, PluginManifest] = {}
+        for path in discovered:
+            manifest = await load_manifest(path)
+            if not manifest:
+                self._failed_plugins[path] = "无法加载 manifest.json"
+                continue
+            manifests[manifest.name] = manifest
+
+        # 剔除缺失依赖/不兼容插件（并递归影响依赖它的插件）
+        loadable = self._prune_unloadable_plugins(manifests)
+        if not loadable:
+            return [], {}
+
+        resolver = PluginDependencyResolver()
+        for manifest in loadable.values():
+            resolver.add_plugin(manifest)
+
+        cycle = resolver.check_circular_dependency()
+        if cycle:
+            cycle_str = " -> ".join(cycle)
+            raise ValueError(f"检测到循环依赖: {cycle_str}")
+
+        load_order = resolver.resolve_load_order()
+        logger.info(f"插件加载顺序: {' -> '.join(load_order)}")
+        return load_order, loadable
+
+    async def load_all_plugins(
+        self,
+        plugins_dir: str,
+        *,
+        plugin_manager: "PluginManager | None" = None,
+    ) -> dict[str, bool]:
+        """按计划加载插件，并委托 PluginManager 执行单插件加载。"""
+        from src.core.components.managers.plugin_manager import get_plugin_manager
+
+        manager = plugin_manager or get_plugin_manager()
+        load_order, manifests_to_load = await self.plan_plugins(plugins_dir)
+        if not load_order:
+            if self._failed_plugins:
+                logger.warning("无可加载插件，失败原因如下：")
+                for name, reason in self._failed_plugins.items():
+                    logger.warning(f"  - {name}: {reason}")
+            return {}
+
+        results: dict[str, bool] = {}
+        for plugin_name in load_order:
+            manifest = manifests_to_load[plugin_name]
+            success = await manager.load_plugin_from_manifest(
+                manifest._source_path,
+                manifest,
+            )
+            results[plugin_name] = success
+
+        return results
+
+
+_global_plugin_loader: PluginLoader | None = None
+
+
+def get_plugin_loader() -> PluginLoader:
+    global _global_plugin_loader
+    if _global_plugin_loader is None:
+        _global_plugin_loader = PluginLoader()
+    return _global_plugin_loader
+
+
+async def load_all_plugins(plugins_dir: str) -> dict[str, bool]:
+    """便捷入口：使用全局 PluginLoader 加载目录下所有插件。"""
+    return await get_plugin_loader().load_all_plugins(plugins_dir)
 
 
 class PluginDependencyResolver:

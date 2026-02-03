@@ -4,7 +4,6 @@
 依赖关系跟踪，以及按插件或组件类型查询。
 """
 
-from typing import type
 from src.core.components.types import (
     ComponentType,
     build_signature,
