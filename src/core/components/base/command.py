@@ -6,7 +6,7 @@ Command 使用 Trie 树路由系统，支持多级命令和类型提示参数解
 
 import inspect
 import shlex
-from abc import ABC, abstractmethod
+from abc import ABC
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -85,6 +85,36 @@ class BaseCommand(ABC):
         self._root = CommandNode(name="root")
         self._build_command_tree()
 
+    @classmethod
+    def match(cls, parts: list[str]) -> int:
+        """匹配命令。
+
+        检查给定的命令片段列表是否匹配该 Command 组件。
+        这是 command_manager 用来查找匹配命令的核心方法。
+
+        Args:
+            parts: 命令分割后的片段列表（例如 ["time", "set", "30"]）
+
+        Returns:
+            int: 匹配的命令长度，如果不匹配返回 0
+
+        Examples:
+            >>> class TimeCommand(BaseCommand):
+            ...     command_name = "time"
+            >>> TimeCommand.match(["time", "set"])
+            1
+            >>> TimeCommand.match(["other", "command"])
+            0
+        """
+        if not parts or not cls.command_name:
+            return 0
+
+        # 检查第一个片段是否匹配 command_name
+        if parts[0] == cls.command_name:
+            return 1
+
+        return 0
+
     def _build_command_tree(self) -> None:
         """构建命令树。
 
@@ -112,27 +142,23 @@ class BaseCommand(ABC):
         current.handler = handler
         current.description = handler.__doc__ or ""
 
-    @abstractmethod
     async def execute(self, message_text: str) -> tuple[bool, str]:
-        """执行命令的主要逻辑。
+        """执行命令的入口方法。
 
-        解析消息文本，匹配路由，调用处理函数。
+        解析消息文本，通过 Trie 树路由到对应的处理函数。
+        插件开发者通常不需要重写此方法，而是使用 @cmd_route 装饰器定义处理函数。
 
         Args:
-            message_text: 消息文本
+            message_text: 完整的消息文本 (例如 "/time set seconds 30")
 
         Returns:
-            tuple[bool, str]: (是否成功, 响应消息)
-
-        Examples:
-            >>> async def execute(self, message_text: str) -> tuple[bool, str]:
-            ...     # 移除命令前缀
-            ...     if message_text.startswith(self.command_prefix):
-            ...         message_text = message_text[len(self.command_prefix):]
-            ...
-            ...     return await self._route_and_execute(message_text)
+            tuple[bool, str]: (是否成功, 返回结果/错误信息)
         """
-        ...
+        # 移除命令前缀
+        if message_text.startswith(self.command_prefix):
+            message_text = message_text[len(self.command_prefix):].strip()
+
+        return await self._route_and_execute(message_text)
 
     async def _route_and_execute(self, command_text: str) -> tuple[bool, str]:
         """路由并执行命令。
@@ -364,7 +390,7 @@ def cmd_route(*path: str) -> Callable:
     """
 
     def decorator(func: Callable) -> Callable:
-        func._cmd_route = list(path)  # type: ignore
+        func._cmd_route = list(path)
         return func
 
     return decorator

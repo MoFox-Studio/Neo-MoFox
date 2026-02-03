@@ -199,7 +199,7 @@ class ActionManager:
 
         for action_cls in actions:
             # 构建签名
-            signature = self._build_signature(action_cls)
+            signature = self._build_signature(action_cls)   # type: ignore
             schema = self.get_action_schema(signature)
             if schema:
                 schemas.append(schema)
@@ -242,14 +242,19 @@ class ActionManager:
         if not action_cls:
             raise ValueError(f"Action 类未找到: {signature}")
 
-        # 创建 ChatStream 实例
-        from src.core.models.stream import ChatStream
+        # 获取或创建 ChatStream（使用 StreamManager）
+        from src.core.managers.stream_manager import get_stream_manager
 
-        chat_stream = ChatStream(
-            stream_id=message.stream_id,
-            platform=message.platform,
-            message=message,
-        )
+        stream_manager = get_stream_manager()
+        chat_stream = await stream_manager.activate_stream(message.stream_id)
+
+        # 如果流不存在，创建新的流
+        if not chat_stream:
+            chat_stream = await stream_manager.get_or_create_stream(
+                platform=message.platform,
+                user_id=message.sender_id,
+                chat_type=message.chat_type,
+            )
 
         # 创建 Action 实例
         action_instance = action_cls(chat_stream=chat_stream, plugin=plugin)

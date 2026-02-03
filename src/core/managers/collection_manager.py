@@ -78,7 +78,7 @@ class CollectionManager:
     async def unpack_collection(
         self,
         signature: str,
-        recursive: bool = True,
+        recursive: bool = False,
     ) -> list[type[LLMUsable]]:
         """解包 Collection，获取所有包含的 LLMUsable 组件类。
 

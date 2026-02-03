@@ -1,75 +1,68 @@
 """事件管理器。
 
-本模块提供事件管理器，负责管理所有事件处理器的注册、订阅和发布。
-支持按权重排序执行和消息拦截功能。
+本模块提供事件管理器，作为 kernel/event 总线的上层封装。
+负责将 EventHandler 组件注册到 EventBus 并管理其生命周期。
+
+支持系统事件（EventType 枚举）和插件自定义事件（字符串）。
 """
 
 import asyncio
-from typing import Any, Dict, List, Optional, Tuple
-from collections import defaultdict
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.kernel.logger import get_logger
+from src.kernel.event import get_event_bus, EventDecision
 
 from src.core.components.base.event_handler import BaseEventHandler
 from src.core.components.types import EventType
 
 logger = get_logger("event_manager")
 
+
 class EventManager:
     """事件管理器。
 
-    负责管理所有事件处理器的注册、订阅和发布。
-    支持按权重排序执行和消息拦截功能。
+    作为 kernel/event 总线的上层封装，负责管理 EventHandler 组件的注册和订阅。
+    处理器按权重排序执行，支持消息拦截功能。
+
+    支持系统事件（EventType 枚举）和插件自定义事件（字符串）。
+    EventType 只是为常见系统事件提供便捷，插件可以自由定义和使用自己的事件名称。
 
     Attributes:
-        _subscription_map: 事件订阅映射表，事件类型 -> 处理器列表
+        _event_bus: 底层事件总线实例
         _handler_map: 处理器映射，处理器签名 -> 处理器实例
+        _handler_wrappers: 处理器包装函数映射（用于取消订阅）
         _lock: 用于线程安全操作的异步锁
 
     Examples:
         >>> manager = EventManager()
-        >>> manager.build_subscription_map()
-        >>> # 发布事件
-        >>> manager.publish_event(EventType.ON_MESSAGE_RECEIVED, {"message": "Hello"})
+        >>> await manager.build_subscription_map()
+        >>> # 发布系统事件
+        >>> await manager.publish_event(EventType.ON_MESSAGE_RECEIVED, {"message": "Hello"})
+        >>> # 发布自定义事件
+        >>> await manager.publish_event("my_plugin:custom_event", {"data": "value"})
     """
 
     def __init__(self) -> None:
         """初始化事件管理器。"""
-        self._subscription_map: Dict[EventType, List[Tuple[BaseEventHandler, str]]] = defaultdict(list)
+        self._event_bus = get_event_bus()
         self._handler_map: Dict[str, BaseEventHandler] = {}
+        self._handler_wrappers: Dict[str, List[Callable[[], None]]] = {}  # signature -> unsubscribe functions
         self._lock = asyncio.Lock()
 
         logger.info("事件管理器初始化完成")
 
-    def build_subscription_map(self) -> None:
+    async def build_subscription_map(self) -> None:
         """构建事件订阅映射表。
 
-        遍历所有已注册的事件处理器，根据它们的订阅信息构建映射表。
+        遍历所有已注册的事件处理器，根据它们的订阅信息注册到 EventBus。
         处理器按权重降序排序，权重高的优先执行。
 
         Examples:
-            >>> manager.build_subscription_map()
+            >>> await manager.build_subscription_map()
         """
-        try:
-            # 尝试获取当前事件循环
-            loop = asyncio.get_running_loop()
-            # 如果有运行的事件循环，创建异步任务
-            loop.create_task(self._build_subscription_map())
-        except RuntimeError:
-            # 没有运行的事件循环，直接同步构建
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                loop.run_until_complete(self._build_subscription_map())
-            finally:
-                # 清理事件循环
-                loop.close()
-
-    async def _build_subscription_map(self) -> None:
-        """内部方法：构建事件订阅映射表。"""
         async with self._lock:
             # 清空现有映射表
-            self._subscription_map.clear()
+            await self._clear_all_subscriptions()
 
             # 从全局注册表获取所有事件处理器组件
             from src.core.components.registry import get_global_registry
@@ -77,7 +70,7 @@ class EventManager:
             registry = get_global_registry()
 
             # 获取所有 EVENT_HANDLER 类型的组件
-            event_handler_classes = registry.get_by_type(ComponentType.EVENT_HANDLER)
+            event_handler_classes: Dict[str, type[BaseEventHandler]] = registry.get_by_type(ComponentType.EVENT_HANDLER)
 
             # 需要从 plugin manager 获取实例化的插件，然后实例化事件处理器
             from src.core.managers.plugin_manager import get_plugin_manager
@@ -108,11 +101,18 @@ class EventManager:
 
                     # 将处理器添加到每个订阅事件的映射表中
                     for event in subscribed_events:
-                        if isinstance(event, EventType):
-                            # 按权重降序排序（权重高的在前）
-                            self._subscription_map[event].append(
-                                (handler, signature)
-                            )
+                        # 支持 EventType 枚举和字符串事件名称
+                        event_name = str(event)
+                        # 创建包装函数适配 EventBus 协议
+                        unsubscribe = self._event_bus.subscribe(
+                            event_name,
+                            self._create_handler_wrapper(handler, signature),
+                            priority=handler.weight
+                        )
+                        # 保存取消订阅函数
+                        if signature not in self._handler_wrappers:
+                            self._handler_wrappers[signature] = []
+                        self._handler_wrappers[signature].append(unsubscribe)
 
                     logger.debug(f"已注册事件处理器: {signature}")
 
@@ -120,17 +120,59 @@ class EventManager:
                     logger.error(f"实例化事件处理器 {signature} 失败: {e}")
                     continue
 
-            # 对每个事件的处理器列表按权重排序
-            for event in self._subscription_map:
-                self._subscription_map[event].sort(
-                    key=lambda x: x[0].weight,
-                    reverse=True
-                )
-
             logger.info(
                 f"订阅映射表构建完成，共处理 {len(self._handler_map)} 个 "
-                f"事件处理器，覆盖 {len(self._subscription_map)} 种事件类型"
+                f"事件处理器"
             )
+
+    def _create_handler_wrapper(
+        self, handler: BaseEventHandler, signature: str
+    ) -> Callable[[str, Dict[str, Any]], Any]:
+        """创建处理器包装函数，将 BaseEventHandler 适配到 EventBus 协议。
+
+        Args:
+            handler: 事件处理器实例
+            signature: 处理器签名
+
+        Returns:
+            符合 EventBus 协议的包装函数
+        """
+        async def wrapper(event_name: str, params: Dict[str, Any]) -> Tuple[EventDecision, Dict[str, Any]]:
+            """包装函数，适配 EventBus 协议。
+
+            Args:
+                event_name: 事件名称（由 EventBus 传入，未使用）
+                params: 事件参数字典
+
+            Returns:
+                (EventDecision, params): 决策和参数字典
+            """
+            try:
+                logger.debug(f"执行事件处理器: {signature}")
+
+                # 执行处理器
+                result = await handler.execute(params)
+                success = result[0]
+                intercepted = result[1]
+
+                # 将结果转换为 EventDecision
+                if intercepted:
+                    # 拦截消息，停止后续处理器
+                    logger.info(f"事件被处理器 {signature} 拦截，停止执行后续处理器")
+                    return (EventDecision.STOP, params)
+                elif success:
+                    # 成功执行，继续后续处理器
+                    return (EventDecision.SUCCESS, params)
+                else:
+                    # 失败，跳过当前处理器的影响
+                    return (EventDecision.PASS, params)
+
+            except Exception as e:
+                logger.error(f"事件处理器 {signature} 执行失败: {e}")
+                # 异常情况，跳过当前处理器的影响
+                return (EventDecision.PASS, params)
+
+        return wrapper
 
     async def publish_event(
         self,
@@ -139,68 +181,43 @@ class EventManager:
     ) -> Dict[str, Any]:
         """发布事件给订阅者。
 
+        支持系统事件（EventType 枚举）和自定义事件（字符串）。
+
         Args:
-            event: 事件类型（EventType 枚举或字符串）
+            event: 事件类型（EventType 枚举或自定义字符串）
             kwargs: 事件参数字典
 
         Returns:
-            Dict[str, Any]: 发布结果，包含每个处理器的执行状态
+            Dict[str, Any]: 发布结果，包含最终决策和参数
 
         Examples:
+            >>> # 发布系统事件
             >>> result = await manager.publish_event(
             ...     EventType.ON_MESSAGE_RECEIVED,
             ...     {"message": "Hello", "sender": "user1"}
+            ... )
+            >>> # 发布自定义事件
+            >>> result = await manager.publish_event(
+            ...     "my_plugin:user_action",
+            ...     {"action": "click", "target": "button"}
             ... )
         """
         if kwargs is None:
             kwargs = {}
 
-        # 如果事件是字符串格式，转换为 EventType 枚举
-        if isinstance(event, str):
-            try:
-                event = EventType(event)
-            except ValueError:
-                logger.warning(f"未知的事件类型: {event}")
-                return {"error": f"Unknown event type: {event}"}
-
         logger.debug(f"发布事件: {event}")
 
-        # 获取该事件的所有订阅处理器
-        subscribed_handlers = self._subscription_map.get(event, [])
-        results = {}
+        # 通过 EventBus 发布事件
+        decision, final_params = await self._event_bus.publish(str(event), kwargs)
 
-        # 按权重顺序执行处理器
-        for handler, signature in subscribed_handlers:
-            try:
-                logger.debug(f"执行事件处理器: {signature}")
+        logger.debug(f"事件 {event} 发布完成，最终决策: {decision}")
 
-                # 执行处理器
-                success, intercepted, message = await handler.execute(kwargs)
+        return {
+            "decision": decision,
+            "params": final_params
+        }
 
-                # 记录结果
-                results[signature] = {
-                    "success": success,
-                    "intercepted": intercepted,
-                    "message": message
-                }
-
-                # 如果处理器拦截了消息，停止执行后续处理器
-                if intercepted:
-                    logger.info(f"事件被处理器 {signature} 拦截，停止执行后续处理器")
-                    break
-
-            except Exception as e:
-                logger.error(f"事件处理器 {signature} 执行失败: {e}")
-                results[signature] = {
-                    "success": False,
-                    "intercepted": False,
-                    "message": f"执行失败: {str(e)}"
-                }
-
-        logger.debug(f"事件 {event} 发布完成，共执行 {len(results)} 个处理器")
-        return results
-
-    def register_handler(self, signature: str, handler: BaseEventHandler) -> None:
+    async def register_handler(self, signature: str, handler: BaseEventHandler) -> None:
         """注册单个事件处理器。
 
         Args:
@@ -208,17 +225,29 @@ class EventManager:
             handler: 事件处理器实例
 
         Examples:
-            >>> manager.register_handler("my_plugin:event_handler:log", handler)
+            >>> await manager.register_handler("my_plugin:event_handler:log", handler)
         """
-        async def _register_handler() -> None:
-            async with self._lock:
-                self._handler_map[signature] = handler
-                logger.debug(f"已注册事件处理器: {signature}")
+        async with self._lock:
+            self._handler_map[signature] = handler
 
-                # 可以在这里重新构建订阅映射表
-                await self._rebuild_subscription_map()
+            # 获取处理器订阅的事件
+            subscribed_events = handler.get_subscribed_events()
 
-        asyncio.create_task(_register_handler())
+            # 将处理器注册到 EventBus
+            for event in subscribed_events:
+                # 支持 EventType 枚举和字符串事件名称
+                event_name = str(event)
+                unsubscribe = self._event_bus.subscribe(
+                    event_name,
+                    self._create_handler_wrapper(handler, signature),
+                    priority=handler.weight
+                )
+                # 保存取消订阅函数
+                if signature not in self._handler_wrappers:
+                    self._handler_wrappers[signature] = []
+                self._handler_wrappers[signature].append(unsubscribe)
+
+            logger.debug(f"已注册事件处理器: {signature}")
 
     def unregister_handler(self, signature: str) -> None:
         """注销单个事件处理器。
@@ -229,46 +258,49 @@ class EventManager:
         Examples:
             >>> manager.unregister_handler("my_plugin:event_handler:log")
         """
-        async def _unregister_handler() -> None:
+        async def _unregister() -> None:
             async with self._lock:
                 if signature in self._handler_map:
-                    handler = self._handler_map.pop(signature)
+                    # 取消所有订阅
+                    if signature in self._handler_wrappers:
+                        for unsubscribe in self._handler_wrappers[signature]:
+                            unsubscribe()
+                        del self._handler_wrappers[signature]
 
-                    # 从订阅映射表中移除
-                    subscribed_events = handler.get_subscribed_events()
-                    for event in subscribed_events:
-                        if isinstance(event, EventType):
-                            self._subscription_map[event] = [
-                                (h, s) for h, s in self._subscription_map[event]
-                                if s != signature
-                            ]
+                    # 从映射表移除
+                    del self._handler_map[signature]
 
                     logger.debug(f"已注销事件处理器: {signature}")
 
-                    # 重新构建订阅映射表以确保顺序正确
-                    await self._rebuild_subscription_map()
-
-        asyncio.create_task(_unregister_handler())
+        asyncio.create_task(_unregister())
 
     def get_handlers_for_event(self, event: EventType | str) -> List[Tuple[BaseEventHandler, str]]:
         """获取指定事件的所有处理器。
 
         Args:
-            event: 事件类型
+            event: 事件类型（EventType 枚举或字符串）
 
         Returns:
             List[Tuple[BaseEventHandler, str]]: 处理器列表，包含处理器实例和签名
 
         Examples:
             >>> handlers = manager.get_handlers_for_event(EventType.ON_MESSAGE_RECEIVED)
+            >>> custom_handlers = manager.get_handlers_for_event("my_plugin:custom_event")
         """
-        if isinstance(event, str):
-            try:
-                event = EventType(event)
-            except ValueError:
-                return []
+        # 将事件转换为字符串（支持 EventType 枚举和自定义字符串）
+        event_name = str(event)
 
-        return self._subscription_map.get(event, [])
+        # 从已注册的处理器中查找订阅了该事件的处理器
+        result = []
+        for signature, handler in self._handler_map.items():
+            subscribed_events = handler.get_subscribed_events()
+            # 检查是否订阅了该事件（支持 EventType 和字符串）
+            if any(str(e) == event_name for e in subscribed_events):
+                result.append((handler, signature))
+
+        # 按权重排序
+        result.sort(key=lambda x: x[0].weight, reverse=True)
+        return result
 
     def get_handler(self, signature: str) -> Optional[BaseEventHandler]:
         """获取指定签名的事件处理器。
@@ -295,30 +327,18 @@ class EventManager:
         """
         return self._handler_map.copy()
 
-    async def _rebuild_subscription_map(self) -> None:
-        """重新构建订阅映射表（内部使用）。"""
-        # 清空现有映射表
-        self._subscription_map.clear()
+    async def _clear_all_subscriptions(self) -> None:
+        """清除所有订阅（内部使用）。"""
+        # 取消所有订阅
+        for signature in list(self._handler_wrappers.keys()):
+            for unsubscribe in self._handler_wrappers[signature]:
+                unsubscribe()
 
-        # 重新填充映射表
-        for signature, handler in self._handler_map.items():
-            subscribed_events = handler.get_subscribed_events()
+        # 清空映射表
+        self._handler_map.clear()
+        self._handler_wrappers.clear()
 
-            for event in subscribed_events:
-                if isinstance(event, EventType):
-                    # 按权重降序排序
-                    self._subscription_map[event].append(
-                        (handler, signature)
-                    )
-
-        # 对每个事件的处理器列表按权重排序
-        for event in self._subscription_map:
-            self._subscription_map[event].sort(
-                key=lambda x: x[0].weight,
-                reverse=True
-            )
-
-        logger.debug("订阅映射表已重新构建")
+        logger.debug("已清除所有事件处理器订阅")
 
     def get_event_stats(self) -> Dict[str, int]:
         """获取事件统计信息。
@@ -333,6 +353,26 @@ class EventManager:
         """
         return {
             "handler_count": len(self._handler_map),
-            "event_type_count": len(self._subscription_map),
-            "total_subscriptions": sum(len(handlers) for handlers in self._subscription_map.values())
+            "event_type_count": self._event_bus.event_count,
+            "total_subscriptions": self._event_bus.handler_count,
         }
+
+
+# 全局单例
+_event_manager: Optional[EventManager] = None
+
+
+def get_event_manager() -> EventManager:
+    """获取全局事件管理器实例（懒加载）。
+
+    Returns:
+        EventManager: 全局事件管理器实例
+
+    Examples:
+        >>> from src.core.managers import get_event_manager
+        >>> manager = get_event_manager()
+    """
+    global _event_manager
+    if _event_manager is None:
+        _event_manager = EventManager()
+    return _event_manager

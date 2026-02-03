@@ -120,22 +120,6 @@ class ChatStreams(Base):
         comment="最后活跃时间"
     )
 
-    # 消息打断系统
-    interruption_count: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=0,
-        comment="打断次数统计"
-    )
-
-    # 上下文窗口大小
-    context_window_size: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        default=5000,
-        comment="保留的上下文消息数量"
-    )
-
     __table_args__ = (
         Index("idx_chatstreams_person_id", "person_id"),
         Index("idx_chatstreams_platform_group", "platform", "group_id"),
@@ -246,11 +230,6 @@ class Messages(Base):
         index=True,
         comment="消息时间戳（Unix timestamp）"
     )
-    sequence_number: Mapped[int] = mapped_column(
-        Integer,
-        nullable=False,
-        comment="消息在聊天流中的序号"
-    )
 
     # 消息内容
     message_type: Mapped[str] = mapped_column(
@@ -275,12 +254,6 @@ class Messages(Base):
         nullable=True,
         comment="回复的消息ID"
     )
-    is_mentioned: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-        comment="是否@了Bot"
-    )
 
     # 平台信息（冗余，便于查询）
     platform: Mapped[str | None] = mapped_column(
@@ -289,19 +262,9 @@ class Messages(Base):
         comment="平台标识（冗余，便于按平台查询）"
     )
 
-    # 过期管理
-    expires_at: Mapped[float | None] = mapped_column(
-        Float,
-        nullable=True,
-        index=True,
-        comment="消息过期时间（Unix timestamp），用于定期清理"
-    )
-
     __table_args__ = (
         Index("idx_messages_stream_time", "stream_id", "time"),
-        Index("idx_messages_stream_sequence", "stream_id", "sequence_number"),
         Index("idx_messages_person_id", "person_id"),
-        Index("idx_messages_expires_at", "expires_at"),
     )
 
 

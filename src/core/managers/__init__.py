@@ -10,8 +10,8 @@ from src.core.managers.chatter_manager import get_chatter_manager
 from src.core.managers.command_manager import get_command_manager
 from src.core.managers.service_manager import get_service_manager
 from src.core.managers.permission_manager import get_permission_manager
-
-from src.core.managers.message_retention_manager import get_message_retention_manager
+from src.core.managers.stream_manager import get_stream_manager
+from src.core.managers.event_manager import get_event_manager
 
 
 __all__ = [
@@ -22,5 +22,6 @@ __all__ = [
     "get_command_manager",
     "get_service_manager",
     "get_permission_manager",
-    "get_message_retention_manager",
+    "get_stream_manager",
+    "get_event_manager",
 ]

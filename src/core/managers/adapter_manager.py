@@ -68,7 +68,7 @@ class AdapterManager:
             return False
 
         # 获取插件实例（用于传递给适配器）
-        plugin_manager = get_plugin_manager()
+        plugin_manager = _get_plugin_manager()
         plugin_name = signature.split(":")[0]
         plugin_instance = plugin_manager.get_plugin(plugin_name)
 
@@ -172,82 +172,6 @@ class AdapterManager:
         # 重新启动适配器
         return await self.start_adapter(signature)
 
-    async def health_check_all(self) -> dict[str, bool]:
-        """批量健康检查。
-
-        对所有已启动的适配器执行健康检查，返回健康状态字典。
-
-        Returns:
-            dict[str, bool]: 适配器签名到健康状态的映射
-
-        Examples:
-            >>> health_status = await manager.health_check_all()
-            >>> {'my_plugin:adapter:qq': True, 'other_plugin:adapter:telegram': False}
-        """
-        health_results: dict[str, bool] = {}
-
-        if not self._active_adapters:
-            logger.info("没有活跃的适配器需要健康检查")
-            return health_results
-
-        # 并发执行所有适配器的健康检查
-        tasks = []
-        for signature, adapter_instance in self._active_adapters.items():
-            task = asyncio.create_task(
-                self._check_adapter_health(signature, adapter_instance)
-            )
-            tasks.append(task)
-
-        # 等待所有健康检查完成
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # 处理结果
-        for i, result in enumerate(results):
-            signature = list(self._active_adapters.keys())[i]
-            if isinstance(result, Exception):
-                logger.error(f"适配器 '{signature}' 健康检查失败: {result}")
-                health_results[signature] = False
-            else:
-                health_results[signature] = bool(result)
-
-        # 记录汇总信息
-        healthy_count = sum(1 for healthy in health_results.values() if healthy)
-        total_count = len(health_results)
-        logger.info(f"健康检查完成: {healthy_count}/{total_count} 个适配器健康")
-
-        return health_results
-
-    async def _check_adapter_health(self, signature: str, adapter_instance: "BaseAdapter") -> bool:
-        """检查单个适配器的健康状态。
-
-        Args:
-            signature: 适配器签名
-            adapter_instance: 适配器实例
-
-        Returns:
-            bool: 是否健康
-        """
-        try:
-            is_healthy = await adapter_instance.health_check()
-
-            if not is_healthy:
-                logger.warning(f"适配器 '{signature}' 健康检查失败，尝试自动重连")
-
-                # 尝试自动重连
-                try:
-                    await adapter_instance.reconnect()
-                    logger.info(f"适配器 '{signature}' 重连成功")
-                    return True
-                except Exception as e:
-                    logger.error(f"适配器 '{signature}' 重连失败: {e}")
-                    return False
-
-            return True
-
-        except Exception as e:
-            logger.error(f"检查适配器 '{signature}' 健康状态时出错: {e}")
-            return False
-
     def get_adapter(self, signature: str) -> "BaseAdapter | None":
         """获取适配器实例。
 
@@ -347,7 +271,7 @@ def reset_adapter_manager() -> None:
 
 
 # 避免循环导入的延迟导入
-def get_plugin_manager():
+def _get_plugin_manager():
     """延迟导入插件管理器以避免循环导入。"""
     from src.core.managers.plugin_manager import get_plugin_manager as _get_plugin_manager
     return _get_plugin_manager()

@@ -83,63 +83,6 @@ class ChatterManager:
         registry = get_global_registry()
         return registry.get(signature)
 
-    async def filter_llm_usables(
-        self,
-        signature: str,
-        unreads: list["Message"],
-    ) -> list[type[LLMUsable]]:
-        """过滤 LLMUsable 组件。
-
-        调用 Chatter 的 modify_llm_usables 方法过滤可用的 LLMUsable。
-
-        Args:
-            signature: Chatter 组件签名
-            unreads: 未读消息列表
-
-        Returns:
-            list[type[LLMUsable]]: 过滤后的 LLMUsable 组件列表
-
-        Examples:
-            >>> usables = await manager.filter_llm_usables(
-            ...     "my_plugin:chatter:my_chatter",
-            ...     unreads
-            ... )
-        """
-        chatter_cls = self.get_chatter_class(signature)
-        if not chatter_cls:
-            logger.warning(f"Chatter 类未找到: {signature}")
-            return []
-
-        # 解析签名获取 plugin_name
-        from src.core.components.types import parse_signature
-        from src.core.managers.plugin_manager import get_plugin_manager
-
-        sig_info = parse_signature(signature)
-        plugin_manager = get_plugin_manager()
-        plugin = plugin_manager.get_plugin(sig_info["plugin_name"])
-
-        if not plugin:
-            logger.warning(f"Plugin 未找到: {sig_info['plugin_name']}")
-            return []
-
-        # 创建临时 Chatter 实例
-        # 使用第一条消息的 stream_id（或默认值）
-        stream_id = unreads[0].stream_id if unreads else "default"
-        chatter_instance = chatter_cls(stream_id=stream_id, plugin=plugin)
-
-        # 获取所有 LLMUsable
-        all_usables = await chatter_instance.get_llm_usables()
-
-        # 调用 Chatter 的过滤方法（只传递 llm_usables 参数）
-        filtered_usables = await chatter_instance.modify_llm_usables(all_usables)
-
-        logger.debug(
-            f"Chatter '{signature}' 过滤 LLMUsable: "
-            f"{len(all_usables)} -> {len(filtered_usables)}"
-        )
-
-        return filtered_usables
-
     def get_active_chatters(self) -> dict[str, "BaseChatter"]:
         """获取当前活跃的 Chatter 实例。
 
@@ -182,6 +125,19 @@ class ChatterManager:
             return True
         return False
 
+    def get_chatter_by_stream(self, stream_id: str) -> "BaseChatter | None":
+        """获取指定聊天流的活跃 Chatter 实例。
+
+        Args:
+            stream_id: 聊天流 ID
+
+        Returns:
+            BaseChatter | None: Chatter 实例，如果不存在则返回 None
+
+        Examples:
+            >>> chatter = manager.get_chatter_by_stream("stream_1")
+        """
+        return self._active_chatters.get(stream_id)
 
 # 全局 Chatter 管理器实例
 _global_chatter_manager: ChatterManager | None = None

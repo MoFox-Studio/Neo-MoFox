@@ -4,20 +4,20 @@
 支持基于权限组的层级权限和基于命令的细粒度权限覆盖。
 """
 
-import hashlib
 import time
 from enum import Enum
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from src.kernel.db import CRUDBase
 from src.kernel.logger import get_logger
 
+from src.core.utils.user_query_helper import get_user_query_helper
 from src.core.components.types import PermissionLevel
 from src.core.models.sql_alchemy import PermissionGroups, CommandPermissions
 
 if TYPE_CHECKING:
     from src.core.components.base.command import BaseCommand
+    from src.core.config import CoreConfig
 
 
 logger = get_logger("permission_manager")
@@ -50,13 +50,14 @@ class PermissionManager:
 
     Examples:
         >>> manager = get_permission_manager()
+        >>> person_id = manager.generate_person_id("qq", "123456")
         >>> has_perm, reason = await manager.check_command_permission(
-        ...     person_id="abc123",
+        ...     person_id=person_id,
         ...     command_class=MyCommand,
         ...     command_signature="my_plugin:command:test"
         ... )
         >>> await manager.set_user_permission_group(
-        ...     person_id="abc123",
+        ...     person_id=person_id,
         ...     level=PermissionLevel.OPERATOR
         ... )
     """
@@ -69,7 +70,7 @@ class PermissionManager:
 
         logger.info("权限管理器初始化完成")
 
-    def _load_config(self) -> Any:
+    def _load_config(self) -> CoreConfig:
         """延迟加载核心配置。
 
         Returns:
@@ -81,55 +82,17 @@ class PermissionManager:
             self._config = get_core_config()
         return self._config
 
-    # ========== User ID 生成 ==========
-
-    @staticmethod
-    @lru_cache(maxsize=10000)
-    def _hash_person_id_cached(person_id: str) -> str:
-        """缓存的 person_id 哈希计算（内部使用）。
-
-        Args:
-            person_id: 原始 person_id
-
-        Returns:
-            str: SHA-256 哈希值
-        """
-        return hashlib.sha256(person_id.encode()).hexdigest()
-
-    @staticmethod
-    def generate_person_id(platform: str, user_id: str) -> str:
-        """生成用户 person_id（SHA-256哈希）。
+    def generate_person_id(self, platform: str, user_id: str) -> str:
+        """生成哈希后的 person_id
 
         Args:
             platform: 平台标识
-            user_id: 平台用户ID
+            user_id: 平台内部用户ID
 
         Returns:
-            str: 哈希后的 person_id
-
-        Examples:
-            >>> PermissionManager.generate_person_id("qq", "123456")
-            "a1b2c3d4..."
+            哈希后的 person_id
         """
-        raw_person_id = f"{platform}:{user_id}"
-        return PermissionManager._hash_person_id_cached(raw_person_id)
-
-    @staticmethod
-    def generate_raw_person_id(platform: str, user_id: str) -> str:
-        """生成原始 person_id（不哈希，用于调试）。
-
-        Args:
-            platform: 平台标识
-            user_id: 平台用户ID
-
-        Returns:
-            str: 原始 person_id，格式：platform:user_id
-
-        Examples:
-            >>> PermissionManager.generate_raw_person_id("qq", "123456")
-            "qq:123456"
-        """
-        return f"{platform}:{user_id}"
+        return get_user_query_helper().generate_person_id(platform, user_id)
 
     # ========== 用户权限组管理 ==========
 
@@ -137,13 +100,14 @@ class PermissionManager:
         """获取用户权限级别。
 
         Args:
-            person_id: 用户 person_id
+            person_id: 哈希后的用户 person_id
 
         Returns:
             PermissionLevel: 用户权限级别
 
         Examples:
-            >>> level = await manager.get_user_permission_level("abc123")
+            >>> person_id = manager.generate_person_id("qq", "123456")
+            >>> level = await manager.get_user_permission_level(person_id)
             >>> level
             PermissionLevel.USER
         """
@@ -162,7 +126,6 @@ class PermissionManager:
 
         # 2. 从数据库查询权限组
         group_record = await self._group_crud.get_by(person_id=person_id)
-
         if group_record is None:
             # 用户不存在，返回默认级别
             default_level_str = config.permissions.default_permission_level
@@ -198,19 +161,20 @@ class PermissionManager:
         """设置用户权限组。
 
         Args:
-            person_id: 用户 person_id
+            person_id: 哈希后的用户 person_id（使用 generate_person_id 生成）
             level: 目标权限级别
-            granted_by: 授权人 person_id
+            granted_by: 授权人的哈希 person_id（可选）
             reason: 变更原因
 
         Returns:
             bool: 是否设置成功
 
         Examples:
+            >>> person_id = manager.generate_person_id("qq", "123456")
             >>> success = await manager.set_user_permission_group(
-            ...     person_id="abc123",
+            ...     person_id=person_id,
             ...     level=PermissionLevel.OPERATOR,
-            ...     granted_by="owner_id",
+            ...     granted_by=manager.generate_person_id("qq", "owner_id"),
             ...     reason="信任的管理员"
             ... )
         """
@@ -251,7 +215,7 @@ class PermissionManager:
         """移除用户权限组（恢复为默认）。
 
         Args:
-            person_id: 用户 person_id
+            person_id: 哈希后的用户 person_id
 
         Returns:
             bool: 是否移除成功
@@ -282,7 +246,7 @@ class PermissionManager:
         4. 比较权限级别
 
         Args:
-            person_id: 用户 person_id
+            person_id: 哈希后的用户 person_id
             command_class: 命令类
             command_signature: 命令签名（可选，用于覆盖查询）
 
@@ -290,8 +254,9 @@ class PermissionManager:
             tuple[bool, str]: (是否有权限, 原因说明)
 
         Examples:
+            >>> person_id = manager.generate_person_id("qq", "123456")
             >>> has_perm, reason = await manager.check_command_permission(
-            ...     person_id="abc123",
+            ...     person_id=person_id,
             ...     command_class=MyCommand,
             ...     command_signature="my_plugin:command:test"
             ... )
@@ -353,10 +318,10 @@ class PermissionManager:
         """设置用户对特定命令的权限覆盖。
 
         Args:
-            person_id: 用户 person_id
+            person_id: 哈希后的用户 person_id（使用 generate_person_id 生成）
             command_signature: 命令签名
             granted: 是否授权（True=允许，False=禁止）
-            granted_by: 授权人 person_id
+            granted_by: 授权人的哈希 person_id（可选）
             reason: 设置原因
 
         Returns:
@@ -364,8 +329,9 @@ class PermissionManager:
 
         Examples:
             >>> # 允许 guest 执行 operator 级别的命令
+            >>> guest_id = manager.generate_person_id("qq", "guest_id")
             >>> await manager.grant_command_permission(
-            ...     person_id="guest_id",
+            ...     person_id=guest_id,
             ...     command_signature="admin:command:restart",
             ...     granted=True,
             ...     reason="特殊授权"
@@ -419,7 +385,7 @@ class PermissionManager:
         """移除命令权限覆盖。
 
         Args:
-            person_id: 用户 person_id
+            person_id: 哈希后的用户 person_id（使用 generate_person_id 生成）
             command_signature: 命令签名
 
         Returns:
@@ -440,13 +406,14 @@ class PermissionManager:
         """获取用户的所有命令权限覆盖。
 
         Args:
-            person_id: 用户 person_id
+            person_id: 哈希后的用户 person_id（使用 generate_person_id 生成）
 
         Returns:
             list[dict]: 命令权限覆盖列表
 
         Examples:
-            >>> overrides = await manager.get_user_command_overrides("abc123")
+            >>> person_id = manager.generate_person_id("qq", "123456")
+            >>> overrides = await manager.get_user_command_overrides(person_id)
             >>> [
             ...     {
             ...         "command_signature": "admin:command:restart",
@@ -480,7 +447,8 @@ def get_permission_manager() -> PermissionManager:
 
     Examples:
         >>> manager = get_permission_manager()
-        >>> level = await manager.get_user_permission_level("abc123")
+        >>> person_id = manager.generate_person_id("qq", "123456")
+        >>> level = await manager.get_user_permission_level(person_id)
     """
     global _global_permission_manager
     if _global_permission_manager is None:

@@ -15,6 +15,23 @@ class CoreConfig(ConfigBase):
     定义 Core 层的所有配置节。Core 层包含对话管理、用户管理、消息处理等业务逻辑。
     """
 
+    @config_section("chat")
+    class ChatSection(SectionBase):
+        """聊天配置节
+
+        定义聊天相关的配置参数。
+        """
+
+        default_chat_mode: str = Field(
+            default="normal",
+            description="默认聊天模式：focus/normal/proactive/priority",
+        )
+        max_context_size: int = Field(
+            default=100,
+            description="每个聊天流的最大上下文消息数",
+        )
+    chat: ChatSection = Field(default_factory=ChatSection)
+    
     @config_section("database")
     class DatabaseSection(SectionBase):
         """数据库配置节
@@ -39,9 +56,10 @@ class CoreConfig(ConfigBase):
     class PermissionSection(SectionBase):
         """权限配置节
 
-        定义权限系统相关配置，包括所有者列表和默认权限级别。
+        定义权限系统相关配置，包括所有者列表、默认权限级别和权限继承规则。
         """
 
+        # ========== 基础权限配置 ==========
         owner_list: list[str] = Field(
             default_factory=list,
             description="Bot所有者列表，格式：['platform:user_id', ...]",
@@ -50,9 +68,63 @@ class CoreConfig(ConfigBase):
             default="user",
             description="新用户的默认权限级别：owner/operator/user/guest",
         )
+
+        # ========== 权限提升规则 ==========
         allow_operator_promotion: bool = Field(
             default=False,
             description="是否允许operator提升他人权限（仅owner默认可提升）",
+        )
+        allow_operator_demotion: bool = Field(
+            default=False,
+            description="是否允许operator降低他人权限（仅owner默认可降低）",
+        )
+        max_operator_promotion_level: str = Field(
+            default="operator",
+            description="operator可提升的最高权限级别：operator/user（不能提升为owner）",
+        )
+
+        # ========== 权限覆盖配置 ==========
+        allow_command_override: bool = Field(
+            default=True,
+            description="是否允许使用命令级权限覆盖（允许特定用户执行特定命令）",
+        )
+        override_requires_owner_approval: bool = Field(
+            default=False,
+            description="命令权限覆盖是否需要owner批准（operator设置的覆盖是否生效）",
+        )
+
+        # ========== 权限缓存配置 ==========
+        enable_permission_cache: bool = Field(
+            default=True,
+            description="是否启用权限检查缓存（提升性能）",
+        )
+        permission_cache_ttl: int = Field(
+            default=300,
+            description="权限缓存过期时间（秒），默认5分钟",
+        )
+
+        # ========== 权限检查行为 ==========
+        strict_mode: bool = Field(
+            default=True,
+            description="严格模式：权限不足时拒绝执行（非严格模式可能仅记录警告）",
+        )
+        log_permission_denied: bool = Field(
+            default=True,
+            description="是否记录权限拒绝日志",
+        )
+        log_permission_granted: bool = Field(
+            default=False,
+            description="是否记录权限允许日志（调试用）",
+        )
+
+        # ========== 群组权限配置 ==========
+        enable_group_permissions: bool = Field(
+            default=False,
+            description="是否启用群组级权限（未来扩展）",
+        )
+        group_admin_permission_level: str = Field(
+            default="operator",
+            description="群组管理员的默认权限级别",
         )
 
     permissions: PermissionSection = Field(default_factory=PermissionSection)

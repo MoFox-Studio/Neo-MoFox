@@ -4,7 +4,9 @@
 """
 
 import time
+import hashlib
 from typing import TYPE_CHECKING
+from functools import lru_cache
 
 from src.kernel.db import CRUDBase, QueryBuilder
 from src.kernel.logger import get_logger
@@ -30,6 +32,7 @@ class UserQueryHelper:
         self._ChatStreams = ChatStreams
         self._Messages = Messages
 
+    @lru_cache(maxsize=10000)
     def generate_person_id(self, platform: str, user_id: str) -> str:
         """生成 person_id
 
@@ -40,7 +43,7 @@ class UserQueryHelper:
         Returns:
             全局唯一的 person_id
         """
-        return f"{platform}:{user_id}"
+        return hashlib.sha256(f"{platform}_{user_id}".encode()).hexdigest()
 
     async def get_or_create_person(
         self,

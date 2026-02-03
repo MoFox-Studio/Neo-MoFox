@@ -5,7 +5,7 @@
 """
 
 from abc import ABC
-from typing import TYPE_CHECKING, type
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.core.components.base.config import BaseConfig

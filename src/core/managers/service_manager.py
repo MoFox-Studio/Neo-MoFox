@@ -5,7 +5,7 @@ Service 是"暴露的功能"，供其他插件或组件调用。
 管理器提供动态实例创建和方法调用接口，支持同步和异步调用。
 """
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 

@@ -41,8 +41,6 @@ class StreamContext:
     history_messages: list["Message"] = field(default_factory=list)
     is_active: bool = True
     is_chatter_processing: bool = False
-    interruption_count: int = 0
-    last_interruption_time: float = 0.0
 
     # 当前消息
     current_message: "Message | None" = None
