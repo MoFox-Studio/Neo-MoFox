@@ -92,13 +92,13 @@ class CollectionManager:
 
         规则：
         - 若组件未被任何 collection 门控，则可用。
-        - 若组件被若干 collections 门控，则当且仅当这些 collections 全部在该 stream 中已解包时可用。
+        - 若组件被若干 collections 门控，只要其中【任意一个】collection 在该 stream 中已解包，该组件即为可用。
         """
         gates = self._get_gate_set(component_signature)
         if not gates:
             return True
         unpacked = self._get_unpacked_collections(stream_id)
-        return gates.issubset(unpacked)
+        return not gates.isdisjoint(unpacked)
 
     def repack(self, stream_id: str) -> None:
         """在一轮对话结束后，恢复该聊天流的“初始门控状态”。

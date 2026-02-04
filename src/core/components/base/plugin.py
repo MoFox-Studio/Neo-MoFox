@@ -52,11 +52,11 @@ class BasePlugin(ABC):
     # 依赖的其他组件
     dependent_components: list[str] = []
 
-    def __init__(self, config: "BaseConfig") -> None:
+    def __init__(self, config: "BaseConfig | None" = None) -> None:
         """初始化插件。
 
         Args:
-            config: 插件配置实例
+            config: 插件配置实例，可选
         """
         self.config = config
 
