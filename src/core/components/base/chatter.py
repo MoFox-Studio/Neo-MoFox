@@ -12,6 +12,9 @@ from src.core.components.types import ChatType
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
+    from src.core.components.base.action import BaseAction
+    from src.core.components.base.tool import BaseTool
+    from src.core.components.base.collection import BaseCollection
     from src.core.models.message import Message
     from src.kernel.llm.payload.tooling import LLMUsable
 
@@ -206,8 +209,8 @@ class BaseChatter(ABC):
         return usables
 
     async def modify_llm_usables(
-        self, llm_usables: list[type["LLMUsable"]]
-    ) -> list[type["LLMUsable"]]:
+        self, llm_usables: list[type["BaseTool | BaseAction | BaseCollection"]]
+    ) -> list[type["BaseTool | BaseAction | BaseCollection"]]:
         """修改 LLMUsable 组件列表。
 
         子类可以重写此方法来过滤、排序或添加组件。
@@ -216,7 +219,7 @@ class BaseChatter(ABC):
             llm_usables: 原始 LLMUsable 组件列表
 
         Returns:
-            list[type[LLMUsable]]: 修改后的组件列表
+            list[type["BaseTool" | "BaseAction" | "BaseCollection"]]: 修改后的组件列表
 
         Examples:
             >>> async def modify_llm_usables(self, llm_usables):
@@ -225,53 +228,52 @@ class BaseChatter(ABC):
         """
         return llm_usables
 
-    async def pre_exec_llm_usables(
-        self, llm_usables: list[type["LLMUsable"]], allow_primary_action: bool = True
-    ) -> dict[str, Any]:
-        """预执行 LLMUsable 组件（sub_actor 阶段）。
-
-        在主要 LLM 调用之前，执行一些预处理的 LLM 调用。
-        例如：激活判定、参数验证等。
-
-        Args:
-            llm_usables: LLMUsable 组件列表
-            allow_primary_action: 是否允许主要动作
-
-        Returns:
-            dict[str, Any]: 预执行结果
-
-        Examples:
-            >>> async def pre_exec_llm_usables(self, llm_usables, allow_primary_action=True):
-            ...     results = {}
-            ...     for usable in llm_usables:
-            ...         # 执行激活判定
-            ...         if hasattr(usable, 'go_activate'):
-            ...             instance = usable(self.plugin)
-            ...             activated = await instance.go_activate()
-            ...             results[usable.__name__] = activated
-            ...     return results
-        """
-        return {}
-
-    async def exec_llm_usables(
-        self, llm_usables: list[type["LLMUsable"]]
-    ) -> dict[str, Any]:
-        """执行 LLMUsable 组件（actor 阶段）。
-
-        执行主要的 LLM 调用和工具调用。
+    async def exec_llm_usable(
+        self,
+        usable_cls: type["BaseTool | BaseAction | BaseCollection"],
+        message: "Message",
+        **kwargs: Any,
+    ) -> tuple[bool, Any]:
+        """执行指定的 LLMUsable 组件。
 
         Args:
-            llm_usables: LLMUsable 组件列表
+            usable_cls: LLMUsable 组件类
+            message: 触发的消息
+            **kwargs: 传递给组件的参数
 
         Returns:
-            dict[str, Any]: 执行结果
+            tuple[bool, Any]: (是否成功, 返回结果)
 
         Examples:
-            >>> async def exec_llm_usables(self, llm_usables):
-            ...     # 生成 schemas
-            ...     schemas = [u.to_schema() for u in llm_usables]
-            ...     # 调用 LLM
-            ...     response = await self._call_llm_with_tools(schemas)
-            ...     return {"response": response}
+            >>> success, result = await self.exec_llm_usable(
+            ...     MyTool,
+            ...     message,
+            ...     param1="value1"
+            ... )
         """
-        return {}
+        from src.core.components.base.action import BaseAction
+        from src.core.components.base.tool import BaseTool
+        from src.core.components.base.collection import BaseCollection
+        from src.core.managers.collection_manager import get_collection_manager
+        from src.core.managers.tool_manager.tool_use import get_tool_use
+        from src.core.managers.action_manager import get_action_manager
+
+        sig = usable_cls.get_signature()
+        if not sig:
+            raise ValueError("LLMUsable 组件未注入插件名称，无法执行")
+
+        if issubclass(usable_cls, BaseChatter):
+            raise ValueError("无法直接执行 Chatter 组件")
+
+        if issubclass(usable_cls, BaseTool):
+            manager = get_tool_use()
+            return await manager.execute_tool(sig, self.plugin, message, **kwargs)
+        elif issubclass(usable_cls, BaseAction):
+            manager = get_action_manager()
+            return await manager.execute_action(sig, self.plugin, message, **kwargs)
+        elif issubclass(usable_cls, BaseCollection):
+            manager = get_collection_manager()
+            await manager.unpack_collection(sig, self.stream_id, plugin=self.plugin)
+            return True, "Collection 已解包"
+        else:
+            raise ValueError("未知的 LLMUsable 组件类型，无法执行")
