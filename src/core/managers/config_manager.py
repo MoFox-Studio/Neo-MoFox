@@ -177,3 +177,39 @@ class ConfigManager:
             >>> plugins = manager.get_loaded_plugins()
         """
         return list(self._configs.keys())
+    
+    def initialize_all_configs(self) -> None:
+        """初始化所有包含Config组件的插件配置。
+        遍历已注册的插件，加载其配置组件。
+
+        Examples:
+            >>> manager = ConfigManager()
+            >>> manager.initialize_all_configs()
+        """
+        from src.core.components.registry import get_global_registry
+        from src.core.components.types import ComponentType, parse_signature
+
+        registry = get_global_registry()
+        # 获取所有已注册的配置组件类
+        config_classes = registry.get_by_type(ComponentType.CONFIG)
+
+        if not config_classes:
+            logger.debug("没有找到注册的配置组件")
+            return
+
+        for signature, config_cls in config_classes.items():
+            try:
+                # 解析签名获取插件名
+                sig_info = parse_signature(signature)
+                plugin_name = sig_info["plugin_name"]
+
+                # 显式转换为 BaseConfig 类型以满足类型检查
+                if issubclass(config_cls, BaseConfig):  # type: ignore
+                    self.load_config(plugin_name, config_cls)  # type: ignore
+                else:
+                    logger.warning(f"组件 {signature} 不是 BaseConfig 的子类")
+
+            except Exception as e:
+                logger.error(f"初始化配置失败: {signature} - {e}")
+
+

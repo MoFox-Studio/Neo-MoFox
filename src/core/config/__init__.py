@@ -29,6 +29,11 @@ from .core_config import (
     get_core_config,
     init_core_config,
 )
+from .mcp_config import (
+    MCPConfig,
+    get_mcp_config,
+    init_mcp_config,
+)
 from .model_config import (
     ModelConfig,
     get_model_config,
@@ -44,6 +49,10 @@ __all__ = [
     "CoreConfig",
     "get_core_config",
     "init_core_config",
+    # MCP 配置
+    "MCPConfig",
+    "get_mcp_config",
+    "init_mcp_config",
     # Model 配置
     "ModelConfig",
     "get_model_config",

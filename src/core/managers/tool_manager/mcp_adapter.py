@@ -101,15 +101,14 @@ class MCPToolAdapter:
             )
 
             # 调用 MCP 客户端管理器执行工具
-            # TODO: 实现 MCP 客户端管理器
-            # result = await mcp_client_manager.call_tool(
-            #     server_name=self.server_name,
-            #     tool_name=self.mcp_tool.name,
-            #     arguments=arguments
-            # )
-
-            # 临时返回空结果
-            result = None
+            from src.core.managers.tool_manager import get_mcp_manager
+            
+            manager = get_mcp_manager()
+            result = await manager.call_tool(
+                server_name=self.server_name,
+                tool_name=self.mcp_tool.name,
+                arguments=arguments
+            )
 
             if result:
                 return self._format_result(result)
@@ -198,9 +197,20 @@ async def load_mcp_tools(server_name: str) -> list[MCPToolAdapter]:
     logger.info(f"开始加载 MCP 工具: {server_name}")
 
     try:
-        # TODO: 实现 MCP 客户端管理器
-        # tools = await mcp_client_manager.get_tools(server_name)
-        tools = []
+        # 获取 MCP 管理器并查找对应会话
+        from src.core.managers.tool_manager import get_mcp_manager
+
+        manager = get_mcp_manager()
+        # 注意：这里直接访问了 manager 的受保护成员 _sessions 以获取底层会话
+        session = manager._sessions.get(server_name)
+
+        if not session:
+            logger.warning(f"MCP 服务器未连接: {server_name}")
+            return []
+
+        # 获取工具列表
+        result = await session.list_tools()
+        tools = result.tools
 
         adapters = []
         for mcp_tool in tools:
