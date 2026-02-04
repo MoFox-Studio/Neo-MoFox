@@ -22,6 +22,7 @@ class BaseCollection(ABC, LLMUsable):
     当 LLM 调用 Collection 时，会解包其内部组件。
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         collection_name: 集合名称
         collection_description: 集合描述
         associated_platforms: 关联的平台列表
@@ -42,6 +43,9 @@ class BaseCollection(ABC, LLMUsable):
         ...             "my_plugin:command:time_command",
         ...         ]
     """
+
+    # 所属插件名称（由 PluginManager 在注册时注入）
+    plugin_name: str = "unknown_plugin"
 
     # 集合元数据
     collection_name: str = ""
@@ -64,6 +68,19 @@ class BaseCollection(ABC, LLMUsable):
         """
         self.plugin = plugin
 
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
+
+        Returns:
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
+
+        Examples:
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
+        """
+        return f"{cls.plugin_name}:collection:{cls.collection_name}" if cls.plugin_name != "unknown_plugin" else None
+    
     @abstractmethod
     async def get_contents(self) -> list[str]:
         """获取 Collection 内部包含的所有 LLMUsable 组件。

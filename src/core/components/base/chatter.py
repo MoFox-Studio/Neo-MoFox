@@ -70,6 +70,7 @@ class BaseChatter(ABC):
     使用生成器模式，通过 yield 返回 Wait/Success/Failure 结果。
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         chatter_name: 聊天器名称
         chatter_description: 聊天器描述
         associated_platforms: 关联的平台列表
@@ -86,6 +87,9 @@ class BaseChatter(ABC):
         ...         # 执行逻辑...
         ...         yield Success("完成")
     """
+
+    # 所属插件名称（由 PluginManager 在注册时注入）
+    plugin_name: str = "unknown_plugin"
 
     # 聊天器元数据
     chatter_name: str = ""
@@ -111,8 +115,20 @@ class BaseChatter(ABC):
         """
         self.stream_id = stream_id
         self.plugin = plugin
-        self._context: dict[str, Any] = {}
 
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
+
+        Returns:
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
+
+        Examples:
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
+        """
+        return f"{cls.plugin_name}:chatter:{cls.chatter_name}" if cls.plugin_name != "unknown_plugin" else None
+    
     @abstractmethod
     async def execute(
         self, unreads: list["Message"]
@@ -247,24 +263,3 @@ class BaseChatter(ABC):
             ...     return {"response": response}
         """
         return {}
-
-    def get_context(self) -> dict[str, Any]:
-        """获取 Chatter 的上下文数据。
-
-        Returns:
-            dict[str, Any]: 上下文字典
-        """
-        return self._context.copy()
-
-    def set_context(self, key: str, value: Any) -> None:
-        """设置上下文数据。
-
-        Args:
-            key: 键
-            value: 值
-        """
-        self._context[key] = value
-
-    def clear_context(self) -> None:
-        """清除所有上下文数据。"""
-        self._context.clear()

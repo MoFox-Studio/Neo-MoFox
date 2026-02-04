@@ -20,6 +20,7 @@ class BaseEventHandler(ABC):
     支持权重排序和消息拦截控制。
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         handler_name: 处理器名称
         handler_description: 处理器描述
         weight: 处理器权重（影响执行顺序，数值越大优先级越高）
@@ -37,6 +38,9 @@ class BaseEventHandler(ABC):
         ...         # 处理事件
         ...         return True, False, "处理完成"
     """
+
+    # 所属插件名称（由 PluginManager 在注册时注入）
+    plugin_name: str = "unknown_plugin"
 
     # 处理器元数据
     handler_name: str = ""
@@ -63,6 +67,19 @@ class BaseEventHandler(ABC):
         for event in self.init_subscribe:
             self.subscribe(event)
 
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
+
+        Returns:
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
+
+        Examples:
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
+        """
+        return f"{cls.plugin_name}:event_handler:{cls.handler_name}" if cls.plugin_name != "unknown_plugin" else None
+    
     @abstractmethod
     async def execute(
         self, kwargs: dict[str, Any] | None

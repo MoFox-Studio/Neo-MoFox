@@ -25,6 +25,7 @@ class BaseAction(ABC, LLMUsable):
     动作是主动的"响应"。
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         action_name: 动作名称
         action_description: 动作的功能描述
         primary_action: 是否为主动作
@@ -43,6 +44,9 @@ class BaseAction(ABC, LLMUsable):
         ...         # 实现逻辑
         ...         return True, "发送成功"
     """
+
+    # 所属插件名称（由 PluginManager 在注册时注入）
+    plugin_name: str = "unknown_plugin"
 
     # 动作元数据
     action_name: str = ""
@@ -68,7 +72,20 @@ class BaseAction(ABC, LLMUsable):
         self.chat_stream = chat_stream
         self.plugin = plugin
         self._last_message: str | None = None
+    
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
 
+        Returns:
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
+
+        Examples:
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
+        """
+        return f"{cls.plugin_name}:action:{cls.action_name}" if cls.plugin_name != "unknown_plugin" else None
+    
     @abstractmethod
     async def execute(
         self, *args: Any, **kwargs: Any

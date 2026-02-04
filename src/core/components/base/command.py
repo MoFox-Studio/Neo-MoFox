@@ -40,6 +40,7 @@ class BaseCommand(ABC):
     通过 @cmd_route 装饰器注册命令路由。
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         command_name: 命令名称
         command_description: 命令描述
         permission_level: 权限级别（默认 USER）
@@ -60,6 +61,9 @@ class BaseCommand(ABC):
         ...     async def handle_get(self) -> tuple[bool, str]:
         ...         return True, "获取值"
     """
+
+    # 所属插件名称（由 PluginManager 在注册时注入）
+    plugin_name: str = "unknown_plugin"
 
     # 命令元数据
     command_name: str = ""
@@ -84,6 +88,19 @@ class BaseCommand(ABC):
         self.plugin = plugin
         self._root = CommandNode(name="root")
         self._build_command_tree()
+
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
+
+        Returns:
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
+
+        Examples:
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
+        """
+        return f"{cls.plugin_name}:command:{cls.command_name}" if cls.plugin_name != "unknown_plugin" else None
 
     @classmethod
     def match(cls, parts: list[str]) -> int:

@@ -23,6 +23,7 @@ class BaseRouter(ABC):
     支持 CORS 配置和自定义路由路径。
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         router_name: 路由名称
         router_description: 路由描述
         custom_route_path: 自定义路由路径（如 "/api/v1/myrouter"）
@@ -39,6 +40,9 @@ class BaseRouter(ABC):
         ...         async def hello():
         ...             return {"message": "Hello"}
     """
+
+    # 所属插件名称（由 PluginManager 在注册时注入）
+    plugin_name: str = "unknown_plugin"
 
     # 路由元数据
     router_name: str = ""
@@ -80,6 +84,19 @@ class BaseRouter(ABC):
         # 注册端点
         self.register_endpoints()
 
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
+
+        Returns:
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
+
+        Examples:
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
+        """
+        return f"{cls.plugin_name}:router:{cls.router_name}" if cls.plugin_name != "unknown_plugin" else None
+    
     @abstractmethod
     def register_endpoints(self) -> None:
         """注册路由端点。

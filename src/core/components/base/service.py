@@ -29,6 +29,7 @@ class BaseService:
     >>> await service.store("key", "value")
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         service_name: 服务名称
         service_description: 服务描述
         version: 服务版本
@@ -51,6 +52,9 @@ class BaseService:
         ...         return None
     """
 
+    # 所属插件名称（由 PluginManager 在注册时注入）
+    plugin_name: str = "unknown_plugin"
+
     # 服务元数据
     service_name: str = ""
     service_description: str = ""
@@ -66,23 +70,16 @@ class BaseService:
             plugin: 所属插件实例
         """
         self.plugin = plugin
-
-    def get_info(self) -> dict[str, Any]:
-        """获取服务信息。
+    
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
 
         Returns:
-            dict[str, Any]: 服务信息字典
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
 
         Examples:
-            >>> info = service.get_info()
-            >>> {
-            ...     "name": "my_service",
-            ...     "description": "我的服务",
-            ...     "version": "1.0.0"
-            ... }
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
         """
-        return {
-            "name": self.service_name,
-            "description": self.service_description,
-            "version": self.version,
-        }
+        return f"{cls.plugin_name}:service:{cls.service_name}" if cls.plugin_name != "unknown_plugin" else None

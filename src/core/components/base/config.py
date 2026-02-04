@@ -22,6 +22,7 @@ class BaseConfig(ABC, ConfigBase):
     每个插件都应通过继承此类并定义配置节来定义其配置。
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         config_name: 配置文件名称（不含 .toml 扩展名）
         config_description: 配置的人类可读描述
 
@@ -39,6 +40,9 @@ class BaseConfig(ABC, ConfigBase):
         ...
         ...     inner: InnerSection = Field(default_factory=InnerSection)
     """
+
+    # 所属插件名称（如被注入，可用于默认路径等场景）
+    plugin_name: str = "unknown_plugin"
 
     # 这些属性应由子类覆盖
     config_name: str = "config"
@@ -58,19 +62,21 @@ class BaseConfig(ABC, ConfigBase):
             >>> path = MyPluginConfig.get_default_path()
             >>> Path("config/plugins/my_plugin/config.toml")
         """
-        # 尝试从模块获取插件名称
-        module = cls.__module__
-        if module and not module.startswith("src.core.components"):
-            # 从模块路径提取插件名称
-            parts = module.split(".")
-            if len(parts) >= 2:
-                plugin_name = parts[-1]  # 最后一部分可能是插件名称
-            else:
-                plugin_name = "unknown_plugin"
-        else:
-            plugin_name = "unknown_plugin"
 
-        return Path("config") / "plugins" / plugin_name / f"{cls.config_name}.toml"
+        return Path("config") / "plugins" / cls.plugin_name / f"{cls.config_name}.toml"
+
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
+
+        Returns:
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
+
+        Examples:
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
+        """
+        return f"{cls.plugin_name}:config:{cls.config_name}" if cls.plugin_name != "unknown_plugin" else None
 
     @classmethod
     def generate_default(cls, path: str | Path | None = None) -> None:

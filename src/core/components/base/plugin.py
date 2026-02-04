@@ -4,7 +4,7 @@
 插件是组件的容器，包含其他各种类型的组件。
 """
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -59,9 +59,8 @@ class BasePlugin(ABC):
             config: 插件配置实例
         """
         self.config = config
-        self._components: dict[str, type] = {}
-        self._instances: dict[str, object] = {}
 
+    @abstractmethod
     def get_components(self) -> list[type]:
         """获取插件内所有组件类。
 
@@ -72,41 +71,7 @@ class BasePlugin(ABC):
             >>> components = plugin.get_components()
             >>> [<class MyAction>, <class MyTool>]
         """
-        return list(self._components.values())
-
-    def get_component(self, signature: str) -> type | None:
-        """通过签名获取组件类。
-
-        Args:
-            signature: 组件签名，例如 "my_plugin:action:send_message"
-
-        Returns:
-            type | None: 组件类，如果未找到返回 None
-
-        Examples:
-            >>> action_cls = plugin.get_component("my_plugin:action:send")
-        """
-        return self._components.get(signature)
-
-    def get_component_instance(self, signature: str) -> object | None:
-        """获取组件实例。
-
-        Args:
-            signature: 组件签名
-
-        Returns:
-            object | None: 组件实例，如果未找到返回 None
-        """
-        return self._instances.get(signature)
-
-    def add_component(self, component_cls: type, signature: str) -> None:
-        """添加组件到插件。
-
-        Args:
-            component_cls: 组件类
-            signature: 组件签名
-        """
-        self._components[signature] = component_cls
+        ...
 
     async def on_plugin_loaded(self) -> None:
         """插件加载时的钩子。

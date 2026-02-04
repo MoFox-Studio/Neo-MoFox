@@ -28,6 +28,7 @@ class BaseAdapter(MofoxAdapterBase):
     3. 子进程启动支持
 
     Class Attributes:
+        plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
         adapter_name: 适配器名称
         adapter_version: 适配器版本
         adapter_description: 适配器描述
@@ -45,6 +46,9 @@ class BaseAdapter(MofoxAdapterBase):
         ...         # 解析平台消息并返回 MessageEnvelope
         ...         return envelope
     """
+
+    # 所属插件名称（由 PluginManager 在注册时注入）
+    plugin_name: str = "unknown_plugin"
 
     # 适配器元数据
     adapter_name: str = "unknown_adapter"
@@ -75,6 +79,19 @@ class BaseAdapter(MofoxAdapterBase):
         self._health_check_task_info: Any | None = None
         self._running = False
 
+    @classmethod
+    def get_signature(cls) -> str | None:
+        """获取动作组件的唯一签名。
+
+        Returns:
+            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
+
+        Examples:
+            >>> signature = SendEmoji.get_signature()
+            >>> "my_plugin:action:send_emoji"
+        """
+        return f"{cls.plugin_name}:adapter:{cls.adapter_name}" if cls.plugin_name != "unknown_plugin" else None
+    
     @classmethod
     def from_process_queues(
         cls,
@@ -118,6 +135,7 @@ class BaseAdapter(MofoxAdapterBase):
         self._health_check_task_info = tm.create_task(
             self._health_check_loop(),
             name=f"{self.adapter_name}_health_check",
+            daemon=True,
         )
 
         self._running = True

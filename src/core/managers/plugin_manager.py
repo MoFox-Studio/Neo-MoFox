@@ -435,6 +435,9 @@ class PluginManager:
                 continue
 
             try:
+                # 注入所属插件名称
+                component_cls.plugin_name = plugin_name
+
                 # 注册到全局注册表
                 registry.register(component_cls, signature, dependencies)
                 logger.debug(f"注册组件: {signature}")
