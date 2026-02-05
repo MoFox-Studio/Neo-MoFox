@@ -34,6 +34,7 @@ def load_ui_level_from_config(config_path: str = "config/core.toml") -> "UILevel
 
 async def main() -> None:
     """主函数"""
+    import os
     from src.app.runtime import Bot
 
     # 从配置文件读取 UI 级别

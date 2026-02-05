@@ -70,7 +70,6 @@ class SinkManager:
             adapter.core_sink = sink
 
             self._active_sinks[adapter_signature] = sink
-            logger.info(f"为 Adapter {adapter_signature} 设置 CoreSink")
         except NotImplementedError as e:
             logger.warning(f"无法为 Adapter {adapter_signature} 设置 CoreSink: {e}")
             raise

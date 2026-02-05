@@ -202,7 +202,7 @@ def get_core_config() -> CoreConfig:
     return _global_config
 
 
-def init_core_config(config_path: str | None = None) -> CoreConfig:
+def init_core_config(config_path: str) -> CoreConfig:
     """初始化 Core 配置
 
     Args:
@@ -224,9 +224,29 @@ def init_core_config(config_path: str | None = None) -> CoreConfig:
     """
     global _global_config
 
-    if config_path is None:
-        # 使用默认配置
-        _global_config = CoreConfig()
+    from pathlib import Path
+
+    path = Path(config_path)
+
+    # 确保配置文件存在
+    if not path.exists():
+        # 确保父目录存在
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 创建默认配置文件
+        default_config = CoreConfig.default()
+        _global_config = CoreConfig.model_validate(default_config)
+
+        # 保存默认配置到文件
+        from src.kernel.config.core import _render_toml_with_signature
+        toml_content = _render_toml_with_signature(CoreConfig, default_config)
+        path.write_text(toml_content, encoding="utf-8")
+    elif path.is_dir():
+        # 如果路径存在但是目录，抛出清晰的错误
+        raise RuntimeError(
+            f"配置路径是一个目录，不是文件: {config_path}. "
+            f"请删除该目录或指定不同的配置文件路径。"
+        )
     else:
         # 从文件加载配置
         _global_config = CoreConfig.load(config_path, auto_update=True)
