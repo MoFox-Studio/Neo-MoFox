@@ -99,11 +99,18 @@ class LLMResponse:
     def _maybe_append_response_to_context(self) -> None:
         if not self._auto_append_response:
             return
-        if not self.message:
+
+        content_parts: list[object] = []
+        if self.message:
+            content_parts.append(Text(self.message))
+        if self.call_list:
+            content_parts.extend(self.call_list)
+
+        if not content_parts:
             return
 
         # 将 assistant 回复写回 payloads
-        self.payloads.append(LLMPayload(ROLE.ASSISTANT, Text(self.message)))
+        self.payloads.append(LLMPayload(ROLE.ASSISTANT, content_parts))  # type: ignore[arg-type]
         self._maybe_apply_context_manager()
 
     def _maybe_apply_context_manager(self) -> None:
@@ -113,7 +120,14 @@ class LLMResponse:
         self.payloads = context_manager.maybe_trim(self.payloads)
 
     def to_payload(self) -> LLMPayload:
-        return LLMPayload(ROLE.ASSISTANT, Text(self.message or ""))
+        content_parts: list[object] = []
+        if self.message:
+            content_parts.append(Text(self.message))
+        if self.call_list:
+            content_parts.extend(self.call_list)
+        if not content_parts:
+            content_parts.append(Text(""))
+        return LLMPayload(ROLE.ASSISTANT, content_parts)  # type: ignore[arg-type]
 
     def add_payload(self, payload: "LLMPayload | LLMResponse", position=None) -> Self:
         if isinstance(payload, LLMResponse):

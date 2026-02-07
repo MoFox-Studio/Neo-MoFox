@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .content import Content
+
 
 class LLMUsable(Protocol):
     @classmethod
@@ -14,7 +16,7 @@ class LLMUsable(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolCall:
+class ToolCall(Content):
     id: str | None
     name: str
     args: dict[str, Any] | str

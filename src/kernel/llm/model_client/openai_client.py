@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, AsyncIterator
 
-from ..payload import Image, LLMPayload, Text, Tool, ToolResult
+from ..payload import Image, LLMPayload, Text, Tool, ToolCall, ToolResult
 from ..roles import ROLE
 from .base import StreamEvent
 from src.kernel.logger import get_logger
@@ -91,6 +91,43 @@ def _payloads_to_openai_messages(payloads: list[LLMPayload]) -> tuple[list[dict[
 
         role = payload.role.value
 
+        if payload.role == ROLE.ASSISTANT:
+            tool_calls: list[dict[str, Any]] = []
+            text_parts: list[str] = []
+
+            for idx, part in enumerate(payload.content):
+                if isinstance(part, ToolCall):
+                    if isinstance(part.args, dict):
+                        args_text = json.dumps(part.args, ensure_ascii=False)
+                    else:
+                        args_text = str(part.args)
+                    call_id = part.id or f"call_{idx}"
+                    tool_calls.append(
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": part.name,
+                                "arguments": args_text,
+                            },
+                        }
+                    )
+                    continue
+
+                if isinstance(part, Text):
+                    text_parts.append(part.text)
+                    continue
+
+            if tool_calls:
+                messages.append(
+                    {
+                        "role": role,
+                        "content": "".join(text_parts),
+                        "tool_calls": tool_calls,
+                    }
+                )
+                continue
+
         # content 支持 list[Content]，需转成 OpenAI 的多模态 content parts
         if len(payload.content) == 1 and isinstance(payload.content[0], Text):
             messages.append({"role": role, "content": payload.content[0].text})
@@ -163,15 +200,8 @@ class OpenAIChatClient:
                 response = await self._inner.handle_async_request(request)
                 return response
 
-        disable_keepalive = False
-        if base_url:
-            disable_keepalive = base_url.startswith("http://127.0.0.1") or base_url.startswith("http://localhost")
-
         limits = None
         headers = None
-        if disable_keepalive:
-            limits = httpx.Limits(max_connections=20, max_keepalive_connections=0, keepalive_expiry=0.0)
-            headers = {"Connection": "close"}
 
         base_transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0") if force_ipv4 else httpx.AsyncHTTPTransport()
         transport = _LoggingAsyncTransport(base_transport)
