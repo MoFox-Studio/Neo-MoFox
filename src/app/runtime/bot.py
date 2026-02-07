@@ -180,6 +180,8 @@ class Bot:
         self.logger = get_logger(name="console", display="控制台", color=COLOR.BLUE)
         self.ui.update_phase_status("日志", "已初始化")
 
+        await self._preflight_llm_providers()
+
         # Step 3: Event Bus
         from src.kernel.event import get_event_bus
 
@@ -243,6 +245,54 @@ class Bot:
         Path("data/json_storage").mkdir(parents=True, exist_ok=True)
         self.storage = JSONStore("data/json_storage")
         self.ui.update_phase_status("存储", "已初始化")
+
+    async def _preflight_llm_providers(self) -> None:
+        assert self.config is not None
+        if not self.config.bot.llm_preflight_check:
+            self.ui.update_phase_status("LLM 预检", "已跳过")
+            return
+
+        assert self.logger is not None
+
+        from src.core.config import get_model_config
+        import httpx
+        import time
+
+        providers = get_model_config().api_providers
+        if not providers:
+            self.logger.warning("LLM 预检: 未配置任何 API 提供商")
+            self.ui.update_phase_status("LLM 预检", "无配置")
+            return
+
+        timeout = float(self.config.bot.llm_preflight_timeout or 5.0)
+        self.ui.update_phase_status("LLM 预检", "进行中...")
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for provider in providers:
+                base_url = str(provider.base_url).rstrip("/")
+                url = f"{base_url}/models"
+                headers: dict[str, str] = {}
+                try:
+                    api_key = provider.get_api_key()
+                except Exception:
+                    api_key = ""
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+
+                start = time.perf_counter()
+                try:
+                    resp = await client.get(url, headers=headers)
+                    elapsed = time.perf_counter() - start
+                    self.logger.info(
+                        f"LLM 预检: {provider.name} {resp.status_code} {elapsed:.2f}s ({url})"
+                    )
+                except Exception as e:
+                    elapsed = time.perf_counter() - start
+                    self.logger.warning(
+                        f"LLM 预检失败: {provider.name} {elapsed:.2f}s ({url}) -> {e}"
+                    )
+
+        self.ui.update_phase_status("LLM 预检", "已完成")
 
     async def _initialize_core(self) -> None:
         """初始化 Core 层组件

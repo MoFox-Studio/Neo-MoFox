@@ -4,6 +4,7 @@ import base64
 import json
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -111,52 +112,6 @@ def _payloads_to_openai_messages(payloads: list[LLMPayload]) -> tuple[list[dict[
     return messages, tools
 
 
-async def _direct_http_chat(
-    *,
-    base_url: str,
-    api_key: str,
-    timeout: float | None,
-    params: dict[str, Any],
-) -> tuple[str | None, list[dict[str, Any]] | None]:
-    
-    import httpx
-
-    endpoint = base_url.rstrip("/") + "/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(endpoint, headers=headers, json=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-    choices = data.get("choices") or []
-    if not choices:
-        return "", []
-
-    msg = choices[0].get("message") or {}
-    content = msg.get("content") or ""
-    tool_calls = []
-    for tc in msg.get("tool_calls", []) or []:
-        fn = tc.get("function") or {}
-        args = fn.get("arguments")
-        try:
-            args = json.loads(args) if isinstance(args, str) else args
-        except Exception:
-            pass
-        tool_calls.append(
-            {
-                "id": tc.get("id"),
-                "name": fn.get("name", ""),
-                "args": args or {},
-            }
-        )
-
-    return content, tool_calls
-
-
 class OpenAIChatClient:
     """OpenAI provider。
 
@@ -167,7 +122,9 @@ class OpenAIChatClient:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._clients: dict[tuple[str, str | None, int], Any] = {}
+        self._clients: dict[tuple[str, str | None, int, float | None], Any] = {}
+        self._sync_clients: dict[tuple[str, str | None, float | None, bool, bool], Any] = {}
+        self._sync_http_executors: dict[int, ThreadPoolExecutor] = {}
 
     def _get_loop_key(self) -> int:
         try:
@@ -176,9 +133,18 @@ class OpenAIChatClient:
         except RuntimeError:
             return 0
 
-    def _get_client(self, *, api_key: str, base_url: str | None, timeout: float | None):
+    def _get_client(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None,
+        timeout: float | None,
+        trust_env: bool,
+        force_ipv4: bool,
+    ):
         loop_key = self._get_loop_key()
-        cache_key = (api_key, base_url, loop_key)
+        timeout_key = float(timeout) if isinstance(timeout, (int, float)) else None
+        cache_key = (api_key, base_url, loop_key, timeout_key, trust_env, force_ipv4)
         with self._lock:
             cached = self._clients.get(cache_key)
             if cached is not None:
@@ -207,8 +173,9 @@ class OpenAIChatClient:
             limits = httpx.Limits(max_connections=20, max_keepalive_connections=0, keepalive_expiry=0.0)
             headers = {"Connection": "close"}
 
-        transport = _LoggingAsyncTransport(httpx.AsyncHTTPTransport())
-        http_client_kwargs: dict[str, Any] = {"transport": transport}
+        base_transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0") if force_ipv4 else httpx.AsyncHTTPTransport()
+        transport = _LoggingAsyncTransport(base_transport)
+        http_client_kwargs: dict[str, Any] = {"transport": transport, "trust_env": trust_env}
         if limits:
             http_client_kwargs["limits"] = limits
         if headers:
@@ -227,6 +194,49 @@ class OpenAIChatClient:
         with self._lock:
             self._clients[cache_key] = client
         return client
+
+    def _get_sync_client(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None,
+        timeout: float | None,
+        trust_env: bool,
+        force_ipv4: bool,
+    ):
+        timeout_key = float(timeout) if isinstance(timeout, (int, float)) else None
+        cache_key = (api_key, base_url, timeout_key, trust_env, force_ipv4)
+        with self._lock:
+            cached = self._sync_clients.get(cache_key)
+            if cached is not None:
+                return cached
+
+        from openai import OpenAI
+        import httpx
+
+        transport = httpx.HTTPTransport(local_address="0.0.0.0") if force_ipv4 else httpx.HTTPTransport()
+        http_client = httpx.Client(transport=transport, trust_env=trust_env)
+
+        kwargs: dict[str, Any] = {"api_key": api_key, "http_client": http_client}
+        if base_url:
+            kwargs["base_url"] = base_url
+        if isinstance(timeout, (int, float)):
+            kwargs["timeout"] = float(timeout)
+        kwargs["max_retries"] = 0
+
+        client = OpenAI(**kwargs)
+        with self._lock:
+            self._sync_clients[cache_key] = client
+        return client
+
+    def _get_sync_http_executor(self) -> ThreadPoolExecutor:
+        loop_key = self._get_loop_key()
+        with self._lock:
+            executor = self._sync_http_executors.get(loop_key)
+            if executor is None:
+                executor = ThreadPoolExecutor(max_workers=4)
+                self._sync_http_executors[loop_key] = executor
+            return executor
 
     async def create(
         self,
@@ -249,13 +259,6 @@ class OpenAIChatClient:
         base_url = str(base_url) if base_url else None
         timeout = model_set.get("timeout")
 
-        client = self._get_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=float(timeout) if isinstance(timeout, (int, float)) else None,
-        )
-        messages, openai_tools = _payloads_to_openai_messages(payloads)
-
         max_tokens = model_set.get("max_tokens")
         temperature = model_set.get("temperature")
         extra_params = model_set.get("extra_params")
@@ -265,7 +268,19 @@ class OpenAIChatClient:
             raise ValueError("model.extra_params 必须是 dict")
 
         extra_params = dict(extra_params)
-        direct_http = bool(extra_params.pop("direct_http", False))
+        trust_env = extra_params.pop("trust_env", None)
+        trust_env = bool(trust_env) if trust_env is not None else True
+        force_ipv4 = bool(extra_params.pop("force_ipv4", False))
+        force_sync_http = bool(extra_params.pop("force_sync_http", False))
+
+        client = self._get_client(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=float(timeout) if isinstance(timeout, (int, float)) else None,
+            trust_env=trust_env,
+            force_ipv4=force_ipv4,
+        )
+        messages, openai_tools = _payloads_to_openai_messages(payloads)
 
         params: dict[str, Any] = {
             "model": model_name,
@@ -277,20 +292,60 @@ class OpenAIChatClient:
             params["temperature"] = float(temperature)
         if openai_tools:
             params["tools"] = openai_tools
+            if "tool_choice" not in params:
+                # Some providers require explicit auto tool choice to return tool_calls
+                params["tool_choice"] = "required"
 
         # 允许每模型注入额外参数（如 top_p/response_format/tool_choice 等）
         params.update(extra_params)
 
-        if direct_http:
-            if stream:
-                raise RuntimeError("direct_http 暂不支持 stream=true")
-            content, tool_calls = await _direct_http_chat(
-                base_url=base_url or "",
+        if not stream and force_sync_http:
+            sync_client = self._get_sync_client(
                 api_key=api_key,
+                base_url=base_url,
                 timeout=float(timeout) if isinstance(timeout, (int, float)) else None,
-                params=params,
+                trust_env=trust_env,
+                force_ipv4=force_ipv4,
             )
-            return content or "", tool_calls or [], None
+
+            def _sync_create():
+                return sync_client.chat.completions.create(**params)
+
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(self._get_sync_http_executor(), _sync_create)
+            msg = resp.choices[0].message
+            tool_calls = []
+            if getattr(msg, "tool_calls", None):
+                for tc in msg.tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    except Exception:
+                        args = tc.function.arguments
+                    tool_calls.append(
+                        {
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "args": args,
+                        }
+                    )
+
+            if not tool_calls and getattr(msg, "function_call", None):
+                fn_call = msg.function_call
+                try:
+                    args = json.loads(fn_call.arguments) if fn_call.arguments else {}
+                except Exception:
+                    args = fn_call.arguments
+                tool_calls.append(
+                    {
+                        "id": None,
+                        "name": fn_call.name,
+                        "args": args,
+                    }
+                )
+            logger.debug(
+                f"OpenAI create (sync) done: model={model_name} request={request_name}"
+            )
+            return msg.content or "", tool_calls, None
 
         if not stream:
             resp = await client.chat.completions.create(**params)
@@ -309,6 +364,20 @@ class OpenAIChatClient:
                             "args": args,
                         }
                     )
+
+            if not tool_calls and getattr(msg, "function_call", None):
+                fn_call = msg.function_call
+                try:
+                    args = json.loads(fn_call.arguments) if fn_call.arguments else {}
+                except Exception:
+                    args = fn_call.arguments
+                tool_calls.append(
+                    {
+                        "id": None,
+                        "name": fn_call.name,
+                        "args": args,
+                    }
+                )
             return msg.content or "", tool_calls, None
 
         stream_resp = await client.chat.completions.create(**params, stream=True)
@@ -332,5 +401,13 @@ class OpenAIChatClient:
                             tool_name=getattr(fn, "name", None) if fn else None,
                             tool_args_delta=getattr(fn, "arguments", None) if fn else None,
                         )
+
+                function_call_delta = getattr(delta, "function_call", None)
+                if function_call_delta and not tool_calls_delta:
+                    yield StreamEvent(
+                        tool_call_id="function_call",
+                        tool_name=getattr(function_call_delta, "name", None),
+                        tool_args_delta=getattr(function_call_delta, "arguments", None),
+                    )
 
         return None, None, iter_events()

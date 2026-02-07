@@ -411,6 +411,18 @@ class ModelConfig(ConfigBase):
         
         # 构建 ModelSet
         model_set: list[dict[str, Any]] = []
+
+        global_extra_params: dict[str, Any] = {}
+        try:
+            from src.core.config import get_core_config
+
+            core_config = get_core_config()
+            global_extra_params = {
+                "force_sync_http": core_config.advanced.force_sync_http,
+                "trust_env": core_config.advanced.trust_env,
+            }
+        except Exception:
+            global_extra_params = {}
         
         for model_name in task_config.model_list:
             # 获取模型信息
@@ -420,6 +432,9 @@ class ModelConfig(ConfigBase):
             provider = self.get_provider(model_info.api_provider)
             
             # 构建 ModelEntry 字典
+            extra_params = dict(global_extra_params)
+            extra_params.update(model_info.extra_params)
+
             model_entry: dict[str, Any] = {
                 "api_provider": provider.name,
                 "base_url": provider.base_url,
@@ -433,7 +448,7 @@ class ModelConfig(ConfigBase):
                 "price_out": model_info.price_out,
                 "temperature": task_config.temperature,
                 "max_tokens": task_config.max_tokens,
-                "extra_params": dict(model_info.extra_params),  # 复制一份
+                "extra_params": extra_params,
             }
             
             model_set.append(model_entry)

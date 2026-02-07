@@ -29,13 +29,3 @@ class Image(Content):
 @dataclass(frozen=True, slots=True)
 class Audio(Content):
     value: str
-
-
-@dataclass(frozen=True, slots=True)
-class Action(Content):
-    """占位：Action 与 Tool 类似，但语义上是“动作组件”。
-
-    kernel/llm 不关心 Action 的实现细节，只要求遵循 LLMUsable。
-    """
-
-    action: type

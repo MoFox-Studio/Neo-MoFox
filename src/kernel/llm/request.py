@@ -124,6 +124,7 @@ class LLMRequest:
 
             try:
                 with timer:
+                    timeout_seconds = model.get("timeout")
                     create_task = client.create(
                         model_name=model_identifier,
                         payloads=payloads,
@@ -133,7 +134,6 @@ class LLMRequest:
                         stream=stream,
                     )
 
-                    timeout_seconds = model.get("timeout")
                     if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0:
                         message, tool_calls, stream_iter = await asyncio.wait_for(
                             create_task,
@@ -179,7 +179,7 @@ class LLMRequest:
                 # 将原始异常转换为标准化 LLM 异常
                 classified_error = classify_exception(e, model=model_identifier)
                 last_error = classified_error
-                
+
                 # 记录失败指标
                 if self.enable_metrics:
                     metrics = RequestMetrics(

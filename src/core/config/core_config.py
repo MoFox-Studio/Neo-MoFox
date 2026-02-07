@@ -52,8 +52,34 @@ class CoreConfig(ConfigBase):
             default=5.0,
             description="强制关闭等待时间（秒）",
         )
+        llm_preflight_check: bool = Field(
+            default=False,
+            description="启动时执行 LLM 接口连通性预检",
+        )
+        llm_preflight_timeout: float = Field(
+            default=5.0,
+            description="LLM 接口预检超时时间（秒）",
+        )
 
     bot: BotSection = Field(default_factory=BotSection)
+
+    @config_section("advanced")
+    class AdvancedSection(SectionBase):
+        """高级配置节
+
+        定义全局请求相关的高级参数。
+        """
+
+        force_sync_http: bool = Field(
+            default=False,
+            description="全局强制使用同步 HTTP（OpenAI SDK 同步路径，仅非流式）",
+        )
+        trust_env: bool = Field(
+            default=True,
+            description="是否信任系统代理与环境变量（httpx trust_env）",
+        )
+
+    advanced: AdvancedSection = Field(default_factory=AdvancedSection)
 
     @config_section("chat")
     class ChatSection(SectionBase):

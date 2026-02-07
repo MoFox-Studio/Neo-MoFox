@@ -18,7 +18,6 @@ from .response import LLMResponse
 from .types import ModelEntry, ModelSet
 
 from .payload import (
-	Action,
 	Audio,
 	Content,
 	Image,
@@ -68,7 +67,6 @@ __all__ = [
 	"Text",
 	"Image",
 	"Audio",
-	"Action",
 	# 工具相关
 	"Tool",
 	"ToolResult",
