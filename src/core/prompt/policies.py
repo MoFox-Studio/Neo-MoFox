@@ -110,8 +110,9 @@ def trim() -> RenderPolicy:
     Examples:
         >>> policy = trim()
         >>> policy("  hello  ")  # "hello"
+        >>> policy(None)  # ""
     """
-    return RenderPolicy(lambda v: str(v).strip())
+    return RenderPolicy(lambda v: "" if v is None else str(v).strip())
 
 
 def header(title: str, sep: str = "\n") -> RenderPolicy:
@@ -211,8 +212,11 @@ def min_len(n: int) -> RenderPolicy:
         >>> policy = min_len(5)
         >>> policy("hi")  # ""
         >>> policy("hello")  # "hello"
+        >>> policy(None)  # ""
     """
     def _fn(v: Any) -> str:
+        if v is None:
+            return ""
         s = str(v)
         return "" if len(s.strip()) < n else s
 

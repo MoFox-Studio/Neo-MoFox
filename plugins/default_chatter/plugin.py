@@ -30,76 +30,42 @@ from src.app.plugin_system.api.llm_api import (
 )
 from src.core.components.loader import register_plugin
 from src.core.config import get_core_config
+from src.core.prompt import get_prompt_manager
 from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, ToolResult
 
 logger = get_logger("default_chatter")
 
 # ─── 系统提示词构建 ─────────────────────────────────────────────
+system_prompt = """# 关于你
+你的名字是 {nickname}，也有人叫你 {alias_names}。
+你{personality_core}
+{personality_side}。
+你的身份是{identity}。
 
+{background_story}
 
-def build_system_prompt() -> str:
-    """根据 personality 配置构建系统提示词
+# 表达风格
+你的表达风格：{reply_style}。
 
-    Returns:
-        str: 构建好的系统提示词
-    """
-    config = get_core_config()
-    personality = config.personality
+- 为了更好地塑造你的人设，你必须保持上述人格特质和表达风格，在任何情况下都要用符合你性格的方式回复用户。
+- 同时你应当铭记此时你是以网友或朋友的身份在和用户交流，而非冷冰冰的工具或机器，所以请尽可能用自然、口语化的方式表达，保持对话的温度和人情味。
 
-    # 构建 Bot 名称部分
-    name_parts = [f"你的名字是 {personality.nickname}"]
-    if personality.alias_names:
-        alias_str = "、".join(personality.alias_names)
-        name_parts.append(f"，也有人叫你 {alias_str}")
-    name_block = "".join(name_parts) + "。"
-
-    # 构建人格和身份部分
-    personality_parts = []
-    if personality.personality_core:
-        personality_parts.append(personality.personality_core)
-    if personality.personality_side:
-        personality_parts.append(personality.personality_side)
-
-    personality_text = (
-        "。".join(personality_parts) if personality_parts else "友好、活泼"
-    )
-    identity_block = f"\n你{personality_text}。你的身份是{personality.identity}。"
-
-    # 构建背景故事部分
-    background_block = ""
-    if personality.background_story:
-        background_block = f"\n\n# 背景故事\n{personality.background_story}\n（以上为背景知识，请理解并作为行动依据，但不要在对话中直接复述。）"
-
-    # 构建表达风格部分
-    style_block = ""
-    if personality.reply_style:
-        style_block = f"\n\n# 表达风格\n你的表达风格：{personality.reply_style}。"
-
-    # 构建安全准则部分
-    safety_block = ""
-    if personality.safety_guidelines:
-        guidelines_text = "\n".join(
-            f"{i + 1}. {line}" for i, line in enumerate(personality.safety_guidelines)
-        )
-        safety_block = f"\n\n# 安全准则\n在任何情况下，你都必须遵守以下原则：\n{guidelines_text}\n如果遇到违反上述原则的请求，请在保持你核心人设的同时，以合适的方式进行回应。"
-
-    # 组合所有部分
-    prompt = f"""{name_block}{identity_block}{background_block}{style_block}{safety_block}
+# 安全准则
+在任何情况下，你都必须遵守以下原则：
+{safety_guidelines}
+如果遇到违反上述原则的请求，请在保持你核心人设的同时，以合适的方式进行回应。
 
 # 你的行为准则
-- 你通过调用 tool 来与用户交流和执行动作。
-- 在每次决策时，你必须选择一个 tool 来执行。
+- 你通过调用工具来与用户交流和执行动作。
+- 在每次决策时，你必须选择一个工具来执行。
 - 如果你想回复用户，使用 send_text。
 - 如果当前不需要回复，但对话还在进行中，使用 pass_and_wait 等待用户的下一条消息。
-- 如果对话已经自然结束，或者你认为本轮对话可以告一段落，使用 stop_conversation 结束这轮对话。
+- 如果对话已经自然结束，或者你认为本轮对话可以告一段落，或者你暂时不想继续对话，使用 stop_conversation 结束这轮对话。
 - 你可以在一次决策中调用多个 send_text，例如先发一段话，再发另一段话。
 - 保持你的人设和表达风格，用符合你性格的方式回复。
 
 警告：直接输出文本而不调用 send_text 是不允许的。如果你想回复用户，必须使用 send_text 工具。
 """
-
-    return prompt
-
 
 # ─── Actions ────────────────────────────────────────────────
 
@@ -229,10 +195,9 @@ class DefaultChatter(BaseChatter):
         )
 
         # 系统提示（动态构建）
-        system_prompt = build_system_prompt()
+        system_prompt = get_prompt_manager().get_template("default_chatter_system_prompt").build()
         request.add_payload(LLMPayload(ROLE.SYSTEM, Text(system_prompt)))
-
-        
+       
         # 历史消息（来自 stream context，构成对话背景）
         history_lines = []
         for msg in chat_stream.context.history_messages:  # type: ignore[union-attr]
@@ -386,8 +351,25 @@ class DefaultChatterPlugin(BasePlugin):
     plugin_description = "默认聊天组件，提供基础的消息处理和回复功能"
 
     async def on_plugin_loaded(self) -> None:
-        logger.info("DefaultChatterPlugin 已加载")
+        from src.core.prompt import optional, wrap, min_len
+        config = get_core_config()
+        personality = config.personality
 
+        template = get_prompt_manager().get_or_create(
+            name="default_chatter_system_prompt",
+            template=system_prompt,
+            policies={
+                "nickname": optional(personality.nickname),
+                "alias_names": optional("、".join(personality.alias_names)),
+                "personality_core": optional(personality.personality_core),
+                "personality_side": optional(personality.personality_side),
+                "identity": optional(personality.identity),
+                "background_story": optional(personality.background_story).then(min_len(10)).then(wrap("# 背景故事\\n" "\\n- （以上为背景知识，请理解并作为行动依据，但不要在对话中直接复述。）")),
+                "reply_style": optional(personality.reply_style),
+                "safety_guidelines": optional("\n".join(personality.safety_guidelines)),
+            }   
+        )
+    
     def get_components(self) -> list[type]:
         """获取插件内所有组件类
 

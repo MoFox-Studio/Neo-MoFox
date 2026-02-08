@@ -26,6 +26,7 @@ Prompt 模板模块
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -148,12 +149,13 @@ class PromptTemplate:
 
         # 在非严格模式下，提取模板中所有占位符，将未设置的设为空字符串
         if not strict:
-            import re
             # 查找所有 {placeholder} 格式的占位符
             placeholders = set(re.findall(r'\{([^{}]+)\}', self.template))
             for placeholder in placeholders:
                 if placeholder not in rendered:
-                    rendered[placeholder] = ""
+                    # 应用策略处理未设置的占位符（如可选值策略会返回默认值）
+                    policy = self.policies.get(placeholder, optional())
+                    rendered[placeholder] = policy(None)
 
         return self.template.format_map(rendered)
 
