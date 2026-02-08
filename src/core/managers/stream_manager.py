@@ -15,9 +15,11 @@
 import asyncio
 import time
 from typing import TYPE_CHECKING, Any
+from async_lru import alru_cache
 
 from src.kernel.db import CRUDBase, QueryBuilder
 from src.kernel.logger import get_logger
+from src.core.config import get_core_config
 
 if TYPE_CHECKING:
     from src.core.models.message import Message
@@ -181,7 +183,7 @@ class StreamManager:
         chat_stream.last_active_time = stream_record.last_active_time
 
         # 加载上下文
-        chat_stream.context = await self.load_stream_context(stream_id, max_messages=100)
+        chat_stream.context = await self.load_stream_context(stream_id, max_messages=get_core_config().chat.max_context_size)
 
         logger.debug(f"从数据库构建流: {stream_id}")
 
@@ -216,7 +218,7 @@ class StreamManager:
             )
 
         # 查询历史消息
-        query = QueryBuilder(self._Messages).filter(stream_id=stream_id).order_by("-sequence_number")
+        query = QueryBuilder(self._Messages).filter(stream_id=stream_id).order_by("-id")
         if max_messages is not None:
             query = query.limit(max_messages)
         messages_records = await query.all()
@@ -224,13 +226,13 @@ class StreamManager:
         # 转换为运行时 Message 对象
         history_messages = []
         for msg_record in reversed(messages_records):  # 按时间正序
-            history_messages.append(self._db_message_to_runtime(msg_record))  # type: ignore    
+            history_messages.append(await self._db_message_to_runtime(msg_record))  # type: ignore    
 
         # 创建 StreamContext
         context = StreamContext(
             stream_id=stream_id,
             chat_type=stream_record.chat_type,
-            max_context_size=max_messages if max_messages else 100,  # 仅用于内存限制
+            max_context_size=max_messages if max_messages else get_core_config().chat.max_context_size,  # 仅用于内存限制
             history_messages=history_messages,
         )
 
@@ -275,10 +277,12 @@ class StreamManager:
                 "platform": message.platform,
             }
 
-            # 创建数据库记录
-            db_message = await self._messages_crud.create(message_data)
+            # 持久化到数据库
+            db_message = await self._messages_crud.get_by(message_id=message.message_id)
+            if not db_message:
+                db_message = await self._messages_crud.create(message_data)
 
-            # 更新流实例
+            # 更新流实例内容
             chat_stream = self._streams.get(stream_id)
             if chat_stream:
                 chat_stream.context.add_history_message(message)
@@ -333,6 +337,7 @@ class StreamManager:
 
     # ==================== Query & Utilities ====================
 
+    @alru_cache(maxsize=256)
     async def get_stream_info(self, stream_id: str) -> dict[str, Any] | None:
         """获取流的综合信息。
 
@@ -387,14 +392,14 @@ class StreamManager:
         messages_records = (
             await QueryBuilder(self._Messages)
             .filter(stream_id=stream_id)
-            .order_by("-sequence_number")
+            .order_by("-id")
             .limit(limit)
             .offset(offset)
             .all()
         )
 
         return [
-            self._db_message_to_runtime(msg) for msg in reversed(messages_records) # type: ignore
+            await self._db_message_to_runtime(msg) for msg in reversed(messages_records) # type: ignore
         ]
 
     def clear_cache(self, stream_id: str | None = None) -> None:
@@ -561,7 +566,7 @@ class StreamManager:
             self._stream_locks[stream_id] = asyncio.Lock()
         return self._stream_locks[stream_id]
 
-    def _db_message_to_runtime(self, db_message: "Messages") -> "Message":
+    async def _db_message_to_runtime(self, db_message: "Messages") -> "Message":
         """将数据库消息转换为运行时消息。
 
         Args:
@@ -571,7 +576,26 @@ class StreamManager:
             Message: 运行时消息对象
         """
         from src.core.models.message import Message, MessageType
+        from src.core.utils.user_query_helper import get_user_query_helper
+        from src.core.managers import get_stream_manager
 
+        stream_info = await get_stream_manager().get_stream_info(db_message.stream_id)
+
+        # 获取 sender_id 和 sender_name
+        if db_message.person_id:
+            parts = db_message.person_id.split(":")
+            if len(parts) >= 2:
+                platform, user_id = parts[0], parts[1]
+            else:
+                platform, user_id = "unknown", db_message.person_id
+        else:
+            platform, user_id = "system", "system"
+
+        person, _ = await get_user_query_helper().get_or_create_person(
+            platform=platform,
+            user_id=user_id,
+        )
+        
         return Message(
             message_id=db_message.message_id,
             time=db_message.time,
@@ -579,11 +603,11 @@ class StreamManager:
             content=db_message.content,
             processed_plain_text=db_message.processed_plain_text,
             message_type=MessageType(db_message.message_type),
-            sender_id=getattr(db_message, "sender_id", ""),
-            sender_name=getattr(db_message, "sender_name", ""),
-            sender_cardname=getattr(db_message, "sender_cardname", None),
+            sender_id=person.person_id,
+            sender_name=person.nickname if person.nickname else "未知用户",
+            sender_cardname=person.cardname if person.cardname else "",
             platform=db_message.platform or "",
-            chat_type=getattr(db_message, "chat_type", "private"),
+            chat_type=stream_info.get("chat_type", "private") if stream_info else "private",
             stream_id=db_message.stream_id,
             raw_data=None,
             extra={},

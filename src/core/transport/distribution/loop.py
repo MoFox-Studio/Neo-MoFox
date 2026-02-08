@@ -213,9 +213,10 @@ async def run_chat_stream(
     except asyncio.CancelledError:
         logger.info(f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, 被取消")
     finally:
-        # 清理
+        # 清理活跃生成器（生成器是任务相关的，不跨任务持久化）
         manager._chatter_genes.pop(stream_id, None)
-        manager._wait_states.pop(stream_id, None)
+        
+        # 注意：此处不再主动清理 _wait_states，因为它代表流的持久状态，应由其自身逻辑或管理器管理
         try:
             context = await manager._get_stream_context(stream_id)
             if context and context.stream_loop_task:

@@ -64,6 +64,22 @@ class MessageReceiver:
             self._event_manager = get_event_manager()
         return self._event_manager
 
+    async def _update_person_info(self, message: Message) -> None:
+        """更新用户信息。
+
+        Args:
+            message: 待写入数据库的 Message 实例
+        """
+        from src.core.utils.user_query_helper import get_user_query_helper
+
+        # 1. 更新用户信息
+        await get_user_query_helper().update_person_info(
+            platform=message.platform,
+            user_id=message.sender_id,
+            nickname=message.sender_name,
+            cardname=message.sender_cardname,
+        )
+
     # ──────────────────────────────────────────
     # 公共接口
     # ──────────────────────────────────────────
@@ -149,6 +165,8 @@ class MessageReceiver:
         content_preview = escape((message.processed_plain_text or str(message.content) or "")[:80])
         logger.info(f"<[b]{escape(platform)}[/b]> {location}: {content_preview}")
 
+        await self._update_person_info(message)
+
         event_manager = self._get_event_manager()
         await event_manager.publish_event(
             EventType.ON_MESSAGE_RECEIVED,
@@ -211,6 +229,8 @@ class MessageReceiver:
             f"其他类型消息经事件处理器转换: id={simple_message.message_id}, "
             f"processed_len={len(processed)}"
         )
+
+        await self._update_person_info(simple_message)
 
         await event_manager.publish_event(
             EventType.ON_MESSAGE_RECEIVED,

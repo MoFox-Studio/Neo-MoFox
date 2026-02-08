@@ -42,6 +42,8 @@ async def migrate_person_info():
         if db_type == "postgresql":
             # PostgreSQL 使用 ALTER TABLE ADD COLUMN
             new_columns = [
+                ("cardname", "TEXT"),
+                ("last_interaction", "FLOAT"),
                 ("first_interaction", "FLOAT"),
                 ("interaction_count", "INTEGER"),
                 ("created_at", "FLOAT"),
@@ -69,6 +71,18 @@ async def migrate_person_info():
 
         else:  # SQLite
             # SQLite 支持直接添加列
+            try:
+                await session.execute(text("ALTER TABLE person_info ADD COLUMN cardname TEXT"))
+                logger.info("添加字段: person_info.cardname")
+            except Exception:
+                pass
+
+            try:
+                await session.execute(text("ALTER TABLE person_info ADD COLUMN last_interaction FLOAT"))
+                logger.info("添加字段: person_info.last_interaction")
+            except Exception:
+                pass
+
             try:
                 await session.execute(text("ALTER TABLE person_info ADD COLUMN first_interaction FLOAT"))
                 logger.info("添加字段: person_info.first_interaction")

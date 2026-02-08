@@ -7,6 +7,7 @@ import time
 import hashlib
 from typing import TYPE_CHECKING, cast
 from functools import lru_cache
+from async_lru import alru_cache
 
 from src.kernel.db import CRUDBase, QueryBuilder
 from src.kernel.logger import get_logger
@@ -57,6 +58,7 @@ class UserQueryHelper:
         """
         return hashlib.sha256(f"{platform}_{user_id}".encode()).hexdigest()
 
+    @alru_cache(maxsize=256)
     async def get_or_create_person(
         self,
         platform: str,
@@ -109,7 +111,49 @@ class UserQueryHelper:
         person = await self.person_crud.create(person_data)
         logger.info(f"创建新用户：{person_id} ({nickname})")
         return person, True
+    
+    @alru_cache(maxsize=256)
+    async def update_person_info(
+        self,
+        platform: str,
+        user_id: str,
+        nickname: str | None = None,
+        cardname: str | None = None,
+    ) -> bool:
+        """更新用户信息
 
+        Args:
+            platform: 平台标识
+            user_id: 平台内部用户ID
+            nickname: 用户昵称
+            cardname: 群名片
+
+        Returns:
+            是否更新成功
+        """
+        person_id = self.generate_person_id(platform, user_id)
+
+        person = await self.person_crud.get_by(person_id=person_id)
+        if not person:
+            await self.get_or_create_person(platform, user_id, nickname, cardname)
+            logger.info(f"用户不存在，已创建新用户：{person_id} ({nickname})")
+            return True
+
+        update_data = {
+            "updated_at": time.time(),
+            "nickname": None,
+            "cardname": None
+        }
+
+        if nickname is not None:
+            update_data["nickname"] = nickname
+        if cardname is not None:
+            update_data["cardname"] = cardname
+
+        await self.person_crud.update(person.id, update_data)
+        logger.info(f"更新用户信息：{person_id} ({nickname})")
+        return True
+        
     async def get_user_streams(
         self,
         platform: str,

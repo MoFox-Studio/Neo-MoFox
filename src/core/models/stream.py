@@ -52,12 +52,8 @@ class StreamContext:
     message_cache: deque["Message"] = field(default_factory=deque)
     is_cache_enabled: bool = False
 
-    # 对话冷却：stop_conversation 设置此时间戳，冷却期间不触发新对话轮次
-    cooldown_until: float = 0.0
-
     # 流循环任务引用
     stream_loop_task: asyncio.Task | None = field(default=None, repr=False)
-
 
     def add_unread_message(self, message: "Message") -> None:
         """添加未读消息。
@@ -108,7 +104,9 @@ class StreamContext:
         if isinstance(accept_format, str):
             accept_format = [accept_format]
         elif not isinstance(accept_format, list):
-            accept_format = list(accept_format) if hasattr(accept_format, "__iter__") else []
+            accept_format = (
+                list(accept_format) if hasattr(accept_format, "__iter__") else []
+            )
 
         # 如果没有 accept_format，默认支持所有类型
         if not accept_format:
@@ -258,4 +256,3 @@ class ChatStream:
             key = f"{platform}_{user_id}_private"
 
         return ChatStream._generate_stream_id_cached(key)
-

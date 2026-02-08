@@ -40,7 +40,7 @@ def extract_stream_id(message_info: MessageInfoPayload) -> str:
     if group_info:
         return ChatStream.generate_stream_id(
             platform=platform,
-            group_id=group_info["group_id"],
+            group_id=group_info["group_id"]
         )
 
     user_info = message_info.get("user_info")

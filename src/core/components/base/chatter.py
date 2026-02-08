@@ -458,7 +458,7 @@ class BaseChatter(ABC):
                 sender_name = msg.sender_name or msg.sender_id or "未知用户"
 
                 # 格式化内容
-                content = str(msg.content) if msg.content else ""
+                content = str(msg.processed_plain_text) if msg.processed_plain_text else ""
 
                 # 组装行
                 line = f"【{time_str}】{sender_name}: {content}"
