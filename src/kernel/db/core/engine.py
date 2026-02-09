@@ -201,7 +201,8 @@ def _build_sqlite_config(
     db_file = Path(db_path)
     db_file.parent.mkdir(parents=True, exist_ok=True)
 
-    url = f"sqlite+aiosqlite:///{db_file.absolute()}"
+    # SQLAlchemy SQLite URL expects forward slashes even on Windows.
+    url = f"sqlite+aiosqlite:///{db_file.absolute().as_posix()}"
 
     engine_kwargs = {
         "echo": echo,
