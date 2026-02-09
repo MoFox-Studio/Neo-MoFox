@@ -46,7 +46,7 @@ class NapcatAdapterConfig(BaseConfig):
             default="blacklist",
             description="群聊名单模式: blacklist/whitelist",
         )
-        group_list: list[str] = Field(
+        group_list: list[str | int] = Field(
             default_factory=list,
             description="群聊名单；根据名单模式过滤",
         )
@@ -54,11 +54,11 @@ class NapcatAdapterConfig(BaseConfig):
             default="blacklist",
             description="私聊名单模式: blacklist/whitelist",
         )
-        private_list: list[str] = Field(
+        private_list: list[str | int] = Field(
             default_factory=list,
             description="私聊名单；根据名单模式过滤",
         )
-        ban_user_id: list[str] = Field(
+        ban_user_id: list[str | int] = Field(
             default_factory=list,
             description="全局封禁的用户 ID 列表",
         )

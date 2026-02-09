@@ -576,10 +576,70 @@ async def migrate_messages():
                         WHERE stream_id IS NULL AND chat_id IS NOT NULL
                     """)
                 )
+
+                # SQLite: 数据迁移后尝试立即删除 chat_id 以解除 NOT NULL 约束
+                # 避免后续操作或运行时因缺少 chat_id 导致 IntegrityError
+                try:
+                    # 先尝试删除索引 idx_messages_chat_id (如果存在)
+                    await session.execute(text("DROP INDEX IF EXISTS idx_messages_chat_id"))
+                    # 再删除列
+                    await session.execute(text("ALTER TABLE messages DROP COLUMN chat_id"))
+                    logger.info("SQLite: 数据迁移后立即删除 messages.chat_id")
+                except Exception as e:
+                    logger.warning(f"SQLite: 尝试立即删除 chat_id 失败: {e}")
+
+                    # 如果直接删除失败，尝试重建表策略（更稳健）
+                    try:
+                        logger.info("SQLite: 直接删除失败，尝试重建表策略...")
+                        # 1. 创建新表
+                        await session.execute(text("""
+                            CREATE TABLE messages_new (
+                                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                                message_id TEXT NOT NULL,
+                                stream_id VARCHAR(64) NOT NULL,
+                                person_id VARCHAR(100),
+                                time FLOAT NOT NULL,
+                                message_type VARCHAR(20) NOT NULL,
+                                content TEXT NOT NULL,
+                                processed_plain_text TEXT,
+                                reply_to VARCHAR(100),
+                                platform VARCHAR(50)
+                            )
+                        """))
+                        # 2. 复制数据
+                        await session.execute(text("""
+                            INSERT INTO messages_new (
+                                id, message_id, stream_id, person_id, time,
+                                message_type, content, processed_plain_text, reply_to, platform
+                            )
+                            SELECT
+                                id, message_id, stream_id, person_id, time,
+                                COALESCE(message_type, 'text'),
+                                COALESCE(content, processed_plain_text, ''),
+                                processed_plain_text, reply_to, platform
+                            FROM messages
+                        """))
+                        # 3. 删除旧表
+                        await session.execute(text("DROP TABLE messages"))
+                        # 4. 重命名新表
+                        await session.execute(text("ALTER TABLE messages_new RENAME TO messages"))
+                        
+                        # 5. 重建索引
+                        await session.execute(text("CREATE UNIQUE INDEX ix_messages_message_id ON messages (message_id)"))
+                        await session.execute(text("CREATE INDEX ix_messages_stream_id ON messages (stream_id)"))
+                        await session.execute(text("CREATE INDEX ix_messages_person_id ON messages (person_id)"))
+                        await session.execute(text("CREATE INDEX ix_messages_time ON messages (time)"))
+                        await session.execute(text("CREATE INDEX idx_messages_stream_time ON messages (stream_id, time)"))
+                        
+                        logger.info("SQLite: 通过重建表成功移除 chat_id")
+                    except Exception as recreate_err:
+                         logger.error(f"SQLite: 重建表失败: {recreate_err}")
+
             except Exception:
                 pass  # 字段可能不存在
 
         # 4. 生成 person_id - 检查源字段是否存在
+        # 注意：如果是通过重建表方式，字段可能已经不存在了，所以这里的 update 可能会失败，需要 try-except
         if db_type == "postgresql":
             check_result = await session.execute(
                 text("""
@@ -601,13 +661,17 @@ async def migrate_messages():
                 )
         else:  # SQLite
             try:
-                await session.execute(
-                    text("""
-                        UPDATE messages
-                        SET person_id = user_platform || ':' || user_id
-                        WHERE person_id IS NULL AND user_id IS NOT NULL
-                    """)
-                )
+                # 检查列是否存在再执行 UPDATE
+                check_res = await session.execute(text("PRAGMA table_info(messages)"))
+                cols = [r[1] for r in check_res.all()]
+                if 'user_platform' in cols and 'user_id' in cols:
+                    await session.execute(
+                        text("""
+                            UPDATE messages
+                            SET person_id = user_platform || ':' || user_id
+                            WHERE person_id IS NULL AND user_id IS NOT NULL
+                        """)
+                    )
             except Exception:
                 pass  # 字段可能不存在，跳过
 
@@ -892,6 +956,14 @@ async def migrate_action_records():
                         WHERE stream_id IS NULL AND chat_id IS NOT NULL
                     """)
                 )
+
+                # SQLite: 数据迁移后尝试立即删除 chat_id 以解除 NOT NULL 约束
+                try:
+                    await session.execute(text("ALTER TABLE action_records DROP COLUMN chat_id"))
+                    logger.info("SQLite: 数据迁移后立即删除 action_records.chat_id")
+                except Exception as e:
+                    logger.warning(f"SQLite: 尝试立即删除 chat_id 失败: {e}")
+
             except Exception:
                 pass  # 字段可能不存在，跳过
 

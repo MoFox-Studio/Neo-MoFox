@@ -145,6 +145,10 @@ def _toml_format_value(value: Any) -> str:
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, str):
+        if "\n" in value:
+            # 多行字符串使用三引号
+            escaped = value.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+            return f'"""\n{escaped}"""'
         return _toml_escape_string(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_format_value(v) for v in value) + "]"
