@@ -46,15 +46,15 @@ class APIProviderSection(SectionBase):
     """
 
     name: str = Field(
-        ...,
+        default="SiliconFlow",
         description="API提供商名称（如 openai、azure、gemini 等）",
     )
     base_url: str = Field(
-        ...,
+        default="https://api.siliconflow.cn/v1",
         description="API 基础 URL",
     )
     api_key: str | list[str] = Field(
-        ...,
+        default="your-siliconflow-api-key-here",
         description="API 密钥，支持单个密钥或密钥列表轮询",
     )
     client_type: Literal["openai", "gemini", "aiohttp_gemini", "bedrock"] = Field(
@@ -62,11 +62,11 @@ class APIProviderSection(SectionBase):
         description="客户端类型（openai/gemini/bedrock等）",
     )
     max_retry: int = Field(
-        default=2,
+        default=3,
         description="最大重试次数",
     )
     timeout: int = Field(
-        default=10,
+        default=30,
         description="API 调用超时时长（秒）",
     )
     retry_interval: int = Field(
@@ -165,7 +165,7 @@ class TaskConfigSection(SectionBase):
     """
 
     model_list: list[str] = Field(
-        ...,
+        default_factory=list,
         description="任务使用的模型列表（模型名称）",
     )
     max_tokens: int = Field(
@@ -182,7 +182,7 @@ class TaskConfigSection(SectionBase):
     )
     embedding_dimension: int | None = Field(
         default=None,
-        description="嵌入模型输出向量维度（仅嵌入任务使用）",
+        description="嵌入模型输出向量维度",
     )
 
 
@@ -199,39 +199,42 @@ class ModelTasksSection(SectionBase):
 
     # ========== 核心对话任务 ==========
     utils: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=[]),
-        description="组件模型配置",
+        default_factory=lambda: TaskConfigSection(model_list=["siliconflow-deepseek-ai/DeepSeek-V3.2"]),
+        description="在 MoFox 的一些组件中使用的模型，例如表情包模块，取名模块，关系模块，是 MoFox 必须的模型",
     )
     utils_small: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=[]),
-        description="组件小模型配置",
+        default_factory=lambda: TaskConfigSection(model_list=["qwen3-8b"]),
+        description="在 MoFox 的一些组件中使用的小模型，消耗量较大，建议使用速度较快的小模型",
     )
     actor: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=[]),
+        default_factory=lambda: TaskConfigSection(model_list=["siliconflow-deepseek-ai/DeepSeek-V3.2"]),
         description="动作器模型配置",
     )
     sub_actor: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=[]),
+        default_factory=lambda: TaskConfigSection(model_list=["siliconflow-deepseek-ai/DeepSeek-V3.2"]),
         description="副动作器模型配置",
     )
 
     # ========== 多模态任务 ==========
     vlm: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=[]),
-        description="视觉语言模型配置",
+        default_factory=lambda: TaskConfigSection(model_list=["qwen2.5-vl-72b"]),
+        description="图像识别模型",
     )
     voice: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=[]),
-        description="语音识别模型配置",
+        default_factory=lambda: TaskConfigSection(model_list=["sensevoice-small"]),
+        description="语音识别模型",
     )
     video: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=[]),
+        default_factory=lambda: TaskConfigSection(model_list=["qwen2.5-vl-72b"]),
         description="视频分析模型配置",
     )
-    # ========== 工具与规划 ==========
     tool_use: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=[]),
-        description="专注工具使用模型配置",
+        default_factory=lambda: TaskConfigSection(model_list=["qwen3-8b"]),
+        description="工具调用模型，需要使用支持工具调用的模型",
+    )
+    embedding: TaskConfigSection = Field(
+        default_factory=lambda: TaskConfigSection(model_list=["bge-m3"], embedding_dimension=1024),
+        description="嵌入模型配置",
     )
 
     def get_task(self, task_name: str) -> TaskConfigSection:
@@ -267,13 +270,60 @@ class ModelConfig(ConfigBase):
 
     # ========== API 提供商配置 ==========
     api_providers: list[APIProviderSection] = Field(
-        default_factory=list,
+        default_factory=lambda: [
+            APIProviderSection(
+                name="SiliconFlow",
+                base_url="https://api.siliconflow.cn/v1",
+                api_key="your-siliconflow-api-key-here",
+                client_type="openai",
+                max_retry=3,
+                timeout=30,
+                retry_interval=10,
+            ),
+        ],
         description="API 提供商列表",
     )
 
     # ========== 模型信息配置 ==========
     models: list[ModelInfoSection] = Field(
-        default_factory=list,
+        default_factory=lambda: [
+            ModelInfoSection(
+                name="siliconflow-deepseek-ai/DeepSeek-V3.2",
+                model_identifier="deepseek-ai/DeepSeek-V3.2",
+                api_provider="SiliconFlow",
+                price_in=2.0,
+                price_out=8.0,
+            ),
+            ModelInfoSection(
+                name="qwen3-8b",
+                model_identifier="Qwen/Qwen3-8B",
+                api_provider="SiliconFlow",
+                price_in=0.0,
+                price_out=0.0,
+                extra_params={"enable_thinking": False},
+            ),
+            ModelInfoSection(
+                name="qwen2.5-vl-72b",
+                model_identifier="Qwen/Qwen2.5-VL-72B-Instruct",
+                api_provider="SiliconFlow",
+                price_in=4.13,
+                price_out=4.13,
+            ),
+            ModelInfoSection(
+                name="sensevoice-small",
+                model_identifier="FunAudioLLM/SenseVoiceSmall",
+                api_provider="SiliconFlow",
+                price_in=0.0,
+                price_out=0.0,
+            ),
+            ModelInfoSection(
+                name="bge-m3",
+                model_identifier="BAAI/bge-m3",
+                api_provider="SiliconFlow",
+                price_in=0.0,
+                price_out=0.0,
+            ),
+        ],
         description="模型信息列表",
     )
 
