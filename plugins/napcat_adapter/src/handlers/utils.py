@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import io
 import ssl
@@ -18,7 +17,6 @@ if TYPE_CHECKING:
 logger = get_logger("napcat_adapter")
 
 # 简单的缓存实现，通过 kernel.storage 实现磁盘持久化存储
-_CACHE_LOCK = asyncio.Lock()
 _CACHE_LOADED = False
 _CACHE: dict[str, dict[str, dict[str, Any]]] = {
     "group_info": {},
@@ -51,23 +49,26 @@ async def _ensure_cache_loaded() -> None:
     if _CACHE_LOADED:
         return
 
-    async with _CACHE_LOCK:
-        if _CACHE_LOADED:
-            return
+    # 先加载数据，避免在持有 _CACHE_LOCK 时进行异步 IO (json_store 内部有自己的锁)
+    # 这可以防止与系统中其他同样使用 json_store 的组件产生循环死锁
+    from src.kernel.storage import json_store
 
-        from src.kernel.storage import json_store
+    try:
+        data = await json_store.load("napcat_cache")
+    except Exception as e:
+        logger.debug(f"Failed to load napcat cache: {e}")
+        data = None
 
-        try:
-            data = await json_store.load("napcat_cache")
-            if isinstance(data, dict):
-                for key, section in _CACHE.items():
-                    cached_section = data.get(key)
-                    if isinstance(cached_section, dict):
-                        section.update(cached_section)
-        except Exception as e:
-            logger.debug(f"Failed to load napcat cache: {e}")
+    if _CACHE_LOADED:
+        return
 
-        _CACHE_LOADED = True
+    if isinstance(data, dict):
+        for key, section in _CACHE.items():
+            cached_section = data.get(key)
+            if isinstance(cached_section, dict):
+                section.update(cached_section)
+
+    _CACHE_LOADED = True
 
 
 async def _save_cache_to_disk() -> None:
@@ -83,29 +84,31 @@ async def _save_cache_to_disk() -> None:
 async def _get_cached(section: str, key: str, ttl: int) -> Any | None:
     await _ensure_cache_loaded()
     now = time.time()
-    async with _CACHE_LOCK:
-        entry = _CACHE.get(section, {}).get(key)
-        if not entry:
-            return None
-        ts = entry.get("ts", 0)
-        if ts and now - ts <= ttl:
-            return entry.get("data")
-        _CACHE.get(section, {}).pop(key, None)
-        try:
-            await _save_cache_to_disk()
-        except Exception:
-            pass
+    entry = _CACHE.get(section, {}).get(key)
+    if not entry:
         return None
+    ts = entry.get("ts", 0)
+    if ts and now - ts <= ttl:
+        return entry.get("data")
+    _CACHE.get(section, {}).pop(key, None)
+
+    # 在锁外执行 IO 操作，避免长时间持有琐导致死锁或性能下降
+    try:
+        await _save_cache_to_disk()
+    except Exception:
+        pass
+    return None
 
 
 async def _set_cached(section: str, key: str, data: Any) -> None:
     await _ensure_cache_loaded()
-    async with _CACHE_LOCK:
-        _CACHE.setdefault(section, {})[key] = {"data": data, "ts": time.time()}
-        try:
-            await _save_cache_to_disk()
-        except Exception:
-            logger.debug("Write napcat cache failed")
+    _CACHE.setdefault(section, {})[key] = {"data": data, "ts": time.time()}
+
+    # 在锁外执行 IO 操作
+    try:
+        await _save_cache_to_disk()
+    except Exception:
+        logger.debug("Write napcat cache failed")
 
 
 def _get_adapter(adapter: "NapcatAdapter | None" = None) -> "NapcatAdapter":

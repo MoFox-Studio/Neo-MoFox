@@ -49,6 +49,8 @@ class BasePlugin(ABC):
     plugin_description: str = "无描述"
     plugin_version: str = "1.0.0"
 
+    configs: list["BaseConfig"] = []
+
     # 依赖的其他组件
     dependent_components: list[str] = []
 

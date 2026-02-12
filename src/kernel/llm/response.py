@@ -24,6 +24,7 @@ from .roles import ROLE
 if TYPE_CHECKING:
     from .request import LLMRequest
     from .types import ModelSet
+    from .context import LLMContextManager
 
 
 @dataclass(slots=True)
@@ -36,6 +37,7 @@ class LLMResponse:
 
     payloads: list[LLMPayload]
     model_set: "ModelSet"
+    context_manager: LLMContextManager | None = None
 
     message: str | None = None
     call_list: list[ToolCall] | None = None
@@ -46,6 +48,10 @@ class LLMResponse:
         """Initialize fields that need special handling."""
         if self.call_list is None:
             object.__setattr__(self, "call_list", [])
+        if self.context_manager is None:
+            ctx = getattr(self._upper, "context_manager", None)
+            if ctx:
+                object.__setattr__(self, "context_manager", ctx)
 
     def __await__(self):
         return self._collect_full_response().__await__()
@@ -114,10 +120,9 @@ class LLMResponse:
         self._maybe_apply_context_manager()
 
     def _maybe_apply_context_manager(self) -> None:
-        context_manager = getattr(self._upper, "context_manager", None)
-        if not context_manager:
+        if not self.context_manager:
             return
-        self.payloads = context_manager.maybe_trim(self.payloads)
+        self.payloads = self.context_manager.maybe_trim(self.payloads)
 
     def to_payload(self) -> LLMPayload:
         content_parts: list[object] = []
@@ -150,7 +155,11 @@ class LLMResponse:
         # 延迟导入，避免循环依赖
         from .request import LLMRequest
 
-        req = LLMRequest(self.model_set, request_name=getattr(self._upper, "request_name", ""))
+        req = LLMRequest(
+            self.model_set,
+            request_name=getattr(self._upper, "request_name", ""),
+            context_manager=self.context_manager,
+        )
         req.payloads = list(self.payloads)
         return await req.send(auto_append_response=auto_append_response, stream=stream)
 

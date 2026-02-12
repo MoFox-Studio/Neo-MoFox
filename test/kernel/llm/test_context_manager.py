@@ -38,7 +38,7 @@ def test_context_manager_trims_full_groups() -> None:
     manager = LLMContextManager(max_payloads=5)
     payloads = [
         LLMPayload(ROLE.SYSTEM, Text("sys")),
-        LLMPayload(ROLE.TOOL, Tool(DummyTool)),
+        LLMPayload(ROLE.TOOL, DummyTool),
         LLMPayload(ROLE.USER, Text("q1")),
         LLMPayload(ROLE.ASSISTANT, Text("a1")),
         LLMPayload(ROLE.TOOL_RESULT, ToolResult({"ok": True})),

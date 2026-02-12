@@ -150,6 +150,7 @@ class LLMRequest:
                     _auto_append_response=auto_append_response,
                     payloads=list(self.payloads),
                     model_set=model_set,
+                    context_manager=self.context_manager,
                     message=message,
                     call_list=[],
                 )

@@ -345,13 +345,13 @@ class TestExtractTools:
 
         payloads = [
             LLMPayload(ROLE.USER, Text("Hello")),
-            LLMPayload(ROLE.TOOL, Tool(tool=MockTool)),
-            LLMPayload(ROLE.TOOL, Tool(tool=MockTool)),
+            LLMPayload(ROLE.TOOL, MockTool),
+            LLMPayload(ROLE.TOOL, MockTool),
         ]
         tools = _extract_tools(payloads)
 
         assert len(tools) == 2
-        assert all(isinstance(t, Tool) for t in tools)
+        assert all(t is MockTool for t in tools)
 
     def test_extract_tools_from_non_tool_roles(self) -> None:
         """Test that non-TOOL roles don't extract tools."""

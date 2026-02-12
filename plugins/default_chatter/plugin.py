@@ -208,7 +208,15 @@ class DefaultChatter(BaseChatter):
             LLMPayload(ROLE.USER, Text(f"【新收到待判定消息】\n{unreads_text}"))
         )
 
-        request = create_llm_request(model_set, "sub_agent")
+        context_manager = LLMContextManager(
+            max_payloads=5
+        )
+
+        request = create_llm_request(
+            model_set,
+            "sub_agent",
+            context_manager=context_manager,
+        )
         for p in sub_payloads:
             request.add_payload(p)
 
@@ -349,7 +357,8 @@ class DefaultChatter(BaseChatter):
                     logger.warning(
                         "LLM 返回了纯文本而非 tool call: " f"{response.message[:100]}"
                     )
-                continue
+                    yield Stop(0)  # 立即结束对话，等待下一轮新消息触发
+                    return
 
             # ── 处理 tool calls ──
             should_wait = False

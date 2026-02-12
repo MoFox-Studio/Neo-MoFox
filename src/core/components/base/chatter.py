@@ -101,7 +101,6 @@ class BaseChatter(ABC):
         chatter_name: 聊天器名称
         chatter_description: 聊天器描述
         associated_platforms: 关联的平台列表
-        chatter_allow: 支持的 Chatter 列表（用于多 Chatter 场景）
         chat_type: 支持的聊天类型
 
     Examples:
@@ -123,7 +122,6 @@ class BaseChatter(ABC):
     chatter_description: str = ""
 
     associated_platforms: list[str] = []
-    chatter_allow: list[str] = []
     chat_type: ChatType = ChatType.ALL
 
     # 组件级依赖（精确到组件签名）
