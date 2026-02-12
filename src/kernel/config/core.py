@@ -316,7 +316,10 @@ def _placeholder_for_type(annotation: Any) -> Any:
         return {}
 
     if args and type(None) in args:
-        return None
+        for arg in args:
+            if arg is type(None):
+                continue
+            return _placeholder_for_type(arg)
 
     if annotation in (str,):
         return ""
@@ -343,18 +346,8 @@ def _render_toml_with_signature(
     sections = _iter_sections(config_model)
 
     for idx, section in enumerate(sections):
-        lines.append("")
-        # 获取 Section 的 docstring 作为分类标题
-        section_doc = inspect.getdoc(section.model) or ""
-        title = section_doc.splitlines()[0].strip() if section_doc else section.name
-        
-        # 构造装饰线，使标题居中
-        line_width = 80
-        padding = (line_width - len(title) - 4) // 2
-        header_line = "# " + "=" * padding + " " + title + " " + "=" * (line_width - padding - len(title) - 4)
-        
-        lines.append(header_line)
-        lines.append("")
+        if idx != 0:
+            lines.append("")
 
         section_data = data.get(section.name)
         if section.is_list:
@@ -372,7 +365,6 @@ def _render_toml_with_signature(
                     item,
                     is_list=True,
                     include_doc=(item_idx == 0),
-                    show_inline_comments=(item_idx == 0),
                 )
                 if item_idx != len(items) - 1:
                     lines.append("")
@@ -388,7 +380,6 @@ def _render_toml_with_signature(
             section_data,
             is_list=False,
             include_doc=True,
-            show_inline_comments=True,
         )
 
     while lines and lines[-1] == "":
@@ -405,32 +396,21 @@ def _render_section_block(
     *,
     is_list: bool,
     include_doc: bool,
-    section_comment: str = "",
-    show_inline_comments: bool = True,
 ) -> None:
-    # 移除 Section 顶部的 docstring 注释
+    if include_doc:
+        section_doc = inspect.getdoc(section_model) or ""
+        if section_doc:
+            for doc_line in section_doc.splitlines():
+                lines.append(f"# {doc_line}")
 
     if is_list:
-        lines.append(f"[[{section_name}]]{section_comment if show_inline_comments else ''}")
+        lines.append(f"[[{section_name}]]")
     else:
-        lines.append(f"[{section_name}]{section_comment if show_inline_comments else ''}")
+        lines.append(f"[{section_name}]")
 
     for field_name, field in section_model.model_fields.items():
-        value = section_data.get(field_name)
-        # 如果值为 None 且不是嵌套模型，则跳过渲染（实现可选字段不显示）
         annotation = field.annotation
         nested_model, nested_is_list = _get_section_model_from_annotation(annotation)
-        
-        if value is None and nested_model is None:
-            continue
-
-        # 提取 description 第一行作为行内注释
-        description = field.description or ""
-        inline_comment = ""
-        if description and show_inline_comments:
-            first_line = description.splitlines()[0].strip()
-            if first_line:
-                inline_comment = f" # {first_line}"
 
         if nested_model is not None:
             nested_data = section_data.get(field_name)
@@ -450,8 +430,6 @@ def _render_section_block(
                         item,
                         is_list=True,
                         include_doc=(nested_idx == 0),
-                        section_comment=inline_comment,
-                        show_inline_comments=show_inline_comments,
                     )
                 continue
 
@@ -465,17 +443,36 @@ def _render_section_block(
                 nested_data,
                 is_list=False,
                 include_doc=True,
-                section_comment=inline_comment,
-                show_inline_comments=show_inline_comments,
             )
             continue
 
-        # 移除 # signature 注释行
+        description = field.description or ""
+        if description:
+            for doc_line in description.splitlines():
+                lines.append(f"# {doc_line}")
 
-        value_str = _toml_format_value(value)
-        
-        # 拼接 key = value 和行内注释
-        lines.append(f"{field_name} = {value_str}{inline_comment}")
+        type_text = _type_repr(annotation)
+
+        default_text = None
+        if field.default_factory is not None:
+            try:
+                default_text = _toml_format_value(_eval_default_factory(field.default_factory))
+            except Exception:
+                default_text = None
+        elif field.default is not None and field.default is not ...:
+            default_text = _toml_format_value(field.default)
+
+        sig_parts = [f"允许的类型：{type_text}"]
+        if default_text is not None:
+            sig_parts.append(f"默认值：{default_text}")
+        else:
+            sig_parts.append("默认值：<必填>")
+
+        lines.append("# " + ", ".join(sig_parts))
+
+        value = section_data.get(field_name)
+        lines.append(f"{field_name} = {_toml_format_value(value)}")
+        lines.append("")
 
     while lines and lines[-1] == "":
         lines.pop()
