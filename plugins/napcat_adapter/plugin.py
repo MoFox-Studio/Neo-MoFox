@@ -19,7 +19,7 @@ from mofox_wire import CoreSink, MessageEnvelope, WebSocketAdapterOptions
 
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.core.components.base import BaseAdapter, BaseConfig, BasePlugin
+from src.core.components.base import BaseAdapter, BasePlugin
 from src.core.components.loader import register_plugin
 
 from .config import NapcatAdapterConfig
@@ -332,6 +332,7 @@ class NapcatAdapterPlugin(BasePlugin):
     plugin_version = "2.0.0"
     plugin_author = "MoFox Team"
     plugin_description = "Napcat/OneBot 11 适配器（基于 Neo-MoFox 重写）"
+    configs = [NapcatAdapterConfig]
 
 
     def get_components(self) -> list[type]:
@@ -340,4 +341,4 @@ class NapcatAdapterPlugin(BasePlugin):
         Returns:
             list[type]: 插件内所有组件类的列表
         """
-        return [NapcatAdapter, NapcatAdapterConfig]
+        return [NapcatAdapter]

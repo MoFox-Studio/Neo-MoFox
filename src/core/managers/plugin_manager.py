@@ -87,36 +87,42 @@ class PluginManager:
             logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
             return False
 
-        # 4. 实例化插件（先用 None，之后检查是否有 Config 组件）
+        # 4. 通过插件类属性 configs 加载配置
+        from src.core.components.base.config import BaseConfig
+        from src.core.managers.config_manager import get_config_manager
+
+        config_instance = None
+        has_config = False
+        config_classes = getattr(plugin_class, "configs", [])
+
+        if not isinstance(config_classes, list):
+            logger.warning(
+                f"插件 '{plugin_name}' 的 configs 不是 list 类型，将忽略并继续兼容旧逻辑"
+            )
+            config_classes = []
+
+        for config_cls in config_classes:
+            if isinstance(config_cls, type) and issubclass(config_cls, BaseConfig):
+                config_instance = get_config_manager().load_config(plugin_name, config_cls)
+                has_config = True
+                break
+
+        # 5. 实例化插件（注入已加载配置）
         try:
-            plugin_instance = plugin_class(config=None)  # type: ignore
+            plugin_instance = plugin_class(config=config_instance)  # type: ignore
         except Exception as e:
             error_msg = f"插件实例化失败: {e}"
             self._failed_plugins[plugin_name] = error_msg
             logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
             return False
 
-        # 4.1 检查是否有 Config 组件，如果有则加载配置
-        from src.core.components.base.config import BaseConfig
-        from src.core.managers.config_manager import get_config_manager
-
-        has_config = False
-        for component_cls in plugin_instance.get_components():
-            if isinstance(component_cls, type) and issubclass(
-                component_cls, BaseConfig
-            ):
-                has_config = True
-                config = get_config_manager().load_config(plugin_name, component_cls)
-                plugin_instance.config = config
-                break
-
         if not has_config:
-            logger.debug(f"插件 '{plugin_name}' 没有 Config 组件，使用空配置")
+            logger.debug(f"插件 '{plugin_name}' 未通过类属性 configs 声明配置，使用空配置")
 
-        # 5. 注册组件到全局注册表
+        # 6. 注册组件到全局注册表
         await self._register_components(plugin_instance)
 
-        # 6. 调用生命周期钩子
+        # 7. 调用生命周期钩子
         try:
             await plugin_instance.on_plugin_loaded()
         except Exception as e:
@@ -124,7 +130,7 @@ class PluginManager:
                 f"调用插件 '{plugin_name}' 的 on_plugin_loaded 钩子时出错: {e}"
             )
 
-        # 6.1 门控 Collection 内部组件：未解包前默认不可用
+        # 7.1 门控 Collection 内部组件：未解包前默认不可用
         try:
             from src.core.managers.collection_manager import get_collection_manager
             from src.core.components.registry import get_global_registry
@@ -146,7 +152,7 @@ class PluginManager:
         except Exception as e:
             logger.warning(f"插件 '{plugin_name}' Collection 门控初始化失败: {e}")
 
-        # 7. 记录并更新状态
+        # 8. 记录并更新状态
         self._loaded_plugins[plugin_name] = plugin_instance
         self._manifests[plugin_name] = manifest
         self._plugin_paths[plugin_name] = plugin_path
@@ -555,13 +561,35 @@ class PluginManager:
         registry = get_global_registry()
         state_manager = get_global_state_manager()
 
-        # 获取插件的所有组件
+        from src.core.components.base.config import BaseConfig
+
+        # 获取插件的所有组件（Config 仅允许通过类属性 configs 声明）
         components = plugin_instance.get_components()
+
+        normalized_components: list[type] = []
+        for component_cls in components:
+            if (
+                isinstance(component_cls, type)
+                and issubclass(component_cls, BaseConfig)
+            ):
+                logger.warning(
+                    f"插件 '{plugin_instance.plugin_name}' 在 get_components() 中声明了 Config 组件 "
+                    f"{component_cls.__name__}，该路径已弃用并将被忽略，请改用类属性 configs"
+                )
+                continue
+            normalized_components.append(component_cls)
+
+        config_components = getattr(plugin_instance.__class__, "configs", [])
+        if isinstance(config_components, list):
+            for config_cls in config_components:
+                if config_cls not in normalized_components:
+                    normalized_components.append(config_cls)
+
         plugin_name = plugin_instance.plugin_name
 
-        logger.debug(f"开始注册插件 '{plugin_name}' 的 {len(components)} 个组件")
+        logger.debug(f"开始注册插件 '{plugin_name}' 的 {len(normalized_components)} 个组件")
 
-        for component_cls in components:
+        for component_cls in normalized_components:
             # 推断组件类型和名称
             component_type, component_name, dependencies = self._identify_component(
                 component_cls

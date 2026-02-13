@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any, AsyncGenerator
+from typing import TYPE_CHECKING, Any, AsyncGenerator, cast
 
 from src.kernel.logger import get_logger, COLOR
 
@@ -304,7 +304,7 @@ class StreamLoopManager:
         unread_count_now = len(context.unread_messages)
         now = time.time()
 
-        wait_time = getattr(last_yield, "time", None)
+        wait_time = cast(float | None, getattr(last_yield, "time", None))
 
         if isinstance(last_yield, Wait):
             if wait_time is None:
@@ -318,6 +318,8 @@ class StreamLoopManager:
 
         elif isinstance(last_yield, Stop):
             # Stop(seconds): 冷却结束且出现新未读消息时恢复
+            assert wait_time is not None
+            
             cooldown_ready = now >= yielded_at + float(wait_time)
             message_ready = unread_count_now > unread_count_at_yield
             if not (cooldown_ready and message_ready):

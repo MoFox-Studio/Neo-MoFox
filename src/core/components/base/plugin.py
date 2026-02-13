@@ -21,6 +21,7 @@ class BasePlugin(ABC):
         plugin_name: 插件名称（唯一标识符）
         plugin_description: 插件描述
         plugin_version: 插件版本
+        configs: 插件配置类列表，会在插件实例化前优先加载
         dependent_components: 依赖的其他组件列表，格式：["plugin_name:component_type:component_name"]
 
     Examples:
@@ -49,7 +50,7 @@ class BasePlugin(ABC):
     plugin_description: str = "无描述"
     plugin_version: str = "1.0.0"
 
-    configs: list["BaseConfig"] = []
+    configs: list[type["BaseConfig"]] = []
 
     # 依赖的其他组件
     dependent_components: list[str] = []
