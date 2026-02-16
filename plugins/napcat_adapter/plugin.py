@@ -32,6 +32,21 @@ from .src.handlers.to_napcat.send_handler import SendHandler
 logger = get_logger("napcat_adapter")
 
 
+def _validate_bot_identity(config: NapcatAdapterConfig) -> None:
+    """校验 Bot 身份配置。"""
+
+    qq_id = str(config.bot.qq_id).strip()
+    qq_nickname = str(config.bot.qq_nickname).strip()
+
+    invalid_id_values = {"", "0", "none", "null", "undefined", "pydanticundefined"}
+    if qq_id.lower() in invalid_id_values or not qq_id.isdigit():
+        raise ValueError("配置项 bot.qq_id 无效：必须为非空数字字符串")
+
+    invalid_nickname_values = {"", "none", "null", "undefined", "pydanticundefined"}
+    if qq_nickname.lower() in invalid_nickname_values:
+        raise ValueError("配置项 bot.qq_nickname 无效：必须为非空昵称")
+
+
 class NapcatAdapter(BaseAdapter):
     """Napcat 适配器 - 完全基于 mofox-wire 架构"""
 
@@ -176,6 +191,12 @@ class NapcatAdapter(BaseAdapter):
     async def on_adapter_loaded(self) -> None:
         """适配器加载时的初始化"""
         logger.info("Napcat 适配器正在启动...")
+
+        if not self.plugin or not self.plugin.config:
+            raise RuntimeError("Napcat 适配器启动失败：缺少插件配置")
+
+        config = cast(NapcatAdapterConfig, self.plugin.config)
+        _validate_bot_identity(config)
 
         # 设置处理器配置（将整个 plugin 对象传递给处理器）
         # 注意：handlers 现在会直接访问 plugin.config 而不是接收 dict

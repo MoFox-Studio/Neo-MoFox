@@ -108,9 +108,13 @@ class ConfigBase(BaseModel):
 
     @classmethod
     def default(cls) -> ConfigData:
-        """生成默认配置字典。"""
+        """生成默认配置字典。
 
-        return cls().model_dump()  # type: ignore[return-value]
+        对于没有显式默认值的必填字段，会按字段类型生成占位值，
+        以确保默认配置文件可被稳定生成。
+        """
+
+        return _merge_with_model_defaults(cls, {})
 
 
 def _normalize_newlines(text: str) -> str:
@@ -459,7 +463,11 @@ def _render_section_block(
                 default_text = _toml_format_value(_eval_default_factory(field.default_factory))
             except Exception:
                 default_text = None
-        elif field.default is not None and field.default is not ...:
+        elif (
+            field.default is not None
+            and field.default is not ...
+            and field.default is not PydanticUndefined
+        ):
             default_text = _toml_format_value(field.default)
 
         sig_parts = [f"值类型：{type_text}"]

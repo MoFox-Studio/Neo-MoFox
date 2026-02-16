@@ -29,6 +29,26 @@ class TestConfig(BaseConfig):
     test_section: TestSection = Field(default_factory=TestSection)
 
 
+class RequiredSection(SectionBase):
+    """包含必填字段的测试配置节。"""
+
+    qq_id: str = Field(description="Bot 的 QQ 账号 ID")
+    qq_nickname: str = Field(description="Bot 的 QQ 昵称")
+
+
+class RequiredConfig(BaseConfig):
+    """包含必填字段的测试配置类。"""
+
+    config_name: ClassVar[str] = "required_config"
+    config_description: ClassVar[str] = "Required fields config"
+
+    @config_section("bot")
+    class BotSection(RequiredSection):
+        pass
+
+    bot: BotSection
+
+
 class TestBaseConfig:
     """测试 BaseConfig 类。"""
 
@@ -95,6 +115,23 @@ class TestBaseConfig:
         mock_mkdir.assert_called_once()
         args = mock_write.call_args
         assert args is not None
+
+    @patch("src.core.components.base.config.Path.write_text")
+    @patch("src.core.components.base.config.Path.mkdir")
+    def test_generate_default_with_required_fields(self, mock_mkdir, mock_write):
+        """测试含必填字段配置也能生成默认配置。"""
+        RequiredConfig._plugin_ = "required_plugin"
+
+        RequiredConfig.generate_default()
+
+        mock_mkdir.assert_called_once()
+        mock_write.assert_called_once()
+
+        call_args = mock_write.call_args
+        assert call_args is not None
+        toml_text = call_args.args[0]
+        assert "qq_id = \"\"" in toml_text
+        assert "qq_nickname = \"\"" in toml_text
 
     def test_generate_default_no_config_name(self):
         """测试没有 config_name 时生成默认配置。"""

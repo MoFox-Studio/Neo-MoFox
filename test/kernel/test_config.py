@@ -277,6 +277,26 @@ option2 = 100
             }
         }
 
+    def test_configbase_default_with_required_fields(self) -> None:
+        """测试存在必填字段时仍可生成默认配置（使用占位值）。"""
+
+        class TestConfig(ConfigBase):
+            @config_section("bot")
+            class BotSection(SectionBase):
+                qq_id: str = Field(description="Bot QQ ID")
+                qq_nickname: str = Field(description="Bot QQ 昵称")
+
+            bot: BotSection
+
+        defaults = TestConfig.default()
+
+        assert defaults == {
+            "bot": {
+                "qq_id": "",
+                "qq_nickname": "",
+            }
+        }
+
     def test_configbase_multiple_inheritance(self) -> None:
         """测试多层继承时字段继承行为（Pydantic 语义）"""
         class BaseConfig(ConfigBase):

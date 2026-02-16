@@ -549,7 +549,7 @@ class PluginManager:
         """注册插件的所有组件到全局注册表。
 
         通过 get_components() 获取插件的所有组件类，推断组件类型，
-        构建签名，注册到全局注册表，并通知对应的管理器。
+        构建签名，注册到全局注册表。
 
         Args:
             plugin_instance: 插件实例
