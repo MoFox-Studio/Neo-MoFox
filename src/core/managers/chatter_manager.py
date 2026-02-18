@@ -200,14 +200,14 @@ class ChatterManager:
 
             score = 0
             chatter_chat_type = self._normalize_chat_type(
-                getattr(chatter_cls, "chat_type", None)
+                chatter_cls.chat_type
             )
             if stream_chat_type and chatter_chat_type == stream_chat_type:
                 score += 2
             elif chatter_chat_type in (ChatType.ALL, None):
                 score += 1
 
-            platforms = getattr(chatter_cls, "associated_platforms", [])
+            platforms = chatter_cls.associated_platforms
             if platforms:
                 score += 1
 
@@ -234,12 +234,12 @@ class ChatterManager:
         platform: str,
     ) -> bool:
         chatter_chat_type = ChatterManager._normalize_chat_type(
-            getattr(chatter_cls, "chat_type", None)
+            chatter_cls.chat_type
         )
         if stream_chat_type and chatter_chat_type not in (None, ChatType.ALL, stream_chat_type):
             return False
 
-        platforms = getattr(chatter_cls, "associated_platforms", [])
+        platforms = chatter_cls.associated_platforms
         if platforms and platform and platform not in platforms:
             return False
 
@@ -249,9 +249,7 @@ class ChatterManager:
     def _get_plugin_name_from_chatter(
         chatter_cls: type["BaseChatter"],
     ) -> str | None:
-        signature = chatter_cls.get_signature() if hasattr(chatter_cls, "get_signature") else None
-        if not signature:
-            signature = getattr(chatter_cls, "_signature_", None)
+        signature = chatter_cls.get_signature()
         if not signature:
             return None
         try:

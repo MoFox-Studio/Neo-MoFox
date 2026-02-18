@@ -75,13 +75,9 @@ class BaseCollection(ABC, LLMUsable):
         """
         signature = self.get_signature()
         if not signature:
-            sig = getattr(self.__class__, "_signature_", None)
-            if isinstance(sig, str) and sig:
-                signature = sig
-            else:
-                plugin_name = getattr(self.plugin, "plugin_name", "")
-                if plugin_name:
-                    signature = f"{plugin_name}:collection:{self.collection_name}"
+            plugin_name = self.plugin.plugin_name
+            if plugin_name:
+                signature = f"{plugin_name}:collection:{self.collection_name}"
 
         if not signature:
             return False, {"error": "Collection signature 未就绪"}
@@ -98,7 +94,7 @@ class BaseCollection(ABC, LLMUsable):
 
         component_signatures: list[str] = []
         for component_cls in unpacked:
-            sig = getattr(component_cls, "_signature_", None)
+            sig = component_cls.get_signature()  # type: ignore[attr-defined]
             if isinstance(sig, str):
                 component_signatures.append(sig)
 

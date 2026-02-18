@@ -373,27 +373,10 @@ class CollectionManager:
 
         优化：优先使用 _signature_ 属性（O(1)），避免注册表遍历。
         """
-        # 优先使用 _signature_ 属性（大多数组件都有这个属性）
-        sig = getattr(component_cls, "_signature_", None)
-        if isinstance(sig, str) and sig:
-            return sig
-
-        # 尝试通过组件名称构建签名（避免遍历）
-        plugin_name = getattr(component_cls, "plugin_name", None)
-        if plugin_name and plugin_name != "unknown_plugin":
-            # 检查组件类型
-            if issubclass(component_cls, BaseAction):
-                action_name = getattr(component_cls, "action_name", None)
-                if action_name:
-                    return f"{plugin_name}:action:{action_name}"
-            elif issubclass(component_cls, BaseTool):
-                tool_name = getattr(component_cls, "tool_name", None)
-                if tool_name:
-                    return f"{plugin_name}:tool:{tool_name}"
-            elif issubclass(component_cls, BaseCollection):
-                collection_name = getattr(component_cls, "collection_name", None)
-                if collection_name:
-                    return f"{plugin_name}:collection:{collection_name}"
+        if issubclass(component_cls, BaseAction | BaseTool | BaseCollection):
+            sig = component_cls.get_signature()  # type: ignore[attr-defined]
+            if isinstance(sig, str) and sig:
+                return sig
 
         # 最后才从注册表反向查找（O(n)）
         registry = get_global_registry()

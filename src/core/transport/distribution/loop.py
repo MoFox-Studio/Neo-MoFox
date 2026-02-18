@@ -143,7 +143,7 @@ async def run_chat_stream(
 
                         # 修正 chat_type：如果有 group_id 但 chat_type 不是 group，以 group_id 为准
                         actual_chat_type = chat_stream.chat_type
-                        if getattr(chat_stream, "group_id", None) and actual_chat_type == "private":
+                        if chat_stream.group_id and actual_chat_type == "private":
                             actual_chat_type = "group"
 
                         chatter = chatter_manager.get_or_create_chatter_for_stream(

@@ -142,7 +142,7 @@ class BaseCommand(ABC):
         """
         for name, method in inspect.getmembers(self, predicate=inspect.ismethod):
             if hasattr(method, "_cmd_route"):
-                route_path = getattr(method, "_cmd_route")
+                route_path = method._cmd_route  # type: ignore[attr-defined]
                 self._register_route(route_path, method)
 
     def _register_route(self, path: list[str], handler: Callable) -> None:
