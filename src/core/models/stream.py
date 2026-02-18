@@ -169,7 +169,6 @@ class ChatStream:
         stream_id: str,
         platform: str = "",
         chat_type: str = "private",
-        group_id: str | None = None,
         bot_id: str = "",
         bot_nickname: str = "",
     ) -> None:
@@ -179,14 +178,12 @@ class ChatStream:
             stream_id: 聊天流唯一标识符
             platform: 平台标识
             chat_type: 聊天类型（private/group/discuss）
-            group_id: 群组 ID（群聊时使用）
             bot_id: 机器人 ID
             bot_nickname: 机器人昵称
         """
         self.stream_id = stream_id
         self.platform = platform
         self.chat_type = chat_type
-        self.group_id = group_id
         self.bot_id = bot_id
         self.bot_nickname = bot_nickname
         self.create_time = time.time()

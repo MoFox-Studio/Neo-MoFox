@@ -141,13 +141,8 @@ async def run_chat_stream(
                         if not chat_stream:
                             continue
 
-                        # 修正 chat_type：如果有 group_id 但 chat_type 不是 group，以 group_id 为准
-                        actual_chat_type = chat_stream.chat_type
-                        if chat_stream.group_id and actual_chat_type == "private":
-                            actual_chat_type = "group"
-
                         chatter = chatter_manager.get_or_create_chatter_for_stream(
-                            stream_id, actual_chat_type, chat_stream.platform
+                            stream_id, chat_stream.chat_type, chat_stream.platform
                         )
                     
                     if chatter:
@@ -172,10 +167,6 @@ async def run_chat_stream(
                     
                     # 执行一步迭代
                     result = await anext(chatter_gene)
-
-                    # LLM 调用可能耗时较长，完成后立即刷新心跳，
-                    # 避免 WatchDog 在正常处理期间误报"响应缓慢"
-                    get_watchdog().feed_dog(stream_id=stream_id)
                     
                     # 4. 根据执行结果处理状态
                     if isinstance(result, Success):
