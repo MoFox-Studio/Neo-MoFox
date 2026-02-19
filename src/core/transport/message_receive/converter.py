@@ -221,7 +221,7 @@ class MessageConverter:
                     person = await get_user_query_helper().person_crud.get_by(
                         person_id=person_id
                     )
-                    if person and getattr(person, "user_id", None):
+                    if person and person.user_id:
                         target_user_id = str(person.user_id)
                 except Exception:
                     target_user_id = None

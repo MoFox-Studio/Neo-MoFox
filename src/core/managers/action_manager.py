@@ -526,7 +526,7 @@ class ActionManager:
         """
         # 优先使用 _signature_ 属性（在 plugin_manager 注册时设置）
         if hasattr(action_cls, "_signature_"):
-            return getattr(action_cls, "_signature_")  # type: ignore[attr-defined]
+            return action_cls._signature_  # type: ignore[attr-defined]
 
         # 如果属性不存在，从注册表反向查找
         registry = get_global_registry()

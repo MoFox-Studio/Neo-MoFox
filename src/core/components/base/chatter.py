@@ -512,13 +512,13 @@ class BaseChatter(ABC):
         pending_by_id: dict[str, Message] = {
             msg.message_id: msg
             for msg in unread_messages
-            if getattr(msg, "message_id", "")
+            if msg.message_id
         }
 
         flushed_count = 0
         remained_unreads: list[Message] = []
         for msg in context.unread_messages:
-            msg_id = getattr(msg, "message_id", "")
+            msg_id = msg.message_id
             if msg_id and msg_id in pending_by_id:
                 context.add_history_message(msg)
                 flushed_count += 1

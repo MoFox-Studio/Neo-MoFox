@@ -93,7 +93,7 @@ class PluginManager:
 
         config_instance = None
         has_config = False
-        config_classes = getattr(plugin_class, "configs", [])
+        config_classes = plugin_class.configs  # type: ignore[attr-defined]
 
         if not isinstance(config_classes, list):
             logger.warning(
@@ -579,7 +579,7 @@ class PluginManager:
                 continue
             normalized_components.append(component_cls)
 
-        config_components = getattr(plugin_instance.__class__, "configs", [])
+        config_components = plugin_instance.__class__.configs  # type: ignore[attr-defined]
         if isinstance(config_components, list):
             for config_cls in config_components:
                 if config_cls not in normalized_components:
@@ -680,7 +680,7 @@ class PluginManager:
                     component_cls, base_cls
                 ):
                     component_name = getattr(component_cls, name_attr, None)
-                    dependencies = getattr(component_cls, "dependencies", [])
+                    dependencies = component_cls.dependencies  # type: ignore[attr-defined]
                     return comp_type, component_name, dependencies
             except TypeError:
                 # component_cls 不是类

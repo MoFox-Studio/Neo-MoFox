@@ -355,11 +355,11 @@ class StreamManager:
                 context.unread_messages = [
                     msg
                     for msg in context.unread_messages
-                    if getattr(msg, "message_id", None) != message.message_id
+                    if msg.message_id != message.message_id
                 ]
 
                 exists_in_history = any(
-                    getattr(msg, "message_id", None) == message.message_id
+                    msg.message_id == message.message_id
                     for msg in context.history_messages
                 )
                 if not exists_in_history:
@@ -764,8 +764,8 @@ class StreamManager:
         if isinstance(extra_person_id, str) and extra_person_id:
             return extra_person_id
 
-        sender_id = str(getattr(message, "sender_id", "") or "")
-        platform = str(getattr(message, "platform", "") or "")
+        sender_id = str(message.sender_id or "")
+        platform = str(message.platform or "")
         if not sender_id or not platform:
             return None
 

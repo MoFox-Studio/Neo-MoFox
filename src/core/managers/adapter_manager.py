@@ -168,12 +168,7 @@ class AdapterManager:
 
         try:
             # 停止适配器
-            stop = getattr(adapter_instance, "stop", None)
-            if callable(stop):
-                result = stop()
-                # 如果是协程，await它
-                if asyncio.iscoroutine(result):
-                    await result
+            await adapter_instance.stop()
 
             # 从活跃列表中移除
             del self._active_adapters[signature]
@@ -305,10 +300,7 @@ class AdapterManager:
             >>> {'bot_id': '12345678', 'bot_nickname': 'MyBot'}
         """
         for adapter in self._active_adapters.values():
-            if (
-                hasattr(adapter, "platform")
-                and getattr(adapter, "platform") == platform
-            ):
+            if adapter.platform == platform:
                 return await adapter.get_bot_info()
         return None
 

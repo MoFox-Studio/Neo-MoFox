@@ -584,7 +584,7 @@ class ConsoleUIManager:
                 str(idx),
                 plugin_name,
                 manifest.version,
-                getattr(manifest, "author", "-"),
+                manifest.author,
                 desc,
                 deps,
             )

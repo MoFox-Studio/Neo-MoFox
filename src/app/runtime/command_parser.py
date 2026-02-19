@@ -302,7 +302,7 @@ class CommandParser:
 
         for plugin_name, plugin in plugins.items():
             # 尝试获取版本信息
-            version = getattr(plugin, "plugin_version", "unknown")
+            version = plugin.plugin_version
             status = "[green]运行中[/green]"
 
             table.add_row(plugin_name, version, status)
