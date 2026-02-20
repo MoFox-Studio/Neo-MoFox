@@ -296,3 +296,36 @@ class BaseAdapter(AdapterBase):
             "bot_name": "Unknown Bot",
             "platform": self.platform,
         }
+
+    async def send_adapter_command(
+        self, command_name: str, command_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """发送命令到适配器。
+
+        这是一个通用的命令接口，允许直接调用适配器特定的功能。
+        适配器基类提供默认实现，子类可以重写以实现平台特定的命令处理。
+
+        Args:
+            command_name: 命令名称（如 "get_group_list", "send_group_poke" 等）
+            command_data: 命令参数字典
+
+        Returns:
+            dict[str, Any]: 命令执行结果，格式为:
+                - 成功: {"status": "ok", "data": {...}, "message": "..."}
+                - 失败: {"status": "failed", "message": "错误信息"}
+                - 错误: {"status": "error", "message": "错误信息"}
+
+        Examples:
+            >>> # 在子类中重写
+            >>> async def send_adapter_command(self, command_name: str, command_data: dict) -> dict:
+            ...     if command_name == "get_group_list":
+            ...         groups = await self.platform_api.get_groups()
+            ...         return {"status": "ok", "data": groups}
+            ...     return await super().send_adapter_command(command_name, command_data)
+        """
+        # 默认实现：返回不支持的命令
+        return {
+            "status": "error",
+            "message": f"适配器 {self.adapter_name} 不支持命令: {command_name}",
+            "data": None,
+        }

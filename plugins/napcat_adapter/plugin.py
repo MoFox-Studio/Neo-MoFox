@@ -336,6 +336,89 @@ class NapcatAdapter(BaseAdapter):
             "bot_nickname": config.bot.qq_nickname,
             "platform": self.platform,
         }
+
+    async def send_adapter_command(
+        self, command_name: str, command_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        发送命令到 Napcat 适配器。
+
+        此方法将命令转换为 OneBot 11 标准的 API 调用。
+        支持所有 Napcat/OneBot 11 的 API 动作。
+
+        Args:
+            command_name: OneBot API 动作名称（如 "get_group_list", "send_group_poke" 等）
+            command_data: API 参数字典
+
+        Returns:
+            dict: 命令执行结果
+                - 成功: {"status": "ok", "data": {...}, "message": "..."}
+                - 失败: {"status": "failed", "message": "..."}
+                - 错误: {"status": "error", "message": "..."}
+
+        Examples:
+            >>> # 获取群列表
+            >>> result = await adapter.send_adapter_command("get_group_list", {})
+            >>> # 发送戳一戳
+            >>> result = await adapter.send_adapter_command(
+            ...     "send_group_poke",
+            ...     {"group_id": 123456, "user_id": 789012}
+            ... )
+        """
+        try:
+            # 调用 Napcat API
+            response = await self.send_napcat_api(
+                action=command_name,
+                params=command_data,
+                timeout=30.0
+            )
+
+            # 解析 OneBot 响应
+            # OneBot 11 标准响应格式:
+            # {"status": "ok", "retcode": 0, "data": {...}}
+            # {"status": "failed", "retcode": 1, "msg": "..."}
+            if response.get("status") == "ok":
+                return {
+                    "status": "ok",
+                    "data": response.get("data"),
+                    "message": "命令执行成功"
+                }
+            elif response.get("status") == "failed":
+                return {
+                    "status": "failed",
+                    "message": response.get("msg") or response.get("message", "未知错误"),
+                    "data": response.get("data")
+                }
+            else:
+                # 异常响应格式
+                return {
+                    "status": "error",
+                    "message": f"未知响应状态: {response.get('status')}",
+                    "data": response
+                }
+
+        except asyncio.TimeoutError:
+            logger.error(f"执行适配器命令 '{command_name}' 超时")
+            return {
+                "status": "error",
+                "message": f"命令执行超时（30秒）",
+                "data": None
+            }
+        except RuntimeError as e:
+            # WebSocket 连接未建立等运行时错误
+            logger.error(f"执行适配器命令 '{command_name}' 失败: {e}")
+            return {
+                "status": "error",
+                "message": f"适配器未就绪: {str(e)}",
+                "data": None
+            }
+        except Exception as e:
+            logger.error(f"执行适配器命令 '{command_name}' 时发生异常: {e}")
+            return {
+                "status": "error",
+                "message": f"执行命令失败: {str(e)}",
+                "data": None
+            }
     
 @register_plugin
 class NapcatAdapterPlugin(BasePlugin):

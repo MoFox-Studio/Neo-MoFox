@@ -304,6 +304,57 @@ class AdapterManager:
                 return await adapter.get_bot_info()
         return None
 
+    async def send_adapter_command(
+        self, adapter_sign: str, command_name: str, command_data: dict
+    ) -> dict:
+        """向指定适配器发送命令。
+
+        通过适配器签名定位适配器，然后调用其 send_adapter_command 方法。
+
+        Args:
+            adapter_sign: 适配器组件签名，格式为 'plugin_name:adapter:adapter_name'
+            command_name: 命令名称
+            command_data: 命令参数字典
+
+        Returns:
+            dict: 命令执行结果，格式为:
+                - 成功: {"status": "ok", "data": {...}, "message": "..."}
+                - 失败: {"status": "failed", "message": "错误信息"}
+                - 错误: {"status": "error", "message": "错误信息"}
+
+        Examples:
+            >>> result = await manager.send_adapter_command(
+            ...     "napcat_plugin:adapter:napcat",
+            ...     "get_group_list",
+            ...     {}
+            ... )
+            >>> {'status': 'ok', 'data': [...]}
+        """
+        # 检查适配器是否已启动
+        if adapter_sign not in self._active_adapters:
+            logger.warning(f"适配器 '{adapter_sign}' 未启动或不存在")
+            return {
+                "status": "error",
+                "message": f"适配器 '{adapter_sign}' 未启动或不存在",
+                "data": None,
+            }
+
+        adapter = self._active_adapters[adapter_sign]
+
+        try:
+            # 调用适配器的 send_adapter_command 方法
+            result = await adapter.send_adapter_command(command_name, command_data)
+            return result
+        except Exception as e:
+            logger.error(
+                f"向适配器 '{adapter_sign}' 发送命令 '{command_name}' 时发生异常: {e}"
+            )
+            return {
+                "status": "error",
+                "message": f"发送命令时发生异常: {str(e)}",
+                "data": None,
+            }
+
 
 # 全局适配器管理器实例
 _global_adapter_manager: "AdapterManager | None" = None
