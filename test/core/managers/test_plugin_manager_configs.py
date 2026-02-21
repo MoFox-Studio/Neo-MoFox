@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core.components.base.config import BaseConfig
+from src.core.components.base.agent import BaseAgent
 from src.core.components.base.plugin import BasePlugin
 from src.core.components.registry import get_global_registry
 from src.core.components.state_manager import get_global_state_manager
@@ -180,3 +181,35 @@ async def test_register_components_ignores_config_from_get_components() -> None:
 
     config_components = registry.get_by_type(ComponentType.CONFIG)
     assert "ignore_legacy_config_plugin:config:test_config" not in config_components
+
+
+@pytest.mark.asyncio
+async def test_register_components_supports_agent_type() -> None:
+    """插件组件注册应支持 Agent 组件类型。"""
+
+    class _TestAgent(BaseAgent):
+        agent_name = "planner"
+        agent_description = "planner agent"
+
+        async def execute(self, task: str) -> tuple[bool, str]:
+            return True, task
+
+    class AgentPlugin(BasePlugin):
+        plugin_name = "agent_plugin"
+
+        def get_components(self) -> list[type]:
+            return [_TestAgent]
+
+    registry = get_global_registry()
+    state_manager = get_global_state_manager()
+    registry.clear()
+    state_manager.clear()
+
+    manager = PluginManager()
+    plugin = AgentPlugin(config=None)
+
+    await manager._register_components(plugin)
+
+    agent_components = registry.get_by_type(ComponentType.AGENT)
+    assert "agent_plugin:agent:planner" in agent_components
+    assert agent_components["agent_plugin:agent:planner"] is _TestAgent

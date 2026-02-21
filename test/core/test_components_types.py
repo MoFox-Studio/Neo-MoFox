@@ -32,6 +32,7 @@ class TestComponentType:
     def test_component_type_values(self):
         """测试 ComponentType 枚举值。"""
         assert ComponentType.ACTION.value == "action"
+        assert ComponentType.AGENT.value == "agent"
         assert ComponentType.TOOL.value == "tool"
         assert ComponentType.ADAPTER.value == "adapter"
         assert ComponentType.CHATTER.value == "chatter"
@@ -131,6 +132,13 @@ class TestParseSignature:
         assert result["plugin_name"] == "other_plugin"
         assert result["component_type"] == ComponentType.TOOL
         assert result["component_name"] == "calculator"
+
+    def test_parse_agent_signature(self):
+        """测试解析 agent 类型签名。"""
+        result = parse_signature("other_plugin:agent:planner")
+        assert result["plugin_name"] == "other_plugin"
+        assert result["component_type"] == ComponentType.AGENT
+        assert result["component_name"] == "planner"
 
     def test_parse_invalid_format_missing_parts(self):
         """测试缺少部分的无效格式。"""

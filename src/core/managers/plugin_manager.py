@@ -624,6 +624,7 @@ class PluginManager:
         # 动态导入基类以避免循环导入
         from src.core.components.types import ComponentType
         from src.core.components.base.action import BaseAction
+        from src.core.components.base.agent import BaseAgent
         from src.core.components.base.adapter import BaseAdapter
         from src.core.components.base.chatter import BaseChatter
         from src.core.components.base.command import BaseCommand
@@ -639,6 +640,7 @@ class PluginManager:
             tuple[type, str],
         ] = {
             ComponentType.ACTION: (BaseAction, "action_name"),
+            ComponentType.AGENT: (BaseAgent, "agent_name"),
             ComponentType.TOOL: (BaseTool, "tool_name"),
             ComponentType.ADAPTER: (BaseAdapter, "adapter_name"),
             ComponentType.CHATTER: (BaseChatter, "chatter_name"),

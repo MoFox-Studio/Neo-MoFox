@@ -27,6 +27,7 @@ class ComponentType(Enum):
     """
 
     ACTION = "action"
+    AGENT = "agent"
     TOOL = "tool"
     ADAPTER = "adapter"
     CHATTER = "chatter"

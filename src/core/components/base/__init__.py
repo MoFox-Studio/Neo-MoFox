@@ -1,6 +1,7 @@
 """Base component classes."""
 
 from .action import BaseAction
+from .agent import BaseAgent
 from .adapter import BaseAdapter
 from .chatter import BaseChatter, Failure, Success, Wait, Stop
 from .command import BaseCommand, CommandNode
@@ -13,6 +14,7 @@ from .tool import BaseTool
 
 __all__ = [
     "BaseAction",
+    "BaseAgent",
     "BaseAdapter",
     "BaseChatter",
     "BaseCommand",

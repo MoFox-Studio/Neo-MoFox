@@ -196,6 +196,7 @@ class TestComponentRegistry:
         # 测试不同类型的组件
         types_to_test = [
             ComponentType.ACTION,
+            ComponentType.AGENT,
             ComponentType.TOOL,
             ComponentType.ADAPTER,
             ComponentType.CHATTER,

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, cast
 
 from src.core.components.types import ChatType
 from src.core.components.base.action import BaseAction
+from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
 from src.core.managers import (
     get_tool_use,
@@ -26,6 +27,7 @@ from src.kernel.logger import get_logger, COLOR
 
 if TYPE_CHECKING:
     from src.core.components.base.action import BaseAction
+    from src.core.components.base.agent import BaseAgent
     from src.core.components.base.tool import BaseTool
     from src.core.components.base.plugin import BasePlugin
     from src.core.models.message import Message
@@ -208,6 +210,7 @@ class BaseChatter(ABC):
 
         for comp_type in (
             ComponentType.ACTION,
+            ComponentType.AGENT,
             ComponentType.TOOL,
         ):
             components = registry.get_by_type(comp_type)
@@ -247,10 +250,13 @@ class BaseChatter(ABC):
         filtered: list[type[LLMUsable]] = []
 
         for usable_cls in llm_usables:
-            usable_cls = cast(type["BaseAction|BaseTool"], usable_cls)  # 类型提示
+            usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
             signature = usable_cls.get_signature() or usable_cls.__name__
 
-            if issubclass(usable_cls, BaseAction) and usable_cls.associated_types:
+            if (
+                (issubclass(usable_cls, BaseAction) or issubclass(usable_cls, BaseAgent))
+                and usable_cls.associated_types
+            ):
                 if not chat_context.check_types(usable_cls.associated_types):
                     types_str = ", ".join(usable_cls.associated_types)
                     reason = f"适配器不支持（需要: {types_str}）"
@@ -264,12 +270,12 @@ class BaseChatter(ABC):
         tasks = []
         signatures = []
         for usable_cls in filtered:
-            usable_cls = cast(type["BaseAction|BaseTool"], usable_cls)  # 类型提示
+            usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
             signature = usable_cls.get_signature() or usable_cls.__name__
 
             try:
                 component_plugin = self._resolve_component_plugin(signature)
-                instance: BaseAction | BaseTool
+                instance: BaseAction | BaseAgent | BaseTool
                 if issubclass(usable_cls, BaseAction):
                     instance = usable_cls(chat_stream=chat_stream, plugin=component_plugin)
 
@@ -282,6 +288,8 @@ class BaseChatter(ABC):
                         )
                 elif issubclass(usable_cls, BaseTool):
                     instance = usable_cls(plugin=component_plugin)
+                elif issubclass(usable_cls, BaseAgent):
+                    instance = usable_cls(stream_id=self.stream_id, plugin=component_plugin)
                 else:
                     continue
 
@@ -384,7 +392,7 @@ class BaseChatter(ABC):
             ... )
         """
 
-        usable_cls = cast(type["BaseAction|BaseTool"], usable_cls)  # 类型提示
+        usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
         sig = usable_cls.get_signature()
         if not sig:
             raise ValueError("LLMUsable 组件未注入插件名称，无法执行")
@@ -400,6 +408,11 @@ class BaseChatter(ABC):
             owner_plugin = self._resolve_component_plugin(sig)
             manager = get_action_manager()
             return await manager.execute_action(sig, owner_plugin, message, **kwargs)
+        elif issubclass(usable_cls, BaseAgent):
+            owner_plugin = self._resolve_component_plugin(sig)
+            kwargs.pop("reason", None)
+            agent_instance = usable_cls(stream_id=self.stream_id, plugin=owner_plugin)
+            return await agent_instance.execute(**kwargs)
         else:
             raise ValueError("未知的 LLMUsable 组件类型，无法执行")
 

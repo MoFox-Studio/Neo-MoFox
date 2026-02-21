@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.components.base.chatter import BaseChatter, ChatterResult, Failure, Success, Wait
+from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
 from src.core.components.types import ChatType
 from src.core.models.message import Message
@@ -228,6 +229,47 @@ class TestBaseChatter:
             owner_plugin,
             message,
         )
+
+    @pytest.mark.asyncio
+    async def test_exec_llm_usable_agent_without_global_managers(self):
+        """测试执行 Agent 时不通过 Tool/Action 管理器。"""
+
+        class LocalAgent(BaseAgent):
+            agent_name = "local_agent"
+            agent_description = "local agent"
+            _signature_ = "plugin_b:agent:local_agent"
+
+            async def execute(self, query: str) -> tuple[bool, str]:
+                return True, f"agent:{query}"
+
+        class CrossPluginChatter(BaseChatter):
+            chatter_name = "cross_plugin_chatter"
+
+            async def execute(self):
+                if False:
+                    yield Success("never")  # pragma: no cover
+
+        chatter_plugin = MagicMock()
+        chatter_plugin.plugin_name = "plugin_a"
+        owner_plugin = MagicMock()
+        owner_plugin.plugin_name = "plugin_b"
+        message = MagicMock()
+
+        chatter = CrossPluginChatter("stream_123", chatter_plugin)
+
+        with patch("src.core.components.base.chatter.get_plugin_manager") as mock_pm, patch(
+            "src.core.components.base.chatter.get_tool_use"
+        ) as mock_tool_use, patch(
+            "src.core.components.base.chatter.get_action_manager"
+        ) as mock_action_manager:
+            mock_pm.return_value.get_plugin.return_value = owner_plugin
+
+            ok, payload = await chatter.exec_llm_usable(LocalAgent, message, query="demo")
+
+        assert ok is True
+        assert payload == "agent:demo"
+        mock_tool_use.assert_not_called()
+        mock_action_manager.assert_not_called()
 
 
 class TestChatterAttributes:

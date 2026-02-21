@@ -2,6 +2,7 @@
 
 from src.core.components.base import (
     BaseAction,
+    BaseAgent,
     BaseAdapter,
     BaseChatter,
     BaseCommand,
@@ -19,6 +20,7 @@ from src.core.components.base import (
 
 __all__ = [
     "BaseAction",
+    "BaseAgent",
     "BaseAdapter",
     "BaseChatter",
     "BaseCommand",
