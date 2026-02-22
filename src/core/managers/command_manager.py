@@ -232,8 +232,11 @@ class CommandManager:
 
         # 创建 Command 实例并执行
         try:
-            command_instance = command_cls(plugin=plugin)
-            result = await command_instance.execute(command_text)
+            command_instance = command_cls(plugin=plugin,stream_id=message.stream_id)
+            # 传入 stream_id 以便命令可以访问聊天流信息
+            result = await command_instance.execute(
+                message_text=command_text,
+            )
             return result
 
         except Exception as e:
