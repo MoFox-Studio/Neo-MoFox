@@ -3,10 +3,13 @@
 将旧版 models.py 的数据迁移到新版 sql_alchemy.py 的表结构。
 
 运行方式：
-    python -m scripts.migrate_models
+    python scripts/migrate_models.py
+    
+交互式引导用户输入旧数据库路径和目标数据库路径。
 """
 
 import asyncio
+import shutil
 import sys
 from pathlib import Path
 
@@ -17,10 +20,43 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.kernel.db import init_database_from_config, get_db_session
-from src.core.config import init_core_config
 from src.kernel.logger import get_logger
 
 logger = get_logger("migration", display="Migration")
+
+# 存储交互式输入的 bot_id 信息
+_bot_id_map: dict[str, str] = {}
+
+
+def _parse_and_store_bot_ids(raw_input: str) -> None:
+    """解析并存储用户输入的 bot_id。
+
+    格式: "平台:ID,平台:ID"，如 "qq:1919810114,qq:1234567890"
+    多个相同平台的 bot_id 只保留最后一个。
+
+    Args:
+        raw_input: 用户输入的原始字符串
+    """
+    _bot_id_map.clear()
+    if not raw_input:
+        return
+    for pair in raw_input.split(","):
+        pair = pair.strip()
+        if ":" in pair:
+            platform, bot_id = pair.split(":", 1)
+            platform = platform.strip()
+            bot_id = bot_id.strip()
+            if platform and bot_id:
+                _bot_id_map[platform] = bot_id
+
+
+def _get_bot_ids() -> dict[str, str]:
+    """获取已存储的 bot_id 映射。
+
+    Returns:
+        dict: {platform: bot_id}
+    """
+    return _bot_id_map
 
 
 async def check_column_exists(session, table_name, column_name):
@@ -304,7 +340,11 @@ async def migrate_chat_streams():
 
         await session.commit()
 
-        # 2. 生成 person_id (从 user_platform 和 user_id) - 检查源字段是否存在
+        # 2. 生成 person_id (从 user_platform 和 user_id) - 使用 SHA-256 哈希
+        # person_id 必须是 sha256(f"{platform}_{user_id}") 格式，
+        # 与 user_query_helper.generate_person_id() 保持一致
+        import hashlib
+
         if db_type == "postgresql":
             # 检查 user_platform 和 user_id 是否存在
             check_result = await session.execute(
@@ -318,23 +358,36 @@ async def migrate_chat_streams():
             source_fields_exist = (check_result.scalar() or 0) >= 2
 
             if source_fields_exist:
-                await session.execute(
+                rows = await session.execute(
                     text("""
-                        UPDATE chat_streams
-                        SET person_id = user_platform || ':' || user_id
+                        SELECT stream_id, user_platform, user_id
+                        FROM chat_streams
                         WHERE person_id IS NULL AND user_id IS NOT NULL
                     """)
                 )
+                for row in rows.fetchall():
+                    stream_id, platform, user_id = row
+                    hashed = hashlib.sha256(f"{platform}_{user_id}".encode()).hexdigest()
+                    await session.execute(
+                        text("UPDATE chat_streams SET person_id = :pid WHERE stream_id = :sid"),
+                        {"pid": hashed, "sid": stream_id},
+                    )
         else:  # SQLite
-            # SQLite 简化处理
             try:
-                await session.execute(
+                rows = await session.execute(
                     text("""
-                        UPDATE chat_streams
-                        SET person_id = user_platform || ':' || user_id
+                        SELECT stream_id, user_platform, user_id
+                        FROM chat_streams
                         WHERE person_id IS NULL AND user_id IS NOT NULL
                     """)
                 )
+                for row in rows.fetchall():
+                    stream_id, platform, user_id = row
+                    hashed = hashlib.sha256(f"{platform}_{user_id}".encode()).hexdigest()
+                    await session.execute(
+                        text("UPDATE chat_streams SET person_id = :pid WHERE stream_id = :sid"),
+                        {"pid": hashed, "sid": stream_id},
+                    )
             except Exception:
                 pass  # 字段可能不存在，跳过
 
@@ -547,7 +600,153 @@ async def migrate_messages():
 
         await session.commit()
 
-        # 3. 将 chat_id 迁移到 stream_id - 检查源字段是否存在
+        # 3. 生成 person_id（必须在表重建前完成，因为重建会移除 user_platform/user_id 列）
+        # person_id 必须是 sha256(f"{platform}_{user_id}") 格式，
+        # 与 user_query_helper.generate_person_id() 保持一致
+        import hashlib
+
+        if db_type == "postgresql":
+            check_result = await session.execute(
+                text("""
+                    SELECT COUNT(*)
+                    FROM information_schema.columns
+                    WHERE table_name = 'messages'
+                    AND column_name IN ('user_platform', 'user_id')
+                """)
+            )
+            source_fields_exist = (check_result.scalar() or 0) >= 2
+
+            if source_fields_exist:
+                rows = await session.execute(
+                    text("""
+                        SELECT id, user_platform, user_id
+                        FROM messages
+                        WHERE person_id IS NULL AND user_id IS NOT NULL
+                    """)
+                )
+                for row in rows.fetchall():
+                    msg_id, platform, user_id = row
+                    hashed = hashlib.sha256(f"{platform}_{user_id}".encode()).hexdigest()
+                    await session.execute(
+                        text("UPDATE messages SET person_id = :pid WHERE id = :mid"),
+                        {"pid": hashed, "mid": msg_id},
+                    )
+                logger.info("PostgreSQL: 已为 messages 生成 person_id (SHA-256)")
+        else:  # SQLite
+            try:
+                check_res = await session.execute(text("PRAGMA table_info(messages)"))
+                cols = [r[1] for r in check_res.all()]
+                if 'user_platform' in cols and 'user_id' in cols:
+                    rows = await session.execute(
+                        text("""
+                            SELECT id, user_platform, user_id
+                            FROM messages
+                            WHERE person_id IS NULL AND user_id IS NOT NULL
+                        """)
+                    )
+                    count = 0
+                    for row in rows.fetchall():
+                        msg_id, platform, user_id = row
+                        hashed = hashlib.sha256(f"{platform}_{user_id}".encode()).hexdigest()
+                        await session.execute(
+                            text("UPDATE messages SET person_id = :pid WHERE id = :mid"),
+                            {"pid": hashed, "mid": msg_id},
+                        )
+                        count += 1
+                    logger.info(f"SQLite: 已为 {count} 条 messages 生成 person_id (SHA-256)")
+            except Exception as e:
+                logger.warning(f"生成 messages.person_id 失败: {e}")
+
+        # 3.5 复制 user_platform 到 platform（必须在表重建前完成，重建会移除 user_platform 列）
+        if db_type == "postgresql":
+            if source_fields_exist:  # 复用上面的检查结果
+                await session.execute(
+                    text("""
+                        UPDATE messages
+                        SET platform = user_platform
+                        WHERE platform IS NULL AND user_platform IS NOT NULL
+                    """)
+                )
+                logger.info("PostgreSQL: 已复制 user_platform 到 platform")
+        else:  # SQLite
+            try:
+                check_res2 = await session.execute(text("PRAGMA table_info(messages)"))
+                cols2 = [r[1] for r in check_res2.all()]
+                if 'user_platform' in cols2 and 'platform' in cols2:
+                    await session.execute(
+                        text("""
+                            UPDATE messages
+                            SET platform = user_platform
+                            WHERE platform IS NULL AND user_platform IS NOT NULL
+                        """)
+                    )
+                    logger.info("SQLite: 已复制 user_platform 到 platform")
+            except Exception as e:
+                logger.warning(f"复制 user_platform 到 platform 失败: {e}")
+
+        # 3.6 为无 platform 的消息（如 bot 自己发的消息，旧库未存 user_platform）从所属 stream 补充
+        if db_type == "postgresql":
+            await session.execute(
+                text("""
+                    UPDATE messages m
+                    SET platform = cs.platform
+                    FROM chat_streams cs
+                    WHERE m.stream_id = cs.stream_id
+                    AND m.platform IS NULL
+                    AND cs.platform IS NOT NULL
+                """)
+            )
+        else:  # SQLite
+            try:
+                await session.execute(
+                    text("""
+                        UPDATE messages
+                        SET platform = (
+                            SELECT cs.platform
+                            FROM chat_streams cs
+                            WHERE cs.stream_id = messages.stream_id
+                        )
+                        WHERE platform IS NULL
+                        AND stream_id IS NOT NULL
+                    """)
+                )
+            except Exception as e:
+                logger.warning(f"从 stream 补充 platform 失败: {e}")
+        logger.info("已从所属 chat_stream 补充缺失的 platform")
+
+        # 3.7 为 bot 消息设置 person_id = "bot"（旧库中 bot 消息没有存 user_id，迁移后 person_id 为 NULL）
+        bot_ids = _get_bot_ids()
+        if bot_ids:
+            for platform, bid in bot_ids.items():
+                bot_person_id = hashlib.sha256(f"{platform}_{bid}".encode()).hexdigest()
+                # 将 bot 的哈希 person_id 和 NULL person_id 统一设为 "bot"
+                if db_type == "postgresql":
+                    await session.execute(
+                        text("""
+                            UPDATE messages
+                            SET person_id = 'bot'
+                            WHERE (person_id IS NULL OR person_id = :bot_pid)
+                            AND platform = :platform
+                        """),
+                        {"bot_pid": bot_person_id, "platform": platform},
+                    )
+                else:  # SQLite
+                    await session.execute(
+                        text("""
+                            UPDATE messages
+                            SET person_id = 'bot'
+                            WHERE (person_id IS NULL OR person_id = :bot_pid)
+                            AND platform = :platform
+                        """),
+                        {"bot_pid": bot_person_id, "platform": platform},
+                    )
+                logger.info(f"已为平台 {platform} 的 bot 消息设置 person_id='bot' (bot_id={bid})")
+        else:
+            logger.warning("未提供 bot_id，bot 消息的 person_id 将保持为 NULL")
+
+        await session.commit()
+
+        # 4. 将 chat_id 迁移到 stream_id - 检查源字段是否存在
         if db_type == "postgresql":
             check_result = await session.execute(
                 text("""
@@ -637,43 +836,6 @@ async def migrate_messages():
 
             except Exception:
                 pass  # 字段可能不存在
-
-        # 4. 生成 person_id - 检查源字段是否存在
-        # 注意：如果是通过重建表方式，字段可能已经不存在了，所以这里的 update 可能会失败，需要 try-except
-        if db_type == "postgresql":
-            check_result = await session.execute(
-                text("""
-                    SELECT COUNT(*)
-                    FROM information_schema.columns
-                    WHERE table_name = 'messages'
-                    AND column_name IN ('user_platform', 'user_id')
-                """)
-            )
-            source_fields_exist = (check_result.scalar() or 0) >= 2
-
-            if source_fields_exist:
-                await session.execute(
-                    text("""
-                        UPDATE messages
-                        SET person_id = user_platform || ':' || user_id
-                        WHERE person_id IS NULL AND user_id IS NOT NULL
-                    """)
-                )
-        else:  # SQLite
-            try:
-                # 检查列是否存在再执行 UPDATE
-                check_res = await session.execute(text("PRAGMA table_info(messages)"))
-                cols = [r[1] for r in check_res.all()]
-                if 'user_platform' in cols and 'user_id' in cols:
-                    await session.execute(
-                        text("""
-                            UPDATE messages
-                            SET person_id = user_platform || ':' || user_id
-                            WHERE person_id IS NULL AND user_id IS NOT NULL
-                        """)
-                    )
-            except Exception:
-                pass  # 字段可能不存在，跳过
 
         # 5. 设置默认 message_type
         await session.execute(
@@ -1251,6 +1413,66 @@ async def verify_migration():
             )
 
 
+async def migrate_emoji():
+    """清理 emoji 表冗余旧字段。
+
+    移除 query_count、emotion、record_time 三个已被新字段替代的列。
+    """
+    drop_columns = ["query_count", "emotion", "record_time"]
+
+    async with get_db_session() as session:
+        db_type = session.bind.dialect.name
+
+        # 先检查 emoji 表是否存在
+        if db_type == "postgresql":
+            result = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM information_schema.tables "
+                    "WHERE table_name = 'emoji'"
+                )
+            )
+        else:  # SQLite
+            result = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type='table' AND name='emoji'"
+                )
+            )
+        if (result.scalar() or 0) == 0:
+            logger.info("emoji 表不存在，跳过")
+            return
+
+        dropped = []
+        for col in drop_columns:
+            exists = await check_column_exists(session, "emoji", col)
+            if not exists:
+                logger.debug(f"emoji.{col} 已不存在，跳过")
+                continue
+
+            if db_type == "postgresql":
+                await session.execute(
+                    text(f"ALTER TABLE emoji DROP COLUMN IF EXISTS {col}")
+                )
+                dropped.append(col)
+            else:  # SQLite >= 3.35.0 支持 DROP COLUMN
+                try:
+                    await session.execute(
+                        text(f"ALTER TABLE emoji DROP COLUMN {col}")
+                    )
+                    dropped.append(col)
+                except Exception as e:
+                    logger.warning(
+                        f"SQLite 删除 emoji.{col} 失败（版本可能过低）: {e}"
+                    )
+
+        await session.commit()
+
+    if dropped:
+        logger.info(f"Emoji 迁移完成：已删除列 {', '.join(dropped)}")
+    else:
+        logger.info("Emoji 迁移完成：无需删除列")
+
+
 async def run_all_migrations():
     """运行所有迁移"""
     logger.info("=" * 60)
@@ -1260,51 +1482,55 @@ async def run_all_migrations():
 
     try:
         # 1. 迁移用户信息
-        logger.info("\n[1/12] 迁移 PersonInfo...")
+        logger.info("\n[1/13] 迁移 PersonInfo...")
         await migrate_person_info()
 
         # 2. 迁移聊天流
-        logger.info("\n[2/12] 迁移 ChatStreams...")
+        logger.info("\n[2/13] 迁移 ChatStreams...")
         await migrate_chat_streams()
 
         # 3. 迁移消息
-        logger.info("\n[3/12] 迁移 Messages...")
+        logger.info("\n[3/13] 迁移 Messages...")
         await migrate_messages()
 
         # 4. 迁移动作记录
-        logger.info("\n[4/12] 迁移 ActionRecords...")
+        logger.info("\n[4/13] 迁移 ActionRecords...")
         await migrate_action_records()
 
         # 5. 迁移图像信息
-        logger.info("\n[5/12] 迁移 Images...")
+        logger.info("\n[5/13] 迁移 Images...")
         await migrate_images()
 
         # 6. 迁移图像描述
-        logger.info("\n[6/12] 迁移 ImageDescriptions...")
+        logger.info("\n[6/13] 迁移 ImageDescriptions...")
         await migrate_image_descriptions()
 
         # 7. 迁移在线时长
-        logger.info("\n[7/12] 迁移 OnlineTime...")
+        logger.info("\n[7/13] 迁移 OnlineTime...")
         await migrate_online_time()
 
         # 8. 迁移封禁用户
-        logger.info("\n[8/12] 迁移 BanUsers...")
+        logger.info("\n[8/13] 迁移 BanUsers...")
         await migrate_ban_users()
 
         # 9. 迁移权限节点
-        logger.info("\n[9/12] 迁移 PermissionNodes...")
+        logger.info("\n[9/13] 迁移 PermissionNodes...")
         await migrate_permission_nodes()
 
         # 10. 迁移用户权限
-        logger.info("\n[10/12] 迁移 UserPermissions...")
+        logger.info("\n[10/13] 迁移 UserPermissions...")
         await migrate_user_permissions()
 
         # 11. 迁移 LLM 使用记录
-        logger.info("\n[11/12] 迁移 LLMUsage...")
+        logger.info("\n[11/13] 迁移 LLMUsage...")
         await migrate_llm_usage()
 
-        # 12. 验证迁移结果
-        logger.info("\n[12/12] 验证迁移结果...")
+        # 12. 清理 Emoji 旧字段
+        logger.info("\n[12/13] 清理 Emoji 旧字段...")
+        await migrate_emoji()
+
+        # 13. 验证迁移结果
+        logger.info("\n[13/13] 验证迁移结果...")
         await verify_migration()
 
         logger.info("\n" + "=" * 60)
@@ -1316,40 +1542,15 @@ async def run_all_migrations():
         raise
 
 
-async def main_async(config_path: str = "config/core.toml"):
+async def main_async(db_path: str):
     """异步主函数
 
     Args:
-        config_path: 配置文件路径
+        db_path: 要迁移的数据库文件绝对路径
     """
-    # 初始化配置
-    try:
-        config = init_core_config(config_path)
-        logger.info(f"已加载配置文件: {config_path}")
-        logger.info(f"数据库类型: {config.database.database_type}")
-    except Exception as e:
-        logger.warning(f"无法加载配置文件: {e}，使用默认配置")
-        # 如果配置文件不存在，使用默认配置
-        config = init_core_config(config_path)
-
-    # 从配置初始化数据库
-    db_cfg = config.database
     await init_database_from_config(
-        database_type=db_cfg.database_type,
-        sqlite_path=db_cfg.sqlite_path,
-        postgresql_host=db_cfg.postgresql_host,
-        postgresql_port=db_cfg.postgresql_port,
-        postgresql_database=db_cfg.postgresql_database,
-        postgresql_user=db_cfg.postgresql_user,
-        postgresql_password=db_cfg.postgresql_password,
-        postgresql_schema=db_cfg.postgresql_schema,
-        postgresql_ssl_mode=db_cfg.postgresql_ssl_mode,
-        postgresql_ssl_ca=db_cfg.postgresql_ssl_ca,
-        postgresql_ssl_cert=db_cfg.postgresql_ssl_cert,
-        postgresql_ssl_key=db_cfg.postgresql_ssl_key,
-        connection_pool_size=db_cfg.connection_pool_size,
-        connection_timeout=db_cfg.connection_timeout,
-        echo=db_cfg.echo,
+        database_type="sqlite",
+        sqlite_path=db_path,
     )
 
     # 运行迁移
@@ -1357,21 +1558,52 @@ async def main_async(config_path: str = "config/core.toml"):
 
 
 def main():
-    """主函数"""
-    import argparse
+    """交互式主函数"""
+    print("=" * 60)
+    print("  Neo-MoFox 数据库迁移工具")
+    print("=" * 60)
+    print()
 
-    parser = argparse.ArgumentParser(description="Neo-MoFox 数据库迁移工具")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="config/core.toml",
-        help="配置文件路径（默认：config/core.toml）",
-    )
+    # 1. 输入旧数据库路径
+    old_db = input("请输入旧数据库的绝对路径: ").strip().strip('"').strip("'")
+    old_path = Path(old_db)
+    if not old_path.is_file():
+        print(f"❌ 文件不存在: {old_path}")
+        sys.exit(1)
 
-    args = parser.parse_args()
+    # 2. 输入目标路径
+    default_target = str(project_root / "data" / "MoFox.db")
+    target_db = input(f"请输入迁移目标路径 [默认: {default_target}]: ").strip().strip('"').strip("'")
+    if not target_db:
+        target_db = default_target
+    target_path = Path(target_db)
 
-    # 运行异步主函数
-    asyncio.run(main_async(args.config))
+    # 3. 如果旧库和目标不同，复制一份到目标
+    if old_path.resolve() != target_path.resolve():
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(old_path, target_path)
+        print(f"✅ 已复制数据库: {old_path} → {target_path}")
+    else:
+        print(f"📂 原地迁移: {target_path}")
+
+    # 4. 输入 bot 信息（用于填充旧库 bot 消息的 person_id）
+    print()
+    print("旧数据库中 bot 发送的消息没有存储发送者信息，需要提供 bot 的 ID 来补充。")
+    print("格式: 平台:ID，多个用逗号分隔。例如: qq:3905802962,qq:1234567890")
+    print("直接回车跳过（bot 消息将显示为未知用户）")
+    bot_input = input("请输入 bot ID: ").strip()
+    _parse_and_store_bot_ids(bot_input)
+
+    # 5. 确认
+    print()
+    print(f"  数据库路径: {target_path}")
+    confirm = input("确认开始迁移? [Y/n]: ").strip().lower()
+    if confirm not in ("", "y", "yes"):
+        print("已取消。")
+        sys.exit(0)
+
+    print()
+    asyncio.run(main_async(str(target_path)))
 
 
 if __name__ == "__main__":
