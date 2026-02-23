@@ -36,6 +36,7 @@ async def send_text(
         message_type=MessageType.TEXT,
         stream_id=stream_id,
         platform=platform,
+        processed_plain_text=content,
     )
 
 
@@ -62,6 +63,7 @@ async def send_image(
         message_type=MessageType.IMAGE,
         stream_id=stream_id,
         platform=platform,
+        processed_plain_text="[图片]",
     )
 
 
@@ -69,6 +71,7 @@ async def send_emoji(
     emoji_data: str,
     stream_id: str,
     platform: str | None = None,
+    processed_plain_text: str = "",
 ) -> bool:
     """发送表情包
 
@@ -76,18 +79,21 @@ async def send_emoji(
         emoji_data: 表情数据（base64 或 URL）
         stream_id: 聊天流 ID
         platform: 平台名称（可选）
+        processed_plain_text: 人类可读文本（可选，如 "[表情包: 开心挥手]"）
 
     Returns:
         是否发送成功
 
     Example:
-        success = await send_emoji(emoji_base64, "qq_group_123456")
+        success = await send_emoji(emoji_base64, "qq_group_123456",
+                                   processed_plain_text="[表情包: 开心挥手]")
     """
     return await _send_message(
         content=emoji_data,
         message_type=MessageType.EMOJI,
         stream_id=stream_id,
         platform=platform,
+        processed_plain_text=processed_plain_text,
     )
 
 
@@ -114,6 +120,7 @@ async def send_voice(
         message_type=MessageType.VOICE,
         stream_id=stream_id,
         platform=platform,
+        processed_plain_text="[语音]",
     )
 
 
@@ -140,6 +147,7 @@ async def send_video(
         message_type=MessageType.VIDEO,
         stream_id=stream_id,
         platform=platform,
+        processed_plain_text="[视频]",
     )
 
 
@@ -172,6 +180,7 @@ async def send_file(
         message_type=MessageType.FILE,
         stream_id=stream_id,
         platform=platform,
+        processed_plain_text=file_name or "[文件]",
     )
 
 
@@ -210,6 +219,7 @@ async def send_custom(
         message_type=message_type,
         stream_id=stream_id,
         platform=platform,
+        processed_plain_text="",
     )
 
 
@@ -242,6 +252,7 @@ async def _send_message(
     message_type: MessageType,
     stream_id: str,
     platform: str | None = None,
+    processed_plain_text: str = "",
 ) -> bool:
     """内部消息发送实现
 
@@ -250,6 +261,7 @@ async def _send_message(
         message_type: 消息类型
         stream_id: 聊天流 ID
         platform: 平台名称（可选，会从 stream_id 推断）
+        processed_plain_text: 消息的人类可读文本，由上层调用方显式传入
 
     Returns:
         是否发送成功
@@ -300,16 +312,27 @@ async def _send_message(
                         )
                         if person and person.user_id:
                             extra["target_user_id"] = str(person.user_id)
-                    except Exception:
-                        pass
+                        else:
+                            logger.warning(
+                                f"person_id={person_id} 未查询到 user_id，"
+                                f"私聊消息可能发送到错误目标"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"person_id={person_id} 查询 user_id 失败: {e}"
+                        )
+
+                if "target_user_id" not in extra:
+                    logger.error(
+                        f"stream_id={stream_id} 无法解析私聊目标用户，"
+                        f"消息可能发送给 bot 自身"
+                    )
 
         # 构建消息
-        # 非文本类型不应将二进制/base64 数据放入 processed_plain_text
-        is_text = message_type == MessageType.TEXT
         message = Message(
             message_id=f"api_{message_type.value}_{id(content)}",
             content=content,
-            processed_plain_text=str(content) if is_text and isinstance(content, str) else "",
+            processed_plain_text=processed_plain_text,
             message_type=message_type,
             sender_id=bot_info.get("bot_id", ""),
             sender_name=bot_info.get("bot_nickname", "Bot"),
