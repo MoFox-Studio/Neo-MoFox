@@ -64,6 +64,14 @@ class CoreConfig(ConfigBase):
             default=15,
             description="主循环 tick 间隔（秒），过短可能增加消耗，过长可能降低响应速度",
         )
+        stream_warning_threshold: float = Field(
+            default=4.0,
+            description="流循环警告阈值（倍数），距上次心跳超过 tick_interval × 此值时输出警告",
+        )
+        stream_restart_threshold: float = Field(
+            default=8.0,
+            description="流循环重启阈值（倍数），距上次心跳超过 tick_interval × 此值时尝试重启",
+        )
 
     bot: BotSection = Field(default_factory=BotSection)
 

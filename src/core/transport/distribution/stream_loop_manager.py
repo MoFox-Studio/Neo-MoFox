@@ -169,6 +169,8 @@ class StreamLoopManager:
                 from src.kernel.concurrency import get_task_manager, get_watchdog
 
                 tick_interval = get_core_config().bot.tick_interval
+                warning_threshold = get_core_config().bot.stream_warning_threshold
+                restart_threshold = get_core_config().bot.stream_restart_threshold
 
                 loop_task = get_task_manager().create_task(
                     run_chat_stream(stream_id, self),
@@ -204,8 +206,8 @@ class StreamLoopManager:
                 get_watchdog().register_stream(
                     stream_id=stream_id,
                     tick_interval=tick_interval,
-                    warning_threshold=2.0,
-                    restart_threshold=5.0,
+                    warning_threshold=warning_threshold,
+                    restart_threshold=restart_threshold,
                     restart_callback=_restart_stream_in_loop,
                 )
                 
