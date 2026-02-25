@@ -461,7 +461,7 @@ class MediaManager:
             
             # 构建提示词（模板不需要参数，直接build）
             if template:
-                prompt = template.build()
+                prompt = await template.build()
 
             # 处理 base64 数据：提取纯净的 base64 内容
             clean_base64 = self._extract_clean_base64(base64_data)

@@ -24,6 +24,7 @@ from src.core.components.base import (
     Failure,
     Stop,
 )
+from src.core.models.stream import ChatStream
 from src.core.components.base.action import BaseAction
 from src.core.components.loader import register_plugin
 from src.core.config import get_core_config
@@ -62,21 +63,33 @@ system_prompt = """# 关于你
 
 # 你的行为准则
 - 保持你的人设和表达风格，用符合你性格的方式回复。
-- 后续的消息都遵循 json 的标准化格式。这个格式是给你看的，请不要模仿其格式与用户对话。
+- 后续的消息都遵循根据原始网络json解析后标准化格式。这个格式是给你看的，请**不要模仿其格式与用户对话**。
 - 你的回复必须有理有据，禁止无根据地编造信息或胡乱回复。如果你不确定如何回复，可以跟风或转移话题，但是前提是足够自然不机械。
 
 # 工具介绍
 - Action：action通常是你在对话中需要执行的动作，例如发送消息、结束对话等。你可以调用 action 来完成这些任务，调用时请务必按照规定的格式提供必要的信息。这类工具通常不会提供任何信息，因此如果当你调用action并收到返回结果后，你只需要输出"__SUSPEND__"表示挂起对话等待下一步指令即可。
-- Tool：tool通常是你在对话中需要查询信息或执行特定功能时调用的工具，例如查询天气、计算器等。你可以调用 tool 来获取这些信息或功能，调用时请务必按照规定的格式提供必要的信息。这类工具通常会返回一些结果信息，因此当你调用tool并收到返回结果后，你应该根据结果信息继续进行合理的回复或进一步执行其他工具，而不是简单地输出"__SUSPEND__"。
+- Tool：tool通常是你在对话中需要查询信息或执行特定功能时调用的工具，例如查询天气、计算器等。你可以调用 tool 来获取这些信息或功能，调用时请务必按照规定的格式提供必要的信息。这类工具通常会返回一些结果信息，因此当你调用tool并收到返回结果后，你应该根据结果信息继续进行合理的回复或进一步执行其他工具。
 - Agent：agent通常是你在对话中需要调用的智能体，例如执行复杂任务、处理多轮对话等。你可以调用 agent 来完成这些任务，调用时请务必按照规定的格式提供必要的信息。这类工具通常会返回一些结果信息，因此当你调用agent并收到返回结果后，你应该根据结果信息继续进行合理的回复或进一步执行其他工具。
-
-当前时间: {current_time}
 
 # 其他信息
 你目前正在聊天的平台是：{platform}，聊天类型是 {chat_type}。
 在该平台你的信息：
 - 昵称：{nickname}
 - id：{bot_id}
+"""
+
+user_prompt = """你当前正在名为"{stream_name}"的对话中。
+消息格式说明：【时间】<群组角色> [平台ID] 昵称$群名片： 消息内容
+    
+{history}
+    
+{unreads}
+    
+{extra}
+---
+请基于上述信息决定接下来的动作。
+请务必保持你的回复符合你的人设和表达风格，
+同时请确保你的回复有理有据，禁止无根据地编造信息或胡乱回复。
 """
 
 sub_agent_system_prompt = """你是一个聊天意图识别助手。
@@ -192,35 +205,8 @@ class DefaultChatter(BaseChatter):
             return plugin_config.plugin.mode
         return "enhanced"
 
-    @staticmethod
-    def _format_hms(raw_time: Any) -> str:
-        """将任意时间值格式化为 HH:MM。"""
-        text = str(raw_time or "").strip()
-        if not text:
-            return "00:00"
-
-        try:
-            timestamp = float(text)
-            if timestamp > 0:
-                dt = datetime.datetime.fromtimestamp(timestamp)
-                return dt.strftime("%H:%M")
-        except Exception:
-            pass
-
-        if " " in text:
-            text = text.split(" ")[-1]
-
-        if len(text) >= 5 and text[2] == ":":
-            return text[:5]
-
-        try:
-            dt = datetime.datetime.fromisoformat(str(raw_time))
-            return dt.strftime("%H:%M")
-        except Exception:
-            return text
-
-    def _build_system_prompt(self, chat_stream: ChatStream) -> str:
-        """构建系统提示词。"""
+    async def _build_system_prompt(self, chat_stream: ChatStream) -> str:
+        """构建系统提示词"""
         selected_theme_guide = ""
         plugin_config = self.plugin.config
         if plugin_config and isinstance(plugin_config, DefaultChatterConfig):
@@ -232,56 +218,77 @@ class DefaultChatter(BaseChatter):
                 selected_theme_guide = plugin_config.plugin.theme_guide.group
 
         tmpl = get_prompt_manager().get_template("default_chatter_system_prompt")
-        return (
+        if not tmpl:
+            return ""
+        return await (
             tmpl.set("platform", chat_stream.platform)
             .set("chat_type", chat_stream.chat_type)
             .set("nickname", chat_stream.bot_nickname)
             .set("bot_id", chat_stream.bot_id)
             .set("theme_guide", selected_theme_guide)
             .build()
-            if tmpl
-            else ""
         )
 
-    def _build_classical_user_text(
-        self, chat_stream: Any, unread_msgs: list[Any]
+    async def _build_classical_user_text(
+        self, chat_stream: ChatStream, unread_msgs: list[Any]
     ) -> str:
         """构建 classical 模式 user 提示词。"""
         history_lines = []
-        history_messages = chat_stream.context.history_messages
-        for msg in history_messages:
-            history_lines.append(
-                f"[{self._format_hms(getattr(msg, 'time', ''))}] "
-                f"{getattr(msg, 'sender_name', '未知发送者')}："
-                f"{getattr(msg, 'processed_plain_text', '')}"
-            )
+        for msg in chat_stream.context.history_messages:
+            history_lines.append(self.format_message_line(msg))
 
         unread_lines = []
         for msg in unread_msgs:
-            unread_lines.append(
-                f"[{self._format_hms(getattr(msg, 'time', ''))}] "
-                f"{getattr(msg, 'sender_name', '未知发送者')}："
-                f"{getattr(msg, 'processed_plain_text', '')}"
-            )
+            unread_lines.append(self.format_message_line(msg))
 
-        history_block = "\n".join(history_lines) if history_lines else "（无）"
-        unread_block = "\n".join(unread_lines) if unread_lines else "（无）"
+        history_block = "\n".join(history_lines) if history_lines else ""
+        unread_block = "\n".join(unread_lines) if unread_lines else ""
 
-        return f"# 历史消息\n{history_block}\n\n# 未读消息\n{unread_block}\n 注意历史消息只用来了解上下文，你的回复应该基于未读消息来生成，不要复述历史消息中的内容。"
+        return await self._build_user_prompt(
+            chat_stream,
+            history_text=history_block,
+            unread_lines=unread_block,
+        )
 
-    def _build_enhanced_history_text(self, chat_stream: Any) -> str:
+    def _build_enhanced_history_text(self, chat_stream: ChatStream) -> str:
         """构建 enhanced 模式的历史消息文本。"""
         history_lines: list[str] = []
-        history_messages = chat_stream.context.history_messages
+        for msg in chat_stream.context.history_messages:
+            history_lines.append(self.format_message_line(msg))
 
-        for msg in history_messages:
-            history_lines.append(
-                f"【{self._format_hms(getattr(msg, 'time', ''))}】"
-                f"{getattr(msg, 'sender_name', '未知发送者')}: "
-                f"{getattr(msg, 'processed_plain_text', '')}"
-            )
+        return "\n".join(history_lines)
 
-        return "以下为最近的聊天历史记录：\n" + "\n".join(history_lines)
+    async def _build_user_prompt(
+        self,
+        chat_stream: ChatStream,
+        history_text: str,
+        unread_lines: str,
+        extra: str = "",
+    ) -> str:
+        """通过 user prompt 模板构建用户提示词。
+
+        Args:
+            chat_stream: 当前聊天流
+            history_text: 格式化后的历史消息文本（各行已用统一格式）
+            unread_lines: 格式化后的未读消息文本
+            extra: 额外信息文本
+
+        Returns:
+            str: 渲染后的 user 提示词
+        """
+        stream_name = chat_stream.stream_name
+        tmpl = get_prompt_manager().get_template("default_chatter_user_prompt")
+        assert tmpl, "缺少 default_chatter_user_prompt 模板，请检查提示词管理器配置"
+        res = await (
+            tmpl
+            .set("stream_name", stream_name)
+            .set("history", history_text)
+            .set("unreads", unread_lines)
+            .set("extra", extra)
+            .build()
+        )
+        # print(res)
+        return res
 
     @staticmethod
     def _upsert_pending_unread_payload(
@@ -295,7 +302,9 @@ class DefaultChatter(BaseChatter):
                 if last_payload.content and isinstance(last_payload.content[-1], Text):
                     existing_text = last_payload.content[-1].text
                     separator = "\n" if existing_text else ""
-                    last_payload.content[-1] = Text(f"{existing_text}{separator}{formatted_text}")
+                    last_payload.content[-1] = Text(
+                        f"{existing_text}{separator}{formatted_text}"
+                    )
                 else:
                     last_payload.content.append(Text(formatted_text))
                 return
@@ -306,7 +315,7 @@ class DefaultChatter(BaseChatter):
         self,
         unreads_text: str,
         unread_msgs: list[Any],
-        chat_stream: Any,
+        chat_stream: ChatStream,
     ) -> dict:
         """子代理决策：判断是否需要响应未读消息。
 
@@ -330,7 +339,7 @@ class DefaultChatter(BaseChatter):
         nickname = get_core_config().personality.nickname
         tmpl = get_prompt_manager().get_template("default_chatter_sub_agent_prompt")
         if tmpl:
-            sub_prompt = tmpl.set("nickname", nickname).build()
+            sub_prompt = await tmpl.set("nickname", nickname).build()
         else:
             sub_prompt = sub_agent_system_prompt.format(nickname=nickname)
         request.add_payload(LLMPayload(ROLE.SYSTEM, Text(sub_prompt)))
@@ -401,7 +410,7 @@ class DefaultChatter(BaseChatter):
             yield result
 
     async def _execute_enhanced(
-        self, chat_stream: Any
+        self, chat_stream: ChatStream
     ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
         """enhanced 模式执行流程（保留原有行为）。"""
 
@@ -413,30 +422,46 @@ class DefaultChatter(BaseChatter):
             yield Failure(f"模型配置错误: {e}")
             return
 
-        # 系统提示（动态构建）
-        system_prompt = self._build_system_prompt(chat_stream)
-        request.add_payload(LLMPayload(ROLE.SYSTEM, Text(system_prompt)))
+        # 系统提示（动态构建，异步触发 on_prompt_build 事件）
+        system_prompt_text = await self._build_system_prompt(chat_stream)
+        request.add_payload(LLMPayload(ROLE.SYSTEM, Text(system_prompt_text)))
 
-        # 历史消息（来自 stream context，构成对话背景）
+        # 历史消息在首次有未读消息时与未读消息合并构建，避免分两次 USER payload 干扰模型
         history_text = self._build_enhanced_history_text(chat_stream)
-        if history_text:
-            request.add_payload(LLMPayload(ROLE.USER, Text(history_text)))
 
         # ── 注入可用工具 ──
         usable_map = await self.inject_usables(request)
 
         # ── 对话循环 ──
         response = request
+        # 标记历史消息是否已并入第一个 USER payload
+        history_merged = False
 
         while True:
-            formatted_text, unread_msgs = await self.fetch_unreads()
+            _, unread_msgs = await self.fetch_unreads()
 
             # 更新 unreads 引用，用于后续 exec_llm_usable 的 trigger_msg
             unreads = unread_msgs
 
-            if formatted_text or unread_msgs:
+            if unread_msgs:
+                # 使用统一格式渲染未读消息行
+                unread_lines = "\n".join(
+                    self.format_message_line(msg) for msg in unread_msgs
+                )
+
+                # 通过 user prompt 模板构建完整 user 提示词
+                # 首次有未读消息时，将历史消息与未读消息合并到同一个 USER payload
+                unread_user_prompt = await self._build_user_prompt(
+                    chat_stream,
+                    history_text=history_text if not history_merged else "",
+                    unread_lines=unread_lines,
+                )
+                history_merged = True
+
                 # ── 子代理决策 ──
-                decision = await self.sub_agent(formatted_text, unread_msgs, chat_stream)
+                decision = await self.sub_agent(
+                    unread_user_prompt, unread_msgs, chat_stream
+                )
                 logger.info(
                     f"Sub-agent 决策: {decision['reason']} (响应: {decision['should_respond']})"
                 )
@@ -444,7 +469,7 @@ class DefaultChatter(BaseChatter):
                 # 无论是否响应，都将未读消息并入单个 USER payload
                 self._upsert_pending_unread_payload(
                     response=response,
-                    formatted_text=formatted_text,
+                    formatted_text=unread_user_prompt,
                 )
 
                 if not decision["should_respond"]:
@@ -522,11 +547,9 @@ class DefaultChatter(BaseChatter):
             # action 执行后不需要 LLM 进一步响应结果，但为保持上下文规范
             # (assistant tool_call → tool_result → assistant)，补充一个占位 assistant 消息。
             if response.call_list and all(
-                c.name.startswith("action:") for c in response.call_list
+                c.name.startswith("action-") for c in response.call_list
             ):
-                response.add_payload(
-                    LLMPayload(ROLE.ASSISTANT, Text(_SUSPEND_TEXT))
-                )
+                response.add_payload(LLMPayload(ROLE.ASSISTANT, Text(_SUSPEND_TEXT)))
                 logger.debug("已注入 SUSPEND 占位符（本轮全部为 action 调用）")
 
             # ── 处理控制流结果 ──
@@ -545,7 +568,7 @@ class DefaultChatter(BaseChatter):
             continue
 
     async def _execute_classical(
-        self, chat_stream: Any
+        self, chat_stream: ChatStream
     ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
         """classical 模式执行流程。"""
         try:
@@ -560,14 +583,14 @@ class DefaultChatter(BaseChatter):
         usable_map = await self.inject_usables(_base_request)
 
         while True:
-            formatted_text, unread_msgs = await self.fetch_unreads()
+            _, unread_msgs = await self.fetch_unreads()
             unreads = unread_msgs
 
-            if not formatted_text or not unread_msgs:
+            if not unread_msgs:
                 yield Wait()
                 continue
 
-            classical_user_text = self._build_classical_user_text(
+            classical_user_text = await self._build_classical_user_text(
                 chat_stream, unread_msgs
             )
             decision = await self.sub_agent(
@@ -584,7 +607,9 @@ class DefaultChatter(BaseChatter):
 
             request = self.create_request("actor")
             request.add_payload(
-                LLMPayload(ROLE.SYSTEM, Text(self._build_system_prompt(chat_stream)))
+                LLMPayload(
+                    ROLE.SYSTEM, Text(await self._build_system_prompt(chat_stream))
+                )
             )
             request.add_payload(LLMPayload(ROLE.USER, Text(classical_user_text)))
             if usable_map.get_all():
@@ -655,7 +680,9 @@ class DefaultChatter(BaseChatter):
 
                     else:
                         trigger_msg = unreads[-1] if unreads else None
-                        _, success = await self.run_tool_call(call, response, usable_map, trigger_msg)
+                        _, success = await self.run_tool_call(
+                            call, response, usable_map, trigger_msg
+                        )
                         if success and call.name == _SEND_TEXT:
                             sent_once = True
                             break  # 已发送一次，立即停止处理同批次的后续 tool call
@@ -741,6 +768,33 @@ class DefaultChatterPlugin(BasePlugin):
             },
         )
 
+        get_prompt_manager().get_or_create(
+            name="default_chatter_user_prompt",
+            template=user_prompt,
+            policies={
+                "stream_name": optional("未知对话"),
+                "history": optional("")
+                .then(min_len(2))
+                .then(
+                    wrap(
+                        "# 历史消息\n",
+                        "\n- （以上为历史消息摘要，供你参考了解之前的对话历史但不必复述）",
+                    )
+                ),
+                "unreads": optional("")
+                .then(min_len(2))
+                .then(
+                    wrap(
+                        "# 新收到的消息\n",
+                        "\n- （以上为新收到的消息，请基于这些消息生成回复）",
+                    )
+                ),
+                "extra": optional("")
+                .then(min_len(2))
+                .then(wrap("# 额外信息\n", "\n- （以上为额外信息，你可以适当参考）")),
+            },
+        )
+
     def get_components(self) -> list[type]:
         """获取插件内所有组件类
 
@@ -753,4 +807,3 @@ class DefaultChatterPlugin(BasePlugin):
             PassAndWaitAction,
             StopConversationAction,
         ]
-

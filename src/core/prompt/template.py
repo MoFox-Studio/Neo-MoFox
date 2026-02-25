@@ -16,7 +16,7 @@ Prompt 模板模块
         }
     )
 
-    prompt = (
+    prompt = await (
         tmpl.set("user.query", "怎么设计 prompt 系统？")
             .set("context.kb", "")
             .build()
@@ -31,6 +31,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.core.prompt.policies import RenderPolicy, optional
+
+# 事件名常量，供订阅方引用
+PROMPT_BUILD_EVENT = "on_prompt_build"
 
 
 @dataclass
@@ -65,7 +68,7 @@ class PromptTemplate:
 
         Examples:
             >>> tmpl = PromptTemplate(name="test", template="Hello {name}")
-            >>> tmpl.set("name", "World").build()
+            >>> await tmpl.set("name", "World").build()
             "Hello World"
         """
         self.values[key] = value
@@ -116,10 +119,12 @@ class PromptTemplate:
         self.values.clear()
         return self
 
-    def build(self, strict: bool = False) -> str:
-        """构建最终的提示词字符串
+    async def build(self, strict: bool = False) -> str:
+        """构建最终的提示词字符串。
 
         根据设置的值和渲染策略生成最终的提示词。
+        构建前会触发 ``on_prompt_build`` 事件，订阅者可以修改
+        ``values``、``template``、``policies`` 后再继续渲染。
 
         Args:
             strict: 是否严格模式。严格模式下，如果模板中使用了
@@ -133,31 +138,73 @@ class PromptTemplate:
             KeyError: 严格模式下，模板使用了未设置的占位符
 
         Examples:
-            >>> tmpl = PromptTemplate(
-            ...     name="greet",
-            ...     template="Hello {name}, you are {age} years old"
-            ... )
-            >>> tmpl.set("name", "Alice").set("age", 25).build()
+            >>> prompt = await tmpl.set("name", "Alice").set("age", 25).build()
             "Hello Alice, you are 25 years old"
         """
-        rendered = {}
+        effective_template = self.template
+        effective_values: dict[str, Any] = dict(self.values)
+        effective_policies: dict[str, RenderPolicy] = dict(self.policies)
 
-        # 渲染所有已设置的值
-        for key, value in self.values.items():
-            policy = self.policies.get(key, optional())
+        try:
+            from src.kernel.event import get_event_bus
+
+            event_bus = get_event_bus()
+            if event_bus.get_subscribers(PROMPT_BUILD_EVENT):
+                _, final_params = await event_bus.publish(
+                    PROMPT_BUILD_EVENT,
+                    {
+                        "name": self.name,
+                        "template": effective_template,
+                        "values": effective_values,
+                        "policies": effective_policies,
+                        "strict": strict,
+                    },
+                )
+                effective_template = str(final_params.get("template", effective_template))
+                if isinstance(final_params.get("values"), dict):
+                    effective_values = final_params["values"]
+                if isinstance(final_params.get("policies"), dict):
+                    effective_policies = final_params["policies"]
+        except Exception:
+            # 事件触发失败不中断 prompt 构建，静默降级
+            pass
+
+        return self._render(effective_template, effective_values, effective_policies, strict)
+
+    def _render(
+        self,
+        template: str,
+        values: dict[str, Any],
+        policies: dict[str, RenderPolicy],
+        strict: bool,
+    ) -> str:
+        """内部渲染方法，根据给定的模板、值和策略生成提示词字符串。
+
+        Args:
+            template: 模板字符串
+            values: 占位符值映射
+            policies: 占位符渲染策略映射
+            strict: 是否严格模式
+
+        Returns:
+            str: 渲染后的提示词字符串
+        """
+        rendered: dict[str, str] = {}
+
+        for key, value in values.items():
+            policy = policies.get(key, optional())
             rendered[key] = policy(value)
 
         # 在非严格模式下，提取模板中所有占位符，将未设置的设为空字符串
         if not strict:
-            # 查找所有 {placeholder} 格式的占位符
-            placeholders = set(re.findall(r'\{([^{}]+)\}', self.template))
+            placeholders = set(re.findall(r'\{([^{}]+)\}', template))
             for placeholder in placeholders:
                 if placeholder not in rendered:
                     # 应用策略处理未设置的占位符（如可选值策略会返回默认值）
-                    policy = self.policies.get(placeholder, optional())
+                    policy = policies.get(placeholder, optional())
                     rendered[placeholder] = policy(None)
 
-        return self.template.format_map(rendered)
+        return template.format_map(rendered)
 
     def build_partial(self) -> str:
         """部分构建模板，只替换已设置的占位符
@@ -218,7 +265,7 @@ class PromptTemplate:
         Examples:
             >>> tmpl = PromptTemplate(name="test", template="Hello {name}")
             >>> new_tmpl = tmpl.with_values(name="World")
-            >>> new_tmpl.build()
+            >>> await new_tmpl.build()
             "Hello World"
             >>> tmpl.values  # 原模板不受影响
             {}

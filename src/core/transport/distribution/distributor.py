@@ -50,7 +50,15 @@ async def _on_message_received(_: str, params: dict) -> tuple[EventDecision, dic
         # message.stream_id 已经是标准哈希格式（由 extract_stream_id 生成）
         sm = get_stream_manager()
         group_id = message.extra.get("group_id") if hasattr(message, "extra") else ""
+        group_name = message.extra.get("group_name", "") if hasattr(message, "extra") else ""
         user_id = message.sender_id if message.chat_type != "group" else ""
+
+        # 群聊用群名，私聊用"xxx的私聊"（优先 cardname，fallback sender_name/sender_id）
+        if message.chat_type == "group":
+            stream_name = group_name or ""
+        else:
+            display_name = message.sender_cardname or message.sender_name
+            stream_name = f"{display_name}的私聊" if display_name else ""
 
         chat_stream = await sm.get_or_create_stream(
             platform=message.platform,
@@ -58,6 +66,7 @@ async def _on_message_received(_: str, params: dict) -> tuple[EventDecision, dic
             chat_type=message.chat_type,
             user_id=user_id,
             group_id=group_id or "",
+            group_name=stream_name,
         )
 
         stream_id = chat_stream.stream_id

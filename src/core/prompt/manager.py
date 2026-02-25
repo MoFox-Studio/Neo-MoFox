@@ -97,7 +97,8 @@ class PromptManager:
             >>> if tmpl:
             ...     prompt = tmpl.set("key", "value").build()
         """
-        return self._templates.get(name)
+        tmpl = self._templates.get(name)
+        return tmpl.clone() if tmpl is not None else None
 
     def get_or_create(
         self,
@@ -127,7 +128,7 @@ class PromptManager:
         """
         existing = self.get_template(name)
         if existing is not None:
-            return existing
+            return existing  # get_template 已返回 clone，无需再次 clone
 
         from src.core.prompt.policies import RenderPolicy
 
@@ -147,7 +148,7 @@ class PromptManager:
             policies=resolved_policies or {},
         )
         self.register_template(new_template)
-        return new_template
+        return new_template.clone()
 
     def has_template(self, name: str) -> bool:
         """检查模板是否存在

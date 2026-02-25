@@ -81,6 +81,7 @@ class StreamManager:
         platform: str = "",
         user_id: str = "",
         group_id: str = "",
+        group_name: str = "",
         chat_type: str = "private",
 
     ) -> "ChatStream":
@@ -94,6 +95,7 @@ class StreamManager:
             platform: 平台标识
             user_id: 用户ID（私聊时使用）
             group_id: 群组ID（群聊时使用）
+            group_name: 群组名称（群聊时使用，用于填充 stream_name）
             chat_type: 聊天类型（private/group/discuss）
 
         Returns:
@@ -142,8 +144,21 @@ class StreamManager:
                         platform=platform,
                         user_id=user_id,
                         group_id=group_id,
+                        group_name=group_name,
                         chat_type=chat_type,
                     )
+                elif group_name and chat_stream.stream_name != group_name:
+                    # 调用方传入了新名称（如群名变更、私聊显示名更新），同步到内存和数据库
+                    logger.debug(
+                        f"更新流名称: {stream_id}, "
+                        f"旧={chat_stream.stream_name!r} -> 新={group_name!r}"
+                    )
+                    chat_stream.stream_name = group_name
+                    _record = await self._streams_crud.get_by(stream_id=stream_id)
+                    if _record:
+                        await self._streams_crud.update(
+                            _record.id, {"group_name": group_name}
+                        )
             else:
                 # 创建新流
                 logger.debug(f"创建新流: {stream_id}")
@@ -152,6 +167,7 @@ class StreamManager:
                     platform=platform,
                     user_id=user_id,
                     group_id=group_id,
+                    group_name=group_name,
                     chat_type=chat_type,
                 )
 
@@ -184,6 +200,7 @@ class StreamManager:
             stream_id=stream_record.stream_id,
             platform=stream_record.platform,
             chat_type=stream_record.chat_type,
+            stream_name=stream_record.group_name or "",
         )
         chat_stream.create_time = stream_record.created_at
         chat_stream.last_active_time = stream_record.last_active_time
@@ -557,6 +574,7 @@ class StreamManager:
         chat_type: str = "private",
         user_id: str = "",
         group_id: str = "",
+        group_name: str = "",
         stream_id: str = "",
     ) -> "ChatStream":
         """创建新流。
@@ -565,7 +583,8 @@ class StreamManager:
             platform: 平台标识
             chat_type: 聊天类型
             user_id: 用户ID
-            group_id: 群组ID       
+            group_id: 群组ID
+            group_name: 群组名称（群聊时使用）
 
         Returns:
             ChatStream: 新创建的流对象
@@ -601,6 +620,7 @@ class StreamManager:
             "person_id": person_id,
             "platform": platform,
             "group_id": group_id or None,
+            "group_name": group_name or None,
             "chat_type": chat_type,
             "created_at": now,
             "last_active_time": now,
@@ -618,6 +638,9 @@ class StreamManager:
         except Exception as e:
             logger.warning(f"获取 Bot 信息失败，将使用空值: platform={platform}, error={e}")
 
+        # stream_name：由调用方按聊天类型传入（群聊=群名，私聊=xxx的私聊）
+        stream_name = group_name or ""
+
         # 创建 ChatStream 对象
         chat_stream = ChatStream(
             stream_id=stream_id,
@@ -625,6 +648,7 @@ class StreamManager:
             chat_type=chat_type,
             bot_id=bot_id,
             bot_nickname=bot_nickname,
+            stream_name=stream_name,
         )
         chat_stream.create_time = now
         chat_stream.last_active_time = now

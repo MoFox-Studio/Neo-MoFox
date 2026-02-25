@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncGenerator, cast
 
@@ -546,19 +545,85 @@ class BaseChatter(ABC):
         )
         return True, exec_success
 
+    @staticmethod
+    def _format_role(role: str | None) -> str:
+        """将发送者角色值转为中文显示名。
+
+        Args:
+            role: 角色字符串（owner/operator/member/bot/other）或 None
+
+        Returns:
+            str: 中文角色名
+        """
+        _ROLE_MAP = {
+            "owner": "群主",
+            "operator": "管理员",
+            "member": "成员",
+            "bot": "机器人",
+            "other": "其他",
+        }
+        if not role:
+            return ""
+        return _ROLE_MAP.get(str(role).lower(), str(role))
+
+    @staticmethod
+    def format_message_line(
+        msg: "Message",
+        time_format: str = "%H:%M",
+    ) -> str:
+        """将单条消息格式化为统一的显示行。
+
+        格式：【时间】<role> [platform_id] nickname$cardname： 消息
+
+        Args:
+            msg: 消息对象
+            time_format: 时间格式化字符串
+
+        Returns:
+            str: 格式化后的消息行
+        """
+        # 时间
+        raw_time = getattr(msg, "time", None)
+        if isinstance(raw_time, (int, float)):
+            time_str = datetime.fromtimestamp(raw_time).strftime(time_format)
+        elif isinstance(raw_time, datetime):
+            time_str = raw_time.strftime(time_format)
+        else:
+            time_str = str(raw_time or "")
+
+        # 角色
+        role_raw = getattr(msg, "sender_role", None)
+        role_str = BaseChatter._format_role(role_raw)
+        role_part = f"<{role_str}> " if role_str else ""
+
+        # 平台 ID（优先使用 sender_id，这是平台原始 ID）
+        platform_id = getattr(msg, "sender_id", "") or ""
+        id_part = f"[{platform_id}] " if platform_id else ""
+
+        # 名称部分：nickname$cardname（无 cardname 时省略 $cardname）
+        nickname = getattr(msg, "sender_name", "") or ""
+        cardname = getattr(msg, "sender_cardname", None)
+        if cardname and cardname != nickname:
+            name_part = f"{nickname}${cardname}"
+        else:
+            name_part = nickname or "未知发送者"
+
+        # 消息内容
+        content = getattr(msg, "processed_plain_text", None) or str(getattr(msg, "content", ""))
+
+        return f"【{time_str}】{role_part}{id_part}{name_part}： {content}"
+
     async def fetch_unreads(
         self,
-        format_as_group: bool = True,
         time_format: str = "%H:%M",
     ) -> tuple[str, list["Message"]]:
         """仅读取未读消息，不修改上下文。
 
         Args:
-            format_as_group: 是否将未读消息格式化为一个 JSON 组
-            time_format: 时间格式化字符串（用于 time 字段）
+            time_format: 时间格式化字符串
 
         Returns:
-            tuple[str, list[Message]]: (格式化后的未读消息 JSON 文本, 未读消息列表)
+            tuple[str, list[Message]]: (格式化后的未读消息文本，每条消息占一行, 未读消息列表)
         """
         logger = get_logger("chatter")
 
@@ -577,37 +642,8 @@ class BaseChatter(ABC):
         if not unread_messages:
             return "", []
 
-        if not format_as_group:
-            return "", unread_messages
-
-        formatted_messages = []
-        for msg in unread_messages:
-            if isinstance(msg.time, (int, float)):
-                time_str = datetime.fromtimestamp(msg.time).strftime(time_format)
-            elif isinstance(msg.time, datetime):
-                time_str = msg.time.strftime(time_format)
-            else:
-                time_str = str(msg.time)
-
-            message_type_value = (
-                msg.message_type.value
-                if hasattr(msg.message_type, "value")
-                else str(msg.message_type)
-            )
-            formatted_messages.append(
-                {
-                    "message_id": msg.message_id,
-                    "time": time_str,
-                    "reply_to": msg.reply_to,
-                    "message_type": message_type_value,
-                    "processed_plain_text": msg.processed_plain_text,
-                    "sender_id": msg.sender_id,
-                    "sender_name": msg.sender_name,
-                    "sender_cardname": msg.sender_cardname,
-                }
-            )
-
-        return json.dumps(formatted_messages, ensure_ascii=False), unread_messages
+        lines = [self.format_message_line(msg, time_format) for msg in unread_messages]
+        return "\n".join(lines), unread_messages
 
     async def flush_unreads(self, unread_messages: list["Message"]) -> int:
         """将指定未读消息从 unread 移入 history。

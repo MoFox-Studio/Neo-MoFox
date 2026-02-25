@@ -148,6 +148,12 @@ class MessageConverter:
         group_id = group_info.get("group_id") if group_info else None
         group_name = group_info.get("group_name") if group_info else None
 
+        # 提取发送者角色（UserRole 枚举转字符串）
+        raw_role = user_info.get("role")
+        sender_role: str | None = None
+        if raw_role is not None:
+            sender_role = raw_role.value
+
         # 提取 extra 元数据
         extra_data = message_info.get("extra") or {}
         
@@ -161,6 +167,7 @@ class MessageConverter:
             sender_id=user_info.get("user_id", ""),
             sender_name=user_info.get("user_nickname", ""),
             sender_cardname=user_info.get("user_cardname"),
+            sender_role=sender_role,
             platform=message_info.get("platform", ""),
             chat_type=infer_chat_type(message_info),
             stream_id=extract_stream_id(message_info),

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import orjson
 from mofox_wire import MessageBuilder, SegPayload
+from mofox_wire.types import UserRole
 
 from src.app.plugin_system.api.log_api import get_logger
 
@@ -79,6 +80,13 @@ class MessageHandler:
 
         # 构造用户信息
         sender_info = raw.get("sender", {})
+        role = sender_info.get("role", "")
+        if role == "owner":
+            sender_info["role"] = UserRole.OWNER
+        elif role == "admin":
+            sender_info["role"] = UserRole.OPERATOR
+        elif role == "member":
+            sender_info["role"] = UserRole.MEMBER
 
         (
             msg_builder.direction("incoming")
@@ -90,6 +98,7 @@ class MessageHandler:
                 nickname=sender_info.get("nickname", ""),
                 cardname=sender_info.get("card", ""),
                 user_avatar=sender_info.get("avatar", ""),
+                role=sender_info.get("role", ""),
             )
         )
 

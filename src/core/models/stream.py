@@ -151,6 +151,7 @@ class ChatStream:
         platform: 平台标识
         bot_id: 机器人 ID
         bot_nickname: 机器人昵称
+        stream_name: 聊天流名称（群聊时为群名，私聊时为用户昵称，默认为空字符串）
         message: 初始消息
         context: 聊天流上下文
         create_time: 创建时间
@@ -171,6 +172,7 @@ class ChatStream:
         chat_type: str = "private",
         bot_id: str = "",
         bot_nickname: str = "",
+        stream_name: str = "",
     ) -> None:
         """初始化聊天流。
 
@@ -180,12 +182,14 @@ class ChatStream:
             chat_type: 聊天类型（private/group/discuss）
             bot_id: 机器人 ID
             bot_nickname: 机器人昵称
+            stream_name: 聊天流名称（群名或用户名）
         """
         self.stream_id = stream_id
         self.platform = platform
         self.chat_type = chat_type
         self.bot_id = bot_id
         self.bot_nickname = bot_nickname
+        self.stream_name = stream_name
         self.create_time = time.time()
         self.last_active_time = time.time()
 

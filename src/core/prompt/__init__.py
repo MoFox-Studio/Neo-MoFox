@@ -28,7 +28,7 @@ Prompt management system.
 """
 
 # 模板相关
-from src.core.prompt.template import PromptTemplate
+from src.core.prompt.template import PromptTemplate, PROMPT_BUILD_EVENT
 
 # 管理器相关
 from src.core.prompt.manager import (
@@ -55,6 +55,8 @@ __all__ = [
     "get_prompt_manager",
     "PromptManager",
     "reset_prompt_manager",
+    # 事件
+    "PROMPT_BUILD_EVENT",
     # 渲染策略
     "RenderPolicy",
     "optional",

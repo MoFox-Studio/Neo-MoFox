@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 
 from src.core.prompt.manager import PromptManager, get_prompt_manager, reset_prompt_manager
 from src.core.prompt.template import PromptTemplate
@@ -237,7 +238,8 @@ class TestGlobalManager:
         assert manager2 is not manager1
         assert manager2.count() == 0
 
-    def test_global_manager_integration(self) -> None:
+    @pytest.mark.asyncio
+    async def test_global_manager_integration(self) -> None:
         """Test using global manager with templates."""
         manager = get_prompt_manager()
 
@@ -254,7 +256,7 @@ class TestGlobalManager:
         retrieved = manager.get_template("greet")
         assert retrieved is not None
 
-        result = retrieved.set("name", "World").build()
+        result = await retrieved.set("name", "World").build()
         assert result == "Hello World"
 
 
@@ -265,7 +267,8 @@ class TestManagerIntegration:
         """Reset manager before each test."""
         reset_prompt_manager()
 
-    def test_workflow_full_cycle(self) -> None:
+    @pytest.mark.asyncio
+    async def test_workflow_full_cycle(self) -> None:
         """Test full workflow: create, register, retrieve, use."""
         manager = get_prompt_manager()
 
@@ -279,10 +282,11 @@ class TestManagerIntegration:
         retrieved = manager.get_template("kb_query")
         assert retrieved is tmpl
 
-        result = retrieved.set("query", "如何学习Python？").set("context", "").build()
+        result = await retrieved.set("query", "如何学习Python？").set("context", "").build()
         assert "如何学习Python？" in result
 
-    def test_multiple_templates_management(self) -> None:
+    @pytest.mark.asyncio
+    async def test_multiple_templates_management(self) -> None:
         """Test managing multiple templates."""
         manager = get_prompt_manager()
 
@@ -307,11 +311,12 @@ class TestManagerIntegration:
         assert farewell is not None
         assert question is not None
 
-        assert greet.set("name", "Alice").build() == "Hello Alice"
-        assert farewell.set("name", "Bob").build() == "Goodbye Bob"
-        assert question.set("question", "How are you").build() == "How are you?"
+        assert await greet.set("name", "Alice").build() == "Hello Alice"
+        assert await farewell.set("name", "Bob").build() == "Goodbye Bob"
+        assert await question.set("question", "How are you").build() == "How are you?"
 
-    def test_template_isolation(self) -> None:
+    @pytest.mark.asyncio
+    async def test_template_isolation(self) -> None:
         """Test that templates are isolated from each other."""
         manager = get_prompt_manager()
 
@@ -330,5 +335,5 @@ class TestManagerIntegration:
         assert tmpl2.get("b") is None
 
         # Build results should be correct
-        assert tmpl1.build() == "1 2"
-        assert tmpl2.build() == "X Y"
+        assert await tmpl1.build() == "1 2"
+        assert await tmpl2.build() == "X Y"

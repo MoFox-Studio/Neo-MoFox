@@ -46,9 +46,10 @@ class Message:
         message_type: 消息类型
 
         # 用户信息
-        sender_id: 发送者 ID
+        sender_id: 发送者 ID（平台原始 ID）
         sender_name: 发送者名称
         sender_cardname: 发送者备注名或群名片
+        sender_role: 发送者在群组中的角色（owner/operator/member/bot/other）
 
         # 聊天上下文
         platform: 消息来源平台
@@ -84,6 +85,7 @@ class Message:
         sender_id: str = "",
         sender_name: str = "",
         sender_cardname: str | None = None,
+        sender_role: str | None = None,
         # 聊天上下文
         platform: str = "",
         chat_type: str = "",
@@ -102,9 +104,10 @@ class Message:
             content: 消息内容
             processed_plain_text: 处理后的纯文本内容
             message_type: 消息类型
-            sender_id: 发送者 ID
+            sender_id: 发送者 ID（平台原始 ID）
             sender_name: 发送者名称
             sender_cardname: 发送者备注名或群名片
+            sender_role: 发送者在群组中的角色（owner/operator/member/bot/other）
             platform: 消息来源平台
             chat_type: 聊天类型
             raw_data: 原始平台数据
@@ -128,6 +131,7 @@ class Message:
         self.sender_id = sender_id
         self.sender_name = sender_name
         self.sender_cardname = sender_cardname
+        self.sender_role = sender_role
 
         # 聊天上下文
         self.platform = platform
@@ -166,6 +170,7 @@ class Message:
             "sender_id": self.sender_id,
             "sender_name": self.sender_name,
             "sender_cardname": self.sender_cardname,
+            "sender_role": self.sender_role,
             # 聊天上下文
             "platform": self.platform,
             "chat_type": self.chat_type,
@@ -215,6 +220,7 @@ class Message:
                 "sender_id",
                 "sender_name",
                 "sender_cardname",
+                "sender_role",
                 "platform",
                 "chat_type",
             }
@@ -231,6 +237,7 @@ class Message:
             sender_id=data.get("sender_id", ""),
             sender_name=data.get("sender_name", ""),
             sender_cardname=data.get("sender_cardname"),
+            sender_role=data.get("sender_role"),
             platform=data.get("platform", ""),
             chat_type=data.get("chat_type", ""),
             raw_data=None,

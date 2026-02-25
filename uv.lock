@@ -1449,7 +1449,7 @@ wheels = [
 
 [[package]]
 name = "mofox-wire"
-version = "0.1.5"
+version = "0.1.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1458,9 +1458,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/87/9b/e57c261f9026a70015672e775116ff4c3e612007035964b543386a85b4a1/mofox_wire-0.1.5.tar.gz", hash = "sha256:0b680fd5965f88076e4a5bdb2d1b8f4bc257bdece9dadea12848358e4cb35f27", size = 97754, upload-time = "2025-12-03T13:15:35.044Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/15/c5e11756f1365d7c02af6915b5db59e7896816da059ec47bc6bd0c7a2f3e/mofox_wire-0.1.7.tar.gz", hash = "sha256:7c7c8d6e559522572db9cd59fdc4c2ff5c85cea753afc3be8dd6f212aff1d329", size = 91234, upload-time = "2026-02-25T15:59:36.479Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6c/7f/dc8377e82ac086172dae83dfb24c74cc5e72b09013ff418e05b0c29bc331/mofox_wire-0.1.5-py3-none-any.whl", hash = "sha256:a94d7606acee47fbfeb5d87bd3a06df3fbb5707b6383a063ef8b017616426d89", size = 59625, upload-time = "2025-12-03T13:15:33.091Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/9e/570dd95cab2d72e17d13ab7744072ea92189abf97e9c74b1a5790a51f6bf/mofox_wire-0.1.7-py3-none-any.whl", hash = "sha256:e3f155586461420ebe3768c1ac966eaf9226873ba50cf81fc03e9714c797d9cd", size = 58662, upload-time = "2026-02-25T15:59:31.996Z" },
 ]
 
 [[package]]
@@ -1632,7 +1632,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.128.0" },
     { name = "json-repair", specifier = ">=0.57.1" },
     { name = "mcp", specifier = ">=1.26.0" },
-    { name = "mofox-wire", specifier = ">=0.1.5" },
+    { name = "mofox-wire", specifier = ">=0.1.7" },
     { name = "openai", specifier = ">=2.16.0" },
     { name = "packaging", specifier = ">=26.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
