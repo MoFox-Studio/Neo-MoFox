@@ -61,16 +61,31 @@ class CoreConfig(ConfigBase):
             description="LLM 接口预检超时时间（秒）",
         )
         tick_interval: float = Field(
-            default=15,
+            default=5.0,
             description="主循环 tick 间隔（秒），过短可能增加消耗，过长可能降低响应速度",
         )
         stream_warning_threshold: float = Field(
-            default=4.0,
+            default=15.0,
             description="流循环警告阈值（倍数），距上次心跳超过 tick_interval × 此值时输出警告",
         )
         stream_restart_threshold: float = Field(
-            default=8.0,
+            default=30.0,
             description="流循环重启阈值（倍数），距上次心跳超过 tick_interval × 此值时尝试重启",
+        )
+        message_buffer_window: float = Field(
+            default=8.0,
+            description=(
+                "消息缓冲窗口（秒）。收到新消息后，在此时间窗口内的 Tick 将被跳过，"
+                "以等待用户可能发出的连续消息合并处理。设为 0 可禁用此功能。"
+            ),
+        )
+        message_buffer_max_skip: int = Field(
+            default=3,
+            description=(
+                "消息缓冲最多连续跳过的 Tick 次数上限。"
+                "防止群聊高压环境下因消息持续涌入导致 Tick 始终被跳过、Bot 无法响应。"
+                "达到上限后强制激活 Chatter，无论缓冲窗口是否已过。"
+            ),
         )
 
     bot: BotSection = Field(default_factory=BotSection)

@@ -315,6 +315,64 @@ class StreamLoopManager:
     # 内部方法 — 状态处理
     # ========================================================================
 
+    def _message_buffer_check(self, stream_id: str, context: "StreamContext") -> bool:
+        """消息缓冲机制检查。
+
+        收到新消息后，在配置的缓冲窗口内跳过 Tick，等待用户可能连续发出的下一条消息，
+        避免将同一用户的多条连续消息拆成多次处理。
+        当连续跳过次数达到上限时强制放行，防止高压群聊使 Bot 始终无法响应。
+
+        Args:
+            stream_id: 流 ID
+            context: 流上下文
+
+        Returns:
+            bool: True 表示可以继续执行本次 Tick，False 表示应跳过本次 Tick
+        """
+        from src.core.config import get_core_config
+
+        try:
+            bot_cfg = get_core_config().bot
+            buffer_window: float = bot_cfg.message_buffer_window
+            max_skip: int = bot_cfg.message_buffer_max_skip
+        except Exception:
+            # 配置未初始化时不阻塞
+            return True
+
+        # 功能关闭时直接放行
+        if buffer_window <= 0:
+            return True
+
+        last_msg_time = context.last_message_time
+        if last_msg_time is None:
+            # 尚未收到过消息，无需缓冲
+            return True
+
+        elapsed = time.time() - last_msg_time
+        if elapsed >= buffer_window:
+            # 缓冲窗口已过，重置计数并放行
+            context.message_buffer_skip_count = 0
+            return True
+
+        # 仍在缓冲窗口内
+        if context.message_buffer_skip_count >= max_skip:
+            # 已达最大跳过次数，强制放行并重置计数
+            logger.debug(
+                f"[缓冲] stream={stream_id[:8]}, "
+                f"已达最大跳过次数 ({max_skip})，强制激活 Chatter"
+            )
+            context.message_buffer_skip_count = 0
+            return True
+
+        # 跳过本次 Tick
+        context.message_buffer_skip_count += 1
+        logger.debug(
+            f"[缓冲] stream={stream_id[:8]}, "
+            f"消息缓冲中 (elapsed={elapsed:.2f}s < window={buffer_window}s, "
+            f"skip={context.message_buffer_skip_count}/{max_skip})，跳过本次 Tick"
+        )
+        return False
+
     def _wait_state_check(self, stream_id: str, context: "StreamContext") -> bool:
         """检查并更新等待状态。
 

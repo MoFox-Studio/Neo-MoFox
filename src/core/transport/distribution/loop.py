@@ -123,7 +123,13 @@ async def run_chat_stream(
                     # 处于等待中且未满足条件，跳过本次 Tick
                     continue
 
-                # 2. 获取或创建 chatter_gene
+                # 2. 消息缓冲机制检查
+                # 若距上次收到消息未超过缓冲窗口，则跳过本次 Tick（等待用户连续消息合并），
+                # 但当连续跳过次数已达上限时强制继续，防止高压群聊导致 Bot 始终无法响应。
+                if not manager._message_buffer_check(stream_id, context):
+                    continue
+
+                # 3. 获取或创建 chatter_gene
                 chatter_gene = manager._chatter_genes.get(stream_id)
                 
                 if not chatter_gene:

@@ -33,6 +33,8 @@ class StreamContext:
         is_chatter_processing: Chatter 是否正在处理
         message_cache: 消息缓存队列
         is_cache_enabled: 是否启用消息缓存
+        last_message_time: 最近一次收到新消息的时间戳，None 表示尚未收到
+        message_buffer_skip_count: 当前连续因消息缓冲机制跳过的 Tick 次数
     """
 
     stream_id: str
@@ -51,6 +53,12 @@ class StreamContext:
     # 消息缓存系统
     message_cache: deque["Message"] = field(default_factory=deque)
     is_cache_enabled: bool = False
+
+    # 消息缓冲机制
+    # last_message_time: 最近一次收到新消息的时间戳（None 表示尚未收到过消息）
+    # message_buffer_skip_count: 当前连续因缓冲而跳过的 Tick 次数
+    last_message_time: float | None = None
+    message_buffer_skip_count: int = 0
 
     # 流循环任务引用
     stream_loop_task: asyncio.Task | None = field(default=None, repr=False)

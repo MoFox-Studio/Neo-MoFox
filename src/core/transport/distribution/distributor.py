@@ -75,6 +75,11 @@ async def _on_message_received(_: str, params: dict) -> tuple[EventDecision, dic
         # 2. 持久化消息到数据库 + 更新未读消息
         await sm.add_message(message)
 
+        # 3. 更新消息缓冲时间戳，并重置连续跳过计数
+        import time
+        context.last_message_time = time.time()
+        context.message_buffer_skip_count = 0
+
         # 4. 尝试启动该流的 Tick 驱动器（如果已在运行则跳过）
         slm = get_stream_loop_manager()
         if slm.is_running:

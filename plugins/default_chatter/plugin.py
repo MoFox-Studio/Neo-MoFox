@@ -719,7 +719,7 @@ class DefaultChatter(BaseChatter):
 
                 # ── 若本轮全部 call 均为 action 类型，注入 SUSPEND 占位符 ──
                 if response.call_list and all(
-                    c.name.startswith("action:") for c in response.call_list
+                    c.name.startswith("action-") for c in response.call_list
                 ):
                     response.add_payload(
                         LLMPayload(ROLE.ASSISTANT, Text(_SUSPEND_TEXT))
