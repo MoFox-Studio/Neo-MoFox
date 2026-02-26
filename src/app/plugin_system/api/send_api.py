@@ -4,6 +4,7 @@
 """
 import asyncio
 from typing import Any
+from uuid import uuid4
 
 from src.core.models.message import Message, MessageType
 
@@ -330,7 +331,7 @@ async def _send_message(
 
         # 构建消息
         message = Message(
-            message_id=f"api_{message_type.value}_{id(content)}",
+            message_id=f"api_{message_type.value}_{uuid4().hex}",
             content=content,
             processed_plain_text=processed_plain_text,
             message_type=message_type,

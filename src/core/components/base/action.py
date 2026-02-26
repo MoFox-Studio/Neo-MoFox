@@ -7,6 +7,7 @@
 import random
 from abc import ABC, abstractmethod
 from typing import Annotated, Any, TYPE_CHECKING
+from uuid import uuid4
 
 from src.core.components.types import ChatType
 from src.core.components.utils import parse_function_signature
@@ -398,7 +399,7 @@ class BaseAction(ABC, LLMUsable):
                     extra["target_group_name"] = target_group_name
 
                 message = Message(
-                    message_id=f"action_{self.action_name}_{id(self)}",
+                    message_id=f"action_{self.action_name}_{uuid4().hex}",
                     content=content_str,
                     processed_plain_text=content_str,
                     message_type=MessageType.TEXT,
