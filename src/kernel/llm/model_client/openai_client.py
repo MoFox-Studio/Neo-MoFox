@@ -593,8 +593,22 @@ class OpenAIChatClient:
                 # 部分提供商需要显式指定 tool_choice 才会返回工具调用
                 params["tool_choice"] = "required"
 
-        # 允许每模型注入额外参数（如 top_p/response_format/tool_choice 等）
-        params.update(extra_params)
+            # 允许每模型注入额外参数（如 top_p/response_format/tool_choice 等）
+            params.update(extra_params)
+
+            # 新增：区分标准参数与非标准参数
+            standard_params = {
+                "model", "messages", "max_tokens", "temperature", "top_p", "n", "stream",
+                "stop", "presence_penalty", "frequency_penalty", "logit_bias", "user",
+                "tools", "tool_choice", "response_format", "seed", "parallel_tool_calls",
+                "functions", "function_call"
+            }
+            extra_body = {}
+            for key in list(params.keys()):
+                if key not in standard_params:
+                    extra_body[key] = params.pop(key)   # 从 params 中移除，存入 extra_body
+            if extra_body:
+                params["extra_body"] = extra_body
 
         if not stream:
             return await self._create_non_stream(
