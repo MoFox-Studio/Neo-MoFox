@@ -198,7 +198,7 @@ async def test_db_message_to_runtime_uses_bot_nickname_for_bot_message(monkeypat
     )
     helper = SimpleNamespace(
         person_crud=SimpleNamespace(get_by=AsyncMock(return_value=fake_person)),
-        generate_person_id=lambda platform, user_id: f"{platform}:{user_id}",
+        generate_person_id=lambda platform, user_id: "hash_qq_bot_001",
     )
     monkeypatch.setattr(
         "src.core.utils.user_query_helper.get_user_query_helper",
@@ -232,3 +232,90 @@ async def test_db_message_to_runtime_uses_bot_nickname_for_bot_message(monkeypat
     assert runtime_msg.sender_id == "10001"
     assert runtime_msg.sender_name == "MoFox"
     assert runtime_msg.sender_cardname == "MoFox"
+
+
+@pytest.mark.asyncio
+async def test_get_stream_info_normalizes_raw_person_id(monkeypatch) -> None:
+    """读取流信息时，原始 person_id 应自动规范化为哈希格式。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    manager._streams_crud.get_by = AsyncMock(
+        return_value=SimpleNamespace(
+            id=1,
+            stream_id="stream-normalize-001",
+            platform="qq",
+            chat_type="private",
+            group_id=None,
+            group_name=None,
+            person_id="qq:12345",
+            last_active_time=100.0,
+            created_at=90.0,
+        )
+    )
+    manager._streams_crud.update = AsyncMock(return_value=None)
+
+    helper = SimpleNamespace(generate_person_id=lambda platform, user_id: "hash_qq_12345")
+    monkeypatch.setattr(
+        "src.core.utils.user_query_helper.get_user_query_helper",
+        lambda: helper,
+    )
+
+    class _FakeQuery:
+        def filter(self, **kwargs):
+            return self
+
+        async def count(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.QueryBuilder",
+        lambda _model: _FakeQuery(),
+    )
+
+    info = await manager.get_stream_info("stream-normalize-001")
+
+    assert info is not None
+    assert info["person_id"] == "hash_qq_12345"
+    manager._streams_crud.update.assert_awaited_once_with(1, {"person_id": "hash_qq_12345"})
+
+
+@pytest.mark.asyncio
+async def test_add_message_normalizes_direct_raw_person_id(monkeypatch) -> None:
+    """消息携带原始 person_id 时，入库应写入哈希格式。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    manager._messages_crud.get_by = AsyncMock(return_value=None)
+    manager._messages_crud.create = AsyncMock(return_value=SimpleNamespace(id=1))
+    manager._streams_crud.get_by = AsyncMock(return_value=SimpleNamespace(id=1))
+    manager._streams_crud.update = AsyncMock(return_value=None)
+
+    helper = SimpleNamespace(generate_person_id=lambda platform, user_id: "hash_qq_user_123")
+    monkeypatch.setattr(
+        "src.core.utils.user_query_helper.get_user_query_helper",
+        lambda: helper,
+    )
+
+    stream_id = "stream-msg-raw-person-001"
+    manager._streams[stream_id] = SimpleNamespace(
+        context=SimpleNamespace(add_unread_message=lambda _msg: None),
+        update_active_time=lambda: None,
+    )
+
+    message = Message(
+        message_id="m002",
+        content="hello",
+        processed_plain_text="hello",
+        sender_id="user_123",
+        sender_name="Alice",
+        platform="qq",
+        chat_type="private",
+        stream_id=stream_id,
+        person_id="qq:user_123",
+    )
+
+    await manager.add_message(message)
+
+    created_data = manager._messages_crud.create.await_args.args[0]
+    assert created_data["person_id"] == "hash_qq_user_123"

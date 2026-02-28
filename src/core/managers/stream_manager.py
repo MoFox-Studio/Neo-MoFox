@@ -448,6 +448,17 @@ class StreamManager:
         if not stream:
             return None
 
+        normalized_person_id = self._normalize_person_id(
+            person_id=stream.person_id,
+            platform=stream.platform,
+        )
+        if normalized_person_id and normalized_person_id != stream.person_id:
+            await self._streams_crud.update(stream.id, {"person_id": normalized_person_id})
+            stream.person_id = normalized_person_id
+            logger.warning(
+                f"stream_id={stream_id} 检测到原始 person_id，已自动规范化为哈希格式"
+            )
+
         message_count = await QueryBuilder(self._Messages).filter(
             stream_id=stream_id
         ).count()
@@ -458,7 +469,7 @@ class StreamManager:
             "chat_type": stream.chat_type,
             "group_id": stream.group_id,
             "group_name": stream.group_name,
-            "person_id": stream.person_id,
+            "person_id": normalized_person_id or stream.person_id,
             "message_count": message_count,
             "last_active_time": stream.last_active_time,
             "created_at": stream.created_at,
@@ -768,11 +779,21 @@ class StreamManager:
 
         direct_person_id = getattr(message, "person_id", None)
         if isinstance(direct_person_id, str) and direct_person_id:
-            return direct_person_id
+            normalized_direct_person_id = self._normalize_person_id(
+                person_id=direct_person_id,
+                platform=str(message.platform or ""),
+            )
+            if normalized_direct_person_id:
+                return normalized_direct_person_id
 
         extra_person_id = message.extra.get("person_id")
         if isinstance(extra_person_id, str) and extra_person_id:
-            return extra_person_id
+            normalized_extra_person_id = self._normalize_person_id(
+                person_id=extra_person_id,
+                platform=str(message.platform or ""),
+            )
+            if normalized_extra_person_id:
+                return normalized_extra_person_id
 
         sender_id = str(message.sender_id or "")
         platform = str(message.platform or "")
@@ -780,6 +801,25 @@ class StreamManager:
             return None
 
         return get_user_query_helper().generate_person_id(platform, sender_id)
+
+    def _normalize_person_id(self, person_id: str, platform: str) -> str | None:
+        """将 person_id 规范化为哈希格式。"""
+        from src.core.utils.user_query_helper import get_user_query_helper
+
+        if not person_id:
+            return None
+
+        if ":" not in person_id:
+            return person_id
+
+        raw_platform, raw_user_id = person_id.split(":", 1)
+        if not raw_platform or not raw_user_id:
+            return None
+
+        if platform and raw_platform != platform:
+            return None
+
+        return get_user_query_helper().generate_person_id(raw_platform, raw_user_id)
 
 
 # 全局单例
