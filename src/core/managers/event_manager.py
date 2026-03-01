@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     pass
@@ -118,10 +118,10 @@ class EventManager:
                         event_name = (
                             event.value if isinstance(event, EventType) else str(event)
                         )
-                        # 创建包装函数适配 EventBus 协议
+                        # 直接注册处理器 execute，以薄异常保护包装
                         unsubscribe = self._event_bus.subscribe(
                             event_name,
-                            self._create_handler_wrapper(handler, signature),
+                            self._make_safe_wrapper(handler, signature),
                             priority=handler.weight,
                         )
                         # 保存取消订阅函数
@@ -139,55 +139,32 @@ class EventManager:
                 f"订阅映射表构建完成，共处理 {len(self._handler_map)} 个 " f"事件处理器"
             )
 
-    def _create_handler_wrapper(
+    def _make_safe_wrapper(
         self, handler: BaseEventHandler, signature: str
     ) -> Callable[[str, Dict[str, Any]], Any]:
-        """创建处理器包装函数，将 BaseEventHandler 适配到 EventBus 协议。
+        """为事件处理器创建异常防护包装，直接透传 EventBus 协议。
+
+        handler.execute 与 EventBus 订阅者协议完全一致：接受 (event_name, params)
+        并返回 (EventDecision, params)。本方法仅添加异常捕获，不做任何语义转换。
 
         Args:
             handler: 事件处理器实例
-            signature: 处理器签名
+            signature: 处理器签名（用于日志）
 
         Returns:
-            符合 EventBus 协议的包装函数
+            符合 EventBus 协议的异常安全包装函数
         """
 
-        async def wrapper(
+        async def safe_execute(
             event_name: str, params: Dict[str, Any]
-        ) -> Tuple[EventDecision, Dict[str, Any]]:
-            """包装函数，适配 EventBus 协议。
-
-            Args:
-                event_name: 事件名称（由 EventBus 传入，未使用）
-                params: 事件参数字典
-
-            Returns:
-                (EventDecision, params): 决策和参数字典
-            """
+        ) -> tuple[EventDecision, Dict[str, Any]]:
             try:
-                # 执行处理器
-                result = await handler.execute(params)
-                success = result[0]
-                intercepted = result[1]
-
-                # 将结果转换为 EventDecision
-                if intercepted:
-                    # 拦截消息，停止后续处理器
-                    logger.info(f"事件被处理器 {signature} 拦截，停止执行后续处理器")
-                    return (EventDecision.STOP, params)
-                elif success:
-                    # 成功执行，继续后续处理器
-                    return (EventDecision.SUCCESS, params)
-                else:
-                    # 失败，跳过当前处理器的影响
-                    return (EventDecision.PASS, params)
-
+                return await handler.execute(event_name, params)
             except Exception as e:
                 logger.error(f"事件处理器 {signature} 执行失败: {e}")
-                # 异常情况，跳过当前处理器的影响
                 return (EventDecision.PASS, params)
 
-        return wrapper
+        return safe_execute
 
     async def publish_event(
         self, event: EventType | str, kwargs: Optional[Dict[str, Any]] = None

@@ -81,6 +81,9 @@ class DefaultChatterPromptBuilder:
             .set("history", history_text)
             .set("unreads", unread_lines)
             .set("extra", extra)
+            # stream_id 不在模板占位符中，仅作为元数据随 on_prompt_build 事件 values 传递，
+            # 供 notice_injector 等插件按会话区分并注入内容
+            .set("stream_id", chat_stream.stream_id or "")
             .build()
         )
 

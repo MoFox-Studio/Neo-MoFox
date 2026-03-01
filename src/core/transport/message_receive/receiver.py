@@ -31,6 +31,12 @@ from src.kernel.logger import get_logger, COLOR
 
 logger = get_logger("message_receiver", display="消息接收器", color=COLOR.CYAN)
 
+# 核心能够作为标准消息解析处理的 message_type 白名单。
+# 只有 message_info["message_type"] 在此集合内的 envelope 才会进入 _handle_message；
+# 其余已知类型（notice、request、meta_event 等）以及未知类型均路由至 _handle_other。
+# 对于未显式设置 message_type 的老式 envelope，回退到 has_segments 判断以保持兼容。
+_STANDARD_MESSAGE_TYPES: frozenset[str] = frozenset({"message", "group", "private"})
+
 
 class MessageReceiver:
     """消息接收器。
@@ -124,12 +130,23 @@ class MessageReceiver:
             await self._handle_adapter_response(envelope)
             return
 
-        # 判断是否为标准消息（含 message_segment 或 message_chain）
+        # 优先根据 message_type 路由：
+        #   - 在白名单内 → _handle_message（核心可解析的标准消息）
+        #   - 已设置但不在白名单 → _handle_other（notice / request / meta_event 等）
+        #   - 未设置 → 退化到 has_segments 判断，保持对旧格式适配器的兼容
+        message_type = msg_info.get("message_type")
+        if message_type is not None:
+            if message_type in _STANDARD_MESSAGE_TYPES:
+                await self._handle_message(envelope, adapter_signature)
+            else:
+                await self._handle_other(envelope, adapter_signature)
+            return
+
+        # message_type 未设置时：有消息段则视为标准消息，否则路由至 _handle_other
         has_segments = (
             envelope.get("message_segment") is not None  # type: ignore[arg-type]
             or envelope.get("message_chain") is not None  # type: ignore[arg-type]
         )
-
         if has_segments:
             await self._handle_message(envelope, adapter_signature)
         else:

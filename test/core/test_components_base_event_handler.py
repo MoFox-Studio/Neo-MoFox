@@ -5,6 +5,7 @@ import pytest
 
 from src.core.components.base.event_handler import BaseEventHandler
 from src.core.components.types import EventType
+from src.kernel.event import EventDecision
 
 
 class ConcreteEventHandler(BaseEventHandler):
@@ -17,12 +18,11 @@ class ConcreteEventHandler(BaseEventHandler):
     init_subscribe = []
 
     async def execute(
-        self, kwargs: dict | None
-    ) -> tuple[bool, bool, str | None]:
+        self, event_name: str, params: dict
+    ) -> tuple[EventDecision, dict]:
         """执行事件处理。"""
-        if kwargs is None:
-            return False, False, "No kwargs"
-        return True, False, "Handled"
+        params["handled"] = True
+        return EventDecision.SUCCESS, params
 
 
 class TestBaseEventHandler:
@@ -64,20 +64,19 @@ class TestBaseEventHandler:
         import asyncio
 
         handler = ConcreteEventHandler(mock_plugin)
-        success, intercept, message = asyncio.run(handler.execute({"key": "value"}))
-        assert success is True
-        assert intercept is False
-        assert message == "Handled"
+        params = {"key": "value"}
+        decision, result_params = asyncio.run(handler.execute("test_event", params))
+        assert decision is EventDecision.SUCCESS
+        assert result_params["handled"] is True
 
-    def test_execute_with_none_kwargs(self, mock_plugin):
-        """测试 execute 方法（None kwargs）。"""
+    def test_execute_with_empty_params(self, mock_plugin):
+        """测试 execute 方法（空 params）。"""
         import asyncio
 
         handler = ConcreteEventHandler(mock_plugin)
-        success, intercept, message = asyncio.run(handler.execute(None))
-        assert success is False
-        assert intercept is False
-        assert message == "No kwargs"
+        decision, result_params = asyncio.run(handler.execute("test_event", {}))
+        assert decision is EventDecision.SUCCESS
+        assert result_params["handled"] is True
 
     def test_subscribe_event_type(self, mock_plugin):
         """测试订阅事件（EventType）。"""
@@ -157,8 +156,8 @@ class TestBaseEventHandler:
             handler_name = "init_handler"
             init_subscribe = [EventType.ON_START, EventType.ON_STOP, "custom"]
 
-            async def execute(self, kwargs: dict | None) -> tuple[bool, bool, str | None]:
-                return True, False, None
+            async def execute(self, event_name: str, params: dict) -> tuple[EventDecision, dict]:
+                return EventDecision.SUCCESS, params
 
         handler = InitSubHandler(mock_plugin)
         assert EventType.ON_START in handler._subscribed_events
@@ -178,8 +177,8 @@ class TestEventHandlerAttributes:
             intercept_message = True
             dependencies = ["other_plugin:service:log"]
 
-            async def execute(self, kwargs: dict | None) -> tuple[bool, bool, str | None]:
-                return True, True, "Intercepted"
+            async def execute(self, event_name: str, params: dict) -> tuple[EventDecision, dict]:
+                return EventDecision.STOP, params
 
         handler = CustomHandler(mock_plugin)
         assert handler.handler_name == "custom_handler"
@@ -192,10 +191,8 @@ class TestEventHandlerAttributes:
         """测试不同权重。"""
         for test_weight in [-10, 0, 5, 100, 1000]:
             # Create execute method that captures test_weight correctly
-            async def execute(self, kwargs: dict | None = None) -> tuple[bool, bool, str | None]:
-                _ = self  # Unused
-                _ = kwargs  # Unused
-                return True, False, None
+            async def execute(self, event_name: str, params: dict) -> tuple[EventDecision, dict]:
+                return EventDecision.SUCCESS, params
 
             # Create class dynamically to avoid scoping issues
             WeightHandler = type(
@@ -216,26 +213,25 @@ class TestEventHandlerAttributes:
 class TestEventHandlerExecuteResults:
     """测试 EventHandler execute 返回值组合。"""
 
-    def test_all_success_combinations(self, mock_plugin):
-        """测试所有成功组合。"""
+    def test_all_decision_variants(self, mock_plugin):
+        """测试所有 EventDecision 返回值变体。"""
+        import asyncio
+
         test_cases = [
-            (True, False, "Success without intercept"),
-            (True, True, "Success with intercept"),
-            (False, False, "Failed without intercept"),
-            (False, True, "Failed with intercept"),
+            EventDecision.SUCCESS,
+            EventDecision.STOP,
+            EventDecision.PASS,
         ]
 
-        for success, intercept, message in test_cases:
+        for decision in test_cases:
             class ResultHandler(BaseEventHandler):
-                handler_name = f"handler_{success}_{intercept}"
+                handler_name = "result_handler"
+                _expected_decision = decision
 
-                async def execute(self, kwargs: dict | None) -> tuple[bool, bool, str | None]:
-                    return success, intercept, message
-
-            import asyncio
+                async def execute(self, event_name: str, params: dict) -> tuple[EventDecision, dict]:
+                    return self._expected_decision, params
 
             handler = ResultHandler(mock_plugin)
-            result_success, result_intercept, result_message = asyncio.run(handler.execute({}))
-            assert result_success == success
-            assert result_intercept == intercept
-            assert result_message == message
+            result_decision, result_params = asyncio.run(handler.execute("test_event", {}))
+            assert result_decision is decision
+            assert isinstance(result_params, dict)

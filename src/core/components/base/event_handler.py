@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import EventType
+from src.kernel.event import EventDecision
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -34,9 +35,11 @@ class BaseEventHandler(ABC):
         ...     intercept_message = False
         ...     init_subscribe = [EventType.MESSAGE_RECEIVED, EventType.USER_JOIN]
         ...
-        ...     async def execute(self, kwargs: dict | None) -> tuple[bool, bool, str | None]:
-        ...         # 处理事件
-        ...         return True, False, "处理完成"
+        ...     async def execute(
+        ...         self, event_name: str, params: dict[str, Any]
+        ...     ) -> tuple[EventDecision, dict[str, Any]]:
+        ...         # 处理事件，继续执行后续处理器
+        ...         return EventDecision.SUCCESS, params
     """
     _plugin_: str
     _signature_: str
@@ -85,27 +88,36 @@ class BaseEventHandler(ABC):
     
     @abstractmethod
     async def execute(
-        self, kwargs: dict[str, Any] | None
-    ) -> tuple[bool, bool, str | None]:
+        self, event_name: str, params: dict[str, Any]
+    ) -> tuple[EventDecision, dict[str, Any]]:
         """执行事件处理的主要逻辑。
 
+        与 kernel EventBus 订阅者协议保持一致：接受事件名称和参数字典，
+        返回决策枚举与（可能已修改的）参数字典。
+
         Args:
-            kwargs: 事件参数字典
+            event_name: 触发本处理器的事件名称（由 EventBus 传入）
+            params: 事件参数字典（即 EventBus publish 时的 params，可就地修改）
 
         Returns:
-            tuple[bool, bool, str | None]: (是否成功, 是否拦截, 消息)
+            tuple[EventDecision, dict[str, Any]]:
+                - ``EventDecision.SUCCESS`` — 执行完成，继续后续处理器
+                - ``EventDecision.STOP``    — 拦截，阻止后续处理器执行
+                - ``EventDecision.PASS``    — 跳过本处理器，不传播参数变更
 
         Examples:
-            >>> async def execute(self, kwargs: dict | None) -> tuple[bool, bool, str | None]:
-            ...     if kwargs is None:
-            ...         return False, False, "无事件参数"
+            >>> async def execute(
+            ...     self, event_name: str, params: dict[str, Any]
+            ... ) -> tuple[EventDecision, dict[str, Any]]:
+            ...     # 正常处理，继续后续处理器
+            ...     return EventDecision.SUCCESS, params
             ...
-            ...     event_type = kwargs.get("event_type")
-            ...     if event_type == EventType.MESSAGE_RECEIVED:
-            ...         # 处理消息接收事件
-            ...         return True, False, "消息已处理"
+            ...     # 拦截，阻止后续处理器执行
+            ...     params["reason"] = "已拦截"
+            ...     return EventDecision.STOP, params
             ...
-            ...     return True, False, None
+            ...     # 跳过，不传播本处理器对 params 的变更
+            ...     return EventDecision.PASS, params
         """
         ...
 
