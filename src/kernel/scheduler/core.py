@@ -11,6 +11,7 @@
 5. 并发控制 - 使用 concurrency 模块统一管理任务
 """
 
+import inspect
 import asyncio
 import uuid
 import weakref
@@ -449,7 +450,7 @@ class UnifiedScheduler:
             return False
 
         try:
-            if asyncio.iscoroutinefunction(condition_func):
+            if inspect.iscoroutinefunction(condition_func):
                 result = await condition_func()
             else:
                 result = condition_func()
