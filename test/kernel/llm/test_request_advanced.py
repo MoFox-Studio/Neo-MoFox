@@ -222,6 +222,28 @@ def test_llm_request_add_payload_with_position():
     assert req.payloads[1] == payload2
 
 
+def test_llm_request_add_payload_uses_context_manager_add() -> None:
+    """测试LLMRequest.add_payload会委托给context_manager.add_payload。"""
+
+    from src.kernel.llm.context import LLMContextManager
+
+    class SpyManager(LLMContextManager):
+        def __init__(self) -> None:
+            super().__init__(max_payloads=20)
+            self.called = False
+
+        def add_payload(self, payloads, payload, position=None):
+            self.called = True
+            return super().add_payload(payloads, payload, position=position)
+
+    manager = SpyManager()
+    req = LLMRequest([dummy_model()], request_name="test", context_manager=manager)
+
+    req.add_payload(LLMPayload("user", [Text("hello")]))
+
+    assert manager.called is True
+
+
 def test_llm_request_custom_policy():
     """测试LLMRequest使用自定义policy。"""
     from src.kernel.llm.policy import RoundRobinPolicy

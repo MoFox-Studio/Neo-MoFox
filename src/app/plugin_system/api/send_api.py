@@ -211,9 +211,19 @@ async def send_custom(
     """
     if isinstance(message_type, str):
         try:
-            message_type = MessageType(message_type)
+            message_type_enum = MessageType(message_type)
         except ValueError:
-            message_type = MessageType.UNKNOWN
+            # 未知类型（如 "music"）：通过 extra_media 机制传递，使 napcat adapter 等可
+            # 直接处理自定义消息段类型，而不会被降级为文本消息
+            return await _send_message(
+                content="",
+                message_type=MessageType.UNKNOWN,
+                stream_id=stream_id,
+                platform=platform,
+                processed_plain_text="",
+                extra_media=[{"type": message_type, "data": content}],
+            )
+        message_type = message_type_enum
 
     return await _send_message(
         content=content,
@@ -254,6 +264,7 @@ async def _send_message(
     stream_id: str,
     platform: str | None = None,
     processed_plain_text: str = "",
+    extra_media: list[dict] | None = None,
 ) -> bool:
     """内部消息发送实现
 
@@ -263,6 +274,8 @@ async def _send_message(
         stream_id: 聊天流 ID
         platform: 平台名称（可选，会从 stream_id 推断）
         processed_plain_text: 消息的人类可读文本，由上层调用方显式传入
+        extra_media: 额外媒体段列表，用于发送框架 MessageType 枚举不覆盖的自定义类型
+                     格式：[{"type": "music", "data": "song_id"}, ...]
 
     Returns:
         是否发送成功
@@ -328,6 +341,10 @@ async def _send_message(
                         f"stream_id={stream_id} 无法解析私聊目标用户，"
                         f"消息可能发送给 bot 自身"
                     )
+
+        # 注入额外媒体段（用于 MessageType 枚举以外的自定义类型，如 music）
+        if extra_media:
+            extra["media"] = extra_media
 
         # 构建消息
         message = Message(

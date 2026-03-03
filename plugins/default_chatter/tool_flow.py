@@ -32,13 +32,33 @@ async def process_tool_calls(
     stop_call_name: str,
     send_text_call_name: str | None,
     break_on_send_text: bool,
+    cross_round_seen_signatures: set[str] | None = None,
 ) -> ToolCallOutcome:
     """处理单轮 LLM 的 tool calls 并返回控制流结果。"""
     outcome = ToolCallOutcome()
     seen_call_signatures: set[str] = set()
+    sent_text_successfully = False
 
-    for call in calls:
+    for idx, call in enumerate(calls):
         get_watchdog().feed_dog(stream_id)  # 喂狗，防止工具调用过久导致 Watchdog 误判超时
+
+        # classical 模式可配置为“发出一次 send_text 后不再继续推理型工具调用”。
+        # 但若后续仍是 action（例如再次 send_text 分段回复），则应允许继续执行。
+        if break_on_send_text and sent_text_successfully and not call.name.startswith("action-"):
+            for skipped in calls[idx:]:
+                response.add_payload(
+                    LLMPayload(
+                        ROLE.TOOL_RESULT,
+                        ToolResult(  # type: ignore[arg-type]
+                            value="已成功发送消息，本轮后续非 action 调用已自动跳过",
+                            call_id=getattr(skipped, "id", None),
+                            name=getattr(skipped, "name", ""),
+                        ),
+                    )
+                )
+            outcome.sent_once = True
+            break
+
         args = call.args if isinstance(call.args, dict) else {}
         dedupe_args = (
             {key: value for key, value in args.items() if key != "reason"}
@@ -58,7 +78,22 @@ async def process_tool_calls(
                 )
             )
             continue
+
+        if cross_round_seen_signatures is not None and dedupe_key in cross_round_seen_signatures:
+            response.add_payload(
+                LLMPayload(
+                    ROLE.TOOL_RESULT,
+                    ToolResult(  # type: ignore[arg-type]
+                        value="检测到跨轮重复工具调用，已自动跳过",
+                        call_id=call.id,
+                        name=call.name,
+                    ),
+                )
+            )
+            continue
         seen_call_signatures.add(dedupe_key)
+        if cross_round_seen_signatures is not None:
+            cross_round_seen_signatures.add(dedupe_key)
 
         if call.name == pass_call_name:
             response.add_payload(
@@ -90,20 +125,19 @@ async def process_tool_calls(
             continue
 
         appended, success = await run_tool_call(call, response, usable_map, trigger_msg)
+
+        if send_text_call_name and success and call.name == send_text_call_name:
+            sent_text_successfully = True
+
         if appended and not call.name.startswith("action-"):
             # 仅 tool/agent 等“有信息返回、通常需要后续推理”的调用，
             # 才标记为需要继续发起下一轮 LLM 请求。
             # action 调用（如 send_text）执行后通常应等待新消息，不应立即二次请求。
             outcome.has_pending_tool_results = True
 
-        if (
-            break_on_send_text
-            and send_text_call_name
-            and success
-            and call.name == send_text_call_name
-        ):
-            outcome.sent_once = True
-            break
+        # 注意：不在 send_text 本身处立即 break。
+        # 这样可以支持 LLM 在同一轮内多次 action-send_text 分段回复；
+        # 但一旦后续出现非 action 调用，会在循环开头被统一跳过并写回 TOOL_RESULT。
 
     return outcome
 

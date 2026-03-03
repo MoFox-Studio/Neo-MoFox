@@ -6,6 +6,14 @@ class LLMError(RuntimeError):
     """LLM 操作基础异常。"""
 
 
+class LLMContextError(LLMError):
+    """上下文结构错误。
+
+    用于在严格模式下，当上下文 messages 不满足协议约束时直接抛出，
+    以避免“自动修复”掩盖上游链路问题。
+    """
+
+
 class LLMConfigurationError(LLMError):
     """配置错误。"""
 

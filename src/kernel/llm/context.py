@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from .payload import LLMPayload
+from .payload.content import Content, Text
+from .payload.tooling import LLMUsable, ToolCall, ToolResult
 from .roles import ROLE
+from .exceptions import LLMContextError
 
 CompressionHook = Callable[[list[list[LLMPayload]], list[LLMPayload]], list[LLMPayload]]
 TokenCounter = Callable[[list[LLMPayload]], int]
@@ -14,13 +17,247 @@ TokenCounter = Callable[[list[LLMPayload]], int]
 
 @dataclass(slots=True)
 class LLMContextManager:
-    """上下文管理器，负责根据 max_payloads 限制对上下文进行裁剪。
+    """上下文管理器。
 
-    重载 maybe_trim 方法实现裁剪逻辑，默认按照“保留开头的系统/工具消息 + 最近的用户/助手消息”的策略进行裁剪。
+    默认职责：
+    1. 接管 payload 列表写入（add_payload/system/tool/reminder）；
+    2. 在写入后执行结构校验（strict，不做自动修复）；
+    3. 最后按 max_payloads/token_budget 执行裁剪。
+
+    对于 reminder：固定注入到“首个 USER 消息的首段”；若尚无 USER，则立即创建空 USER 并写入 reminder。
     """
 
     max_payloads: int | None = None
     compression_hook: CompressionHook | None = None
+    _reminders: list[Text] | None = None
+
+    def validate_for_send(self, payloads: list[LLMPayload]) -> None:
+        """在发起 LLM 请求前校验上下文结构。
+
+        不允许任何未闭合的 tool 调用链（包括尾部）。
+        """
+
+        self._validate_payloads(payloads, allow_incomplete_tail=False)
+
+    def add_payload(
+        self,
+        payloads: list[LLMPayload],
+        payload: LLMPayload,
+        position: int | None = None,
+    ) -> list[LLMPayload]:
+        """向上下文追加 payload，并进行规范化与裁剪。
+
+        Args:
+            payloads: 现有 payload 列表。
+            payload: 待追加 payload。
+            position: 可选插入位置。
+
+        Returns:
+            list[LLMPayload]: 规范化后的 payload 列表。
+        """
+
+        updated = list(payloads)
+
+        if position is not None:
+            updated.insert(int(position), payload)
+        elif updated and updated[-1].role == payload.role:
+            updated[-1].content.extend(payload.content)
+        else:
+            updated.append(payload)
+
+        updated = self._apply_reminders(updated)
+        trimmed = self.maybe_trim(updated)
+
+        # strict：不做自动修复，但要尽早暴露“非尾部”的链路错误。
+        # 允许“尾部未闭合”的中间态（例如 assistant(tool_calls) 刚写入，tool_result 还没追加）。
+        self._validate_payloads(trimmed, allow_incomplete_tail=True)
+
+        return trimmed
+
+    def _validate_payloads(self, payloads: list[LLMPayload], *, allow_incomplete_tail: bool) -> None:
+        """校验 payloads 是否满足 OpenAI 兼容 messages 的基本结构约束。
+
+        约束（对对话消息 USER/ASSISTANT/TOOL_RESULT 生效；SYSTEM/TOOL 作为 pinned 不参与链路判断）：
+        - TOOL_RESULT 必须紧随带 tool_calls 的 ASSISTANT 之后；
+        - 若 ASSISTANT 含 tool_calls，则必须补齐所有对应 call_id 的 TOOL_RESULT；
+        - TOOL_RESULT 之后必须有 ASSISTANT 承接，才能进入下一条 USER。
+
+        Args:
+            payloads: 待校验的 payload 列表。
+            allow_incomplete_tail: 是否允许“尾部未闭合”的中间态。
+                - True：允许末尾是 ASSISTANT(tool_calls) 或 TOOL_RESULT（等待后续补齐）。
+                - False：必须完整闭合。
+        """
+
+        pinned_roles = {ROLE.SYSTEM, ROLE.TOOL}
+        convo = [p for p in payloads if p.role not in pinned_roles]
+
+        def _err(message: str) -> None:
+            roles = [p.role.value for p in convo]
+            raise LLMContextError(f"LLM 上下文不合法: {message}; roles={roles}")
+
+        idx = 0
+        while idx < len(convo):
+            payload = convo[idx]
+
+            if payload.role == ROLE.USER:
+                idx += 1
+                continue
+
+            if payload.role == ROLE.ASSISTANT:
+                if idx == 0:
+                    _err("对话不能以 assistant 开始")
+                prev_role = convo[idx - 1].role
+                if prev_role not in {ROLE.USER, ROLE.TOOL_RESULT}:
+                    _err("assistant 前必须是 user 或 tool_result")
+
+                tool_calls = [part for part in payload.content if isinstance(part, ToolCall)]
+                if not tool_calls:
+                    idx += 1
+                    continue
+
+                expected_ids: set[str] = set()
+                for part in tool_calls:
+                    if not part.id:
+                        _err("assistant.tool_calls 缺少 id（strict 模式不允许自动生成）")
+                    expected_ids.add(str(part.id))
+
+                j = idx + 1
+                if j >= len(convo):
+                    if allow_incomplete_tail:
+                        return
+                    _err("assistant(tool_calls) 后缺少 tool_result")
+
+                seen: set[str] = set()
+                while j < len(convo) and convo[j].role == ROLE.TOOL_RESULT:
+                    results = [part for part in convo[j].content if isinstance(part, ToolResult)]
+                    if not results:
+                        _err("tool_result payload 中缺少 ToolResult 内容")
+                    for result in results:
+                        if not result.call_id:
+                            _err("ToolResult 缺少 call_id")
+                        call_id = str(result.call_id)
+                        if call_id not in expected_ids:
+                            _err(f"ToolResult.call_id={call_id} 不匹配任何 tool_call")
+                        if call_id in seen:
+                            _err(f"重复的 ToolResult.call_id={call_id}")
+                        seen.add(call_id)
+                    j += 1
+
+                missing = expected_ids - seen
+                if missing:
+                    if allow_incomplete_tail and j >= len(convo):
+                        return
+                    _err(f"tool_result 未覆盖全部 tool_call: missing={sorted(missing)}")
+
+                # tool_result 后如果直接进入下一条 USER，是不合法的。
+                # 但 tool_result 作为尾部是合法且常见的（下一条 assistant 将由本次请求生成）。
+                if j < len(convo) and convo[j].role == ROLE.USER:
+                    _err("tool_result 后不能直接跟 user（缺少 assistant 承接）")
+
+                # 若后续还有消息且不是 USER，则必须是 ASSISTANT 才能继续对话。
+                if j < len(convo) and convo[j].role != ROLE.ASSISTANT:
+                    _err("tool_result 后只能是 assistant 或结束")
+
+                idx = j
+                continue
+
+            if payload.role == ROLE.TOOL_RESULT:
+                # 孤立 tool_result：一定非法（是否允许尾部取决于前面是否有 tool_calls）
+                _err("孤立的 tool_result（未紧随 assistant.tool_calls）")
+
+            _err(f"未知的对话角色: {payload.role}")
+
+    def system(
+        self,
+        payloads: list[LLMPayload],
+        content: Content | LLMUsable | list[Content | LLMUsable],
+        position: int | None = None,
+    ) -> list[LLMPayload]:
+        """追加 SYSTEM payload，语义等同于 add_payload。"""
+
+        return self.add_payload(
+            payloads,
+            LLMPayload(ROLE.SYSTEM, content),
+            position=position,
+        )
+
+    def tool(
+        self,
+        payloads: list[LLMPayload],
+        content: Content | LLMUsable | list[Content | LLMUsable],
+        position: int | None = None,
+    ) -> list[LLMPayload]:
+        """追加 TOOL payload，语义等同于 add_payload。"""
+
+        return self.add_payload(
+            payloads,
+            LLMPayload(ROLE.TOOL, content),
+            position=position,
+        )
+
+    def reminder(
+        self,
+        payloads: list[LLMPayload],
+        content: str | Text | list[str | Text],
+    ) -> list[LLMPayload]:
+        """登记 reminder 并注入到首个 USER 消息首段。
+
+        reminder 作为仅次于 system 的固有提示词，不单独作为 role 出现。
+        """
+
+        items = content if isinstance(content, list) else [content]
+        if self._reminders is None:
+            self._reminders = []
+
+        for item in items:
+            text_part = item if isinstance(item, Text) else Text(str(item))
+            self._reminders.append(text_part)
+
+        updated = self._apply_reminders(list(payloads))
+        trimmed = self.maybe_trim(updated)
+        self._validate_payloads(trimmed, allow_incomplete_tail=True)
+        return trimmed
+
+    def _apply_reminders(self, payloads: list[LLMPayload]) -> list[LLMPayload]:
+        """将 reminder 固定注入首个 USER 消息首段。"""
+
+        if not self._reminders:
+            return payloads
+
+        reminder_parts: list[Content | LLMUsable] = [Text(item.text) for item in self._reminders]
+        updated = list(payloads)
+
+        user_index = next((idx for idx, p in enumerate(updated) if p.role == ROLE.USER), None)
+        if user_index is None:
+            insert_index = 0
+            while insert_index < len(updated) and updated[insert_index].role in {ROLE.SYSTEM, ROLE.TOOL}:
+                insert_index += 1
+            updated.insert(insert_index, LLMPayload(ROLE.USER, reminder_parts))
+            return updated
+
+        first_user = updated[user_index]
+        existing = first_user.content
+
+        matched_prefix_len = 0
+        while (
+            matched_prefix_len < len(reminder_parts)
+            and matched_prefix_len < len(existing)
+            and self._is_same_text_part(existing[matched_prefix_len], reminder_parts[matched_prefix_len])
+        ):
+            matched_prefix_len += 1
+
+        if matched_prefix_len == len(reminder_parts):
+            return updated
+
+        rebuilt = reminder_parts + existing[matched_prefix_len:]
+        updated[user_index] = LLMPayload(ROLE.USER, rebuilt)
+        return updated
+
+    def _is_same_text_part(self, left: Content | LLMUsable, right: Content | LLMUsable) -> bool:
+        """判断两个内容片段是否为同一文本片段。"""
+
+        return isinstance(left, Text) and isinstance(right, Text) and left.text == right.text
 
     def maybe_trim(
         self,

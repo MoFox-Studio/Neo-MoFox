@@ -65,8 +65,6 @@ class TestPermissionSection:
         assert config.strict_mode is True
         assert config.log_permission_denied is True
         assert config.log_permission_granted is False
-        assert config.enable_group_permissions is False
-        assert config.group_admin_permission_level == "operator"
 
     def test_custom_owner_list(self):
         """测试自定义所有者列表。"""
@@ -107,15 +105,38 @@ class TestPermissionSection:
         assert config.log_permission_denied is False
         assert config.log_permission_granted is True
 
-    def test_group_permissions_settings(self):
-        """测试群组权限设置。"""
-        config = CoreConfig.PermissionSection(
-            enable_group_permissions=True,
-            group_admin_permission_level="user",
-        )
 
-        assert config.enable_group_permissions is True
-        assert config.group_admin_permission_level == "user"
+
+class TestChatSectionLegacyKeys:
+    """测试 ChatSection 的旧字段兼容（通过 auto_update 剔除）。"""
+
+    def test_init_core_config_strips_legacy_context_validation_mode(self, temp_dir: Path) -> None:
+        """旧配置里残留 context_validation_mode 不应导致加载失败，并应被自动移除。"""
+        import src.core.config.core_config as core_config_module
+
+        original_config = core_config_module._global_config
+        core_config_module._global_config = None
+
+        try:
+            config_file = temp_dir / "core.toml"
+            config_file.write_text(
+                """
+[chat]
+default_chat_mode = \"focus\"
+max_context_size = 150
+context_validation_mode = \"repair\"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            config = init_core_config(str(config_file))
+            assert config.chat.default_chat_mode == "focus"
+            assert config.chat.max_context_size == 150
+
+            updated = config_file.read_text(encoding="utf-8")
+            assert "context_validation_mode" not in updated
+        finally:
+            core_config_module._global_config = original_config
 
 
 class TestCoreConfig:

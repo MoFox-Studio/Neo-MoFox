@@ -164,8 +164,12 @@ class LLMResponse:
         if not content_parts:
             return
 
-        # 将 assistant 回复写回 payloads
-        self.payloads.append(LLMPayload(ROLE.ASSISTANT, content_parts))  # type: ignore[arg-type]
+        assistant_payload = LLMPayload(ROLE.ASSISTANT, content_parts)  # type: ignore[arg-type]
+        if self.context_manager is not None:
+            self.payloads = self.context_manager.add_payload(self.payloads, assistant_payload)
+            return
+
+        self.payloads.append(assistant_payload)
         self._maybe_apply_context_manager()
 
     def _maybe_apply_context_manager(self) -> None:
@@ -190,6 +194,14 @@ class LLMResponse:
         if isinstance(payload, LLMResponse):
             payload = payload.to_payload()
 
+        if self.context_manager is not None:
+            self.payloads = self.context_manager.add_payload(
+                self.payloads,
+                payload,
+                position=int(position) if position is not None else None,
+            )
+            return self
+
         if position is not None:
             self.payloads.insert(int(position), payload)
         else:
@@ -202,6 +214,11 @@ class LLMResponse:
 
     def add_call_reflex(self, results: list[LLMPayload]) -> Self:
         """在当前响应的 payloads 中追加一个新的工具调用结果列表，适用于工具调用完成后需要将结果写回上下文的场景。"""
+        if self.context_manager is not None:
+            for payload in results:
+                self.payloads = self.context_manager.add_payload(self.payloads, payload)
+            return self
+
         for payload in results:
             self.payloads.append(payload)
         self._maybe_apply_context_manager()

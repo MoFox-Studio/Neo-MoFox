@@ -505,7 +505,8 @@ class TestLLMResponseAddCallReflex:
 
         result = response.add_call_reflex(results)
         assert result is response
-        assert len(response.payloads) == len(sample_payloads) + 2
+        assert len(response.payloads) == len(sample_payloads)
+        assert all(payload.role != ROLE.TOOL_RESULT for payload in response.payloads)
 
 
 class TestLLMResponseSend:

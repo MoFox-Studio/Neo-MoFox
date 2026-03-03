@@ -482,7 +482,7 @@ class MessageConverter:
             user_id = data
 
         result.at_users.append({"nickname": nickname, "user_id": user_id})
-        result.text_parts.append(f"@{nickname} ")
+        result.text_parts.append(f"@<{nickname}:{user_id}> ")
 
     def _handle_reply(
         self,

@@ -20,6 +20,23 @@ if TYPE_CHECKING:
     from src.kernel.llm import LLMContextManager, ModelSet
 
 
+def _strip_usable_prefix(name: str) -> str:
+    """去除 usable schema 常见前缀，返回可用于别名匹配的名称。
+
+    支持 ``tool-`` / ``action-`` / ``agent-`` 三类前缀。
+
+    Args:
+        name: 原始 schema 名称。
+
+    Returns:
+        去除已知前缀后的名称；若无已知前缀则原样返回。
+    """
+    for prefix in ("tool-", "action-", "agent-"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
 class BaseAgent(ABC, LLMUsable):
     """Agent 组件基类。
 
@@ -172,6 +189,7 @@ class BaseAgent(ABC, LLMUsable):
             name = function_schema.get("name")
             if isinstance(name, str) and name:
                 local_index[name] = usable_cls
+                local_index[_strip_usable_prefix(name)] = usable_cls
 
         usable_cls = local_index.get(usable_name)
         if not usable_cls:

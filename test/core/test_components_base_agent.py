@@ -146,6 +146,17 @@ class TestBaseAgent:
         assert result == "private:weather"
 
     @pytest.mark.asyncio
+    async def test_execute_local_usable_success_with_prefixed_name(self, mock_plugin):
+        """测试执行私有 usable（带 schema 前缀名）成功。"""
+        agent = ConcreteAgent(stream_id="stream_123", plugin=mock_plugin)
+        success, result = await agent.execute_local_usable(
+            "tool-private_lookup",
+            query="weather",
+        )
+        assert success is True
+        assert result == "private:weather"
+
+    @pytest.mark.asyncio
     async def test_execute_local_usable_not_found(self, mock_plugin):
         """测试执行不存在的私有 usable。"""
         agent = ConcreteAgent(stream_id="stream_123", plugin=mock_plugin)

@@ -439,13 +439,16 @@ class MediaManager:
             from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
             from src.core.prompt import get_prompt_manager
             
+            
             # 检查 VLM 模型是否可用
             if not self._vlm_model_set:
                 logger.debug("VLM 模型不可用")
                 return None
 
             # 创建 VLM 请求
-            context_manager = LLMContextManager(max_payloads=3)
+            context_manager = LLMContextManager(
+                max_payloads=3,
+            )
             request = create_llm_request(
                 self._vlm_model_set,
                 "image_recognition",

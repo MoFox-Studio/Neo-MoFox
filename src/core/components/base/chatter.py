@@ -457,13 +457,14 @@ class BaseChatter(ABC):
 
         model_set = get_model_config().get_task(task)
         max_payloads = max_context if max_context is not None else get_core_config().chat.max_context_size
-        context_manager = LLMContextManager(max_payloads=max_payloads)
+        context_manager = LLMContextManager(
+            max_payloads=max_payloads,
+        )
 
         _logger = get_logger("chatter")
         if model_set:
             first = model_set[0]
             _logger.debug(
-                f"[{self.chatter_name}] 模型配置(task={task}): "
                 f"provider={first.get('api_provider')}, "
                 f"base_url={first.get('base_url')}, "
                 f"timeout={first.get('timeout')}"
@@ -516,7 +517,6 @@ class BaseChatter(ABC):
         Args:
             call: LLM 返回的工具调用对象（含 name / id / args）
             response: 当前 LLM 响应对象，TOOL_RESULT payload 将追加于此
-            usable_map: 工具注册表，用于按名称查找工具类
             trigger_msg: 触发本次对话的消息；为 None 且工具有效时跳过执行
 
         Returns:

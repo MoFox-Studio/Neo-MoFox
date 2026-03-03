@@ -103,6 +103,14 @@ class LLMRequest:
         Returns:
             Self: 返回当前 LLMRequest 实例，支持链式调用。
         """
+        if self.context_manager is not None:
+            self.payloads = self.context_manager.add_payload(
+                self.payloads,
+                payload,
+                position=int(position) if position is not None else None,
+            )
+            return self
+
         if position is not None:
             self.payloads.insert(int(position), payload)
             return self
@@ -241,6 +249,11 @@ class LLMRequest:
             # 根据当前模型的上下文限制和保留策略，裁剪 payloads 以适应当前模型
             # 注意：裁剪结果仅用于本次请求，不回写 self.payloads，避免重试时基于已裁剪的结果再裁剪
             trimmed_payloads = self._maybe_trim_payloads_for_model(payloads, model)
+
+            # 严格上下文校验：不允许带着不完整/不合法的 tool 链路发起请求。
+            # 该错误属于“本地逻辑错误”，不应进入重试链。
+            if self.context_manager is not None:
+                self.context_manager.validate_for_send(list(trimmed_payloads))
 
             assert self.clients is not None
             client = self.clients.get_client_for_model(model)

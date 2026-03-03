@@ -14,8 +14,9 @@
 import pytest
 
 from src.kernel.llm.exceptions import LLMError
+from src.kernel.llm.context import LLMContextManager
 from src.kernel.llm.model_client.base import StreamEvent
-from src.kernel.llm.payload import LLMPayload, Text
+from src.kernel.llm.payload import LLMPayload, Text, ToolResult
 from src.kernel.llm.request import LLMRequest
 from src.kernel.llm.response import LLMResponse, _ToolCallAccumulator
 from src.kernel.llm.roles import ROLE
@@ -437,9 +438,71 @@ async def test_response_add_call_reflex():
 
     resp.add_call_reflex(results)
 
-    assert len(resp.payloads) == 3
-    assert resp.payloads[1] == results[0]
-    assert resp.payloads[2] == results[1]
+    assert len(resp.payloads) == 1
+    assert all(payload.role != ROLE.TOOL_RESULT for payload in resp.payloads)
+
+
+@pytest.mark.asyncio
+async def test_response_add_payload_uses_context_manager_add_payload() -> None:
+    """测试 response.add_payload 委托给 context_manager.add_payload。"""
+
+    class SpyManager(LLMContextManager):
+        def __init__(self) -> None:
+            super().__init__(max_payloads=20)
+            self.called = False
+
+        def add_payload(self, payloads, payload, position=None):
+            self.called = True
+            return super().add_payload(payloads, payload, position=position)
+
+    manager = SpyManager()
+    req = LLMRequest(dummy_model_set(), request_name="test", context_manager=manager)
+    resp = LLMResponse(
+        _stream=None,
+        _upper=req,
+        _auto_append_response=False,
+        payloads=[LLMPayload(ROLE.USER, Text("first"))],
+        model_set=req.model_set,
+        context_manager=manager,
+    )
+
+    resp.add_payload(LLMPayload(ROLE.ASSISTANT, Text("second")))
+
+    assert manager.called is True
+
+
+@pytest.mark.asyncio
+async def test_response_add_call_reflex_uses_context_manager_add_payload() -> None:
+    """测试 response.add_call_reflex 逐条委托给 context_manager.add_payload。"""
+
+    class SpyManager(LLMContextManager):
+        def __init__(self) -> None:
+            super().__init__(max_payloads=20)
+            self.called_count = 0
+
+        def add_payload(self, payloads, payload, position=None):
+            self.called_count += 1
+            return super().add_payload(payloads, payload, position=position)
+
+    manager = SpyManager()
+    req = LLMRequest(dummy_model_set(), request_name="test", context_manager=manager)
+    resp = LLMResponse(
+        _stream=None,
+        _upper=req,
+        _auto_append_response=False,
+        payloads=[LLMPayload(ROLE.USER, Text("first"))],
+        model_set=req.model_set,
+        context_manager=manager,
+    )
+
+    resp.add_call_reflex(
+        [
+            LLMPayload(ROLE.TOOL_RESULT, ToolResult(value="ok", call_id="call_1")),
+            LLMPayload(ROLE.TOOL_RESULT, ToolResult(value="ok", call_id="call_2")),
+        ]
+    )
+
+    assert manager.called_count == 2
 
 
 # =============================================================================

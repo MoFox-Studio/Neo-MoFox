@@ -43,6 +43,7 @@ from .monitor import (
 
 from .exceptions import (
 	LLMError,
+	LLMContextError,
 	LLMConfigurationError,
 	LLMResponseConsumedError,
 	LLMRateLimitError,
@@ -88,6 +89,7 @@ __all__ = [
 	"get_global_collector",
 	# 异常相关
 	"LLMError",
+	"LLMContextError",
 	"LLMConfigurationError",
 	"LLMResponseConsumedError",
 	"LLMRateLimitError",

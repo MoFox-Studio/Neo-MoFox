@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, AsyncGenerator
 
 from src.core.components.base import Wait, Success, Failure, Stop
@@ -9,6 +11,56 @@ from src.core.models.stream import ChatStream
 from src.kernel.llm import LLMPayload, ROLE, Text
 
 from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
+
+
+class _ToolCallWorkflowPhase(str, Enum):
+    """default_chatter 的 toolcall 工作流相位（简化 FSM）。
+
+    约束目标：强制会话严格遵守
+    USER → ASSISTANT(tool_calls) → TOOL_RESULT → ASSISTANT(follow-up) → USER
+
+    - 仅在 WAIT_USER 阶段允许注入新的 USER payload
+    - 仅在 MODEL_TURN/FOLLOW_UP 阶段允许向模型发起 send
+    - TOOL_EXEC 阶段只执行工具并写回 TOOL_RESULT，不发起新的 USER
+    """
+
+    WAIT_USER = "wait_user"
+    MODEL_TURN = "model_turn"
+    TOOL_EXEC = "tool_exec"
+    FOLLOW_UP = "follow_up"
+
+
+@dataclass
+class _EnhancedWorkflowRuntime:
+    """enhanced 模式运行时状态。"""
+
+    response: Any
+    phase: _ToolCallWorkflowPhase
+    history_merged: bool
+    unreads: list[Any]
+    cross_round_seen_signatures: set[str]
+    unread_msgs_to_flush: list[Any]
+
+    def has_tool_result_tail(self) -> bool:
+        """当前上下文尾部是否为 TOOL_RESULT。"""
+        payloads = getattr(self.response, "payloads", None)
+        return bool(payloads and payloads[-1].role == ROLE.TOOL_RESULT)
+
+
+def _transition(
+    *,
+    rt: _EnhancedWorkflowRuntime,
+    to_phase: _ToolCallWorkflowPhase,
+    logger: Any,
+    reason: str,
+) -> None:
+    """执行状态机相位切换，并记录调试日志。"""
+    if rt.phase == to_phase:
+        return
+    debug_fn = getattr(logger, "debug", None)
+    if callable(debug_fn):
+        debug_fn(f"[FSM] {rt.phase.value} -> {to_phase.value}: {reason}")
+    rt.phase = to_phase
 
 
 async def run_enhanced(
@@ -34,29 +86,47 @@ async def run_enhanced(
     history_text = chatter._build_enhanced_history_text(chat_stream)
     usable_map = await chatter.inject_usables(request)
 
-    response = request
-    history_merged = False
-    has_pending_tool_results = False
-    unreads: list[Any] = []
+    rt = _EnhancedWorkflowRuntime(
+        response=request,
+        phase=_ToolCallWorkflowPhase.FOLLOW_UP if request.payloads and request.payloads[-1].role == ROLE.TOOL_RESULT else _ToolCallWorkflowPhase.WAIT_USER,
+        history_merged=False,
+        unreads=[],
+        cross_round_seen_signatures=set(),
+        unread_msgs_to_flush=[],
+    )
 
     while True:
         _, unread_msgs = await chatter.fetch_unreads()
-        # 仅在有新消息时更新 unreads，保证 has_pending_tool_results 续轮时
-        # trigger_msg 仍指向上一轮触发消息，而非因列表清空变为 None。
-        if unread_msgs:
-            unreads = unread_msgs
 
-        if unread_msgs:
+        # 安全兜底：若上下文尾部为 TOOL_RESULT，必须进入 FOLLOW_UP
+        if rt.phase == _ToolCallWorkflowPhase.WAIT_USER and rt.has_tool_result_tail():
+            _transition(
+                rt=rt,
+                to_phase=_ToolCallWorkflowPhase.FOLLOW_UP,
+                logger=logger,
+                reason="context tail is TOOL_RESULT; must follow-up before new USER",
+            )
+
+        # FSM 驱动：每次循环只推进一个相位（或 yield）
+        if rt.phase == _ToolCallWorkflowPhase.WAIT_USER:
+            if not unread_msgs:
+                yield Wait()
+                continue
+
+            # 仅在采纳新未读消息时清空跨轮去重状态；FOLLOW_UP 阶段不应清空。
+            rt.cross_round_seen_signatures.clear()
+            rt.unreads = unread_msgs
+
             unread_lines = "\n".join(
                 chatter.format_message_line(msg) for msg in unread_msgs
             )
             unread_user_prompt = await chatter._build_user_prompt(
                 chat_stream,
-                history_text=history_text if not history_merged else "",
+                history_text=history_text if not rt.history_merged else "",
                 unread_lines=unread_lines,
                 extra=chatter._build_negative_behaviors_extra(),
             )
-            history_merged = True
+            rt.history_merged = True
 
             decision = await chatter.sub_agent(
                 unread_lines,
@@ -67,76 +137,92 @@ async def run_enhanced(
                 f"Sub-agent 决策: {decision['reason']} (响应: {decision['should_respond']})"
             )
 
-            chatter._upsert_pending_unread_payload(
-                response=response,
-                formatted_text=unread_user_prompt,
-            )
-
             if not decision["should_respond"]:
                 logger.info("Sub-agent 决定不响应，继续等待...")
                 yield Wait()
                 continue
-        elif not has_pending_tool_results:
-            yield Wait()
+
+            chatter._upsert_pending_unread_payload(
+                response=rt.response,
+                formatted_text=unread_user_prompt,
+            )
+            _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.MODEL_TURN, logger=logger, reason="accepted unread batch")
+
+            # MODEL_TURN 阶段发送后才 flush 本轮采纳的 unread
+            rt.unread_msgs_to_flush = unread_msgs
             continue
 
-        has_pending_tool_results = False
+        if rt.phase in (_ToolCallWorkflowPhase.MODEL_TURN, _ToolCallWorkflowPhase.FOLLOW_UP):
+            # FOLLOW_UP 阶段严禁 flush 新未读；MODEL_TURN 才 flush 本轮采纳的 unread。
+            try:
+                rt.response = await rt.response.send(stream=False)
+                await rt.response
+                if rt.phase == _ToolCallWorkflowPhase.MODEL_TURN:
+                    if rt.unread_msgs_to_flush:
+                        await chatter.flush_unreads(rt.unread_msgs_to_flush)
+                    rt.unread_msgs_to_flush = []
+            except Exception as error:
+                logger.error(f"LLM 请求失败: {error}", exc_info=True)
+                yield Failure("LLM 请求失败", error)
+                _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="request failed")
+                continue
 
-        try:
-            response = await response.send(stream=False)
-            await response
-            await chatter.flush_unreads(unread_msgs)
-        except Exception as error:
-            logger.error(f"LLM 请求失败: {error}", exc_info=True)
-            yield Failure("LLM 请求失败", error)
+            _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.TOOL_EXEC, logger=logger, reason="model responded")
             continue
 
-        if not response.call_list:
-            if response.message and response.message.strip():
-                logger.warning(
-                    "LLM 返回了纯文本而非 tool call: "
-                    f"{response.message[:100]}"
-                )
-                yield Stop(0)
+        if rt.phase == _ToolCallWorkflowPhase.TOOL_EXEC:
+            if not rt.response.call_list:
+                if rt.response.message and rt.response.message.strip():
+                    logger.warning(
+                        "LLM 返回了纯文本而非 tool call: "
+                        f"{rt.response.message[:100]}"
+                    )
+                    yield Stop(0)
+                    return
+                yield Wait()
+                _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="no call_list")
+                continue
+
+            logger.info(f"本轮调用列表：{[call.name for call in rt.response.call_list or []]}")
+            for call in rt.response.call_list or []:
+                args = call.args if isinstance(call.args, dict) else {}
+                reason = args.pop("reason", "未提供原因")
+                logger.info(f"LLM 调用 {call.name}，原因: {reason}，参数: {args}")
+
+            call_outcome = await process_tool_calls(
+                stream_id=chat_stream.stream_id,
+                calls=rt.response.call_list or [],
+                response=rt.response,
+                run_tool_call=chatter.run_tool_call,
+                usable_map=usable_map,
+                trigger_msg=rt.unreads[-1] if rt.unreads else None,
+                pass_call_name=pass_call_name,
+                stop_call_name=stop_call_name,
+                send_text_call_name=send_text_call_name,
+                break_on_send_text=False,
+                cross_round_seen_signatures=rt.cross_round_seen_signatures,
+            )
+
+            if call_outcome.should_stop:
+                logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟")
+                yield Stop(call_outcome.stop_minutes * 60)
                 return
 
-        logger.info(f"本轮调用列表：{[call.name for call in response.call_list or []]}")
-        
-        for call in response.call_list or []:
-            args = call.args if isinstance(call.args, dict) else {}
-            reason = args.pop("reason", "未提供原因")
-            logger.info(f"LLM 调用 {call.name}，原因: {reason}，参数: {args}")
+            if call_outcome.has_pending_tool_results:
+                _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.FOLLOW_UP, logger=logger, reason="pending tool results")
+                continue
 
-        call_outcome = await process_tool_calls(
-            stream_id=chat_stream.stream_id,
-            calls=response.call_list or [],
-            response=response,
-            run_tool_call=chatter.run_tool_call,
-            usable_map=usable_map,
-            trigger_msg=unreads[-1] if unreads else None,
-            pass_call_name=pass_call_name,
-            stop_call_name=stop_call_name,
-            send_text_call_name=send_text_call_name,
-            break_on_send_text=False,
-        )
-        has_pending_tool_results = call_outcome.has_pending_tool_results
-
-        if not call_outcome.has_pending_tool_results:
             append_suspend_payload_if_action_only(
-                calls=response.call_list or [],
-                response=response,
+                calls=rt.response.call_list or [],
+                response=rt.response,
                 suspend_text=suspend_text,
                 logger=logger,
             )
 
-        if call_outcome.should_stop:
-            logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟")
-            yield Stop(call_outcome.stop_minutes * 60)
-            return
-
-        if call_outcome.should_wait:
-            has_pending_tool_results = False
-            yield Wait()
+            # 工具链已闭合，可以进入等待或接受新 user。
+            if call_outcome.should_wait:
+                yield Wait()
+            _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="tool exec done")
             continue
 
 
@@ -200,6 +286,8 @@ async def run_classical(
             request.add_payload(LLMPayload(ROLE.TOOL, usable_map.get_all()))  # type: ignore[arg-type]
 
         response = request
+        cross_round_seen_signatures: set[str] = set()
+        has_pending_tool_results = False
 
         while True:
             try:
@@ -236,7 +324,9 @@ async def run_classical(
                 stop_call_name=stop_call_name,
                 send_text_call_name=send_text_call_name,
                 break_on_send_text=True,
+                cross_round_seen_signatures=cross_round_seen_signatures,
             )
+            has_pending_tool_results = call_outcome.has_pending_tool_results
             if not call_outcome.has_pending_tool_results:
                 append_suspend_payload_if_action_only(
                     calls=response.call_list or [],
@@ -258,6 +348,9 @@ async def run_classical(
                 return
 
             if call_outcome.should_wait:
+                # 同 enhanced：若同时存在 pending 工具结果，优先 follow-up。
+                if has_pending_tool_results:
+                    continue
                 await chatter.flush_unreads(unread_msgs)
                 yield Wait()
                 break

@@ -123,7 +123,7 @@ class TestPayloadsToOpenAIMessages:
         payloads = [
             LLMPayload(
                 ROLE.USER,
-                [Text("What's in this image?"), Image("base64|abc123")],
+                [Text("What's in this image?"), Image("base64|aGVsbG8=")],
             )
         ]
         messages, tools = _payloads_to_openai_messages(payloads)
@@ -149,7 +149,7 @@ class TestPayloadsToOpenAIMessages:
                     "parameters": {"type": "object"},
                 }
 
-        payloads = [LLMPayload(ROLE.TOOL, [Tool(tool=MockTool)])]
+        payloads = [LLMPayload(ROLE.TOOL, MockTool)]
         messages, tools = _payloads_to_openai_messages(payloads)
 
         # TOOL payload不应该进入messages
@@ -189,11 +189,37 @@ class TestPayloadsToOpenAIMessages:
         # 应该使用ToolResult的内容
         assert messages[0]["content"] == "result"
 
+    def test_multiple_tool_results_in_one_payload(self):
+        """同一个 TOOL_RESULT payload 内包含多个 ToolResult 时应拆分为多条 tool message。"""
+        from src.kernel.llm.model_client.openai_client import _payloads_to_openai_messages
+
+        payloads = [
+            LLMPayload(
+                ROLE.TOOL_RESULT,
+                [
+                    ToolResult(value="a", call_id="call_a"),
+                    ToolResult(value="b", call_id="call_b"),
+                ],
+            )
+        ]
+
+        messages, tools = _payloads_to_openai_messages(payloads)
+
+        assert tools == []
+        assert len(messages) == 2
+        assert messages[0]["role"] == "tool"
+        assert messages[0]["tool_call_id"] == "call_a"
+        assert messages[0]["content"] == "a"
+        assert messages[1]["role"] == "tool"
+        assert messages[1]["tool_call_id"] == "call_b"
+        assert messages[1]["content"] == "b"
+
     def test_custom_object_with_to_text(self):
         """测试自定义对象带to_text方法。"""
         from src.kernel.llm.model_client.openai_client import _payloads_to_openai_messages
+        from src.kernel.llm.payload.content import Content
 
-        class CustomResult:
+        class CustomResult(Content):
             call_id = "custom_call"
 
             def to_text(self):
@@ -210,8 +236,9 @@ class TestPayloadsToOpenAIMessages:
     def test_empty_tool_result_content(self):
         """测试空的工具结果内容。"""
         from src.kernel.llm.model_client.openai_client import _payloads_to_openai_messages
+        from src.kernel.llm.payload.content import Content
 
-        class BrokenObject:
+        class BrokenObject(Content):
             def to_text(self):
                 raise Exception("Cannot convert")
 
@@ -399,6 +426,7 @@ class TestOpenAIChatClient:
         )
 
         assert message == ""
+        assert tool_calls is not None
         assert len(tool_calls) == 1
         assert tool_calls[0]["id"] == "call_123"
         assert tool_calls[0]["name"] == "calculator"
@@ -523,6 +551,118 @@ class TestOpenAIChatClient:
         assert call_kwargs["presence_penalty"] == 0.1
 
     @pytest.mark.asyncio
+    async def test_default_tool_choice_is_auto_for_deepseek(self):
+        """测试 DeepSeek 场景下默认 tool_choice 为 auto（避免 required 触发 grammar 编译失败）。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        class MockTool:
+            @classmethod
+            def to_schema(cls):
+                return {
+                    "name": "test_tool",
+                    "description": "A test tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"x": {"type": "string"}},
+                        "required": ["x"],
+                    },
+                }
+
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock()]
+        mock_completion.choices[0].message.content = "Response"
+        mock_completion.choices[0].message.tool_calls = None
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [
+            LLMPayload(ROLE.USER, Text("Hi")),
+            LLMPayload(ROLE.TOOL, MockTool),
+        ]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": "https://api.deepseek.com",
+            "timeout": None,
+            "max_tokens": None,
+            "temperature": None,
+            "extra_params": {},
+        }
+
+        await client.create(
+            model_name="deepseek-ai/deepseek-v3.1",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=False,
+        )
+
+        call_kwargs = mock_chat.completions.create.call_args.kwargs
+        assert call_kwargs["tool_choice"] == "auto"
+
+    @pytest.mark.asyncio
+    async def test_default_tool_choice_is_required_for_non_deepseek(self):
+        """测试非 DeepSeek 提供商默认 tool_choice 也为 auto。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        class MockTool:
+            @classmethod
+            def to_schema(cls):
+                return {
+                    "name": "test_tool",
+                    "description": "A test tool",
+                    "parameters": {"type": "object"},
+                }
+
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock()]
+        mock_completion.choices[0].message.content = "Response"
+        mock_completion.choices[0].message.tool_calls = None
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [
+            LLMPayload(ROLE.USER, Text("Hi")),
+            LLMPayload(ROLE.TOOL, MockTool),
+        ]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": None,
+            "timeout": None,
+            "max_tokens": None,
+            "temperature": None,
+            "extra_params": {},
+        }
+
+        await client.create(
+            model_name="gpt-4",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=False,
+        )
+
+        call_kwargs = mock_chat.completions.create.call_args.kwargs
+        assert call_kwargs["tool_choice"] == "auto"
+
+    @pytest.mark.asyncio
     async def test_create_with_tool_call_compat_prompt_and_parsing(self):
         """测试 tool_call_compat 模式注入提示词并解析 JSON 返回。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
@@ -577,7 +717,8 @@ class TestOpenAIChatClient:
         call_kwargs = mock_chat.completions.create.call_args.kwargs
         assert "tools" not in call_kwargs
         assert isinstance(call_kwargs["messages"][-1]["content"], str)
-        assert "tool-call 兼容模式" in call_kwargs["messages"][-1]["content"]
+        assert "请只返回一个 JSON 对象" in call_kwargs["messages"][-1]["content"]
+        assert "可用工具 schema" in call_kwargs["messages"][-1]["content"]
 
         assert message == ""
         assert tool_calls is not None

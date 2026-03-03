@@ -452,6 +452,14 @@ class Bot:
             
             self.http_server = get_http_server(host=host, port=port)
             await self.http_server.start()
+
+            # 挂载 LLM 请求体检视器（调试用 WebUI）
+            try:
+                from src.kernel.llm.request_inspector import get_inspector
+                get_inspector().mount(self.http_server.app)
+            except Exception:
+                pass
+
             self.ui.update_phase_status("HTTP服务器", "已启动")
 
     async def _discover_plugins(self) -> None:

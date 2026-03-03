@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from src.kernel.llm.context import LLMContextManager
-from src.kernel.llm.payload import LLMPayload, Text, ToolResult
+from src.kernel.llm.payload import LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.request import LLMRequest
+from src.kernel.llm.exceptions import LLMContextError
 from src.kernel.llm.roles import ROLE
 
 
@@ -122,3 +125,140 @@ def test_context_manager_trims_by_token_budget() -> None:
     assert trimmed[0].role == ROLE.USER
     assert trimmed[0].content[0].text == "q3"
     assert trimmed[1].role == ROLE.ASSISTANT
+
+
+def test_context_manager_system_tool_equivalent_add_payload() -> None:
+    manager = LLMContextManager(max_payloads=20)
+    payloads: list[LLMPayload] = []
+
+    payloads = manager.system(payloads, Text("sys"))
+    payloads = manager.tool(payloads, DummyTool)
+
+    assert len(payloads) == 2
+    assert payloads[0].role == ROLE.SYSTEM
+    assert payloads[0].content[0].text == "sys"
+    assert payloads[1].role == ROLE.TOOL
+
+
+def test_context_manager_reminder_creates_first_user() -> None:
+    manager = LLMContextManager(max_payloads=20)
+    payloads = [LLMPayload(ROLE.SYSTEM, Text("sys"))]
+
+    payloads = manager.reminder(payloads, "你必须先输出结论")
+
+    assert len(payloads) == 2
+    assert payloads[0].role == ROLE.SYSTEM
+    assert payloads[1].role == ROLE.USER
+    assert payloads[1].content[0].text == "你必须先输出结论"
+
+
+def test_context_manager_defers_missing_tool_result_placeholder_at_tail() -> None:
+    manager = LLMContextManager(max_payloads=20)
+    payloads = [LLMPayload(ROLE.USER, Text("帮我调用工具"))]
+
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.ASSISTANT,
+            [
+                Text("我将调用工具"),
+                ToolCall(id="call_1", name="get_weather", args={"city": "上海"}),
+            ],
+        ),
+    )
+
+    assert len(payloads) == 2
+    assert payloads[0].role == ROLE.USER
+    assert payloads[1].role == ROLE.ASSISTANT
+
+
+def test_context_manager_keeps_multiple_tool_results_in_merged_payload() -> None:
+    manager = LLMContextManager(max_payloads=20)
+    payloads = [LLMPayload(ROLE.USER, Text("请执行两个工具"))]
+
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.ASSISTANT,
+            [
+                Text("开始执行"),
+                ToolCall(id="call_1", name="write_memory", args={"content": "A"}),
+                ToolCall(id="call_2", name="finish_task", args={"content": "ok"}),
+            ],
+        ),
+    )
+
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.TOOL_RESULT,
+            ToolResult(value="写入成功", call_id="call_1", name="write_memory"),
+        ),
+    )
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.TOOL_RESULT,
+            ToolResult(value="任务完成", call_id="call_2", name="finish_task"),
+        ),
+    )
+
+    assert len(payloads) == 3
+    assert payloads[2].role == ROLE.TOOL_RESULT
+
+    results = [part for part in payloads[2].content if isinstance(part, ToolResult)]
+    assert len(results) == 2
+
+    result_by_id = {result.call_id: result for result in results}
+    assert result_by_id["call_1"].value == "写入成功"
+    assert result_by_id["call_1"].name == "write_memory"
+    assert result_by_id["call_2"].value == "任务完成"
+    assert result_by_id["call_2"].name == "finish_task"
+
+
+def test_context_manager_raises_when_tool_chain_is_broken_by_new_user() -> None:
+    """strict 模式下：不自动补齐 tool_result；若 tool_calls 未闭合就进入下一条 USER，应直接报错。"""
+    manager = LLMContextManager(max_payloads=20)
+    payloads = [LLMPayload(ROLE.USER, Text("帮我调用工具"))]
+
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.ASSISTANT,
+            [
+                Text("我将调用工具"),
+                ToolCall(id="call_1", name="get_weather", args={"city": "上海"}),
+            ],
+        ),
+    )
+
+    with pytest.raises(LLMContextError):
+        manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("继续")))
+
+
+def test_context_manager_raises_when_user_follows_tool_result_without_assistant() -> None:
+    """strict 模式下：TOOL_RESULT 后必须由 ASSISTANT 承接；否则直接报错。"""
+    manager = LLMContextManager(max_payloads=20)
+    payloads = [LLMPayload(ROLE.USER, Text("先调用工具"))]
+
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.ASSISTANT,
+            [
+                Text("我将调用工具"),
+                ToolCall(id="call_1", name="web_search", args={"query": "x"}),
+            ],
+        ),
+    )
+
+    payloads = manager.add_payload(
+        payloads,
+        LLMPayload(
+            ROLE.TOOL_RESULT,
+            ToolResult(value="result", call_id="call_1", name="web_search"),
+        ),
+    )
+
+    with pytest.raises(LLMContextError):
+        manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("继续")))
