@@ -45,6 +45,7 @@ async def send_image(
     image_data: str,
     stream_id: str,
     platform: str | None = None,
+    processed_plain_text = "[图片]",
 ) -> bool:
     """发送图片消息
 
@@ -64,7 +65,7 @@ async def send_image(
         message_type=MessageType.IMAGE,
         stream_id=stream_id,
         platform=platform,
-        processed_plain_text="[图片]",
+        processed_plain_text=processed_plain_text,
     )
 
 
@@ -102,6 +103,7 @@ async def send_voice(
     voice_data: str,
     stream_id: str,
     platform: str | None = None,
+    processed_plain_text = "[语音]",
 ) -> bool:
     """发送语音消息
 
@@ -121,7 +123,7 @@ async def send_voice(
         message_type=MessageType.VOICE,
         stream_id=stream_id,
         platform=platform,
-        processed_plain_text="[语音]",
+        processed_plain_text=processed_plain_text,
     )
 
 
@@ -129,6 +131,7 @@ async def send_video(
     video_data: str,
     stream_id: str,
     platform: str | None = None,
+    processed_plain_text = "[视频]",
 ) -> bool:
     """发送视频消息
 
@@ -148,7 +151,7 @@ async def send_video(
         message_type=MessageType.VIDEO,
         stream_id=stream_id,
         platform=platform,
-        processed_plain_text="[视频]",
+        processed_plain_text=processed_plain_text,
     )
 
 
@@ -190,6 +193,7 @@ async def send_custom(
     message_type: MessageType | str,
     stream_id: str,
     platform: str | None = None,
+    processed_plain_text: str = "",
 ) -> bool:
     """发送自定义类型消息
 
@@ -198,7 +202,7 @@ async def send_custom(
         message_type: 消息类型
         stream_id: 聊天流 ID
         platform: 平台名称（可选）
-
+        processed_plain_text: 人类可读文本（可选）
     Returns:
         是否发送成功
 
@@ -220,7 +224,7 @@ async def send_custom(
                 message_type=MessageType.UNKNOWN,
                 stream_id=stream_id,
                 platform=platform,
-                processed_plain_text="",
+                processed_plain_text=processed_plain_text,
                 extra_media=[{"type": message_type, "data": content}],
             )
         message_type = message_type_enum
@@ -230,7 +234,7 @@ async def send_custom(
         message_type=message_type,
         stream_id=stream_id,
         platform=platform,
-        processed_plain_text="",
+        processed_plain_text=processed_plain_text,
     )
 
 
