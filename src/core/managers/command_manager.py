@@ -271,7 +271,7 @@ class CommandManager:
             return f"插件未加载: {sig_info['plugin_name']}"
 
         # 创建临时实例以访问命令树
-        command_instance = command_cls(plugin=plugin)
+        command_instance = command_cls(plugin=plugin, stream_id="")  # stream_id 可空或任意值，因为我们只需要访问命令树结构
 
         # 生成帮助信息
         help_lines = [

@@ -12,6 +12,7 @@ from src.app.plugin_system.api import media_api
 from src.app.plugin_system.api import message_api
 from src.app.plugin_system.api import permission_api
 from src.app.plugin_system.api import plugin_api
+from src.app.plugin_system.api import prompt_api
 from src.app.plugin_system.api import router_api
 from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api import service_api
@@ -31,6 +32,7 @@ __all__ = [
     "message_api",
     "permission_api",
     "plugin_api",
+    "prompt_api",
     "router_api",
     "send_api",
     "service_api",

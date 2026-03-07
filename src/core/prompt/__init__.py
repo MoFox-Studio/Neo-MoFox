@@ -37,6 +37,14 @@ from src.core.prompt.manager import (
     reset_prompt_manager,
 )
 
+# system reminder
+from src.core.prompt.system_reminder import (
+    SystemReminderBucket,
+    SystemReminderStore,
+    get_system_reminder_store,
+    reset_system_reminder_store,
+)
+
 # 渲染策略相关
 from src.core.prompt.policies import (
     RenderPolicy,
@@ -55,6 +63,11 @@ __all__ = [
     "get_prompt_manager",
     "PromptManager",
     "reset_prompt_manager",
+    # system reminder
+    "SystemReminderBucket",
+    "SystemReminderStore",
+    "get_system_reminder_store",
+    "reset_system_reminder_store",
     # 事件
     "PROMPT_BUILD_EVENT",
     # 渲染策略
