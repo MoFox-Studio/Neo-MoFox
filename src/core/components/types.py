@@ -39,7 +39,7 @@ class ComponentType(Enum):
     PLUGIN = "plugin"
 
 
-class EventType(str, Enum):
+class EventType(Enum):
     """事件类型枚举。
 
     定义事件处理器可以订阅的系统事件。
