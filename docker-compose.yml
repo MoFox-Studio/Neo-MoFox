@@ -1,0 +1,40 @@
+services:
+  mofox:
+    # 默认拉取 main 分支的构建镜像
+    # 如果需要 dev 分支，请修改为 ikun11451/neo-mofox-dev:latest
+    image: ikun11451/neo-mofox-main:latest
+    # build: .
+    container_name: mofox-bot
+    restart: unless-stopped
+    volumes:
+      # 将配置、数据和日志文件夹物理映射到宿主机
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # 建议也将插件目录映射，方便动态开发
+      - ./plugins:/app/plugins
+    environment:
+      # 设置容器时区为上海
+      - TZ=Asia/Shanghai
+    # 启用交互模式，支持 Rich 等库的终端控制台输出
+    stdin_open: true
+    tty: true
+
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: mofox-napcat
+    restart: unless-stopped
+    environment:
+      - NAPCAT_UID=0
+      - NAPCAT_GID=0
+      - TZ=Asia/Shanghai
+    ports:
+      - "6099:6099"
+    volumes:
+      - ./config/napcat:/app/napcat/config
+      - ./data/qq:/app/.config/QQ
+    mac_address: 02:42:ac:11:00:00
+
+networks:
+  default:
+    name: mofox-network

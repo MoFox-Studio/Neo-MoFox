@@ -1,0 +1,53 @@
+{
+  "name": "example_plugin",
+  "version": "1.0.0",
+  "description": "示例插件，展示 manifest.json 的 include 字段用法",
+  "author": "MoFox Studio",
+  "dependencies": {
+    "plugins": ["my_plugin"],
+    "components": [
+      "my_plugin:service:message_queue",
+      "my_plugin:tool:calculator",
+      "my_plugin:service:memory",
+      "my_plugin:service:config",
+      "my_plugin:tool:calculator"
+    ]
+  },
+  "include": [
+    {
+      "component_type": "action",
+      "component_name": "send_message",
+      "dependencies": ["my_plugin:service:message_queue"],
+      "enabled": true
+    },
+    {
+      "component_type": "tool",
+      "component_name": "calculator",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "chatter",
+      "component_name": "my_chatter",
+      "dependencies": [
+        "my_plugin:tool:calculator",
+        "my_plugin:service:memory"
+      ],
+      "enabled": true
+    },
+    {
+      "component_type": "command",
+      "component_name": "config_command",
+      "dependencies": ["my_plugin:service:config"],
+      "enabled": true
+    },
+    {
+      "component_type": "collection",
+      "component_name": "utils_collection",
+      "dependencies": ["my_plugin:tool:calculator"],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "min_core_version": "1.0.0"
+}

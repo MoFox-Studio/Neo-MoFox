@@ -1,0 +1,23 @@
+{
+    "name": "napcat_adapter",
+    "version": "2.0.0",
+    "description": "Napcat/OneBot 11 适配器（基于 Neo-MoFox 重写）",
+    "author": "MoFox Team",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "adapter",
+            "component_name": "napcat_adapter",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "min_core_version": "1.0.0",
+    "python_dependencies": [
+        "pillow>=12.1.0"
+    ],
+    "dependencies_required": true
+}

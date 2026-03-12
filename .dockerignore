@@ -1,0 +1,38 @@
+# Python 字节码
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 环境
+.venv/
+venv/
+env/
+.env
+
+# 数据和日志 (通过 volume 映射，不应打包进镜像)
+data/*
+!data/chroma_db/  # 如果有初始化数据可以放这里
+logs/*
+
+# IDE 和配置
+.vscode/
+.idea/
+.git/
+.gitignore
+
+# 重构及说明文档
+*.md
+LICENSE
+
+# 测试
+test/
+tests/
+htmlcov/
+.pytest_cache/
+.coverage
+
+# 构建
+build/
+dist/
+*.egg-info/

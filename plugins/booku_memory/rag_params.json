@@ -1,0 +1,5 @@
+{
+  "deduplicationThreshold": 0.88,
+  "coreBoostRange": [1.2, 1.4],
+  "energyCutoff": 0.1
+}

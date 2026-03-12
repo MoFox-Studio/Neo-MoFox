@@ -1,0 +1,34 @@
+{
+    "name": "default_chatter",
+    "version": "1.0.0",
+    "description": "默认聊天组件，提供基础的消息处理和回复功能",
+    "author": "MoFox Team",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "chatter",
+            "component_name": "default_chatter",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "send_text",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "pass_and_wait",
+            "dependencies": []
+        },
+        {
+            "component_type": "action",
+            "component_name": "stop_conversation",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "min_core_version": "1.0.0"
+}
