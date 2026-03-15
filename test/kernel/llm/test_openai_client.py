@@ -300,6 +300,71 @@ class TestSchemaNormalization:
         assert tags["items"]["type"] == "string"
         assert "default" not in tags
 
+    def test_to_openai_tool_keeps_existing_reason_schema(self):
+        """测试已有 reason 参数时不重复注入。"""
+        from src.kernel.llm.model_client.openai_client import _to_openai_tool
+
+        class MockTool:
+            @classmethod
+            def to_schema(cls):
+                return {
+                    "name": "test_tool",
+                    "description": "desc",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {
+                                "type": "string",
+                                "description": "original reason",
+                            },
+                            "query": {
+                                "type": "string",
+                                "description": "query",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                }
+
+        tool = _to_openai_tool(MockTool)
+        properties = tool["function"]["parameters"]["properties"]
+        required = tool["function"]["parameters"]["required"]
+
+        assert properties["reason"]["description"] == "original reason"
+        assert required == ["query"]
+
+    def test_to_openai_tool_does_not_inject_reason_when_execute_accepts_it(self):
+        """测试 execute 已声明 reason 时不额外注入 schema 参数。"""
+        from src.kernel.llm.model_client.openai_client import _to_openai_tool
+
+        class MockTool:
+            @classmethod
+            def to_schema(cls):
+                return {
+                    "name": "test_tool",
+                    "description": "desc",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "query",
+                            }
+                        },
+                        "required": ["query"],
+                    },
+                }
+
+            async def execute(self, query: str, reason: str) -> tuple[bool, str]:
+                return True, f"{query}:{reason}"
+
+        tool = _to_openai_tool(MockTool)
+        properties = tool["function"]["parameters"]["properties"]
+        required = tool["function"]["parameters"]["required"]
+
+        assert "reason" not in properties
+        assert "reason" not in required
+
 
 class TestOpenAIChatClient:
     """测试OpenAIChatClient类。"""

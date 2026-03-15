@@ -25,6 +25,17 @@ class PrivateTool(BaseTool):
         return True, f"private:{query}"
 
 
+class PrivateReasonTool(BaseTool):
+    """用于测试保留 reason 参数的 Tool。"""
+
+    tool_name = "private_reason_lookup"
+    tool_description = "私有 reason 查询工具"
+
+    async def execute(self, query: str, reason: str) -> tuple[bool, str]:
+        """执行包含 reason 的私有查询。"""
+        return True, f"{query}:{reason}"
+
+
 class ConcreteAgent(BaseAgent):
     """用于测试的具体 Agent。"""
 
@@ -180,6 +191,23 @@ class TestBaseAgent:
         )
         assert success is True
         assert result == "private:weather"
+
+    @pytest.mark.asyncio
+    async def test_execute_local_usable_keeps_declared_reason(self, mock_plugin):
+        """测试私有 usable 显式声明 reason 时不被剥离。"""
+
+        class ReasonAgent(ConcreteAgent):
+            usables = [PrivateReasonTool]
+
+        agent = ReasonAgent(stream_id="stream_123", plugin=mock_plugin)
+        success, result = await agent.execute_local_usable(
+            "private_reason_lookup",
+            query="weather",
+            reason="need details",
+        )
+
+        assert success is True
+        assert result == "weather:need details"
 
     @pytest.mark.asyncio
     async def test_execute_local_usable_not_found(self, mock_plugin):

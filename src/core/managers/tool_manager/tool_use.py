@@ -9,6 +9,7 @@ from typing import Any, TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 from src.core.components.registry import get_global_registry
+from src.core.components.utils import should_strip_auto_reason_argument
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -120,8 +121,9 @@ class ToolUse:
 
         # 执行 Tool
         try:
-            # 剥离 LLM 自动注入的 reason 参数，避免传入 execute() 时签名不匹配
-            kwargs.pop("reason", None)
+            # 仅剥离系统自动注入的 reason；组件原生声明 reason 时必须保留。
+            if should_strip_auto_reason_argument(tool_instance.execute, kwargs):
+                kwargs.pop("reason", None)
 
             # 记录开始执行
             logger.debug(f"开始执行工具: {tool_instance.tool_name}, 参数: {kwargs}")

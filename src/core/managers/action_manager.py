@@ -15,6 +15,7 @@ from src.kernel.concurrency import get_task_manager
 
 from src.core.components.registry import get_global_registry
 from src.core.components.types import ChatType, ComponentType
+from src.core.components.utils import should_strip_auto_reason_argument
 
 if TYPE_CHECKING:
     from src.core.components.base.action import BaseAction
@@ -270,8 +271,9 @@ class ActionManager:
         # 创建 Action 实例
         action_instance = action_cls(chat_stream=chat_stream, plugin=plugin)
 
-        # 剥离 LLM 自动注入的 reason 参数，避免传入 execute() 时签名不匹配
-        kwargs.pop("reason", None)
+        # 仅剥离系统自动注入的 reason；组件原生声明 reason 时必须保留。
+        if should_strip_auto_reason_argument(action_instance.execute, kwargs):
+            kwargs.pop("reason", None)
 
         # 执行 Action
         try:
