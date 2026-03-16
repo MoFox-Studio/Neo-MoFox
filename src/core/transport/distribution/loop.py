@@ -93,7 +93,8 @@ async def run_chat_stream(
         stream_id: 流 ID
         manager: StreamLoopManager 实例
     """
-    task_id = id(asyncio.current_task())
+    current_task = asyncio.current_task()
+    task_id = id(current_task)
     logger.debug(f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, 启动")
 
     try:
@@ -245,16 +246,19 @@ async def run_chat_stream(
         # 清理活跃生成器（生成器是任务相关的，不跨任务持久化）
         manager._chatter_genes.pop(stream_id, None)
 
-        # 注销 WatchDog 心跳，避免已结束流继续触发慢响应告警
-        try:
-            get_watchdog().unregister_stream(stream_id=stream_id)
-        except Exception:
-            pass
-        
-        # 注意：此处不再主动清理 _wait_states，因为它代表流的持久状态，应由其自身逻辑或管理器管理
+        # 仅当当前任务仍是 stream_loop_task 持有者时，才执行最终清理。
+        # 这可避免“旧任务退出时”把新重启任务的 WatchDog 注册与 task 引用误清空。
         try:
             context = await manager._get_stream_context(stream_id)
-            if context and context.stream_loop_task:
+            if (
+                context is not None
+                and context.stream_loop_task is not None
+                and context.stream_loop_task is current_task
+            ):
+                try:
+                    get_watchdog().unregister_stream(stream_id=stream_id)
+                except Exception:
+                    pass
                 context.stream_loop_task = None
-        except:
+        except Exception:
             pass
