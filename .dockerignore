@@ -14,6 +14,7 @@ env/
 data/*
 !data/chroma_db/  # 如果有初始化数据可以放这里
 logs/*
+config/*
 
 # IDE 和配置
 .vscode/
