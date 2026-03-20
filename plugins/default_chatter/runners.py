@@ -96,6 +96,7 @@ async def run_enhanced(
     stop_call_name: str,
     send_text_call_name: str,
     suspend_text: str,
+    enable_cooldown: bool = False,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
     """enhanced 模式执行流程。"""
     try:
@@ -232,8 +233,9 @@ async def run_enhanced(
             )
 
             if call_outcome.should_stop:
-                logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟")
-                yield Stop(call_outcome.stop_minutes * 60)
+                cooldown_seconds = call_outcome.stop_minutes * 60 if enable_cooldown else 0
+                logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟（{'已启用' if enable_cooldown else '已禁用，实际不冷却'}）")
+                yield Stop(cooldown_seconds)
                 return
 
             if call_outcome.has_pending_tool_results:
@@ -262,6 +264,7 @@ async def run_classical(
     stop_call_name: str,
     send_text_call_name: str,
     suspend_text: str,
+    enable_cooldown: bool = False,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
     """classical 模式执行流程。"""
     try:
@@ -371,9 +374,10 @@ async def run_classical(
                 return
 
             if call_outcome.should_stop:
-                logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟")
+                cooldown_seconds = call_outcome.stop_minutes * 60 if enable_cooldown else 0
+                logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟（{'已启用' if enable_cooldown else '已禁用，实际不冷却'}）")
                 await chatter.flush_unreads(unread_msgs)
-                yield Stop(call_outcome.stop_minutes * 60)
+                yield Stop(cooldown_seconds)
                 return
 
             if call_outcome.should_wait:

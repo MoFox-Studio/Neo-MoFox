@@ -65,11 +65,19 @@ class DefaultChatterConfig(BaseConfig):
             hint="开启后会在每轮对话中强调禁止行为",
             order=2
         )
+        enable_cooldown: bool = Field(
+            default=True,
+            description="是否启用回复后冷却功能。开启后 stop_conversation 工具指定的冷却时间将生效，期间新消息不会触发回复；关闭时冷却时间归零，消息可立即触发新对话",
+            label="启用回复后冷却",
+            tag="performance",
+            hint="关闭可避免因 LLM 设置过长冷却时间导致长时间无法回复",
+            order=3
+        )
         theme_guide: ThemeGuideSection = Field(
             default_factory=ThemeGuideSection,
             description="按聊天类型区分的额外提示词",
             label="场景引导配置",
-            order=3
+            order=4
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)

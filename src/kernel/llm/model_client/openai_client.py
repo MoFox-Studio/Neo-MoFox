@@ -695,6 +695,8 @@ class OpenAIChatClient:
                 # 默认策略：统一使用 required。
                 # 如果无法支持请在 model_set.extra_params 显式传入 tool_choice="auto"。
                 params["tool_choice"] = "required"
+        else:
+            params.pop("tool_choice", None)
 
         # 新增：区分标准参数与非标准参数（统一走 extra_body，避免 openai SDK 因未知参数报错）
         standard_params = {

@@ -451,6 +451,12 @@ class DefaultChatter(BaseChatter):
         self, chat_stream: ChatStream
     ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
         """enhanced 模式执行流程（保留原有行为）。"""
+        plugin_config = getattr(self.plugin, "config", None)
+        enable_cooldown = (
+            plugin_config.plugin.enable_cooldown
+            if isinstance(plugin_config, DefaultChatterConfig)
+            else False
+        )
         async for result in run_enhanced(
             chatter=self,
             chat_stream=chat_stream,
@@ -459,6 +465,7 @@ class DefaultChatter(BaseChatter):
             stop_call_name=_STOP_CONVERSATION,
             send_text_call_name=_SEND_TEXT,
             suspend_text=_SUSPEND_TEXT,
+            enable_cooldown=enable_cooldown,
         ):
             yield result
 
@@ -466,6 +473,12 @@ class DefaultChatter(BaseChatter):
         self, chat_stream: ChatStream
     ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
         """classical 模式执行流程。"""
+        plugin_config = getattr(self.plugin, "config", None)
+        enable_cooldown = (
+            plugin_config.plugin.enable_cooldown
+            if isinstance(plugin_config, DefaultChatterConfig)
+            else False
+        )
         async for result in run_classical(
             chatter=self,
             chat_stream=chat_stream,
@@ -474,6 +487,7 @@ class DefaultChatter(BaseChatter):
             stop_call_name=_STOP_CONVERSATION,
             send_text_call_name=_SEND_TEXT,
             suspend_text=_SUSPEND_TEXT,
+            enable_cooldown=enable_cooldown,
         ):
             yield result
 

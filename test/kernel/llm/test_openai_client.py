@@ -499,6 +499,104 @@ class TestOpenAIChatClient:
         assert tool_calls[0]["args"] == {"a": 1, "b": 2}
 
     @pytest.mark.asyncio
+    async def test_create_omits_tool_choice_without_tool_payloads(self):
+        """测试未传工具 payload 时不会透传 tool_choice。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock()]
+        mock_completion.choices[0].message.content = "Hello, world!"
+        mock_completion.choices[0].message.tool_calls = None
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [LLMPayload(ROLE.USER, Text("Hi"))]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": "https://api.test.com",
+            "timeout": 30.0,
+            "extra_params": {"tool_choice": "auto"},
+        }
+
+        await client.create(
+            model_name="gpt-4",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=False,
+        )
+
+        await_args = mock_chat.completions.create.await_args
+        assert await_args is not None
+        create_kwargs = await_args.kwargs
+        assert "tools" not in create_kwargs
+        assert "tool_choice" not in create_kwargs
+
+    @pytest.mark.asyncio
+    async def test_create_keeps_configured_tool_choice_with_tool_payloads(self):
+        """测试传入工具 payload 时保留配置的 tool_choice。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        class MockTool:
+            @classmethod
+            def to_schema(cls):
+                return {
+                    "name": "test_tool",
+                    "description": "A test tool",
+                    "parameters": {"type": "object"},
+                }
+
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock()]
+        mock_completion.choices[0].message.content = "Hello, world!"
+        mock_completion.choices[0].message.tool_calls = None
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [
+            LLMPayload(ROLE.USER, Text("Hi")),
+            LLMPayload(ROLE.TOOL, MockTool),
+        ]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": "https://api.test.com",
+            "timeout": 30.0,
+            "extra_params": {"tool_choice": "auto"},
+        }
+
+        await client.create(
+            model_name="gpt-4",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=False,
+        )
+
+        await_args = mock_chat.completions.create.await_args
+        assert await_args is not None
+        create_kwargs = await_args.kwargs
+        assert create_kwargs["tool_choice"] == "auto"
+        assert create_kwargs["tools"][0]["function"]["name"] == "test_tool"
+
+    @pytest.mark.asyncio
     async def test_create_invalid_model_set_type(self):
         """测试无效的model_set类型。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
