@@ -412,6 +412,71 @@ class Bot:
 
         self.ui.update_phase_status("LLM 预检", "已完成")
 
+    def _check_http_security(self, host: str, api_keys: list[str]) -> None:
+        """检查 HTTP 服务器安全配置
+
+        检测以下不安全的配置组合并发出警告：
+        1. 监听地址为 0.0.0.0（对外开放）
+        2. 未配置有效的 API 密钥或使用示例密钥
+
+        Args:
+            host: HTTP 服务器监听地址
+            api_keys: API 密钥列表
+
+        Warnings:
+            当检测到不安全配置时，在终端输出警告信息
+        """
+        assert self.logger is not None
+
+        # 不安全的示例密钥列表
+        INSECURE_KEYS = {
+            "secret-key-1",
+            "test-key",
+            "example-key",
+            "demo-key",
+            "default-key",
+            "changeme",
+            "password",
+            "123456",
+        }
+
+        # 检查是否对外开放
+        is_public = host == "0.0.0.0"
+        
+        # 检查密钥是否不安全（空或包含示例密钥）
+        has_insecure_keys = (
+            not api_keys or any(key.lower() in INSECURE_KEYS for key in api_keys)
+        )
+
+        if is_public and has_insecure_keys:
+            # 使用 logger 发出警告
+            self.logger.warning("")
+            self.logger.warning("=" * 80)
+            self.logger.warning("⚠️  HTTP 服务器安全警告 ⚠️")
+            self.logger.warning("=" * 80)
+            self.logger.warning("")
+            self.logger.warning(f"检测到 HTTP 服务器配置为对外开放（{host}），但未设置安全的 API 密钥！")
+            self.logger.warning("")
+            self.logger.warning("这将导致以下安全风险：")
+            self.logger.warning("  • 任何人都可以访问您的 Bot API 端点")
+            self.logger.warning("  • 可能被恶意利用进行未授权操作")
+            self.logger.warning("  • 可能导致数据泄露或系统被攻击")
+            self.logger.warning("")
+            self.logger.warning("建议的解决方案：")
+            self.logger.warning("  1. 在 config/core.toml 中设置强密钥：")
+            self.logger.warning('     api_keys = ["your-strong-random-key-here"]')
+            self.logger.warning("  2. 或将监听地址改为本地：")
+            self.logger.warning('     http_router_host = "127.0.0.1"')
+            self.logger.warning("")
+            self.logger.warning("⚠️  我们不会承担因不安全配置导致系统被黑入的任何风险和责任！⚠️")
+            self.logger.warning("")
+            self.logger.warning("=" * 80)
+            self.logger.warning("")
+            input("输入回车来继续:")
+
+            # 同时在 UI 中显示警告状态
+            self.ui.update_phase_status("HTTP服务器", "⚠️ 不安全配置")
+            
     async def _initialize_core(self) -> None:
         """初始化 Core 层组件
 
@@ -449,6 +514,10 @@ class Bot:
         if self.config.http_router.enable_http_router:
             host = self.config.http_router.http_router_host
             port = self.config.http_router.http_router_port
+            api_keys = self.config.http_router.api_keys
+            
+            # 安全检查：检测对外开放且无有效密钥的情况
+            self._check_http_security(host, api_keys)
             
             self.http_server = get_http_server(host=host, port=port)
             await self.http_server.start()

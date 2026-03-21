@@ -19,7 +19,7 @@
 ### 安装
 
 ```python
-from src.kernel.concurrency import get_task_manager, gather
+from src.kernel.concurrency import get_task_manager, get_watchdog
 ```
 
 ### 基本任务创建
@@ -84,7 +84,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from src.kernel.concurrency import gather
+from src.kernel.concurrency import get_task_manager
 
 async def task1():
     await asyncio.sleep(1)
@@ -99,8 +99,10 @@ async def task3():
     return "Task 3 完成"
 
 async def main():
-    # 并行执行三个任务
-    results = await gather(task1(), task2(), task3())
+    tm = get_task_manager()
+    
+    # 使用 TaskManager 的 gather 方法并行执行多个任务
+    results = await tm.gather(task1(), task2(), task3(), return_exceptions=False)
     
     for result in results:
         print(result)
@@ -234,15 +236,19 @@ kernel/concurrency/
 - `get_task_manager()` - 获取全局 TaskManager 单例
 - `get_watchdog()` - 获取全局 WatchDog 单例
 
-**任务操作**：
-- `gather(*coros)` - 并行执行多个协程
+**数据类型**：
+- `TaskInfo` - 任务信息对象
+- `TaskGroup` - 任务组上下文管理器
+- `StreamHeartbeat` - 聊天流心跳信息
 
 **异常类**：
 - `ConcurrencyError` - 基础异常
-- `TaskNotFoundError` - 任务未找到
-- `TaskTimeoutError` - 任务超时
-- `TaskGroupError` - 任务组异常
-- `WatchDogError` - WatchDog 异常
+- `TaskNotFoundError` - 任务未找到异常
+- `TaskTimeoutError` - 任务超时异常
+- `TaskGroupError` - 任务组基础异常
+- `TaskGroupAlreadyExists` - 任务组已存在异常
+- `TaskGroupNotFoundError` - 任务组未找到异常
+- `WatchDogError` - WatchDog 监控异常
 
 ---
 
@@ -292,7 +298,9 @@ async def batch_process():
 ### 模式 4: 并行执行（gather）
 
 ```python
-results = await gather(
+tm = get_task_manager()
+
+results = await tm.gather(
     task1(),
     task2(),
     task3(),

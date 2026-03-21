@@ -27,6 +27,9 @@ _factory_lock: asyncio.Lock | None = None
 在异步环境中安全地初始化单例：
 
 ```python
+import asyncio
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
 async def get_engine() -> AsyncEngine:
     global _engine, _engine_lock
     
@@ -101,7 +104,9 @@ def _infer_db_type_from_url(url: str) -> str | None:
 #### SQLite 优化
 
 ```python
-if db_type == "sqlite":
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+async def optimize_sqlite(connection: AsyncConnection):
     # 设置 busy_timeout，避免 "database is locked" 错误
     await connection.exec_driver_sql("PRAGMA busy_timeout = 60000")
     
@@ -133,6 +138,11 @@ def get_engine_info() -> dict:
 ### 会话工厂配置
 
 ```python
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import async_sessionmaker
+
+engine = await create_async_engine(url="sqlite+aiosqlite:///db.sqlite")
+
 _session_factory = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -167,13 +177,15 @@ get_db_session()
 #### SQLite 会话设置
 
 ```python
-async def _apply_session_settings(session: AsyncSession, db_type: str):
-    if db_type == "sqlite":
-        # busy_timeout：60 秒
-        await session.execute(text("PRAGMA busy_timeout = 60000"))
-        
-        # 启用外键约束
-        await session.execute(text("PRAGMA foreign_keys = ON"))
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
+
+async def apply_sqlite_settings(session: AsyncSession):
+    # busy_timeout：60 秒
+    await session.execute(text("PRAGMA busy_timeout = 60000"))
+    
+    # 启用外键约束
+    await session.execute(text("PRAGMA foreign_keys = ON"))
 ```
 
 #### PostgreSQL 会话设置
@@ -188,22 +200,26 @@ elif db_type == "postgresql":
 ### 事务自动管理
 
 ```python
-async with get_db_session() as session:
-    try:
-        # 执行操作
-        result = await session.execute(select(User))
-        
-        # 如果正常完成，自动提交
-        if session.is_active:
-            await session.commit()
-    except Exception:
-        # 发生异常时自动回滚
-        if session.is_active:
-            await session.rollback()
-        raise
-    finally:
-        # 总是关闭会话
-        await session.close()
+from src.kernel.db import get_db_session
+from sqlalchemy import select
+
+async def example_transaction():
+    async with get_db_session() as session:
+        try:
+            # 执行操作
+            result = await session.execute(select(User))
+            
+            # 如果正常完成，自动提交
+            if session.is_active:
+                await session.commit()
+        except Exception:
+            # 发生异常时自动回滚
+            if session.is_active:
+                await session.rollback()
+            raise
+        finally:
+            # 总是关闭会话
+            await session.close()
 ```
 
 ---
@@ -239,17 +255,23 @@ from src.kernel.db import (
     DatabaseInitializationError,
     DatabaseConnectionError,
     DatabaseQueryError,
+    configure_engine,
+    get_engine,
 )
+import asyncio
 
-try:
-    configure_engine("invalid://url")
-    await get_engine()
-except DatabaseInitializationError as e:
-    print(f"初始化失败: {e}")
-except DatabaseConnectionError as e:
-    print(f"连接失败: {e}")
-except DatabaseError as e:
-    print(f"数据库错误: {e}")
+async def test_exceptions():
+    try:
+        configure_engine("invalid://url")
+        await get_engine()
+    except DatabaseInitializationError as e:
+        print(f"初始化失败: {e}")
+    except DatabaseConnectionError as e:
+        print(f"连接失败: {e}")
+    except DatabaseError as e:
+        print(f"数据库错误: {e}")
+
+asyncio.run(test_exceptions())
 ```
 
 ---
@@ -276,28 +298,26 @@ except DatabaseError as e:
 用于测试环境，完全重置引擎状态：
 
 ```python
-async def reset_engine_state():
-    global _engine, _engine_lock, _engine_config
-    
+from src.kernel.db import reset_engine_state
+import asyncio
+
+async def reset_db_state():
     # 1. 关闭现有引擎
-    await close_engine()
-    
     # 2. 清理锁
-    _engine_lock = None
-    
     # 3. 清理配置
-    _engine_config = None
-```
+    await reset_engine_state()
 
-**使用示例**：
-
-```python
+# 使用示例
 import pytest
 
 @pytest.fixture
 async def clean_db():
     # 每个测试前重置
     await reset_engine_state()
+    yield
+    # 清理
+    await reset_engine_state()
+```
     
     # 配置测试数据库
     configure_engine("sqlite+aiosqlite:///:memory:")

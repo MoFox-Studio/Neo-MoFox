@@ -456,40 +456,6 @@ asyncio.run(main())
 
 ---
 
-## 模块级别的 gather 函数
-
-为了方便使用，模块提供了一个全局 `gather` 函数：
-
-```python
-from src.kernel.concurrency import gather
-
-results = await gather(
-    task1(),
-    task2(),
-    task3()
-)
-```
-
-这是 `TaskManager.gather()` 的便捷包装器，使用全局 TaskManager 实例。
-
----
-
-## 设置 WatchDog
-
-### set_watchdog()
-
-设置 WatchDog 实例（内部使用）。
-
-```python
-tm.set_watchdog(watchdog: WatchDog) -> None
-```
-
-**说明**：
-- 在 TaskManager 和 WatchDog 之间建立关联
-- 通常由框架自动调用，不需要手动调用
-
----
-
 ## 错误处理
 
 ### TaskNotFoundError
@@ -539,7 +505,8 @@ async with tm.group(name="batch", timeout=30) as tg:
 ### 模式 4: 并行执行并处理结果
 
 ```python
-results = await gather(task1(), task2(), task3())
+tm = get_task_manager()
+results = await tm.gather(task1(), task2(), task3())
 for result in results:
     process_result(result)
 ```

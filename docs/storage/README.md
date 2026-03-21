@@ -4,25 +4,46 @@
 
 ## 核心特性
 
-### 1. 异步 I/O
+### 1. 单例模式
+
+- 全局 `json_store` 实例使用单例模式（Singleton Pattern）
+- 应用全生命周期内保证只有一个实例
+- 所有模块共享同一个 `json_store` 定义
+- 每个 `JSONStore` 实例都有独立的配置和锁机制
+
+### 2. 异步 I/O
 
 - 完全基于 asyncio 和 aiofiles
 - 不阻塞事件循环
 - 支持高并发读写
 
-### 2. 本地文件存储
+### 3. 本地文件存储
 
 - JSON 格式存储
 - 自动目录创建
 - 支持自定义存储路径
 
-### 3. 线程安全
+### 4. 线程安全
 
-- 内置 asyncio.Lock 机制
-- 并发读写互斥保护
-- 避免数据竞争
+- **写入操作** (`save`, `delete`，`load`) 受 `asyncio.Lock` 保护
+- **查询操作** (`exists`, `list_all`) 为无锁操作，可安全并发执行
+- 并发读写互斥保护，避免数据竞争
+- 适合高并发场景
 
-### 4. 安全性
+**实现细节**：
+
+```python
+# 写操作被锁保护
+async with self._lock:
+    await self._ensure_dir()
+    # 文件读写操作
+
+# 查询操作无锁
+def _get_file_path(self, name: str) -> Path:
+    # 只进行路径计算，无 I/O 操作
+```
+
+### 5. 安全性
 
 - 防止路径遍历攻击
 - 文件名白名单检查
@@ -32,7 +53,9 @@
 
 ## 快速开始
 
-### 基本用法
+### 全局实例（推荐用法）
+
+最简单的方式是使用全局 `json_store` 实例：
 
 ```python
 from src.kernel.storage import json_store
@@ -60,18 +83,34 @@ print(all_keys)  # ["user_profile", ...]
 await json_store.delete("user_profile")
 ```
 
+**存储位置**：全局实例默认使用 `data/json_storage/` 目录。
+
 ### 创建自定义实例
+
+如果需要隔离存储目录（例如插件有独立的数据存放位置），可以创建单独的 `JSONStore` 实例：
 
 ```python
 from src.kernel.storage import JSONStore
 
-# 创建自定义路径的存储实例
-store = JSONStore(storage_dir="my_data/storage")
+# 为特定功能创建单独的存储实例
+plugin_store = JSONStore(storage_dir="data/plugins/my_plugin")
+cache_store = JSONStore(storage_dir="data/cache")
+temp_store = JSONStore(storage_dir="data/temp")
 
-# 使用方式相同
-await store.save("config", {"theme": "dark"})
-config = await store.load("config")
+# 使用方式与全局实例相同
+await plugin_store.save("config", {"enabled": True})
+await cache_store.save("api_response", {"data": [...]})
+
+# 每个实例维护独立的存储目录和锁机制
+config = await plugin_store.load("config")
+response = await cache_store.load("api_response")
 ```
+
+**参数说明**：
+- `storage_dir`：存储目录路径（默认值：`"data/json_storage"`）
+  - 类型：`str | Path`
+  - 支持相对路径和绝对路径
+  - 目录不存在时自动创建
 
 ---
 
@@ -82,6 +121,8 @@ config = await store.load("config")
 保存数据到 JSON 文件。
 
 ```python
+from src.kernel.storage import json_store, JSONStore
+
 async def save(name: str, data: dict[str, Any]) -> None:
     """
     Args:
@@ -98,6 +139,8 @@ async def save(name: str, data: dict[str, Any]) -> None:
 **使用示例**：
 
 ```python
+from src.kernel.storage import json_store
+
 # 简单数据
 await json_store.save("app_config", {
     "theme": "dark",
@@ -130,6 +173,9 @@ data/json_storage/
 从 JSON 文件加载数据。
 
 ```python
+from src.kernel.storage import json_store
+from typing import Any
+
 async def load(name: str) -> dict[str, Any] | None:
     """
     Args:
@@ -148,6 +194,8 @@ async def load(name: str) -> dict[str, Any] | None:
 **使用示例**：
 
 ```python
+from src.kernel.storage import json_store
+
 # 加载存在的数据
 config = await json_store.load("app_config")
 if config:
@@ -163,6 +211,8 @@ print(missing)  # None
 检查数据是否存在。
 
 ```python
+from src.kernel.storage import json_store
+
 async def exists(name: str) -> bool:
     """
     Args:
@@ -180,6 +230,8 @@ async def exists(name: str) -> bool:
 **使用示例**：
 
 ```python
+from src.kernel.storage import json_store
+
 if await json_store.exists("user_profile"):
     user = await json_store.load("user_profile")
 else:
@@ -191,6 +243,8 @@ else:
 删除数据文件。
 
 ```python
+from src.kernel.storage import json_store
+
 async def delete(name: str) -> bool:
     """
     Args:
@@ -208,6 +262,8 @@ async def delete(name: str) -> bool:
 **使用示例**：
 
 ```python
+from src.kernel.storage import json_store
+
 if await json_store.delete("user_profile"):
     print("删除成功")
 else:
@@ -219,6 +275,8 @@ else:
 列出所有已存储的数据名称。
 
 ```python
+from src.kernel.storage import json_store
+
 async def list_all() -> list[str]:
     """
     Returns:
@@ -230,6 +288,8 @@ async def list_all() -> list[str]:
 **使用示例**：
 
 ```python
+from src.kernel.storage import json_store
+
 all_data = await json_store.list_all()
 for name in all_data:
     print(f"- {name}")
@@ -245,6 +305,9 @@ for name in all_data:
 获取存储目录的绝对路径。
 
 ```python
+from src.kernel.storage import json_store
+from pathlib import Path
+
 def get_storage_dir() -> Path:
     """
     Returns:
@@ -256,6 +319,8 @@ def get_storage_dir() -> Path:
 **使用示例**：
 
 ```python
+from src.kernel.storage import json_store
+
 storage_path = json_store.get_storage_dir()
 print(f"存储目录: {storage_path}")
 # 输出: 存储目录: C:\project\data\json_storage
@@ -268,6 +333,9 @@ print(f"存储目录: {storage_path}")
 ### 场景 1: 应用配置存储
 
 ```python
+from src.kernel.storage import json_store
+from datetime import datetime
+
 async def save_app_config(theme, language, auto_update):
     await json_store.save("app_config", {
         "theme": theme,
@@ -284,6 +352,9 @@ async def load_app_config():
 ### 场景 2: 缓存数据
 
 ```python
+from src.kernel.storage import json_store
+import time
+
 async def cache_api_response(endpoint, data):
     await json_store.save(f"cache_{endpoint}", {
         "data": data,
@@ -304,6 +375,8 @@ async def get_cached_data(endpoint, max_age=3600):
 ### 场景 3: 用户数据存储
 
 ```python
+from src.kernel.storage import json_store
+
 async def save_user(user_id, user_data):
     await json_store.save(f"user_{user_id}", user_data)
 
@@ -325,6 +398,8 @@ async def get_all_users():
 ### 场景 4: 插件持久化数据
 
 ```python
+from src.kernel.storage import json_store
+
 class MyPlugin:
     def __init__(self):
         self.storage_key = "plugin_my_plugin"
@@ -344,12 +419,16 @@ class MyPlugin:
 
 1. **总是使用 await**
    ```python
+   from src.kernel.storage import json_store
+   
    # 正确
    data = await json_store.load("config")
    ```
 
 2. **检查返回值**
    ```python
+   from src.kernel.storage import json_store
+   
    # 正确
    config = await json_store.load("config")
    if config:
@@ -358,6 +437,8 @@ class MyPlugin:
 
 3. **使用有意义的名称**
    ```python
+   from src.kernel.storage import json_store
+   
    # 好
    await json_store.save("user_profile", data)
    
@@ -367,6 +448,8 @@ class MyPlugin:
 
 4. **使用自定义实例进行隔离**
    ```python
+   from src.kernel.storage import JSONStore
+   
    # 不同模块使用不同存储目录
    plugin_store = JSONStore("data/plugins/my_plugin")
    cache_store = JSONStore("data/cache")
@@ -376,6 +459,8 @@ class MyPlugin:
 
 1. **不要使用非法字符在名称中**
    ```python
+   from src.kernel.storage import json_store
+   
    # 错误 - 包含路径分隔符
    await json_store.save("user/profile", data)
    
@@ -388,6 +473,8 @@ class MyPlugin:
 
 2. **不要忽视文件不存在情况**
    ```python
+   from src.kernel.storage import json_store
+   
    # 错误
    data = await json_store.load("config")
    print(data["key"])  # 可能抛异常
@@ -400,17 +487,22 @@ class MyPlugin:
 
 3. **不要存储过大的数据**
    ```python
+   from src.kernel.storage import json_store
+   from datetime import datetime
+   
    # 不适合 (应该用数据库)
    large_dataset = [generate_huge_list()]
    await json_store.save("big_data", large_dataset)
    
    # 适合
-   metadata = {"count": 1000, "last_updated": now()}
+   metadata = {"count": 1000, "last_updated": datetime.now().isoformat()}
    await json_store.save("metadata", metadata)
    ```
 
 4. **不要频繁写入同一文件**
    ```python
+   from src.kernel.storage import json_store
+   
    # 不好 (频繁磁盘 I/O)
    for item in items:
        item["status"] = "processed"
@@ -429,6 +521,8 @@ class MyPlugin:
 ### 1. 批量操作
 
 ```python
+from src.kernel.storage import json_store
+
 # 不好：多次保存
 for user in users:
     await json_store.save(f"user_{user['id']}", user)
@@ -441,6 +535,8 @@ await json_store.save("users", user_map)
 ### 2. 缓存策略
 
 ```python
+from src.kernel.storage import json_store
+
 # 使用内存缓存避免频繁磁盘 I/O
 class CachedStore:
     def __init__(self):
@@ -463,6 +559,9 @@ class CachedStore:
 ### 3. 异步并发
 
 ```python
+from src.kernel.storage import json_store
+import asyncio
+
 # 正确：并发读取
 results = await asyncio.gather(
     json_store.load("config"),
@@ -492,6 +591,12 @@ metadata = await json_store.load("metadata")
 
 **解决**：
 ```python
+from src.kernel.storage import json_store
+from src.kernel.logger import get_logger
+import json
+
+logger = get_logger("storage")
+
 try:
     data = await json_store.load("config")
 except json.JSONDecodeError:
@@ -506,6 +611,8 @@ except json.JSONDecodeError:
 **解决**：确保应用有目录的读写权限
 
 ```python
+from src.kernel.storage import json_store
+
 store_dir = json_store.get_storage_dir()
 print(f"存储路径: {store_dir}")
 ```
@@ -531,6 +638,8 @@ async def save_with_logging(name, data):
 ### 与 Config 模块
 
 ```python
+from src.kernel.storage import json_store
+
 # storage 可以作为 config 持久化的后端
 async def persist_config(config):
     await json_store.save("app_config", config.to_dict())

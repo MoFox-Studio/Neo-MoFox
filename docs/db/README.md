@@ -28,8 +28,8 @@
 ### 配置数据库
 
 ```python
-from src.kernel.db import configure_engine, get_db_session
-from sqlalchemy.orm import declarative_base
+from src.kernel.db import configure_engine, Base
+from sqlalchemy import Column, Integer, String
 
 # 步骤 1: 配置引擎
 configure_engine(
@@ -37,24 +37,23 @@ configure_engine(
     apply_optimizations=True
 )
 
-# 步骤 2: 创建模型基类
-Base = declarative_base()
-
+# 步骤 2: 创建模型
 class User(Base):
     __tablename__ = "users"
     
-    id: int
-    name: str
-    email: str
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    email = Column(String(100), unique=True, nullable=False)
 ```
 
 ### 基本 CRUD 操作
 
 ```python
-from src.kernel.db import CRUDBase, get_db_session
+from src.kernel.db import CRUDBase
 import asyncio
 
 class UserCRUD(CRUDBase[User]):
+    """用户 CRUD 操作"""
     pass
 
 async def main():
@@ -62,15 +61,19 @@ async def main():
     
     # 创建
     user = await crud.create(name="Alice", email="alice@example.com")
+    print(f"创建用户: {user.id}")
     
     # 读取
     retrieved = await crud.get(user.id)
+    print(f"查询用户: {retrieved.name}")
     
     # 更新
     updated = await crud.update(user.id, name="Alice Smith")
+    print(f"更新用户: {updated.name}")
     
     # 删除
-    await crud.delete(user.id)
+    deleted = await crud.delete(user.id)
+    print(f"删除已完成")
 
 asyncio.run(main())
 ```
@@ -79,14 +82,12 @@ asyncio.run(main())
 
 ```python
 from src.kernel.db import QueryBuilder
+import asyncio
 
 async def search_users():
-    qb = QueryBuilder(User)
-    
     # 构建查询
-    users = await qb\
+    users = await QueryBuilder(User)\
         .filter(name__like="%Alice%")\
-        .filter_or(email__like="%@example.com")\
         .order_by("name")\
         .limit(10)\
         .all()
@@ -101,13 +102,17 @@ asyncio.run(search_users())
 
 ```python
 from src.kernel.db import get_db_session
-from sqlalchemy import select
+from sqlalchemy import select, update
+import asyncio
 
 async def transfer_money():
     async with get_db_session() as session:
-        # 所有数据库操作
+        # 查询所有用户
         result = await session.execute(select(User))
         users = result.scalars().all()
+        
+        # 修改用户数据
+        await session.execute(update(User).values(name="Updated"))
         
         # 自动提交（正常退出）或回滚（异常）
         # 不需要手动调用 commit/rollback
@@ -147,6 +152,9 @@ configure_engine(
 **示例**：
 
 ```python
+from src.kernel.db import configure_engine
+from urllib.parse import quote_plus
+
 # SQLite 配置
 configure_engine(
     url="sqlite+aiosqlite:///db.sqlite",
@@ -164,7 +172,6 @@ configure_engine(
 )
 
 # 带密码转义
-from urllib.parse import quote_plus
 password = "p@ss%word"
 configure_engine(
     url=f"postgresql+asyncpg://user:{quote_plus(password)}@localhost/dbname"
@@ -187,11 +194,17 @@ engine = await get_engine() -> AsyncEngine
 **使用示例**：
 
 ```python
+from src.kernel.db import get_engine
+from sqlalchemy import text
+import asyncio
+
 async def get_db_info():
     engine = await get_engine()
     # 使用引擎进行低级操作
     async with engine.begin() as conn:
         result = await conn.execute(text("SELECT 1"))
+
+asyncio.run(get_db_info())
 ```
 
 #### close_engine()
@@ -210,7 +223,9 @@ await close_engine() -> None
 **使用示例**：
 
 ```python
+from src.kernel.db import close_engine
 import atexit
+import asyncio
 
 async def shutdown():
     await close_engine()
@@ -236,6 +251,8 @@ info = get_engine_info() -> dict
 **使用示例**：
 
 ```python
+from src.kernel.db import get_engine_info
+
 info = get_engine_info()
 print(f"数据库类型: {info['db_type']}")
 print(f"已创建: {info['created']}")
@@ -253,6 +270,18 @@ await reset_engine_state() -> None
 - 关闭现有引擎
 - 清理所有状态
 - 主要用于单元测试
+
+```python
+from src.kernel.db import reset_engine_state
+import asyncio
+
+async def test_setup():
+    # 测试前重置状态
+    await reset_engine_state()
+    # 重新配置和初始化
+
+asyncio.run(test_setup())
+```
 
 ### 会话管理
 
@@ -274,7 +303,9 @@ async with get_db_session() as session: AsyncSession
 **使用示例**：
 
 ```python
+from src.kernel.db import get_db_session
 from sqlalchemy import select
+import asyncio
 
 async def get_users():
     async with get_db_session() as session:
@@ -288,15 +319,19 @@ asyncio.run(get_users())
 **异常处理**：
 
 ```python
-from src.kernel.db import DatabaseTransactionError
+from src.kernel.db import get_db_session, DatabaseTransactionError
+import asyncio
 
 async def update_with_error_handling():
     try:
         async with get_db_session() as session:
+            from sqlalchemy import update
             # 如果此处异常，会自动回滚
             await session.execute(update(User).values(active=True))
     except Exception as e:
         print(f"事务失败: {e}")
+
+asyncio.run(update_with_error_handling())
 ```
 
 #### get_session_factory()
@@ -315,11 +350,19 @@ factory = await get_session_factory() -> async_sessionmaker
 **使用示例**：
 
 ```python
-factory = await get_session_factory()
+from src.kernel.db import get_session_factory
+from sqlalchemy import select
+import asyncio
 
-async with factory() as session:
-    # 直接使用工厂创建会话
-    result = await session.execute(select(User))
+async def use_factory():
+    factory = await get_session_factory()
+    
+    async with factory() as session:
+        # 直接使用工厂创建会话
+        result = await session.execute(select(User))
+        return result.scalars().all()
+
+asyncio.run(use_factory())
 ```
 
 #### reset_session_factory()
@@ -357,15 +400,20 @@ DatabaseError
 ```python
 from src.kernel.db import (
     DatabaseError,
-    DatabaseConnectionError
+    DatabaseConnectionError,
+    get_engine
 )
+import asyncio
 
-try:
-    engine = await get_engine()
-except DatabaseConnectionError as e:
-    print(f"无法连接数据库: {e}")
-except DatabaseError as e:
-    print(f"数据库错误: {e}")
+async def test_exception():
+    try:
+        engine = await get_engine()
+    except DatabaseConnectionError as e:
+        print(f"无法连接数据库: {e}")
+    except DatabaseError as e:
+        print(f"数据库错误: {e}")
+
+asyncio.run(test_exception())
 ```
 
 ---
@@ -405,15 +453,21 @@ record = await crud.create(**fields) -> T
 **使用示例**：
 
 ```python
-crud = CRUDBase(User)
+from src.kernel.db import CRUDBase
+import asyncio
 
-user = await crud.create(
-    name="Alice",
-    email="alice@example.com",
-    active=True
-)
+async def create_user():
+    crud = CRUDBase(User)
+    
+    user = await crud.create(
+        name="Alice",
+        email="alice@example.com",
+        active=True
+    )
+    
+    print(f"创建用户 ID: {user.id}")
 
-print(f"创建用户 ID: {user.id}")
+asyncio.run(create_user())
 ```
 
 ##### get()
@@ -435,11 +489,19 @@ record = await crud.get_by(**filters) -> T | None
 **使用示例**：
 
 ```python
-# 按 ID
-user = await crud.get(1)
+from src.kernel.db import CRUDBase
+import asyncio
 
-# 按其他字段
-user = await crud.get_by(email="alice@example.com")
+async def get_records():
+    crud = CRUDBase(User)
+    
+    # 按 ID
+    user = await crud.get(1)
+    
+    # 按其他字段
+    user = await crud.get_by(email="alice@example.com")
+
+asyncio.run(get_records())
 ```
 
 ##### get_all()
@@ -461,7 +523,14 @@ updated = await crud.update(id, **fields) -> T
 **使用示例**：
 
 ```python
-user = await crud.update(1, name="Alice Smith", active=False)
+from src.kernel.db import CRUDBase
+import asyncio
+
+async def update_user():
+    crud = CRUDBase(User)
+    user = await crud.update(1, name="Alice Smith", active=False)
+
+asyncio.run(update_user())
 ```
 
 ##### delete()
@@ -483,10 +552,16 @@ total = await crud.count() -> int
 **使用示例**：
 
 ```python
-crud = CRUDBase(User)
+from src.kernel.db import CRUDBase
+import asyncio
 
-total_users = await crud.count()
-print(f"总用户数: {total_users}")
+async def count_users():
+    crud = CRUDBase(User)
+    
+    total_users = await crud.count()
+    print(f"总用户数: {total_users}")
+
+asyncio.run(count_users())
 ```
 
 ### 查询构建器
@@ -532,24 +607,28 @@ qb = qb.filter(**conditions) -> QueryBuilder
 **使用示例**：
 
 ```python
-qb = QueryBuilder(User)
+from src.kernel.db import QueryBuilder
+import asyncio
 
-# 单条件过滤
-users = await qb.filter(active=True).all()
+async def query_users():
+    # 单条件过滤
+    users = await QueryBuilder(User).filter(active=True).all()
 
-# 多条件过滤（AND）
-users = await qb\
-    .filter(active=True)\
-    .filter(age__gte=18)\
-    .filter(country="China")\
-    .all()
+    # 多条件过滤（AND）
+    users = await QueryBuilder(User)\
+        .filter(active=True)\
+        .filter(age__gte=18)\
+        .filter(country="China")\
+        .all()
 
-# 复杂条件
-users = await qb\
-    .filter(name__like="%Alice%")\
-    .filter(age__gte=18)\
-    .filter(status__in=["active", "pending"])\
-    .all()
+    # 复杂条件
+    users = await QueryBuilder(User)\
+        .filter(name__like="%Alice%")\
+        .filter(age__gte=18)\
+        .filter(status__in=["active", "pending"])\
+        .all()
+
+asyncio.run(query_users())
 ```
 
 #### filter_or()
@@ -563,13 +642,16 @@ qb = qb.filter_or(**conditions) -> QueryBuilder
 **使用示例**：
 
 ```python
-# 查找名字是 Alice 或 Bob 的用户
-users = await QueryBuilder(User)\
-    .filter_or(name="Alice", name="Bob")\
-    .all()
+from src.kernel.db import QueryBuilder
+import asyncio
 
-# 注意：filter_or 只能用一次（SQL OR 的限制）
-# 对于复杂的 OR 条件，建议使用多个独立查询或自定义 SQL
+async def query_or():
+    # 查找名字是 Alice 或 Bob 的用户
+    users = await QueryBuilder(User)\
+        .filter_or(name="Alice", name="Bob")\
+        .all()
+
+asyncio.run(query_or())
 ```
 
 #### order_by()
@@ -587,13 +669,21 @@ qb = qb.order_by(*fields) -> QueryBuilder
 **使用示例**：
 
 ```python
-users = await QueryBuilder(User)\
-    .order_by("name")  # 名字升序
-    .all()
+from src.kernel.db import QueryBuilder
+import asyncio
 
-users = await QueryBuilder(User)\
-    .order_by("-age", "name")  # 年龄降序，名字升序
-    .all()
+async def query_order():
+    # 名字升序
+    users = await QueryBuilder(User)\
+        .order_by("name")\
+        .all()
+
+    # 年龄降序，名字升序
+    users = await QueryBuilder(User)\
+        .order_by("-age", "name")\
+        .all()
+
+asyncio.run(query_order())
 ```
 
 #### limit() 和 offset()
@@ -608,15 +698,21 @@ qb = qb.offset(skip) -> QueryBuilder
 **使用示例**：
 
 ```python
-# 第 1 页，每页 10 条
-page = 1
-per_page = 10
+from src.kernel.db import QueryBuilder
+import asyncio
 
-users = await QueryBuilder(User)\
-    .order_by("id")\
-    .offset((page - 1) * per_page)\
-    .limit(per_page)\
-    .all()
+async def query_pagination():
+    # 第 1 页，每页 10 条
+    page = 1
+    per_page = 10
+
+    users = await QueryBuilder(User)\
+        .order_by("id")\
+        .offset((page - 1) * per_page)\
+        .limit(per_page)\
+        .all()
+
+asyncio.run(query_pagination())
 ```
 
 #### all()
@@ -670,16 +766,20 @@ async for record in qb.stream():
 **使用示例**：
 
 ```python
-# 处理大量数据时推荐使用
-qb = QueryBuilder(User)
+from src.kernel.db import QueryBuilder
+import asyncio
 
-count = 0
-async for user in qb.stream():
-    # 逐条处理，而不是一次性加载到内存
-    process_user(user)
-    count += 1
+async def test_stream():
+    # 处理大量数据时推荐使用
+    count = 0
+    async for user in QueryBuilder(User).stream():
+        # 逐条处理，而不是一次性加载到内存
+        print(f"处理用户: {user.name}")
+        count += 1
 
-print(f"处理了 {count} 条记录")
+    print(f"处理了 {count} 条记录")
+
+asyncio.run(test_stream())
 ```
 
 ### 聚合查询
@@ -715,10 +815,15 @@ total = await aq.sum(field_name) -> Any
 **使用示例**：
 
 ```python
-aq = AggregateQuery(Order)
+from src.kernel.db import AggregateQuery
+import asyncio
 
-# 计算订单总金额
-total_amount = await aq.sum("amount")
+async def test_sum():
+    # 计算订单总金额
+    total_amount = await AggregateQuery(Order).sum("amount")
+    print(f"总金额: {total_amount}")
+
+asyncio.run(test_sum())
 ```
 
 ##### avg()
@@ -726,7 +831,15 @@ total_amount = await aq.sum("amount")
 平均值。
 
 ```python
-average = await aq.avg(field_name) -> Any
+from src.kernel.db import AggregateQuery
+import asyncio
+
+async def test_avg():
+    # 计算平均价格
+    average_price = await AggregateQuery(Product).avg("price")
+    print(f"平均价格: {average_price}")
+
+asyncio.run(test_avg())
 ```
 
 ##### min() 和 max()
@@ -734,8 +847,19 @@ average = await aq.avg(field_name) -> Any
 最小值和最大值。
 
 ```python
-minimum = await aq.min(field_name) -> Any
-maximum = await aq.max(field_name) -> Any
+from src.kernel.db import AggregateQuery
+import asyncio
+
+async def test_minmax():
+    aq = AggregateQuery(Product)
+    
+    minimum = await aq.min("price")
+    maximum = await aq.max("price")
+    
+    print(f"最低价格: {minimum}")
+    print(f"最高价格: {maximum}")
+
+asyncio.run(test_minmax())
 ```
 
 ##### group_by()
@@ -743,7 +867,17 @@ maximum = await aq.max(field_name) -> Any
 分组聚合。
 
 ```python
-groups = await aq.group_by(field_name) -> list[tuple]
+from src.kernel.db import AggregateQuery
+import asyncio
+
+async def test_groupby():
+    # 按分类分组统计
+    groups = await AggregateQuery(Product).group_by("category")
+    
+    for group_key, count in groups:
+        print(f"分类 {group_key}: {count} 个商品")
+
+asyncio.run(test_groupby())
 ```
 
 ---
@@ -753,17 +887,19 @@ groups = await aq.group_by(field_name) -> list[tuple]
 ### 模式 1: 基本操作
 
 ```python
-from src.kernel.db import CRUDBase, get_db_session
+from src.kernel.db import CRUDBase
+from sqlalchemy import Column, Integer, String, Float
+import asyncio
 
 class Product(Base):
     __tablename__ = "products"
-    id: int
-    name: str
-    price: float
-
-crud = CRUDBase(Product)
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    price = Column(Float, nullable=False)
 
 async def basic_crud():
+    crud = CRUDBase(Product)
+    
     # 创建
     p = await crud.create(name="Laptop", price=999.99)
     
@@ -775,12 +911,15 @@ async def basic_crud():
     
     # 删除
     await crud.delete(p.id)
+
+asyncio.run(basic_crud())
 ```
 
 ### 模式 2: 复杂查询
 
 ```python
 from src.kernel.db import QueryBuilder
+import asyncio
 
 async def search():
     users = await QueryBuilder(User)\
@@ -792,13 +931,16 @@ async def search():
         .all()
     
     return users
+
+asyncio.run(search())
 ```
 
 ### 模式 3: 事务
 
 ```python
 from src.kernel.db import get_db_session
-from sqlalchemy import select
+from sqlalchemy import select, update
+import asyncio
 
 async def transfer():
     async with get_db_session() as session:
@@ -811,11 +953,16 @@ async def transfer():
         account.balance -= 100
         
         # 自动提交
+
+asyncio.run(transfer())
 ```
 
 ### 模式 4: 批量操作
 
 ```python
+from src.kernel.db import CRUDBase
+import asyncio
+
 async def batch_import():
     crud = CRUDBase(User)
     
@@ -827,6 +974,8 @@ async def batch_import():
     
     for data in users_data:
         await crud.create(**data)
+
+asyncio.run(batch_import())
 ```
 
 ---
@@ -836,6 +985,9 @@ async def batch_import():
 ### 1. 始终使用会话上下文管理器
 
 ```python
+from src.kernel.db import get_db_session, get_session_factory
+from sqlalchemy import select
+
 # ✓ 好的做法
 async with get_db_session() as session:
     result = await session.execute(select(User))
@@ -849,6 +1001,8 @@ result = await session.execute(select(User))
 ### 2. 为不同的表创建专用 CRUD 类
 
 ```python
+from src.kernel.db import CRUDBase, QueryBuilder
+
 # ✓ 好的做法
 class UserCRUD(CRUDBase[User]):
     async def get_active_users(self):
@@ -866,6 +1020,8 @@ crud_product = CRUDBase(Product)
 ### 3. 使用流式查询处理大量数据
 
 ```python
+from src.kernel.db import QueryBuilder
+
 # ✓ 好的做法 - 流式处理
 async for user in QueryBuilder(User).stream():
     process_user(user)
@@ -879,14 +1035,19 @@ for user in users:
 ### 4. 异常处理
 
 ```python
-from src.kernel.db import DatabaseError, DatabaseConnectionError
+from src.kernel.db import DatabaseError, DatabaseConnectionError, CRUDBase
+import asyncio
 
-try:
-    await crud.create(...)
-except DatabaseError as e:
-    print(f"数据库错误: {e}")
-except Exception as e:
-    print(f"未知错误: {e}")
+async def test_exceptions():
+    try:
+        crud = CRUDBase(User)
+        await crud.create(name="Alice", email="alice@example.com")
+    except DatabaseError as e:
+        print(f"数据库错误: {e}")
+    except Exception as e:
+        print(f"未知错误: {e}")
+
+asyncio.run(test_exceptions())
 ```
 
 ---

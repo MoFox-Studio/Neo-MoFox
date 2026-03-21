@@ -124,12 +124,20 @@ async def get(self, id: int) -> T | None:
 **使用示例**：
 
 ```python
-user = await crud.get(1)
+from src.kernel.db import CRUDBase
+import asyncio
 
-if user:
-    print(f"用户名: {user.name}")
-else:
-    print("用户不存在")
+async def test_get():
+    crud = CRUDBase(User)
+    
+    user = await crud.get(1)
+    
+    if user:
+        print(f"用户名: {user.name}")
+    else:
+        print("用户不存在")
+
+asyncio.run(test_get())
 ```
 
 #### get_by()
@@ -157,11 +165,19 @@ async def get_by(self, **filters: Any) -> T | None:
 **使用示例**：
 
 ```python
-# 按邮箱查找用户
-user = await crud.get_by(email="alice@example.com")
+from src.kernel.db import CRUDBase
+import asyncio
 
-# 按多个条件查找
-user = await crud.get_by(email="alice@example.com", active=True)
+async def test_get_by():
+    crud = CRUDBase(User)
+    
+    # 按邮箱查找用户
+    user = await crud.get_by(email="alice@example.com")
+    
+    # 按多个条件查找
+    user = await crud.get_by(email="alice@example.com", active=True)
+
+asyncio.run(test_get_by())
 ```
 
 #### get_all()
@@ -229,9 +245,17 @@ async def delete(self, id: int) -> int:
 **使用示例**：
 
 ```python
-deleted = await crud.delete(1)
-if deleted > 0:
-    print("用户已删除")
+from src.kernel.db import CRUDBase
+import asyncio
+
+async def test_delete():
+    crud = CRUDBase(User)
+    
+    deleted = await crud.delete(1)
+    if deleted > 0:
+        print("用户已删除")
+
+asyncio.run(test_delete())
 ```
 
 #### count()
@@ -255,8 +279,19 @@ async def count(self, **filters: Any) -> int:
 **使用示例**：
 
 ```python
-total = await crud.count()
-active_count = await crud.count(active=True)
+from src.kernel.db import CRUDBase
+import asyncio
+
+async def test_count():
+    crud = CRUDBase(User)
+    
+    total = await crud.count()
+    active_count = await crud.count(active=True)
+    
+    print(f"总用户数: {total}")
+    print(f"活跃用户: {active_count}")
+
+asyncio.run(test_count())
 ```
 
 ---
@@ -268,13 +303,19 @@ active_count = await crud.count(active=True)
 QueryBuilder 提供 MongoDB 风格的查询 API，支持链式调用和延迟执行：
 
 ```python
-# 链式调用示例
-users = await QueryBuilder(User)\
-    .filter(active=True)\
-    .filter(age__gte=18)\
-    .order_by("-created_at")\
-    .limit(10)\
-    .all()
+from src.kernel.db import QueryBuilder
+import asyncio
+
+async def test_querybuilder():
+    # 链式调用示例
+    users = await QueryBuilder(User)\
+        .filter(active=True)\
+        .filter(age__gte=18)\
+        .order_by("-created_at")\
+        .limit(10)\
+        .all()
+
+asyncio.run(test_querybuilder())
 ```
 
 ### 内部实现

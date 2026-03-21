@@ -155,10 +155,16 @@ class DatabaseSection(SectionBase):
 
 ### 3. @config_section 装饰器
 
-指定配置节的名称和文档。
+指定配置节名称，并可附带 WebUI 展示元信息。
 
 ```python
-@config_section("section_name")
+@config_section(
+    "section_name",
+    title="显示标题",
+    description="节描述",
+    tag="general",
+    order=0,
+)
 class MySection(SectionBase):
     """节的文档"""
     field1: str = Field(...)
@@ -166,16 +172,29 @@ class MySection(SectionBase):
 
 **参数**：
 - `name`：节在 TOML 中的名称
+- `title`：WebUI 显示标题（可选）
+- `description`：WebUI 节描述（可选）
+- `tag`：节标签（可选，用于分组和图标映射）
+- `order`：显示顺序，越小越靠前（可选）
 
 ### 4. Field - 字段定义
 
-使用 Pydantic 的 Field 定义配置字段。
+使用 config 模块增强版 `Field` 定义配置字段。
+
+除 Pydantic 常规验证参数外，还支持 WebUI 元信息。
 
 ```python
 Field(
-    default=...,              # 默认值
-    default_factory=...,      # 默认值工厂函数
-    description="...",        # 字段文档
+    default=...,                 # 默认值
+    description="...",           # 字段文档
+    ge=0,                         # 数值下界（可选）
+    le=100,                       # 数值上界（可选）
+    label="显示名称",             # WebUI 标签（可选）
+    input_type="slider",         # 控件类型（可选）
+    placeholder="请输入...",      # 占位符（可选）
+    order=10,                     # 显示顺序（可选）
+    depends_on="feature_enabled", # 条件显示依赖字段（可选）
+    depends_value=True,           # 条件显示期望值（可选）
 )
 ```
 
@@ -193,38 +212,40 @@ Field(
 # 通用设置
 [general]
 # 调试模式
-# signature: type=bool, default=false
+# 值类型：bool, 默认值：false
 debug = false
 
 # 应用名称
-# signature: type=str, default="MyApp"
+# 值类型：str, 默认值："MyApp"
 app_name = "MyApp"
 
 # 最大工作线程数
-# signature: type=int, default=4
+# 值类型：int, 默认值：4
 max_workers = 4
 
 # 数据库配置
 [database]
 # 数据库主机
-# signature: type=str, default="localhost"
+# 值类型：str, 默认值："localhost"
 host = "localhost"
 
 # 数据库端口
-# signature: type=int, default=5432
+# 值类型：int, 默认值：5432
 port = 5432
 
 # 数据库用户名
-# signature: type=str, default="admin"
+# 值类型：str, 默认值："admin"
 username = "admin"
 ```
 
 ### TOML 节的含义
 
 - `[section_name]` - 定义一个配置节
+- `[[section_name]]` - 定义数组节（列表项配置）
+- `[parent.child]` - 定义嵌套子节
 - `key = value` - 配置选项
 - `# description` - 字段文档（来自 Field.description）
-- `# signature: ...` - 字段签名，包含类型和默认值
+- `# 值类型：..., 默认值：...` - 字段签名，包含类型和默认值
 
 ### TOML 数据类型
 
@@ -355,7 +376,7 @@ config = MyConfig.load(
 **返回**：配置实例
 
 **说明**：
-- 如果文件不存在会抛出 FileNotFoundError
+- 如果文件不存在，会自动创建空文件并继续加载
 - `auto_update=True` 时会比对配置文件和模型定义的"签名"
 - 若签名不一致，自动回写 TOML 文件，尽可能保留用户值
 
@@ -654,4 +675,4 @@ TOML 文件的原始解析数据
 
 - [类型定义详解](./types.md) - Config 模块的类型系统
 - [实现原理](./core.md) - 内部实现细节
-- [高级用法](./advanced.md) - 自定义验证、继承等高级特性
+- [示例代码](../../examples/src/kernel/config/config_example.py) - 最小可运行示例
