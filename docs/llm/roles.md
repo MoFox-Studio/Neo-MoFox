@@ -1,4 +1,4 @@
-# Roles 模块
+﻿# Roles 模块
 
 ## 概述
 
@@ -28,7 +28,7 @@ class ROLE(str, Enum):
 
 **使用示例：**
 ```python
-from kernel.llm import ROLE, LLMPayload, Text
+from src.kernel.llm import ROLE, LLMPayload, Text
 
 system_payload = LLMPayload(
     role=ROLE.SYSTEM,
@@ -68,7 +68,7 @@ LLMPayload(ROLE.SYSTEM, Text("Do not provide information about illegal activitie
 
 **使用示例：**
 ```python
-from kernel.llm import ROLE, LLMPayload, Text, Image
+from src.kernel.llm import ROLE, LLMPayload, Text, Image
 
 # 纯文本
 user_text = LLMPayload(ROLE.USER, Text("What is machine learning?"))
@@ -149,7 +149,7 @@ print(response2.message)
 
 **使用示例：**
 ```python
-from kernel.llm import ROLE, LLMPayload, Tool, ToolRegistry
+from src.kernel.llm import ROLE, LLMPayload, Tool, ToolRegistry
 
 # 定义工具
 class CalculatorTool:
@@ -197,7 +197,7 @@ request.add_payload(LLMPayload(ROLE.TOOL, tools))
 
 **使用示例：**
 ```python
-from kernel.llm import ROLE, LLMPayload, ToolResult
+from src.kernel.llm import ROLE, LLMPayload, ToolResult
 
 # AI 请求调用工具
 response = await request.send()
@@ -423,3 +423,4 @@ final = await request.send()
 - [Request 模块](./request.md) - 如何使用角色构建请求
 - [Response 模块](./response.md) - 如何处理响应
 - [Payload 模块](./payload/README.md) - payload 结构详解
+

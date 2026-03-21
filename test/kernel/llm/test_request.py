@@ -396,6 +396,33 @@ class TestExtractTools:
 
         assert len(tools) == 0
 
+    def test_extract_tools_supports_class_and_instance(self) -> None:
+        """Test that TOOL payload can contain both usable classes and instances."""
+
+        class ClassTool:
+            @classmethod
+            def to_schema(cls) -> dict:
+                return {"name": "class_tool"}
+
+        class InstanceTool:
+            def to_schema(self) -> dict:
+                return {"name": "instance_tool"}
+
+        class InvalidTool:
+            pass
+
+        from src.kernel.llm.request import _extract_tools
+
+        payloads = [
+            LLMPayload(ROLE.TOOL, [ClassTool, InstanceTool(), InvalidTool]),
+        ]
+
+        tools = _extract_tools(payloads)
+
+        assert len(tools) == 2
+        assert tools[0] is ClassTool
+        assert isinstance(tools[1], InstanceTool)
+
 
 class TestLLMRequestSend:
     """Test cases for LLMRequest.send method."""

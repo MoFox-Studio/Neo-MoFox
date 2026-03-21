@@ -1,4 +1,4 @@
-# Content 模块
+﻿# Content 模块
 
 ## 概述
 
@@ -33,7 +33,7 @@ class Text(Content):
 
 **使用示例：**
 ```python
-from kernel.llm import LLMPayload, Text, ROLE
+from src.kernel.llm import LLMPayload, Text, ROLE
 
 # 简单文本
 payload1 = LLMPayload(ROLE.USER, Text("Hello!"))
@@ -453,3 +453,4 @@ A: 当前实现不直接支持网络 URL。建议下载后使用本地路径或 
 - [Payload 模块](./payload.md) - 消息结构
 - [Tooling 模块](./tooling.md) - 工具系统
 - [Request 模块](../request.md) - 请求发送
+

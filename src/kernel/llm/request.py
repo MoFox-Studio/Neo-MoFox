@@ -63,6 +63,13 @@ def _extract_tools(payloads: list[LLMPayload]) -> list[LLMUsable]:
         if payload.role != ROLE.TOOL:
             continue
         for part in payload.content:
+            # TOOL payload 允许传入工具类（type）或工具实例。
+            # 这里显式兼容两种形式，避免仅依赖 Protocol 的 isinstance 细节。
+            if isinstance(part, type):
+                if issubclass(part, LLMUsable):
+                    tools.append(part)
+                continue
+
             if isinstance(part, LLMUsable):
                 tools.append(part)
     return tools

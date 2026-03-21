@@ -59,6 +59,12 @@ class StreamLoopManager:
         # 流启动锁：防止并发启动同一个流的多个任务
         self._stream_start_locks: dict[str, asyncio.Lock] = {}
 
+        # WatchDog 重启防抖状态
+        # - _restart_inflight: 当前正在执行重启的流
+        # - _restart_next_allowed_at: 下一次允许触发重启的单调时间戳
+        self._restart_inflight: set[str] = set()
+        self._restart_next_allowed_at: dict[str, float] = {}
+
         # 对话执行生成器：stream_id -> generator
         self._chatter_genes: dict[str, AsyncGenerator[Any, None]] = {}
 
@@ -171,6 +177,7 @@ class StreamLoopManager:
                 tick_interval = get_core_config().bot.tick_interval
                 warning_threshold = get_core_config().bot.stream_warning_threshold
                 restart_threshold = get_core_config().bot.stream_restart_threshold
+                restart_cooldown = max(tick_interval, tick_interval * restart_threshold)
 
                 loop_task = get_task_manager().create_task(
                     run_chat_stream(stream_id, self),
@@ -185,7 +192,10 @@ class StreamLoopManager:
                     """在线程环境中安全调度流重启。"""
                     try:
                         future = asyncio.run_coroutine_threadsafe(
-                            self.restart_stream_loop(stream_id),
+                            self._restart_stream_loop_from_watchdog(
+                                stream_id=stream_id,
+                                cooldown=restart_cooldown,
+                            ),
                             event_loop,
                         )
 
@@ -261,6 +271,42 @@ class StreamLoopManager:
             bool: 是否成功重启
         """
         return await self.start_stream_loop(stream_id, force=True)
+
+    async def _restart_stream_loop_from_watchdog(self, stream_id: str, cooldown: float) -> bool:
+        """处理 WatchDog 触发的重启请求（带节流与并发保护）。
+
+        Args:
+            stream_id: 流 ID
+            cooldown: 重启冷却时间（秒）
+
+        Returns:
+            bool: 是否实际执行了重启
+        """
+        now = time.monotonic()
+        next_allowed_at = self._restart_next_allowed_at.get(stream_id, 0.0)
+
+        if now < next_allowed_at:
+            logger.debug(
+                f"[管理器] stream={stream_id[:8]}, WatchDog 重启被冷却窗口抑制"
+            )
+            return False
+
+        if stream_id in self._restart_inflight:
+            logger.debug(
+                f"[管理器] stream={stream_id[:8]}, WatchDog 重启请求已在执行中"
+            )
+            return False
+
+        self._restart_inflight.add(stream_id)
+        self._restart_next_allowed_at[stream_id] = now + cooldown
+
+        try:
+            logger.warning(
+                f"[管理器] stream={stream_id[:8]}, 执行 WatchDog 触发的流重启"
+            )
+            return await self.restart_stream_loop(stream_id)
+        finally:
+            self._restart_inflight.discard(stream_id)
     
     # ========================================================================
     # 内部方法 — 上下文管理

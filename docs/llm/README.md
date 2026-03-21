@@ -1,4 +1,4 @@
-# LLM 模块文档（V1.1.0）
+﻿# LLM 模块文档（V1.1.0）
 
 ## 概述
 
@@ -43,8 +43,8 @@ kernel/llm/
 ### 基础请求示例
 
 ```python
-from kernel.llm import LLMRequest, LLMResponse, LLMPayload, Text
-from kernel.llm import ROLE
+from src.kernel.llm import LLMRequest, LLMResponse, LLMPayload, Text
+from src.kernel.llm import ROLE
 
 # 准备模型配置
 model_set = [
@@ -98,7 +98,7 @@ async for chunk in response:
 ### 3. 工具调用（Tool Calling）
 
 ```python
-from kernel.llm import Tool, ToolCall, ToolResult
+from src.kernel.llm import Tool, ToolCall, ToolResult
 
 # 定义工具
 class MyTool:
@@ -127,7 +127,7 @@ for tool_call in response.call_list:
 通过 `policy` 自动管理多个模型的轮询和重试：
 
 ```python
-from kernel.llm.policy import RoundRobinPolicy
+from src.kernel.llm.policy import RoundRobinPolicy
 
 policy = RoundRobinPolicy()
 request.policy = policy
@@ -142,7 +142,7 @@ request.policy = policy
 自动追踪每次请求的性能指标：
 
 ```python
-from kernel.llm import get_global_collector
+from src.kernel.llm import get_global_collector
 
 collector = get_global_collector()
 stats = collector.get_stats("gpt-4")
@@ -183,3 +183,4 @@ A: 可以通过 `enable_metrics=False` 关闭指标收集以提高性能。
 
 - [MoFox 重构指导总览](../README.md)
 - [系统架构设计](../ARCHITECTURE.md)
+

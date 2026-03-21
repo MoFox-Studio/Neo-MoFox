@@ -6,6 +6,10 @@ from src.core.components import BasePlugin, register_plugin
 from src.kernel.logger import get_logger
 
 from .agent import BookuMemoryReadAgent, BookuMemoryWriteAgent
+from .lite_tool import (
+    BookuMemoryReadTool,
+    BookuMemoryWriteTool
+)
 from .agent.tools import (
     BookuMemoryCreateTool,
     BookuMemoryEditInherentTool,
@@ -42,12 +46,11 @@ class BookuMemoryAgentPlugin(BasePlugin):
         ]
 
     @staticmethod
-    def _tool_mode_components() -> list[type]:
-        """返回直接工具模式下暴露的组件。"""
+    def _lite_mode_components() -> list[type]:
+        """返回直接轻量化模式下暴露的组件。"""
         return [
-            BookuMemoryRetrieveTool,
-            BookuMemoryCreateTool,
-            BookuMemoryEditInherentTool,
+            BookuMemoryWriteTool,
+            BookuMemoryReadTool,
             BookuMemoryService,
             BookuKnowledgeService,
             MemoryFlashbackInjector,
@@ -75,10 +78,10 @@ class BookuMemoryAgentPlugin(BasePlugin):
                 logger.info("booku_memory_agent 已在配置中禁用")
                 return []
 
-            if self.config.plugin.enable_agent_proxy_mode:
-                return self._agent_mode_components()
+            if self.config.plugin.enable_lite_mode:
+                return self._lite_mode_components()
 
-            return self._tool_mode_components()
+            return self._agent_mode_components()
 
         # 配置对象不可用时保持历史行为：默认启用 agent 代理模式。
         return self._agent_mode_components()

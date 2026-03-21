@@ -1,4 +1,4 @@
-# Policy 模块
+﻿# Policy 模块
 
 ## 概述
 
@@ -84,7 +84,7 @@ class RoundRobinPolicy(Policy):
 ### 使用示例
 
 ```python
-from kernel.llm import LLMRequest, RoundRobinPolicy
+from src.kernel.llm import LLMRequest, RoundRobinPolicy
 
 models = [
     {
@@ -247,7 +247,7 @@ request = LLMRequest(model_set=models)
 ### 实现自定义策略
 
 ```python
-from kernel.llm.policy import Policy, PolicySession, ModelStep
+from src.kernel.llm.policy import Policy, PolicySession, ModelStep
 
 class CustomPolicy(Policy):
     """自定义策略：根据模型性能选择。"""
@@ -316,7 +316,7 @@ class ErrorAwarePolicySession(PolicySession):
         return ModelStep(model=self.model_set[self.current_idx])
     
     def next_after_error(self, error: BaseException) -> ModelStep:
-        from kernel.llm import (
+        from src.kernel.llm import (
             LLMRateLimitError,
             LLMTimeoutError,
             LLMAuthenticationError
@@ -419,7 +419,7 @@ models = [
 ### 3. 监控重试
 
 ```python
-from kernel.llm import get_global_collector
+from src.kernel.llm import get_global_collector
 
 collector = get_global_collector()
 stats = collector.get_stats("gpt-4")
@@ -433,3 +433,4 @@ print(f"重试次数: {stats.extra.get('retry_count', 0)}")
 - [Request 模块](../request.md)
 - [Response 模块](../response.md)
 - [Exceptions 模块](../exceptions.md)
+

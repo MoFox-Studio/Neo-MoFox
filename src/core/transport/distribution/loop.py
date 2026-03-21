@@ -93,12 +93,16 @@ async def run_chat_stream(
         stream_id: 流 ID
         manager: StreamLoopManager 实例
     """
-    task_id = id(asyncio.current_task())
+    current_task = asyncio.current_task()
+    task_id = id(current_task)
     logger.debug(f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, 启动")
 
     try:
         from src.core.managers import get_chatter_manager
+        from src.core.managers import get_event_manager
+        from src.core.components.types import EventType
         chatter_manager = get_chatter_manager()
+        event_manager = get_event_manager()
 
         # 1. 创建生成器
         tick_generator = conversation_loop(
@@ -170,6 +174,23 @@ async def run_chat_stream(
                 try:
                     # 并发保护：标记正在处理
                     context.is_chatter_processing = True
+
+                    step_event_result = await event_manager.publish_event(
+                        EventType.ON_CHATTER_STEP,
+                        {
+                            "stream_id": stream_id,
+                            "context": context,
+                            "tick": tick,
+                            "chatter_gene": chatter_gene,
+                            "continue": True,
+                        },
+                    )
+                    step_event_params = step_event_result.get("params", {})
+                    if step_event_params.get("continue") is False:
+                        logger.debug(
+                            f"[驱动器] stream={stream_id[:8]}, on_chatter_step continue=False，跳过本 Tick"
+                        )
+                        continue
                     
                     # 执行一步迭代
                     result = await anext(chatter_gene)
@@ -225,16 +246,19 @@ async def run_chat_stream(
         # 清理活跃生成器（生成器是任务相关的，不跨任务持久化）
         manager._chatter_genes.pop(stream_id, None)
 
-        # 注销 WatchDog 心跳，避免已结束流继续触发慢响应告警
-        try:
-            get_watchdog().unregister_stream(stream_id=stream_id)
-        except Exception:
-            pass
-        
-        # 注意：此处不再主动清理 _wait_states，因为它代表流的持久状态，应由其自身逻辑或管理器管理
+        # 仅当当前任务仍是 stream_loop_task 持有者时，才执行最终清理。
+        # 这可避免“旧任务退出时”把新重启任务的 WatchDog 注册与 task 引用误清空。
         try:
             context = await manager._get_stream_context(stream_id)
-            if context and context.stream_loop_task:
+            if (
+                context is not None
+                and context.stream_loop_task is not None
+                and context.stream_loop_task is current_task
+            ):
+                try:
+                    get_watchdog().unregister_stream(stream_id=stream_id)
+                except Exception:
+                    pass
                 context.stream_loop_task = None
-        except:
+        except Exception:
             pass

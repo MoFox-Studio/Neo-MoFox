@@ -328,6 +328,37 @@ async def test_execute_agent_calls_execute(monkeypatch: pytest.MonkeyPatch) -> N
     assert executed_kwargs["task"] == "test_task"
 
 
+@pytest.mark.asyncio
+async def test_execute_agent_keeps_declared_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """execute_agent 在 Agent 显式声明 reason 时应保留参数。"""
+    mock_plugin = MagicMock()
+
+    class ReasonAgent(BaseAgent):
+        agent_name = "reason_agent"
+
+        async def execute(self, task: str, reason: str) -> tuple[bool, str]:
+            return True, f"{task}:{reason}"
+
+    class _FakeRegistry:
+        def get(self, signature: str):
+            return ReasonAgent
+
+    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+
+    success, result = await agent_api.execute_agent(
+        "demo:agent:reason",
+        mock_plugin,
+        "stream_123",
+        task="plan",
+        reason="because",
+    )
+
+    assert success is True
+    assert result == "plan:because"
+
+
 def test_get_agent_usables_requires_signature() -> None:
     """signature 为空时应抛出 ValueError。"""
     with pytest.raises(ValueError, match="signature 不能为空"):

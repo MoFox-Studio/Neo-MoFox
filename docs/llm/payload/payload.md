@@ -1,4 +1,4 @@
-# Payload 模块
+﻿# Payload 模块
 
 ## 概述
 
@@ -22,7 +22,7 @@ class LLMPayload:
 ### 单个内容
 
 ```python
-from kernel.llm import LLMPayload, Text, ROLE
+from src.kernel.llm import LLMPayload, Text, ROLE
 
 # 文本内容
 payload1 = LLMPayload(ROLE.USER, Text("Hello"))
@@ -75,7 +75,7 @@ payload.content.append(Text("Extra"))
 ### 3. 角色验证
 
 ```python
-from kernel.llm import ROLE
+from src.kernel.llm import ROLE
 
 # 必须使用有效的 ROLE 枚举值
 payload1 = LLMPayload(ROLE.USER, Text("Hello"))       # ✓
@@ -95,7 +95,7 @@ payload_bad = LLMPayload("user", Text("Bad"))  # ✗ 类型错误
 ### 场景 1：构建多轮对话
 
 ```python
-from kernel.llm import LLMPayload, LLMRequest, Text, ROLE
+from src.kernel.llm import LLMPayload, LLMRequest, Text, ROLE
 
 request = LLMRequest(model_set=models)
 
@@ -422,3 +422,4 @@ new_payload = copy.deepcopy(old_payload)
 - [Tooling 模块](./tooling.md) - 工具系统
 - [Request 模块](../request.md) - 请求发送
 - [Roles 模块](../roles.md) - 角色定义
+

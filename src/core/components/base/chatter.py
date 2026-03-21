@@ -15,6 +15,7 @@ from src.core.components.types import ChatType
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
+from src.core.components.utils import should_strip_auto_reason_argument
 from src.core.managers import (
     get_tool_use,
     get_action_manager,
@@ -425,8 +426,9 @@ class BaseChatter(ABC):
             return await manager.execute_action(sig, owner_plugin, message, **kwargs)
         elif issubclass(usable_cls, BaseAgent):
             owner_plugin = self._resolve_component_plugin(sig)
-            kwargs.pop("reason", None)
             agent_instance = usable_cls(stream_id=self.stream_id, plugin=owner_plugin)
+            if should_strip_auto_reason_argument(agent_instance.execute, kwargs):
+                kwargs.pop("reason", None)
             return await agent_instance.execute(**kwargs)
         else:
             raise ValueError("未知的 LLMUsable 组件类型，无法执行")

@@ -1,4 +1,4 @@
-# Tooling 模块
+﻿# Tooling 模块
 
 ## 概述
 
@@ -61,7 +61,7 @@ class ToolCall:
 
 **使用示例：**
 ```python
-from kernel.llm import ToolCall
+from src.kernel.llm import ToolCall
 
 # 来自 LLM 的工具调用
 call = ToolCall(
@@ -93,7 +93,7 @@ class Tool:
 
 **使用示例：**
 ```python
-from kernel.llm import Tool, LLMPayload, ROLE
+from src.kernel.llm import Tool, LLMPayload, ROLE
 
 # 创建工具声明
 search_tool = Tool(SearchTool)
@@ -137,7 +137,7 @@ class ToolResult:
 
 **使用示例：**
 ```python
-from kernel.llm import ToolResult
+from src.kernel.llm import ToolResult
 
 # 简单结果
 result1 = ToolResult(
@@ -210,7 +210,7 @@ def register(self, tool: type[LLMUsable], name: str | None = None) -> None:
 
 **使用示例：**
 ```python
-from kernel.llm import ToolRegistry
+from src.kernel.llm import ToolRegistry
 
 registry = ToolRegistry()
 
@@ -320,7 +320,7 @@ async def execute(
 
 **使用示例：**
 ```python
-from kernel.llm import ToolExecutor, ToolCall
+from src.kernel.llm import ToolExecutor, ToolCall
 
 async def search_impl(name: str, args: dict):
     """搜索实现"""
@@ -347,8 +347,8 @@ print(result.value)
 ### 步骤 1：定义工具
 
 ```python
-from kernel.llm import LLMPayload, Tool, ROLE, LLMRequest, LLMResponse, ToolCall, ToolResult
-from kernel.llm import Text
+from src.kernel.llm import LLMPayload, Tool, ROLE, LLMRequest, LLMResponse, ToolCall, ToolResult
+from src.kernel.llm import Text
 
 class CalculatorTool:
     @classmethod
@@ -684,3 +684,4 @@ A: 可以，但需要谨慎处理。推荐使用嵌套的 `ToolRegistry`。
 - [Content 模块](./content.md) - 内容类型
 - [Request 模块](../request.md) - 请求发送
 - [Response 模块](../response.md) - 响应处理
+

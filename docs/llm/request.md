@@ -1,4 +1,4 @@
-# Request 模块
+﻿# Request 模块
 
 ## 概述
 
@@ -393,7 +393,7 @@ print()
 ### 异常类型
 
 ```python
-from kernel.llm import (
+from src.kernel.llm import (
     LLMError,
     LLMConfigurationError,
     LLMRateLimitError,
@@ -435,7 +435,7 @@ request = LLMRequest(model_set=models, enable_metrics=False)
 ### 访问指标
 
 ```python
-from kernel.llm import get_global_collector
+from src.kernel.llm import get_global_collector
 
 collector = get_global_collector()
 
@@ -463,7 +463,7 @@ results = await asyncio.gather(r1, r2)
 
 A: 创建自定义 `Policy`：
 ```python
-from kernel.llm.policy import Policy
+from src.kernel.llm.policy import Policy
 
 class MyPolicy(Policy):
     def new_session(self, *, model_set, request_name):
@@ -518,3 +518,4 @@ for query in queries:
 - [Payload 模块](./payload/README.md) - 消息负载
 - [Policy 模块](./policy/README.md) - 负载均衡策略
 - [Monitor 模块](./monitor.md) - 指标收集
+

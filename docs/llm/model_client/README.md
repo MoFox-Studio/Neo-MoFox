@@ -1,4 +1,4 @@
-# Model Client 模块
+﻿# Model Client 模块
 
 ## 概述
 
@@ -158,7 +158,7 @@ def _get_client(self, *, api_key: str, base_url: str | None, timeout: float | No
 ### 使用示例
 
 ```python
-from kernel.llm import LLMRequest, LLMPayload, Text, ROLE
+from src.kernel.llm import LLMRequest, LLMPayload, Text, ROLE
 
 models = [{
     "client_type": "openai",
@@ -229,7 +229,7 @@ model_config2 = {
 ### 注册自定义客户端
 
 ```python
-from kernel.llm.model_client import ChatModelClient, ModelClientRegistry
+from src.kernel.llm.model_client import ChatModelClient, ModelClientRegistry
 
 class MyCustomClient:
     async def create(self, *, model_name, payloads, tools, request_name, model_set, stream):
@@ -251,8 +251,8 @@ client = registry.get_client_for_model(model_config)
 ### 步骤 1：实现客户端
 
 ```python
-from kernel.llm.model_client import ChatModelClient, StreamEvent
-from kernel.llm import LLMPayload, Tool
+from src.kernel.llm.model_client import ChatModelClient, StreamEvent
+from src.kernel.llm import LLMPayload, Tool
 from typing import AsyncIterator
 
 class GeminiClient:
@@ -293,7 +293,7 @@ class GeminiClient:
 ### 步骤 2：注册客户端
 
 ```python
-from kernel.llm.model_client import ModelClientRegistry
+from src.kernel.llm.model_client import ModelClientRegistry
 
 registry = ModelClientRegistry()
 registry.gemini = GeminiClient()
@@ -368,3 +368,4 @@ request = LLMRequest(model_set=models)  # 会轮流尝试
 - [Request 模块](../request.md)
 - [Response 模块](../response.md)
 - [Policy 模块](../policy/README.md)
+

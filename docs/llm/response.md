@@ -1,4 +1,4 @@
-# Response 模块
+﻿# Response 模块
 
 ## 概述
 
@@ -342,7 +342,7 @@ print(f"最终答案: {final_message}")
 ### 模式 5：错误处理和重试
 
 ```python
-from kernel.llm import LLMError, LLMRateLimitError, LLMTimeoutError
+from src.kernel.llm import LLMError, LLMRateLimitError, LLMTimeoutError
 
 request = LLMRequest(model_set=models)
 request.add_payload(LLMPayload(ROLE.USER, Text("Query")))
@@ -504,3 +504,4 @@ async for chunk in response:
 - [Payload 模块](./payload/README.md) - 消息负载
 - [Exceptions 模块](./exceptions.md) - 异常处理
 - [Monitor 模块](./monitor.md) - 指标收集
+

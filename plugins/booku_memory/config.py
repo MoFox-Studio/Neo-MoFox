@@ -37,15 +37,15 @@ class BookuMemoryConfig(BaseConfig):
             tag="plugin",
             order=0
         )
-        enable_agent_proxy_mode: bool = Field(
-            default=True,
+        enable_lite_mode: bool = Field(
+            default=False,
             description=(
-                "是否启用 agent 代理模式。启用时对外暴露读取/写入两个 Agent；"
-                "关闭时仅对外暴露 3 个 Tool：memory_retrieve（检索）、memory_create（写入）、memory_edit_inherent（编辑固有记忆）。"
+                "是否启用轻量化模式。启用时对外暴露读取/写入两个 Tool, 最小化 LLM 调用, 平均召回时间在3s内；"
+                "关闭时采用 Agent 模式，对外暴露读取/写入两个 Agent, 执行完整记忆读写工作流。"
             ),
-            label="Agent 代理模式",
+            label="轻量化模式",
             tag="ai",
-            hint="开启后使用 Agent，关闭后使用 Tool",
+            hint="开启后使用 Tool，关闭后使用 Agent",
             order=1
         )
         inject_system_prompt: bool = Field(

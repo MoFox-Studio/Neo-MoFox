@@ -1,4 +1,4 @@
-# Payload 模块
+﻿# Payload 模块
 
 ## 概述
 
@@ -20,7 +20,7 @@ payload/
 ## 快速开始
 
 ```python
-from kernel.llm import LLMPayload, Text, Image, ROLE, Tool, ToolCall, ToolResult
+from src.kernel.llm import LLMPayload, Text, Image, ROLE, Tool, ToolCall, ToolResult
 
 # 创建文本 payload
 text_payload = LLMPayload(ROLE.USER, Text("Hello!"))
@@ -53,3 +53,4 @@ result_payload = LLMPayload(ROLE.TOOL_RESULT, ToolResult(value="result", call_id
 - [Roles 模块](../roles.md)
 - [Request 模块](../request.md)
 - [Response 模块](../response.md)
+

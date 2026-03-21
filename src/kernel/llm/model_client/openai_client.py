@@ -145,7 +145,9 @@ def _to_openai_tool(tool: Any) -> dict[str, Any]:
     if isinstance(params, dict):
         _normalize_schema_for_grammar(params)
     props = params.get("properties", {})
-    if "reason" not in props:
+    schema_has_reason = isinstance(props, dict) and "reason" in props
+    execute_has_reason = _callable_accepts_reason(getattr(tool, "execute", None))
+    if not schema_has_reason and not execute_has_reason:
         props["reason"] = {
             "type": "string",
             "description": "说明你选择此动作/工具的原因",
@@ -159,6 +161,32 @@ def _to_openai_tool(tool: Any) -> dict[str, Any]:
         result["function"] = func
 
     return result
+
+
+def _callable_accepts_reason(callable_obj: Any) -> bool:
+    """判断可调用对象是否显式接收 ``reason`` 参数。
+
+    Args:
+        callable_obj: 待检查的可调用对象（通常是组件 ``execute``）。
+
+    Returns:
+        bool: 若显式声明 ``reason`` 或存在 ``**kwargs`` 则返回 True。
+    """
+    if not callable(callable_obj):
+        return False
+
+    try:
+        sig = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return False
+
+    if "reason" in sig.parameters:
+        return True
+
+    return any(
+        p.kind == inspect.Parameter.VAR_KEYWORD
+        for p in sig.parameters.values()
+    )
 
 
 def _normalize_schema_for_grammar(schema: Any) -> None:
@@ -667,6 +695,8 @@ class OpenAIChatClient:
                 # 默认策略：统一使用 required。
                 # 如果无法支持请在 model_set.extra_params 显式传入 tool_choice="auto"。
                 params["tool_choice"] = "required"
+        else:
+            params.pop("tool_choice", None)
 
         # 新增：区分标准参数与非标准参数（统一走 extra_body，避免 openai SDK 因未知参数报错）
         standard_params = {

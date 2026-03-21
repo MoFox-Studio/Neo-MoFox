@@ -1,4 +1,4 @@
-# Monitor 模块
+﻿# Monitor 模块
 
 ## 概述
 
@@ -31,7 +31,7 @@ class RequestMetrics:
 
 **使用示例：**
 ```python
-from kernel.llm import RequestMetrics
+from src.kernel.llm import RequestMetrics
 from datetime import datetime
 
 metrics = RequestMetrics(
@@ -221,7 +221,7 @@ class RequestTimer:
 
 **使用示例：**
 ```python
-from kernel.llm import RequestTimer
+from src.kernel.llm import RequestTimer
 
 timer = RequestTimer()
 with timer:
@@ -244,7 +244,7 @@ def get_global_collector() -> MetricsCollector:
 
 **使用示例：**
 ```python
-from kernel.llm import get_global_collector
+from src.kernel.llm import get_global_collector
 
 collector = get_global_collector()
 stats = collector.get_stats("gpt-4")
@@ -273,7 +273,7 @@ print(f"成功率: {stats.success_rate:.2%}")
 ### 模式 2：性能分析
 
 ```python
-from kernel.llm import get_global_collector
+from src.kernel.llm import get_global_collector
 
 # 进行多次请求
 for i in range(100):
@@ -348,7 +348,7 @@ for error_type, count in stats.error_types.items():
 ### 模式 5：手动记录指标
 
 ```python
-from kernel.llm import RequestMetrics, get_global_collector
+from src.kernel.llm import RequestMetrics, get_global_collector
 import time
 
 # 手动测量和记录
@@ -402,7 +402,7 @@ print(json.dumps(data, indent=2, default=str))
 
 ```python
 import asyncio
-from kernel.llm import get_global_collector
+from src.kernel.llm import get_global_collector
 
 async def generate_report():
     """每分钟生成一次性能报告。"""
@@ -428,7 +428,7 @@ asyncio.create_task(generate_report())
 
 ```python
 import logging
-from kernel.llm import RequestMetrics, get_global_collector
+from src.kernel.llm import RequestMetrics, get_global_collector
 
 logger = logging.getLogger(__name__)
 
@@ -535,3 +535,4 @@ collector.clear_history()
 - [Request 模块](./request.md) - 请求发送
 - [Response 模块](./response.md) - 响应处理
 - [Exceptions 模块](./exceptions.md) - 错误处理
+

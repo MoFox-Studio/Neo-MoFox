@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Any, TYPE_CHECKING
 
 from src.core.components.types import ChatType
-from src.core.components.utils import parse_function_signature
+from src.core.components.utils import parse_function_signature, should_strip_auto_reason_argument
 from src.kernel.llm import LLMUsable, LLMRequest, LLMPayload, ROLE
 from src.kernel.logger import get_logger
 
@@ -227,8 +227,6 @@ class BaseAgent(ABC, LLMUsable):
         from src.core.components.base.tool import BaseTool
         from src.core.managers.stream_manager import get_stream_manager
 
-        kwargs.pop("reason", None)
-
         local_index: dict[str, type[LLMUsable]] = {}
         for usable_cls in self.get_local_usables():
             schema = usable_cls.to_schema()
@@ -244,6 +242,8 @@ class BaseAgent(ABC, LLMUsable):
 
         if issubclass(usable_cls, BaseTool):
             instance = usable_cls(plugin=self.plugin)
+            if should_strip_auto_reason_argument(instance.execute, kwargs):
+                kwargs.pop("reason", None)
             return await instance.execute(**kwargs)
 
         if issubclass(usable_cls, BaseAction):
@@ -260,10 +260,14 @@ class BaseAgent(ABC, LLMUsable):
                     else str(current_msg.content or "")
                 )
 
+            if should_strip_auto_reason_argument(instance.execute, kwargs):
+                kwargs.pop("reason", None)
             return await instance.execute(**kwargs)
 
         if issubclass(usable_cls, BaseAgent):
             instance = usable_cls(stream_id=self.stream_id, plugin=self.plugin)
+            if should_strip_auto_reason_argument(instance.execute, kwargs):
+                kwargs.pop("reason", None)
             return await instance.execute(**kwargs)
 
         raise ValueError(
