@@ -161,12 +161,11 @@ class StreamLoopManager:
                 logger.warning(f"[管理器] stream={stream_id[:8]}, 强制启动：取消现有任务")
                 old_task = context.stream_loop_task
                 old_task.cancel()
-                try:
-                    await asyncio.wait_for(old_task, timeout=2.0)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    pass
-                except Exception as e:
-                    logger.warning(f"等待旧任务结束时出错: {e}")
+                # 真正需要 WatchDog 强制重启时，旧任务往往正处于“已取消但迟迟不退出”的状态。
+                # 若这里继续等待它结束，会把新任务恢复也一起拖死。
+                self._chatter_genes.pop(stream_id, None)
+                self._wait_states.pop(stream_id, None)
+                context.is_chatter_processing = False
 
             # 创建新的驱动器任务
             try:

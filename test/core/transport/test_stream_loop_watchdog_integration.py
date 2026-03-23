@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
@@ -177,6 +178,88 @@ async def test_watchdog_restart_callback_is_throttled(monkeypatch: pytest.Monkey
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_force_restart_does_not_wait_for_stuck_old_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    """强制重启应立即切换到新任务，而不是卡在已取消但不退出的旧任务上。"""
+    manager = StreamLoopManager()
+    stream_id = "stream_force_restart"
+
+    release_old_task = asyncio.Event()
+
+    async def stuck_runner() -> None:
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release_old_task.wait()
+            raise
+
+    started_new_runner = asyncio.Event()
+
+    async def dummy_runner(_stream_id: str, _manager: StreamLoopManager) -> None:
+        started_new_runner.set()
+        await asyncio.sleep(0.01)
+
+    async def stale_generator() -> AsyncGenerator[object, None]:
+        yield object()
+
+    old_task = asyncio.create_task(stuck_runner())
+    context = SimpleNamespace(
+        stream_loop_task=old_task,
+        is_chatter_processing=True,
+    )
+    manager._get_stream_context = AsyncMock(return_value=context)
+    manager._chatter_genes[stream_id] = stale_generator()
+    manager._wait_states[stream_id] = (object(), 0.0, 0)
+
+    monkeypatch.setattr(
+        "src.core.transport.distribution.loop.run_chat_stream",
+        dummy_runner,
+    )
+    monkeypatch.setattr(
+        "src.core.config.get_core_config",
+        lambda: SimpleNamespace(
+            bot=SimpleNamespace(
+                tick_interval=1.0,
+                stream_warning_threshold=2.0,
+                stream_restart_threshold=5.0,
+            )
+        ),
+    )
+
+    fake_watchdog = SimpleNamespace(register_stream=lambda **kwargs: None)
+
+    class FakeTaskInfo:
+        def __init__(self, task: asyncio.Task[None]) -> None:
+            self.task = task
+
+    class FakeTaskManager:
+        def create_task(self, coro, name: str, daemon: bool):
+            assert isinstance(name, str)
+            assert daemon is True
+            return FakeTaskInfo(asyncio.create_task(coro))
+
+    monkeypatch.setattr("src.kernel.concurrency.get_watchdog", lambda: fake_watchdog)
+    monkeypatch.setattr("src.kernel.concurrency.get_task_manager", lambda: FakeTaskManager())
+
+    started = await asyncio.wait_for(manager.start_stream_loop(stream_id, force=True), timeout=0.2)
+
+    assert started is True
+    assert context.stream_loop_task is not old_task
+    assert stream_id not in manager._chatter_genes
+    assert stream_id not in manager._wait_states
+    assert context.is_chatter_processing is False
+
+    await asyncio.wait_for(started_new_runner.wait(), timeout=0.2)
+
+    release_old_task.set()
+    with pytest.raises(asyncio.CancelledError):
+        await old_task
+
+    new_task = context.stream_loop_task
+    assert new_task is not None
+    await new_task
 
 
 @pytest.mark.asyncio

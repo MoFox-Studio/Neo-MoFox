@@ -97,6 +97,10 @@ async def run_chat_stream(
     task_id = id(current_task)
     logger.debug(f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, 启动")
 
+    def _is_task_current(context: "StreamContext") -> bool:
+        """检查当前驱动器任务是否仍然拥有该流。"""
+        return context.stream_loop_task is current_task
+
     try:
         from src.core.managers import get_chatter_manager
         from src.core.managers import get_event_manager
@@ -120,6 +124,12 @@ async def run_chat_stream(
                 context = await manager._get_stream_context(stream_id)
                 if not context:
                     continue
+
+                if not _is_task_current(context):
+                    logger.debug(
+                        f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, 已被新任务接管，退出旧任务"
+                    )
+                    break
 
                 # 1. 检查并处理等待状态
                 wait_state = manager._wait_state_check(stream_id, context)
@@ -194,6 +204,18 @@ async def run_chat_stream(
                     
                     # 执行一步迭代
                     result = await anext(chatter_gene)
+
+                    refreshed_context = await manager._get_stream_context(stream_id)
+                    if not refreshed_context:
+                        break
+
+                    if not _is_task_current(refreshed_context):
+                        logger.debug(
+                            f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, Chatter 步进完成后发现已被新任务接管，丢弃旧结果并退出"
+                        )
+                        break
+
+                    context = refreshed_context
                     
                     # 4. 根据执行结果处理状态
                     if isinstance(result, Success):
