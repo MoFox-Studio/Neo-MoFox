@@ -357,6 +357,9 @@ class EmojiSenderService(BaseService):
 
         logger.warning(f"图片压缩后仍超限，使用最后结果: {len(compressed)} 字节")
         return compressed, output_mime, False
+    
+    @staticmethod
+    def _build_persona_prompt():
         """从主配置人格字段组装 persona 指令片段。"""
         p = get_core_config().personality
 
