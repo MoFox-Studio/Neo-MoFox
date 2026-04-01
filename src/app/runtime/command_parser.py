@@ -12,6 +12,13 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from src.kernel.terminal_io import begin_user_input, end_user_input
 
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.patch_stdout import patch_stdout
+except ImportError:
+    PromptSession = None
+    patch_stdout = None
+
 if TYPE_CHECKING:
     from .bot import Bot
 
@@ -52,6 +59,7 @@ class CommandParser:
         self._help_texts: dict[str, str] = {}
         self._input_queue: queue.Queue[str | BaseException] = queue.Queue()
         self._input_stop_event = threading.Event()
+        self._prompt_session = PromptSession("> ") if PromptSession is not None else None
         self._input_thread = threading.Thread(
             target=self._input_worker,
             name="command_input_reader",
@@ -66,22 +74,28 @@ class CommandParser:
         """后台读取标准输入并写入队列。"""
         while not self._input_stop_event.is_set():
             try:
-                begin_user_input()
-                line = input("> ")
-                end_user_input()
+                line = self._read_input_line()
                 self._input_queue.put(line)
             except EOFError as exc:
-                end_user_input()
                 self._input_queue.put(exc)
                 break
             except KeyboardInterrupt:
-                end_user_input()
                 # 在 Windows 上 Ctrl+C 通常由主线程处理，此处忽略并继续等待。
                 continue
             except Exception as exc:
-                end_user_input()
                 self._input_queue.put(exc)
                 break
+
+    def _read_input_line(self) -> str:
+        """读取一行输入。"""
+        begin_user_input()
+        try:
+            if self._prompt_session is not None and patch_stdout is not None:
+                with patch_stdout(raw=True):
+                    return self._prompt_session.prompt()
+            return input("> ")
+        finally:
+            end_user_input()
 
     def close(self) -> None:
         """关闭命令解析器资源。"""

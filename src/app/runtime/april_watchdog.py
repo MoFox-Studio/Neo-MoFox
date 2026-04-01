@@ -78,7 +78,6 @@ class AprilWatchDogController:
         self._recent_events: deque[DogEvent] = deque(maxlen=12)
         self._dialog_history: deque[tuple[str, str]] = deque(maxlen=10)
         self._last_spoken_at = 0.0
-        self._last_recovery_at = time.monotonic()
         self._mute_until = 0.0
         self._last_bot_reminder = ""
         self._watchdog_listener_registered = False
@@ -222,7 +221,6 @@ class AprilWatchDogController:
                 if self.bot.logger:
                     self.bot.logger.warning(f"WatchDog 人格循环处理异常: {error}")
 
-            self._passive_recover()
             await self._maybe_idle_talk()
             self._update_bot_reminder()
 
@@ -242,7 +240,7 @@ class AprilWatchDogController:
                 trigger_text=event.message,
             )
             speech = result.get("speech") or self._fallback_line(event.message)
-            self._apply_llm_effect(result)
+            self._apply_llm_effect(result, allow_recovery=False)
             self._speak(speech)
 
     async def _maybe_idle_talk(self) -> None:
@@ -261,7 +259,7 @@ class AprilWatchDogController:
             trigger_text="系统暂时平静，但你还在值班。",
         )
         speech = result.get("speech") or self._fallback_line("系统暂时平静")
-        self._apply_llm_effect(result)
+        self._apply_llm_effect(result, allow_recovery=False)
         self._speak(speech, style="bright_yellow")
 
     async def _chat_with_user(self, user_text: str) -> None:
@@ -273,7 +271,7 @@ class AprilWatchDogController:
             trigger_text="控制台用户正在与你对话。",
         )
         speech = result.get("speech") or "我本来想发火，但你这句把我整不会了。"
-        self._apply_llm_effect(result)
+        self._apply_llm_effect(result, allow_recovery=True)
         self._dialog_history.append(("dog", speech))
         self._speak(speech, style="yellow")
 
@@ -333,16 +331,20 @@ class AprilWatchDogController:
             f"最近监控事件:\n{recent_events}\n\n"
             f"最近控制台对话:\n{dialogue}\n\n"
             f"用户本轮输入={user_text or '无'}\n"
-            "如果当前情绪低于 35，请更容易输出 bot_reminder。"
+            "只有在 mode=chat 且用户主动来安抚、解释、哄你时，emotion_delta 才允许为正数；"
+            "其余模式下 emotion_delta 只能为 0 或负数。"
         )
 
-    def _apply_llm_effect(self, result: dict[str, Any]) -> None:
+    def _apply_llm_effect(self, result: dict[str, Any], allow_recovery: bool) -> None:
         """应用 LLM 返回的情绪和提醒。"""
         delta = result.get("emotion_delta", 0)
         if isinstance(delta, bool):
             delta = 0
         if isinstance(delta, (int, float)):
-            self._change_emotion(int(delta))
+            delta_value = int(delta)
+            if not allow_recovery and delta_value > 0:
+                delta_value = 0
+            self._change_emotion(delta_value)
 
         reminder = result.get("bot_reminder", "")
         if isinstance(reminder, str) and reminder.strip():
@@ -351,15 +353,6 @@ class AprilWatchDogController:
     def _change_emotion(self, delta: int) -> None:
         """更新情绪。"""
         self.emotion = max(0, min(100, self.emotion + delta))
-
-    def _passive_recover(self) -> None:
-        """系统平稳时缓慢恢复情绪。"""
-        now = time.monotonic()
-        if now - self._last_recovery_at < 25:
-            return
-        self._last_recovery_at = now
-        if self.emotion < 88:
-            self.emotion += 1
 
     def _current_speech_interval(self) -> float:
         """根据情绪计算说话间隔。"""

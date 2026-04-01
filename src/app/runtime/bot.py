@@ -695,10 +695,6 @@ class Bot:
             if self.logger:
                 self.logger.warning(f"触发 ON_START 事件失败: {e}")
         
-        # 启动实时仪表盘（如果 UI 级别为 VERBOSE）
-        if self.ui.level == UILevel.VERBOSE:
-            self.ui.start_live_dashboard()
-
         # 启动信号处理器
         signal_handler = SignalHandler(self)
         signal_handler.register_signals()
@@ -724,9 +720,6 @@ class Bot:
                     if not should_continue:
                         break
 
-                    # 更新仪表盘统计
-                    if self.ui.level == UILevel.VERBOSE:
-                        await self._update_runtime_stats()
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -734,10 +727,6 @@ class Bot:
 
         finally:
             command_parser.close()
-
-            # 停止实时仪表盘
-            if self.ui.level == UILevel.VERBOSE:
-                self.ui.stop_live_dashboard()
 
             # 恢复信号处理器
             signal_handler.restore_handlers()
