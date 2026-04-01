@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
+
 from rich.traceback import install as install_rich_traceback
 
 from .color import COLOR, get_rich_color

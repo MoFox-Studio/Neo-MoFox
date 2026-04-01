@@ -43,6 +43,8 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
+from src.kernel.terminal_io import is_user_input_active
+
 if TYPE_CHECKING:
     from src.core.components import PluginManifest
 
@@ -951,7 +953,9 @@ class ConsoleUIManager:
             refresh_per_second=2,
             screen=False,
             transient=False,
+            auto_refresh=False,
         )
+        self._live.start()
 
     def _update_dashboard_panels(self) -> None:
         """更新仪表盘所有面板"""
@@ -1068,12 +1072,18 @@ class ConsoleUIManager:
         if not self._dashboard_running or self._layout is None:
             return
 
+        if is_user_input_active():
+            return
+
         # 更新内部统计数据
         self._stats.update(stats)
         self._stats["last_activity"] = datetime.datetime.now().strftime("%H:%M:%S")
 
         # 更新所有面板
         self._update_dashboard_panels()
+
+        if self._live is not None:
+            self._live.refresh()
 
     def record_activity(self, activity: str) -> None:
         """记录活动日志（用于仪表盘显示）
