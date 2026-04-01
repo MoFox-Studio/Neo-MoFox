@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from src.core.components import PluginLoader, PluginManifest
     from src.core.managers import PluginManager
     from src.core.transport import MessageReceiver, HTTPServer, SinkManager
+    from src.app.runtime.april_watchdog import AprilWatchDogController
     from src.kernel.concurrency import TaskManager, WatchDog
     from src.kernel.event import EventBus
     from src.kernel.logger import Logger
@@ -51,7 +52,7 @@ class Bot:
         ui_level: UI 详细程度
     """
 
-    bot_name: str = "Neo-MoFox"
+    bot_name: str = "MoFox-Neo"
     bot_version: str = CORE_VERSION
 
     def __init__(
@@ -87,6 +88,7 @@ class Bot:
         self.event_bus: EventBus | None = None
         self.task_manager: TaskManager | None = None
         self.watchdog: WatchDog | None = None
+        self.dog_controller: AprilWatchDogController | None = None
         self.vector_db: VectorDBBase | None = None
         self.scheduler: UnifiedScheduler | None = None
         self.storage: JSONStore | None = None
@@ -287,14 +289,19 @@ class Bot:
 
         # Step 4: Task Manager
         from src.kernel.concurrency import get_task_manager, get_watchdog
+        from .april_watchdog import AprilWatchDogController
 
         self.task_manager = get_task_manager()
+        self.watchdog = get_watchdog()
+        self.task_manager.set_watchdog(self.watchdog)
         
         # 仅在启用时启动 WatchDog
         if self.config.bot.enable_watchdog:
-            get_watchdog().start()
+            self.watchdog.start()
         else:
             self.logger.warning("WatchDog 已禁用 (调试模式)")
+
+        self.dog_controller = AprilWatchDogController(self)
             
         self.ui.update_phase_status("任务管理器", "已初始化")
 
@@ -305,9 +312,6 @@ class Bot:
         self.ui.update_phase_status("调度器", "已初始化")
 
         # Step 6: WatchDog
-        from src.kernel.concurrency import WatchDog
-
-        self.watchdog = WatchDog()
         self.ui.update_phase_status("看门狗", "已初始化")
 
         # Step 7: Database
@@ -704,6 +708,9 @@ class Bot:
 
         command_parser = CommandParser(self)
 
+        if self.dog_controller:
+            await self.dog_controller.start()
+
         self.logger.info("Neo-MoFox Bot 启动成功")
         self.logger.info("输入 /help 查看可用命令")
 
@@ -867,6 +874,8 @@ class Bot:
                 await self.http_server.stop()
 
             # 6. 停止 WatchDog
+            if self.dog_controller:
+                self.dog_controller.stop()
             if self.watchdog:
                 self.watchdog.stop()
 

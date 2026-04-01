@@ -103,6 +103,10 @@ class CommandParser:
             "ui", self.cmd_ui, "调整 UI 级别 (minimal|standard|verbose)"
         )
 
+        dog_controller = getattr(self.bot, "dog_controller", None)
+        if dog_controller is not None:
+            dog_controller.register_commands(self)
+
     def register_command(
         self, name: str, handler: Callable[[list[str]], Any], help_text: str
     ) -> None:

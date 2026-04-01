@@ -191,7 +191,7 @@ class ConsoleUIManager:
         """获取当前级别的样式配置"""
         return self._STYLES.get(self.level, self._STYLES[UILevel.STANDARD])
 
-    def show_banner(self, version: str, bot_name: str = "Neo-MoFox") -> None:
+    def show_banner(self, version: str, bot_name: str = "MoFox-Neo") -> None:
         """显示启动横幅
 
         根据 UI 级别显示不同风格的横幅：

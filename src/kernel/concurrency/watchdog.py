@@ -21,6 +21,9 @@ from src.kernel.logger import get_logger, COLOR
 logger = get_logger("WatchDog", display="WatchDog", color=COLOR.YELLOW)
 
 
+WatchDogEventCallback = Callable[[dict[str, Any]], None]
+
+
 @dataclass
 class StreamHeartbeat:
     """聊天流心跳信息
@@ -42,6 +45,7 @@ class StreamHeartbeat:
     restart_callback: Callable[[], Any] | None = None
     restart_cooldown: float = 0.0
     next_restart_allowed_at: float = 0.0
+    next_mood_warning_allowed_at: float = 0.0
 
 
 class WatchDog:
@@ -74,6 +78,8 @@ class WatchDog:
         self._stream_registry: dict[str, StreamHeartbeat] = {}
         self._last_tick_time: datetime | None = None
         self._task_manager: TaskManager | None = None
+        self._event_listeners: list[WatchDogEventCallback] = []
+        self._event_listener_lock = threading.Lock()
 
     def start(self) -> None:
         """启动 WatchDog 监控线程"""
@@ -85,6 +91,11 @@ class WatchDog:
         self._monitor_thread.start()
 
         logger.info(f"WatchDog 监控已启动 (tick间隔={self._tick_interval}s)")
+        self._emit_event(
+            event_type="watchdog_started",
+            message="WatchDog 监控已启动",
+            emotion_delta=1,
+        )
 
     def stop(self) -> None:
         """停止 WatchDog 监控线程"""
@@ -98,6 +109,34 @@ class WatchDog:
             self._monitor_thread.join(timeout=3.0)
 
         logger.info("WatchDog 监控已停止")
+        self._emit_event(
+            event_type="watchdog_stopped",
+            message="WatchDog 监控已停止",
+            emotion_delta=2,
+        )
+
+    def add_event_listener(self, callback: WatchDogEventCallback) -> None:
+        """注册 WatchDog 事件监听器。"""
+        with self._event_listener_lock:
+            if callback not in self._event_listeners:
+                self._event_listeners.append(callback)
+
+    def remove_event_listener(self, callback: WatchDogEventCallback) -> None:
+        """移除 WatchDog 事件监听器。"""
+        with self._event_listener_lock:
+            if callback in self._event_listeners:
+                self._event_listeners.remove(callback)
+
+    def _emit_event(self, **payload: Any) -> None:
+        """向监听器广播事件。"""
+        with self._event_listener_lock:
+            listeners = list(self._event_listeners)
+
+        for listener in listeners:
+            try:
+                listener(payload)
+            except Exception as e:
+                logger.debug(f"WatchDog 事件监听器执行失败: {e}")
 
     def _run_loop(self) -> None:
         """WatchDog 主循环（在独立线程中运行）"""
@@ -153,6 +192,20 @@ class WatchDog:
                     f"距离上次心跳 {delta:.2f}s "
                     f"(正常间隔 {heartbeat.tick_interval}s)",
                 )
+                if now_monotonic >= heartbeat.next_mood_warning_allowed_at:
+                    heartbeat.next_mood_warning_allowed_at = now_monotonic + max(
+                        heartbeat.tick_interval,
+                        3.0,
+                    )
+                    self._emit_event(
+                        event_type="stream_warning",
+                        stream_id=stream_id,
+                        message=(
+                            f"聊天流 {stream_id} 响应变慢，"
+                            f"已经 {delta:.2f}s 没心跳了"
+                        ),
+                        emotion_delta=-4,
+                    )
 
             # 检查是否超过重启阈值
             if delta > heartbeat.tick_interval * heartbeat.restart_threshold:
@@ -162,6 +215,15 @@ class WatchDog:
                 logger.warning(
                     f"聊天流 '{stream_id}' 可能已卡死: "
                     f"距离上次心跳 {delta:.2f}s，尝试重启...",
+                )
+                self._emit_event(
+                    event_type="stream_restart",
+                    stream_id=stream_id,
+                    message=(
+                        f"聊天流 {stream_id} 可能卡死，"
+                        f"{delta:.2f}s 未响应，正在尝试重启"
+                    ),
+                    emotion_delta=-10,
                 )
 
                 # 尝试重启
@@ -175,6 +237,12 @@ class WatchDog:
                     except Exception as e:
                         heartbeat.next_restart_allowed_at = now_monotonic
                         logger.error(f"聊天流 '{stream_id}' 重启失败: {e}")
+                        self._emit_event(
+                            event_type="stream_restart_failed",
+                            stream_id=stream_id,
+                            message=f"聊天流 {stream_id} 重启失败: {e}",
+                            emotion_delta=-14,
+                        )
 
     def _check_tasks(self) -> None:
         """检查任务状态"""
@@ -205,6 +273,15 @@ class WatchDog:
                 logger.warning(
                     f"任务 '{task_info.name}' (id={task_info.task_id[:8]}) "
                     f"超时 ({delta:.2f}s > {task_info.timeout}s)，尝试取消...",
+                )
+                self._emit_event(
+                    event_type="task_timeout",
+                    task_name=task_info.name,
+                    message=(
+                        f"任务 {task_info.name} 超时了，"
+                        f"跑了 {delta:.2f}s 还没结束"
+                    ),
+                    emotion_delta=-8,
                 )
 
                 # 取消任务
