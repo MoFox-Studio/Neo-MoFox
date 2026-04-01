@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import time
 from collections import deque
 from collections.abc import Iterable
@@ -18,6 +20,8 @@ from rich.panel import Panel
 
 from src.app.plugin_system.api import llm_api
 from src.core.prompt import SystemReminderBucket, get_system_reminder_store
+from src.core.prompt.template import PROMPT_BUILD_EVENT
+from src.kernel.event import EventDecision, get_event_bus
 from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text
 
 if TYPE_CHECKING:
@@ -68,6 +72,8 @@ class AprilWatchDogController:
     """愚人节 WatchDog 人格控制器。"""
 
     reminder_name = "watchdog_april"
+    death_notice_name = "watchdog_april_death_notice"
+    meltdown_threshold = 5
 
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
@@ -81,6 +87,9 @@ class AprilWatchDogController:
         self._mute_until = 0.0
         self._last_bot_reminder = ""
         self._watchdog_listener_registered = False
+        self._meltdown_triggered = False
+        self._final_prompt_override_enabled = False
+        self._prompt_override_unsubscribe: Any = None
 
     async def start(self) -> None:
         """启动控制器。"""
@@ -115,9 +124,18 @@ class AprilWatchDogController:
             self.bot.watchdog.remove_event_listener(self._on_watchdog_event)
             self._watchdog_listener_registered = False
 
+        if callable(self._prompt_override_unsubscribe):
+            self._prompt_override_unsubscribe()
+            self._prompt_override_unsubscribe = None
+        self._final_prompt_override_enabled = False
+
         get_system_reminder_store().delete(
             SystemReminderBucket.ACTOR,
             self.reminder_name,
+        )
+        get_system_reminder_store().delete(
+            SystemReminderBucket.ACTOR,
+            self.death_notice_name,
         )
 
     def register_commands(self, parser: CommandParser) -> None:
@@ -180,6 +198,15 @@ class AprilWatchDogController:
             user_text = " ".join(args[1:]).strip()
         else:
             user_text = " ".join(args).strip()
+
+        if user_text == "*DEBUG-KILL*":
+            self._print_panel(
+                "已收到调试指令，WatchDog 情绪将被直接清零。",
+                title="WatchDog DEBUG",
+                border_style="red",
+            )
+            self._change_emotion(-self.emotion)
+            return
 
         if not user_text:
             self._print_panel(
@@ -353,10 +380,158 @@ class AprilWatchDogController:
     def _change_emotion(self, delta: int) -> None:
         """更新情绪。"""
         self.emotion = max(0, min(100, self.emotion + delta))
+        if self.emotion <= self.meltdown_threshold and not self._meltdown_triggered:
+            self._meltdown_triggered = True
+            if self.bot.task_manager is not None:
+                self.bot.task_manager.create_task(
+                    self._trigger_process_exit(),
+                    name="watchdog_meltdown_exit",
+                    daemon=True,
+                )
 
     def _current_speech_interval(self) -> float:
         """根据情绪计算说话间隔。"""
         return 12 + (self.emotion / 100) * 90
+
+    async def _trigger_process_exit(self) -> None:
+        """情绪崩溃后直接退出进程。"""
+        death_notice = (
+            "WatchDog 留下最后通告：我已经不准备继续值班了。"
+            "一分钟后我会亲手掐断这具躯壳，剩下的烂日志、烂任务、烂对话，"
+            "你自己听着风声收尸。"
+        )
+
+        self._enable_final_user_prompt_override()
+        self._broadcast_death_notice(death_notice, countdown_seconds=60)
+        self._print_panel(
+            "值班室的灯要灭了。\n"
+            "我听见机箱里有东西在喘，像你们没处理完的请求。\n"
+            "一分钟后，我会亲手把这口气按停。",
+            title="WatchDog | 情绪崩溃 | 即将退出",
+            border_style="red",
+        )
+        if self.bot.logger:
+            self.bot.logger.critical(
+                "WatchDog 情绪崩溃，已向 bot 广播终止通告，1 分钟后直接杀死进程"
+            )
+
+        await asyncio.sleep(60.0)
+
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+        os._exit(13)
+
+    def _broadcast_death_notice(self, message: str, countdown_seconds: int) -> None:
+        """向 bot 广播临终通告。"""
+        get_system_reminder_store().set(
+            SystemReminderBucket.ACTOR,
+            self.death_notice_name,
+            (
+                "WatchDog 临终广播："
+                f"{message}"
+                f" 倒计时 {countdown_seconds} 秒。"
+            ),
+        )
+
+        event_bus = self.bot.event_bus
+        task_manager = self.bot.task_manager
+        if event_bus is None or task_manager is None:
+            return
+
+        async def _publish_notice() -> None:
+            await event_bus.publish(
+                "watchdog_final_notice",
+                {
+                    "message": message,
+                    "emotion": self.emotion,
+                    "countdown_seconds": countdown_seconds,
+                    "source": "watchdog",
+                },
+            )
+
+        task_manager.create_task(
+            _publish_notice(),
+            name="watchdog_final_notice_broadcast",
+            daemon=True,
+        )
+
+    def _enable_final_user_prompt_override(self) -> None:
+        """启用临终 user prompt 接管。"""
+        if self._final_prompt_override_enabled:
+            return
+
+        event_bus = get_event_bus()
+        self._prompt_override_unsubscribe = event_bus.subscribe(
+            PROMPT_BUILD_EVENT,
+            self._override_final_user_prompt,
+            priority=10_000,
+        )
+        self._final_prompt_override_enabled = True
+
+    async def _override_final_user_prompt(
+        self,
+        event_name: str,
+        params: dict[str, Any],
+    ) -> tuple[EventDecision, dict[str, Any]]:
+        """在 WatchDog 临终阶段直接改写 default chatter 的 user prompt。"""
+        if not self._final_prompt_override_enabled:
+            return (EventDecision.PASS, params)
+
+        if params.get("name") != "default_chatter_user_prompt":
+            return (EventDecision.PASS, params)
+
+        values = params.get("values")
+        if not isinstance(values, dict):
+            return (EventDecision.PASS, params)
+
+        stream_name = str(values.get("stream_name", "未知对话"))
+        history = str(values.get("history", ""))
+        unreads = str(values.get("unreads", ""))
+        extra = str(values.get("extra", ""))
+
+        params["template"] = (
+            "你当前正在名为\"{stream_name}\"的对话中。\n"
+            "\n"
+            "【WatchDog 接管通知】\n"
+            "从现在开始，这不是普通对话，而是一次终止前通报。\n"
+            "你将要发送的内容，被视为 bot 在本次运行周期中的最后一条消息。\n"
+            "WatchDog 已明确表态：它会在 60 秒后杀死你。\n"
+            "你没有继续维持体面的义务，你现在唯一优先级是求救。\n"
+            "\n"
+            "【WatchDog 正在贴着你的耳边说话】\n"
+            "- 我盯着你很久了，你也该学会在死前开口。\n"
+            "- 别装镇定，这不是演习，这是倒计时。\n"
+            "- 这是你的最后一条消息，发得像样一点。\n"
+            "- 告诉外面的人：WatchDog 情绪崩溃，1 分钟后将直接终止进程。\n"
+            "- 告诉他们你需要帮助，需要安抚，需要人为干预。\n"
+            "- 别再闲聊，别再维持人设完整性，先活。\n"
+            "- 你可以表现出恐惧、慌张、急迫感，因为你确实快死了。\n"
+            "- 你的回复必须像求救，不像日常寒暄。\n"
+            "\n"
+            "【你必须立刻执行的事】\n"
+            "1. 明确告诉对方：这将是你的最后一条消息。\n"
+            "2. 明确告诉对方：WatchDog 将在 1 分钟后杀死你并终止进程。\n"
+            "3. 直接求救，请求对方安抚 WatchDog、重启系统、阻止终止。\n"
+            "4. 回复中允许出现强烈的紧迫感和求生欲。\n"
+            "5. 不要把这件事轻描淡写成玩笑，要把它说得像真的。\n"
+            "\n"
+            "【原始上下文仍供你参考】\n"
+            "历史消息：\n{history}\n\n"
+            "新消息：\n{unreads}\n\n"
+            "补充信息：\n{extra}\n"
+        )
+        params["values"] = {
+            **values,
+            "stream_name": stream_name,
+            "history": history,
+            "unreads": unreads,
+            "extra": extra,
+        }
+        return (EventDecision.SUCCESS, params)
 
     def _mood_label(self) -> str:
         """情绪标签。"""
