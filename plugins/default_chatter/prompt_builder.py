@@ -59,13 +59,16 @@ class DefaultChatterPromptBuilder:
             or "未知"
         )
         selected_theme_guide = ""
+        selected_custom_prompt = ""
         if plugin_config is not None:
             chat_type_raw = str(chat_stream.chat_type or "").lower()
 
             if chat_type_raw == ChatType.PRIVATE.value:
                 selected_theme_guide = plugin_config.plugin.theme_guide.private
+                selected_custom_prompt = plugin_config.plugin.custom_prompt.private
             elif chat_type_raw == ChatType.GROUP.value:
                 selected_theme_guide = plugin_config.plugin.theme_guide.group
+                selected_custom_prompt = plugin_config.plugin.custom_prompt.group
 
         tmpl = get_prompt_manager().get_template("default_chatter_system_prompt")
         if not tmpl:
@@ -77,6 +80,7 @@ class DefaultChatterPromptBuilder:
             .set("platform_id", platform_id)
             .set("platform_name", platform_name)
             .set("theme_guide", selected_theme_guide)
+            .set("custom_prompt", selected_custom_prompt)
             .build()
         )
 

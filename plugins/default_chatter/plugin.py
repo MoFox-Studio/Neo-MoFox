@@ -72,6 +72,8 @@ system_prompt = """# 关于你
 # 场景引导
 {theme_guide}
 
+{custom_prompt}
+
 # 你的行为准则
 - 保持你的人设和表达风格，用符合你性格的方式回复。
 - 后续的消息都遵循根据原始网络数据解析后标准化格式。这个格式是给你看的，请**不要模仿其格式与用户对话**。
@@ -547,6 +549,9 @@ class DefaultChatterPlugin(BasePlugin):
                 "extra_info": optional(""),
                 "platform_name": optional("未知"),
                 "platform_id": optional("未知ID"),
+                "custom_prompt": optional("")
+                .then(min_len(2))
+                .then(wrap("# 自定义提示\n", "")),
             },
         )
 
