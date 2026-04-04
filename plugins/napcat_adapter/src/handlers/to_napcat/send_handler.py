@@ -117,6 +117,8 @@ class SendHandler:
                     this_batch.append({"type": "text", "data": {"text": line}})
                     batches.append(this_batch)
             else:
+                if seg.get("type") == "reply" and seg == processed_message[0]:
+                    continue
                 if current_batch:
                     batches.append(current_batch)
                     current_batch = []
