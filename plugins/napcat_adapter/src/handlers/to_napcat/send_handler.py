@@ -101,21 +101,57 @@ class SendHandler:
         else:
             logger.error("无法识别的消息类型")
             return
-        logger.debug(
-            f"准备发送到napcat的消息体: action='{action}', {id_name}='{target_id}', "
-            f"message={str(processed_message)[:500]}"
-        )
-        response = await self.send_message_to_napcat(
-            action or "",
-            {
-                id_name or "target_id": target_id,
-                "message": processed_message,
-            },
-        )
-        if response.get("status") == "ok":
-            logger.info("消息发送成功")
+        batches: list[list[dict]] = []
+        current_batch: list[dict] = []
+
+        for seg in processed_message:
+            if isinstance(seg, dict) and seg.get("type") == "text":
+                text = seg.get("data", {}).get("text", "")
+                if not text:
+                    continue
+                lines = [line.rstrip("\r") for line in text.split("\n") if line.strip()]
+                for line in lines:
+                    this_batch = []
+                    if batches == [] and len(processed_message) > 0 and processed_message[0].get("type") == "reply":
+                        this_batch.append(processed_message[0])
+                    this_batch.append({"type": "text", "data": {"text": line}})
+                    batches.append(this_batch)
+            else:
+                if current_batch:
+                    batches.append(current_batch)
+                    current_batch = []
+                current_batch.append(seg)
+
+        if current_batch and any(not (isinstance(seg, dict) and seg.get("type") == "text") for seg in current_batch):
+            batches.append(current_batch)
+
+        if not batches:
+            batches = [processed_message]
+
+        all_ok = True
+        for idx, batch in enumerate(batches):
+            if not batch:
+                continue
+            logger.debug(
+                f"发送批次 {idx+1}/{len(batches)} 到napcat: action='{action}', {id_name}='{target_id}'"
+            )
+            response = await self.send_message_to_napcat(
+                action or "",
+                {
+                    id_name or "target_id": target_id,
+                    "message": batch,
+                },
+            )
+            if response.get("status") == "ok":
+                logger.debug(f"批次 {idx+1} 发送成功")
+            else:
+                logger.warning(f"批次 {idx+1} 发送失败，napcat返回：{response!s}")
+                all_ok = False
+
+        if all_ok:
+            logger.info("所有消息发送成功")
         else:
-            logger.warning(f"消息发送失败，napcat返回：{response!s}")
+            logger.warning("部分消息发送失败")
 
     async def send_command(self, envelope: MessageEnvelope) -> None:
         """
