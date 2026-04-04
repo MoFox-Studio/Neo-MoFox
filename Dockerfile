@@ -30,7 +30,9 @@ WORKDIR /app
 # 设置运行环境变量
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON=python3.12
 
 # 安装运行时必要的系统库，并安装 uv（插件依赖安装需要）
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -9,7 +9,6 @@ import pytest
 
 from src.kernel.llm.payload.tooling import (
     ToolCall,
-    ToolExecutor,
     ToolRegistry,
     ToolResult,
 )
@@ -301,111 +300,13 @@ class TestToolRegistry:
 
 
 # ============================================================================
-# ToolExecutor Tests
+# ToolExecutor Tests - DISABLED (ToolExecutor class removed)
 # ============================================================================
 
 
-class TestToolExecutor:
-    """Test cases for ToolExecutor class."""
-
-    @pytest.fixture
-    def async_execute_func(self) -> AsyncMock:
-        """Mock async execute function."""
-        return AsyncMock(return_value="async result")
-
-    @pytest.fixture
-    def sync_execute_func(self) -> Mock:
-        """Mock sync execute function."""
-        mock = Mock(return_value="sync result")
-        return mock
-
-    def test_executor_creation(self) -> None:
-        """Test creating ToolExecutor."""
-        executor = ToolExecutor()
-        assert executor.timeout == 30.0
-        assert executor.on_error == "return_error"
-
-    def test_executor_with_custom_timeout(self) -> None:
-        """Test creating ToolExecutor with custom timeout."""
-        executor = ToolExecutor(timeout=60.0)
-        assert executor.timeout == 60.0
-
-    def test_executor_with_raise_on_error(self) -> None:
-        """Test creating ToolExecutor with raise on error."""
-        executor = ToolExecutor(on_error="raise")
-        assert executor.on_error == "raise"
-
-    async def test_execute_async_function(
-        self, async_execute_func: AsyncMock
-    ) -> None:
-        """Test executing async function."""
-        executor = ToolExecutor(timeout=30.0)
-        tool_call = ToolCall(id="call_1", name="test", args={"arg": "value"})
-        result = await executor.execute(tool_call, async_execute_func)
-        assert result.value == "async result"
-        assert result.call_id == "call_1"
-        assert result.name == "test"
-
-    async def test_execute_sync_function(
-        self, sync_execute_func: Mock
-    ) -> None:
-        """Test executing sync function in thread pool."""
-
-        executor = ToolExecutor(timeout=30.0)
-        tool_call = ToolCall(id="call_1", name="test", args={"arg": "value"})
-        result = await executor.execute(tool_call, sync_execute_func)
-        assert result.value == "sync result"
-        assert result.call_id == "call_1"
-        assert result.name == "test"
-
-    async def test_execute_with_timeout(self, async_execute_func: AsyncMock) -> None:
-        """Test execution with timeout."""
-
-        async def slow_execute(name: str, args: dict) -> str:
-            await asyncio.sleep(5)
-            return "slow result"
-
-        executor = ToolExecutor(timeout=0.1)
-        tool_call = ToolCall(id="call_1", name="test", args={})
-
-        result = await executor.execute(tool_call, slow_execute)
-        assert "error" in result.value
-        assert result.value["error"] == "tool_execution_timeout"
-
-    async def test_execute_with_exception(
-        self, async_execute_func: AsyncMock
-    ) -> None:
-        """Test execution with exception."""
-
-        async def failing_execute(name: str, args: dict) -> str:
-            raise ValueError("Tool failed!")
-
-        executor = ToolExecutor(timeout=30.0)
-        tool_call = ToolCall(id="call_1", name="test", args={})
-
-        result = await executor.execute(tool_call, failing_execute)
-        assert "error" in result.value
-        assert result.value["error"] == "tool_execution_failed"
-
-    async def test_execute_with_raise_on_error(self) -> None:
-        """Test execute with raise on error mode."""
-
-        async def failing_execute(name: str, args: dict) -> str:
-            raise ValueError("Tool failed!")
-
-        executor = ToolExecutor(timeout=30.0, on_error="raise")
-        tool_call = ToolCall(id="call_1", name="test", args={})
-
-        with pytest.raises(ValueError, match="Tool failed!"):
-            await executor.execute(tool_call, failing_execute)
-
-    async def test_execute_with_string_args(self, async_execute_func: AsyncMock) -> None:
-        """Test execution with string args (should be converted to dict)."""
-        executor = ToolExecutor(timeout=30.0)
-        tool_call = ToolCall(id="call_1", name="test", args='{"key": "value"}')
-        result = await executor.execute(tool_call, async_execute_func)
-        # The executor should convert string args to dict, but if it fails, passes {}
-        assert result.call_id == "call_1"
+# class TestToolExecutor:
+#     """Test cases for ToolExecutor class."""
+#     # Tests commented out as ToolExecutor class has been removed from the codebase
 
 
 # ============================================================================
