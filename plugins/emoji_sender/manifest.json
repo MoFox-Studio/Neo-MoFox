@@ -19,6 +19,12 @@
       "component_name": "send_emoji_meme",
       "dependencies": [],
       "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "recognize_emoji",
+      "dependencies": [],
+      "enabled": true
     }
   ],
   "entry_point": "plugin.py",

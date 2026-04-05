@@ -479,18 +479,42 @@ class MediaManager:
                 template = prompt_manager.get_template("media.image_recognition")
             
             # 构建提示词（模板不需要参数，直接build）
+            prompt = ""
             if template:
                 prompt = await template.build()
 
             # 处理 base64 数据：提取纯净的 base64 内容
             clean_base64 = self._extract_clean_base64(base64_data)
             
-            # 使用标准的 data URL 格式（大多数 VLM API 都支持）
-            # 假设是 PNG 图片，如果需要可以根据实际情况调整
-            image_value = f"data:image/png;base64,{clean_base64}"
+            # 解码为二进制数据以检测 MIME 类型
+            try:
+                image_bytes = base64.b64decode(clean_base64)
+            except Exception as e:
+                logger.warning(f"base64 解码失败: {e}")
+                return None
+            
+            # 检测真实的 MIME 类型
+            detected_mime = self._detect_mime_from_bytes(image_bytes)
+            
+            # 压缩图片（包括 GIF 多帧处理）
+            vlm_bytes, vlm_mime, is_gif_collage = self._compress_image_for_vlm(
+                image_bytes, detected_mime
+            )
+            
+            # 重新编码为 base64
+            vlm_base64 = base64.b64encode(vlm_bytes).decode("utf-8")
+            
+            # 对于 GIF 动图，添加提示说明
+            gif_hint = ""
+            if is_gif_collage:
+                gif_hint = "（这是一个 GIF 动图的关键帧截图，请综合所有帧的内容描述动态效果）"
+            
+            # 使用正确的 MIME 类型构建 data URL
+            image_value = f"data:{vlm_mime};base64,{vlm_base64}"
 
             # 添加 payload 并发送请求
-            request.add_payload(LLMPayload(ROLE.USER, [Text(prompt), Image(image_value)]))
+            full_prompt = prompt + gif_hint
+            request.add_payload(LLMPayload(ROLE.USER, [Text(full_prompt), Image(image_value)]))
             response = await request.send(stream=False)
             await response
 
@@ -612,6 +636,164 @@ class MediaManager:
         data = data.replace("\n", "").replace("\r", "").replace(" ", "")
         
         return data
+
+    @staticmethod
+    def _detect_mime_from_bytes(data: bytes) -> str:
+        """根据文件头判断 MIME 类型。
+
+        Args:
+            data: 图片二进制数据
+
+        Returns:
+            MIME 类型字符串
+        """
+        if len(data) < 12:
+            return "image/png"
+
+        if data[:6] == b"GIF87a" or data[:6] == b"GIF89a":
+            return "image/gif"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            return "image/png"
+        elif data[:2] == b"\xff\xd8":
+            return "image/jpeg"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp"
+
+        return "image/png"
+
+    @staticmethod
+    def _compress_image_for_vlm(
+        image_bytes: bytes,
+        mime: str,
+        max_size_mb: float = 5.0
+    ) -> tuple[bytes, str, bool]:
+        """将图片压缩至指定大小用于 VLM 识别。
+
+        - 静态图（JPG/PNG/WebP）：逐步降低质量和分辨率
+        - GIF：均匀采样最多 6 帧拼成网格图，以 JPEG 发给 VLM
+
+        Args:
+            image_bytes: 图片二进制数据
+            mime: MIME 类型
+            max_size_mb: 最大文件大小（MB）
+
+        Returns:
+            (用于 VLM 的 bytes, mime 类型, is_gif_frames_collage)
+        """
+        try:
+            from PIL import Image as PILImage
+            import io as pil_io
+        except ImportError:
+            logger.warning("PIL 未安装，无法压缩图片")
+            return image_bytes, mime, False
+
+        max_bytes = int(max_size_mb * 1024 * 1024)
+
+        # GIF：提取多个关键帧拼成网格图
+        if mime == "image/gif":
+            try:
+                img = PILImage.open(pil_io.BytesIO(image_bytes))
+                total_frames: int = getattr(img, "n_frames", 1)
+
+                max_frames = 6
+                if total_frames <= max_frames:
+                    frame_indices = list(range(total_frames))
+                else:
+                    step = total_frames / max_frames
+                    frame_indices = [int(i * step) for i in range(max_frames)]
+
+                frames: list[Any] = []
+                for idx in frame_indices:
+                    try:
+                        img.seek(idx)
+                        frames.append(img.convert("RGB").copy())
+                    except EOFError:
+                        break
+
+                if not frames:
+                    raise RuntimeError("无法提取 GIF 帧")
+
+                cols = min(3, len(frames))
+                rows = (len(frames) + cols - 1) // cols
+                fw, fh = frames[0].size
+                grid_img = PILImage.new("RGB", (fw * cols, fh * rows), (255, 255, 255))
+                for i, frame in enumerate(frames):
+                    x = (i % cols) * fw
+                    y = (i // cols) * fh
+                    grid_img.paste(frame.resize((fw, fh)), (x, y))
+
+                output = pil_io.BytesIO()
+                grid_img.save(output, format="JPEG", quality=80)
+                result_bytes = output.getvalue()
+
+                if len(result_bytes) > max_bytes:
+                    scale = (max_bytes / len(result_bytes)) ** 0.5
+                    new_w = max(1, int(grid_img.width * scale))
+                    new_h = max(1, int(grid_img.height * scale))
+                    grid_img = grid_img.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
+                    output = pil_io.BytesIO()
+                    grid_img.save(output, format="JPEG", quality=75)
+                    result_bytes = output.getvalue()
+
+                logger.debug(
+                    f"GIF 提取 {len(frames)} 帧拼成网格用于 VLM: "
+                    f"{len(image_bytes)} → {len(result_bytes)} 字节"
+                )
+                return result_bytes, "image/jpeg", True
+
+            except Exception as e:
+                logger.warning(f"GIF 处理失败: {e}")
+                return image_bytes, mime, False
+
+        # 静态图：不超限则直接返回
+        if len(image_bytes) <= max_bytes:
+            return image_bytes, mime, False
+
+        # 静态图：超限则逐步压缩
+        try:
+            img = PILImage.open(pil_io.BytesIO(image_bytes))
+        except Exception as e:
+            logger.warning(f"无法打开图片: {e}")
+            return image_bytes, mime, False
+
+        output_format = {
+            "image/png": "JPEG",
+            "image/jpeg": "JPEG",
+            "image/jpg": "JPEG",
+            "image/webp": "WEBP",
+        }.get(mime, "JPEG")
+        output_mime = "image/jpeg" if output_format == "JPEG" else mime
+
+        quality = 85
+        scale = 1.0
+        compressed = b""
+
+        while quality >= 30 or scale > 0.4:
+            output = pil_io.BytesIO()
+            try:
+                target = img.convert("RGB") if output_format == "JPEG" else img
+                if scale < 1.0:
+                    new_w = max(1, int(target.width * scale))
+                    new_h = max(1, int(target.height * scale))
+                    target = target.resize((new_w, new_h), PILImage.Resampling.LANCZOS)
+                target.save(output, format=output_format, quality=quality)
+                compressed = output.getvalue()
+                if len(compressed) <= max_bytes:
+                    logger.info(
+                        f"图片已压缩: {len(image_bytes)} → {len(compressed)} 字节"
+                    )
+                    return compressed, output_mime, False
+            except Exception as e:
+                logger.warning(f"压缩图片失败: {e}")
+                break
+
+            if quality > 30:
+                quality = max(30, quality - 10)
+            else:
+                scale = round(scale - 0.1, 1)
+
+        logger.warning(f"图片压缩后仍超限，使用最后结果: {len(compressed)} 字节")
+        return compressed, output_mime, False
     
     async def _save_to_pending(
         self,

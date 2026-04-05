@@ -591,6 +591,148 @@ class EmojiSenderService(BaseService):
             "emotion_tags": filtered_tags,
         }
 
+    async def recognize_emoji(
+        self,
+        base64_data: str,
+    ) -> dict[str, Any] | None:
+        """识别用户发送的表情包（支持 GIF 动态表情包）。
+
+        对 GIF 表情包会提取多帧拼接成网格图，让 VLM 综合所有帧内容进行描述。
+
+        Args:
+            base64_data: base64 编码的表情包数据（可带 data:image/xxx;base64, 前缀）
+
+        Returns:
+            识别结果字典，包含：
+            - description: 表情包描述
+            - emotion_tags: 情感标签列表
+            - is_gif: 是否为 GIF 动图
+            若识别失败返回 None
+        """
+        try:
+            model_set = get_model_set_by_task("vlm")
+        except Exception:
+            logger.debug("未配置 VLM 任务模型，跳过识别")
+            return None
+
+        clean_base64 = self._extract_clean_base64(base64_data)
+        try:
+            image_bytes = base64.b64decode(clean_base64)
+        except Exception as e:
+            logger.warning(f"base64 解码失败: {e}")
+            return None
+
+        mime = self._detect_mime_from_bytes(image_bytes)
+        is_gif = mime == "image/gif"
+
+        try:
+            vlm_bytes, vlm_mime, is_gif_collage = self._compress_image_for_vlm(
+                image_bytes, mime, max_size_mb=5.0
+            )
+        except Exception as e:
+            logger.warning(f"压缩图片失败: {e}")
+            return None
+
+        vlm_base64 = base64.b64encode(vlm_bytes).decode("utf-8")
+
+        persona = self._build_persona_prompt()
+        tag_list = "、".join(EMOTION_TAG_PRESET)
+
+        gif_hint = (
+            "注意：这是一个 GIF 动图表情包的关键帧截图（网格排列），请综合所有帧的内容进行描述，包括动态效果和动作。\n"
+            if is_gif_collage else ""
+        )
+
+        prompt = (
+            "你将看到一张表情包图片。请仔细观察并描述它的内容。\n"
+            + gif_hint
+            + "你必须输出严格 JSON（不要输出任何额外文字），格式如下：\n"
+            '{"description": "描述内容，文字：\'图中文字\'", "emotion_tags": ["标签1", "标签2"]}\n\n'
+            "description 要求（文字部分不计入字数限制）：\n"
+            "- 概括表情包传达的核心情绪、氛围和画面主要特征\n"
+            "- 如果是动图，描述动态效果和动作变化\n"
+            "- 准确复述图中所有文字，格式为：文字：'逐字抄录'，放在末尾\n"
+            "- 如果确保认出表情包的具体来源（作品名、角色名等），请补充说明\n"
+            "- 无法确定出处则省略，只做客观描述\n"
+            "- 总体 60 字以内（不计图中文字）\n"
+            "- 无文字则省略文字部分\n\n"
+            "emotion_tags：从预设标签中选择最合适的（可多选）\n"
+            "预设标签：" + tag_list + "\n\n"
+            "人设（来自主配置）：\n" + persona
+        )
+
+        from src.kernel.llm import Image, LLMContextManager, LLMPayload, ROLE, Text
+
+        context_manager = LLMContextManager(max_payloads=2)
+        request = create_llm_request(
+            model_set=model_set,
+            request_name="emoji_recognize",
+            context_manager=context_manager,
+        )
+
+        image_value = f"data:{vlm_mime};base64,{vlm_base64}"
+        request.add_payload(LLMPayload(ROLE.USER, [Text(prompt), Image(image_value)]))
+
+        try:
+            response = await request.send(stream=False)
+            await response
+        except Exception as e:
+            logger.warning(f"VLM 识别失败: {e}")
+            return None
+
+        raw = (response.message or "").strip()
+        obj = self._extract_json_object(raw)
+        if obj is None:
+            logger.warning("VLM 输出无法解析为 JSON")
+            return None
+
+        description = str(obj.get("description") or "").strip()
+        tags = obj.get("emotion_tags")
+        if not isinstance(tags, list):
+            tags = []
+
+        filtered_tags = [
+            str(t).strip() for t in tags if isinstance(t, (str, int, float)) and str(t).strip() in EMOTION_TAG_PRESET
+        ]
+
+        if len(description) > 300:
+            description = description[:297] + "..."
+
+        return {
+            "description": description,
+            "emotion_tags": filtered_tags,
+            "is_gif": is_gif,
+        }
+
+    @staticmethod
+    def _extract_clean_base64(base64_data: str) -> str:
+        """从 base64 数据中提取纯净的 base64 内容。
+
+        支持带 data:image/xxx;base64, 前缀的格式。
+        """
+        if base64_data.startswith("data:"):
+            comma_idx = base64_data.find(",")
+            if comma_idx != -1:
+                return base64_data[comma_idx + 1 :]
+        return base64_data
+
+    @staticmethod
+    def _detect_mime_from_bytes(data: bytes) -> str:
+        """根据文件头判断 MIME 类型。"""
+        if len(data) < 4:
+            return "image/png"
+
+        if data[:6] == b"GIF87a" or data[:6] == b"GIF89a":
+            return "image/gif"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            return "image/png"
+        elif data[:2] == b"\xff\xd8":
+            return "image/jpeg"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return "image/webp"
+
+        return "image/png"
+
     async def ingest_once(self) -> None:
         """执行一次入库任务。
 
