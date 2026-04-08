@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.core.config.core_config import CoreConfig, get_core_config, init_core_config
+from src.kernel.llm.policy import RoundRobinPolicy, create_default_policy, set_default_policy_factory
 
 
 class TestChatSection:
@@ -28,6 +29,22 @@ class TestChatSection:
 
         assert config.default_chat_mode == "focus"
         assert config.max_context_size == 200
+
+
+class TestLLMSection:
+    """测试 LLM 配置节。"""
+
+    def test_default_llm_config(self):
+        """测试默认 LLM 配置。"""
+        config = CoreConfig.LLMSection()
+
+        assert config.default_policy == "load_balanced"
+
+    def test_custom_llm_config(self):
+        """测试自定义 LLM 配置。"""
+        config = CoreConfig.LLMSection(default_policy="round_robin")
+
+        assert config.default_policy == "round_robin"
 
 
 class TestDatabaseSection:
@@ -147,6 +164,7 @@ class TestCoreConfig:
         config = CoreConfig()
 
         assert isinstance(config.chat, CoreConfig.ChatSection)
+        assert isinstance(config.llm, CoreConfig.LLMSection)
         assert isinstance(config.database, CoreConfig.DatabaseSection)
         assert isinstance(config.permissions, CoreConfig.PermissionSection)
 
@@ -189,6 +207,7 @@ class TestCoreConfig:
                 default_chat_mode="priority",
                 max_context_size=200,
             ),
+            llm=CoreConfig.LLMSection(default_policy="round_robin"),
             database=CoreConfig.DatabaseSection(database_type="postgresql"),
             permissions=CoreConfig.PermissionSection(
                 owner_list=["qq:123", "telegram:456"],
@@ -199,6 +218,7 @@ class TestCoreConfig:
         )
 
         assert config.chat.default_chat_mode == "priority"
+        assert config.llm.default_policy == "round_robin"
         assert config.database.database_type == "postgresql"
         assert len(config.permissions.owner_list) == 2
 
@@ -234,6 +254,9 @@ class TestGlobalCoreConfig:
 default_chat_mode = "focus"
 max_context_size = 150
 
+[llm]
+default_policy = "round_robin"
+
 [database]
 database_type = "postgresql"
 
@@ -247,9 +270,12 @@ allow_operator_promotion = true
             config = init_core_config(str(config_file))
             assert config.chat.default_chat_mode == "focus"
             assert config.chat.max_context_size == 150
+            assert config.llm.default_policy == "round_robin"
             assert config.database.database_type == "postgresql"
             assert len(config.permissions.owner_list) == 2
+            assert isinstance(create_default_policy(), RoundRobinPolicy)
         finally:
+            set_default_policy_factory(None)
             core_config_module._global_config = original_config
 
     def test_get_core_config_before_init_raises(self):

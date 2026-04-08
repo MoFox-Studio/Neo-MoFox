@@ -9,7 +9,7 @@ from typing import Any, Self
 from .exceptions import LLMConfigurationError, classify_exception
 from .model_client import ModelClientRegistry
 from .monitor import RequestMetrics, RequestTimer, get_global_collector
-from .policy import RoundRobinPolicy
+from .policy import create_default_policy
 from .policy.base import Policy
 from .request import _validate_model_entry, _validate_model_set
 from .types import ModelSet, RequestType
@@ -30,7 +30,7 @@ class EmbeddingRequest:
 
     def __post_init__(self) -> None:
         if self.policy is None:
-            self.policy = RoundRobinPolicy()
+            self.policy = create_default_policy()
         if self.clients is None:
             self.clients = ModelClientRegistry()
 

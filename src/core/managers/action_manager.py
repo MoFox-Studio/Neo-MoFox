@@ -16,6 +16,7 @@ from src.kernel.concurrency import get_task_manager
 from src.core.components.registry import get_global_registry
 from src.core.components.types import ChatType, ComponentType
 from src.core.components.utils import should_strip_auto_reason_argument
+from src.core.managers.stream_manager import get_stream_manager
 
 if TYPE_CHECKING:
     from src.core.components.base.action import BaseAction
@@ -250,8 +251,6 @@ class ActionManager:
             raise ValueError(f"Action 类未找到: {signature}")
 
         # 获取或创建 ChatStream（使用 StreamManager）
-        from src.core.managers.stream_manager import get_stream_manager
-
         stream_manager = get_stream_manager()
         chat_stream = await stream_manager.activate_stream(message.stream_id)
 

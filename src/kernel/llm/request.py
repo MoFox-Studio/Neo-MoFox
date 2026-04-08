@@ -24,7 +24,7 @@ from .exceptions import LLMConfigurationError, classify_exception
 from .model_client import ModelClientRegistry
 from .monitor import RequestMetrics, RequestTimer, get_global_collector
 from .payload import LLMPayload, Text, ToolResult
-from .policy import RoundRobinPolicy
+from .policy import create_default_policy
 from .policy.base import Policy
 from .response import LLMResponse
 from .roles import ROLE
@@ -93,7 +93,7 @@ class LLMRequest:
         if self.payloads is None:
             self.payloads = []
         if self.policy is None:
-            self.policy = RoundRobinPolicy()
+            self.policy = create_default_policy()
         if self.clients is None:
             self.clients = ModelClientRegistry()
         if self.context_manager is None:

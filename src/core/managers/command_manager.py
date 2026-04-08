@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 
-from src.core.components.types import ComponentType
+from src.core.components.types import ComponentType, parse_signature
 from src.core.components.registry import get_global_registry
+from src.core.managers.permission_manager import get_permission_manager
+from src.core.managers.plugin_manager import get_plugin_manager
 
 if TYPE_CHECKING:
     from src.core.components.base.command import BaseCommand
@@ -201,8 +203,6 @@ class CommandManager:
             return False, "命令未注册"
 
         # ========== 权限检查 ==========
-        from src.core.managers.permission_manager import get_permission_manager
-
         perm_manager = get_permission_manager()
         person_id = perm_manager.generate_person_id(message.platform, message.sender_id)
 
@@ -220,9 +220,6 @@ class CommandManager:
             return False, f"权限不足：{perm_reason}"
 
         # ========== 命令执行 ==========
-        from src.core.managers import get_plugin_manager
-        from src.core.components.types import parse_signature
-
         sig_info = parse_signature(signature)
         plugin_manager = get_plugin_manager()
         plugin = plugin_manager.get_plugin(sig_info["plugin_name"])
@@ -289,9 +286,6 @@ class CommandManager:
             return f"命令未找到: {signature}"
 
         # 获取 plugin 实例以创建临时 Command 实例
-        from src.core.managers import get_plugin_manager
-        from src.core.components.types import parse_signature
-
         sig_info = parse_signature(signature)
         plugin_manager = get_plugin_manager()
         plugin = plugin_manager.get_plugin(sig_info["plugin_name"])

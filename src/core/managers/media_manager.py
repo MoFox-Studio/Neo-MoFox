@@ -23,8 +23,16 @@ import hashlib
 import time
 from pathlib import Path
 from typing import Any
+from sqlalchemy import select
 
 from src.kernel.logger import get_logger
+from src.app.plugin_system.api.llm_api import get_model_set_by_task, create_llm_request
+from src.core.prompt import PromptTemplate, get_prompt_manager
+from src.core.config import get_core_config
+from src.kernel.scheduler import get_unified_scheduler, TriggerType
+from src.kernel.db.core.session import get_db_session
+from src.core.models.sql_alchemy import Images, ImageDescriptions
+from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
 
 logger = get_logger("media_manager")
 
@@ -62,8 +70,6 @@ class MediaManager:
     def _initialize_vlm(self) -> None:
         """初始化 VLM 模型配置。"""
         try:
-            from src.app.plugin_system.api.llm_api import get_model_set_by_task
-
             self._vlm_model_set = get_model_set_by_task("vlm")
             self._vlm_available = self._vlm_model_set is not None
             
@@ -77,12 +83,9 @@ class MediaManager:
     def _register_prompts(self) -> None:
         """注册媒体识别相关的提示词模板。"""
         try:
-            from src.core.prompt import PromptTemplate, get_prompt_manager
-            
             manager = get_prompt_manager()
             
             # 注册图片识别提示词
-            from src.core.config import get_core_config
             custom_prompt = get_core_config().chat.image_recognition_prompt
             default_template = "描述这张图片的内容，包含主题、主要元素。若有文字或代码，完整转述。"
             image_prompt = PromptTemplate(
@@ -135,8 +138,6 @@ class MediaManager:
     async def _register_cleanup_task(self) -> None:
         """注册定时清理任务到调度器。"""
         try:
-            from src.kernel.scheduler import get_unified_scheduler, TriggerType
-            
             scheduler = get_unified_scheduler()
             
             # 创建周期性清理任务（每5分钟 = 300秒）
@@ -346,13 +347,11 @@ class MediaManager:
             vlm_processed: 是否已经过 VLM 处理
         """
         try:
-            from src.kernel.db.core.session import get_db_session
-            from src.core.models.sql_alchemy import Images
-
+            from sqlalchemy import select
+            
             async with get_db_session() as session:
                 # 查找现有记录（使用 image_id 作为唯一标识）
                 # 这里使用 scalars().first() 来避免数据库中存在多条重复记录导致的 MultipleResultsFound 错误
-                from sqlalchemy import select
                 stmt = (
                     select(Images)
                     .where(Images.image_id == media_hash)
@@ -399,13 +398,10 @@ class MediaManager:
             媒体信息字典，不存在返回 None
         """
         try:
-            from src.kernel.db.core.session import get_db_session
-            from src.core.models.sql_alchemy import Images
             from sqlalchemy import select
 
             async with get_db_session() as session:
                 # 如果存在多条重复记录，取最新一条返回
-                from sqlalchemy import select
                 stmt = (
                     select(Images)
                     .where(Images.image_id == media_hash)
@@ -452,9 +448,6 @@ class MediaManager:
         """
         try:
             from src.app.plugin_system.api.llm_api import create_llm_request
-            from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
-            from src.core.prompt import get_prompt_manager
-            
             
             # 检查 VLM 模型是否可用
             if not self._vlm_model_set:
@@ -522,8 +515,6 @@ class MediaManager:
             缓存的描述，不存在返回 None
         """
         try:
-            from src.kernel.db.core.session import get_db_session
-            from src.core.models.sql_alchemy import ImageDescriptions
             from sqlalchemy import select
 
             async with get_db_session() as session:
@@ -555,13 +546,10 @@ class MediaManager:
             description: 描述文本
         """
         try:
-            from src.kernel.db.core.session import get_db_session
-            from src.core.models.sql_alchemy import ImageDescriptions
             from sqlalchemy import select
 
             async with get_db_session() as session:
                 # 检查是否已存在（避免重复记录导致 MultipleResultsFound）
-                from sqlalchemy import select
                 stmt = (
                     select(ImageDescriptions)
                     .where(

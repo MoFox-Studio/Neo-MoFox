@@ -3,6 +3,8 @@
 定义 core 层所需的配置项，使用 kernel/config 的配置系统。
 """
 
+from typing import Literal
+
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
 
 CORE_VERSION = "1.0.0"
@@ -114,6 +116,20 @@ class CoreConfig(ConfigBase):
             description="自定义识图提示词，留空则使用内置默认提示词",
         )
     chat: ChatSection = Field(default_factory=ChatSection)
+
+    @config_section("llm")
+    class LLMSection(SectionBase):
+        """LLM 配置节。
+
+        定义 LLM 运行时的全局行为，例如默认模型调度策略。
+        """
+
+        default_policy: Literal["load_balanced", "round_robin"] = Field(
+            default="load_balanced",
+            description="默认模型调度策略，可选 load_balanced 或 round_robin",
+        )
+
+    llm: LLMSection = Field(default_factory=LLMSection)
 
     @config_section("personality")
     class PersonalitySection(SectionBase):
@@ -392,6 +408,13 @@ class CoreConfig(ConfigBase):
 _global_config: CoreConfig | None = None
 
 
+def _inject_kernel_llm_policy(config: CoreConfig) -> None:
+    """将 core 层默认 LLM policy 注入到 kernel。"""
+    from src.kernel.llm.policy import create_policy, set_default_policy_factory
+
+    set_default_policy_factory(lambda: create_policy(config.llm.default_policy))
+
+
 def get_core_config() -> CoreConfig:
     """获取全局 Core 配置实例
 
@@ -451,6 +474,7 @@ def init_core_config(config_path: str) -> CoreConfig:
         path.write_text(toml_content, encoding="utf-8")
 
     _global_config = CoreConfig.load(config_path, auto_update=True)
+    _inject_kernel_llm_policy(_global_config)
 
     return _global_config
 

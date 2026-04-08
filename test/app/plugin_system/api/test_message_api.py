@@ -19,10 +19,10 @@ async def test_get_messages_by_time_in_chat_invalid_stream_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_messages_by_time_in_chat_applies_filter_mai(
+async def test_get_messages_by_time_in_chat_applies_filter_bot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """开启 filter_mai 时应使用 Bot 消息过滤。"""
+    """开启 filter_bot 时应使用 Bot 消息过滤。"""
 
     async def fake_query_messages(**_: object) -> list[dict[str, object]]:
         return [
@@ -30,19 +30,19 @@ async def test_get_messages_by_time_in_chat_applies_filter_mai(
             {"sender_id": "user1", "time": 2.0},
         ]
 
-    async def fake_apply_filter_mai(
+    async def fake_apply_filter_bot(
         messages: list[dict[str, object]],
     ) -> list[dict[str, object]]:
         return [m for m in messages if m.get("sender_id") != "bot"]
 
     monkeypatch.setattr(message_api, "_query_messages", fake_query_messages)
-    monkeypatch.setattr(message_api, "_apply_filter_mai", fake_apply_filter_mai)
+    monkeypatch.setattr(message_api, "_apply_filter_bot", fake_apply_filter_bot)
 
     result = await message_api.get_messages_by_time_in_chat(
         stream_id="stream_1",
         start_time=1.0,
         end_time=3.0,
-        filter_mai=True,
+        filter_bot=True,
     )
 
     assert result == [{"sender_id": "user1", "time": 2.0}]

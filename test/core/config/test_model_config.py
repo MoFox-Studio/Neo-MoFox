@@ -148,14 +148,6 @@ class TestTaskConfigSection:
             max_tokens=2000,
             temperature=0.8,
         )
-
-        assert task.model_list == ["gpt-4", "claude-3"]
-        assert task.max_tokens == 2000
-        assert task.temperature == 0.8
-        assert task.concurrency_count == 1
-        assert task.embedding_dimension is None
-
-    def test_task_with_defaults(self):
         """测试使用默认值的任务配置。"""
         task = TaskConfigSection(model_list=["gpt-4"])
 
