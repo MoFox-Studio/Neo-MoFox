@@ -147,7 +147,7 @@ class SendTextAction(BaseAction):
     """发送文本消息"""
 
     action_name = "send_text"
-    action_description = "发送一段文本消息给用户。你可以一次调用多个 send_text 来分多段回复，但每次调用必须提供你想说的话的文本内容，不要添加任何标记或格式，只写纯文本即可。你也可以选择引用或回复之前某条消息作为背景，使用 reply_to 参数指定；若不引用消息，可用 at 参数指定要@的对象。注意：本工具无法发送表情包等非文本内容。"
+    action_description = "发送一段文本消息给用户。你可以一次调用多个 send_text 来分多段回复，但每次调用必须提供你想说的话的文本内容，不要添加任何标记或格式，只写纯文本即可。你也可以选择引用或回复之前某条消息作为背景，使用 reply_to 参数指定；若不引用消息，可用 at 参数指定要@的对象。注意：本工具无法发送表情包等非文本内容。所有@对象都应该通过at参数而不是直接写在文本里，以确保正确解析和发送。"
 
     chatter_allow: list[str] = ["default_chatter"]
 
@@ -162,7 +162,7 @@ class SendTextAction(BaseAction):
         Args:
             content: 要发送的文本内容，不用添加标记，只写你想说的话即可
             reply_to: 可选，要引用回复的目标消息 ID。若指定此参数，发送的消息将作为对该消息的回复
-            at: 可选，不使用 reply_to 时指定要 @ 的对象（用户 ID、昵称或群名片）
+            at: 可选，不使用 reply_to 时指定要 @ 的对象（用户 ID）
         """
         import re
         from src.core.models.message import Message
