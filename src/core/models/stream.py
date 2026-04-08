@@ -25,7 +25,6 @@ class StreamContext:
     Attributes:
         stream_id: 聊天流唯一标识符
         chat_type: 聊天类型（private/group/discuss）
-        chat_mode: 聊天模式（focus/normal/proactive/priority）
         max_context_size: 最大上下文大小
         unread_messages: 未读消息列表
         history_messages: 历史消息列表
