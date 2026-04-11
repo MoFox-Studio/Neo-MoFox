@@ -133,3 +133,28 @@ def test_registry_openai_none_raises_error():
 
     with pytest.raises(LLMConfigurationError, match="OpenAI client 未配置"):
         registry.get_client_for_model(model)
+
+
+def test_registry_get_asr_client_for_model():
+    """测试 get_asr_client_for_model 返回支持 ASR 的 client。"""
+    registry = ModelClientRegistry()
+    model = {"client_type": "openai", "api_key": "sk-test"}
+
+    client = registry.get_asr_client_for_model(model)
+
+    assert hasattr(client, "create_transcription")
+
+
+def test_registry_get_asr_client_raises_when_not_supported():
+    """测试 client 不支持 ASR 时抛出异常。"""
+    from unittest.mock import MagicMock
+
+    registry = ModelClientRegistry()
+    # 替换 openai client 为不支持 create_transcription 的 mock
+    mock_client = MagicMock(spec=[])  # spec=[] 表示无任何属性
+    registry.openai = mock_client  # type: ignore[assignment]
+
+    model = {"client_type": "openai", "api_key": "sk-test"}
+
+    with pytest.raises(LLMConfigurationError, match="不支持 ASR"):
+        registry.get_asr_client_for_model(model)

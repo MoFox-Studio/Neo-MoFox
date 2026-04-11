@@ -63,3 +63,16 @@ class RerankModelClient(Protocol):
     ) -> list[dict[str, Any]]:
         """发起 rerank 请求并返回排序结果。"""
         ...
+
+
+class ASRModelClient(Protocol):
+    async def create_transcription(
+        self,
+        *,
+        model_name: str,
+        audio_bytes: bytes,
+        request_name: str,
+        model_set: Any,
+    ) -> str:
+        """发起语音转文字请求并返回识别结果。"""
+        ...

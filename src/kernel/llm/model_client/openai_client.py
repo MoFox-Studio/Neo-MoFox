@@ -1101,3 +1101,51 @@ class OpenAIChatClient:
         raise LLMConfigurationError(
             f"当前 SDK 客户端不支持原生 rerank 接口，模型：{model_name}"
         )
+
+    async def create_transcription(
+        self,
+        *,
+        model_name: str,
+        audio_bytes: bytes,
+        request_name: str,
+        model_set: Any,
+    ) -> str:
+        """发起语音转文字请求（OpenAI audio/transcriptions 接口）。
+
+        Args:
+            model_name: ASR 模型名称。
+            audio_bytes: WAV 格式的音频字节数据。
+            request_name: 请求名称，用于追踪，此处不使用。
+            model_set: 单个模型配置 dict。
+
+        Returns:
+            识别出的文字内容。
+
+        Raises:
+            TypeError: model_set 不是 dict 时抛出。
+            ValueError: api_key 为空或 extra_params 非 dict 时抛出。
+        """
+        import io
+
+        del request_name
+
+        if not isinstance(model_set, dict):
+            raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
+
+        api_key, base_url, timeout, trust_env, force_ipv4, _ = (
+            self._extract_model_params(model_set)
+        )
+        client = self._get_client(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            trust_env=trust_env,
+            force_ipv4=force_ipv4,
+        )
+
+        resp = await client.audio.transcriptions.create(
+            model=model_name,
+            file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
+        )
+        text = getattr(resp, "text", None)
+        return text if isinstance(text, str) else str(resp)

@@ -27,6 +27,7 @@ from sqlalchemy import select
 
 from src.kernel.logger import get_logger
 from src.app.plugin_system.api.llm_api import get_model_set_by_task, create_llm_request
+from src.kernel.llm.model_client.registry import ModelClientRegistry
 from src.core.prompt import PromptTemplate, get_prompt_manager
 from src.core.config import get_core_config
 from src.kernel.scheduler import get_unified_scheduler, TriggerType
@@ -62,6 +63,7 @@ class MediaManager:
         self._vlm_model_set = None
         self._skip_vlm_stream_ids: set[str] = set()  # 已注册跳过 VLM 识别的聊天流 ID
         self._initialize_vlm()
+        self._initialize_asr()
         self._register_prompts()
         self._setup_media_folders()
         self._cleanup_task_id = None
@@ -79,6 +81,21 @@ class MediaManager:
                 logger.info("未配置 VLM 模型，媒体识别功能不可用")
         except Exception as e:
             logger.error(f"初始化 VLM 模型失败: {e}")
+
+    def _initialize_asr(self) -> None:
+        """初始化 ASR 模型配置。"""
+        try:
+            self._asr_model_set = get_model_set_by_task("voice")
+            self._asr_available = self._asr_model_set is not None
+
+            if self._asr_available:
+                logger.info("ASR 模型已加载，语音识别功能可用")
+            else:
+                logger.info("未配置 ASR 模型，语音识别功能不可用")
+        except Exception as e:
+            self._asr_model_set = None
+            self._asr_available = False
+            logger.error(f"初始化 ASR 模型失败: {e}")
 
     def _register_prompts(self) -> None:
         """注册媒体识别相关的提示词模板。"""
@@ -301,6 +318,24 @@ class MediaManager:
             logger.error(f"识别{media_type}失败: {e}", exc_info=True)
             return None
 
+    async def recognize_voice(self, audio_base64: str) -> str | None:
+        """使用 ASR 识别语音内容。
+
+        Args:
+            audio_base64: base64 编码的 WAV 音频数据。
+
+        Returns:
+            识别出的文字，失败返回 None。
+        """
+        try:
+            if not self._asr_available or not self._asr_model_set:
+                logger.debug("ASR 模型不可用")
+                return None
+            return await self._recognize_with_asr(audio_base64)
+        except Exception as e:
+            logger.error(f"语音识别失败: {e}", exc_info=True)
+            return None
+
     async def recognize_batch(
         self,
         media_list: list[tuple[str, str]],
@@ -494,6 +529,41 @@ class MediaManager:
 
         except Exception as e:
             logger.error(f"VLM 识别失败: {e}", exc_info=True)
+            return None
+
+    async def _recognize_with_asr(self, audio_base64: str) -> str | None:
+        """调用 ASR 客户端执行语音转文字。
+
+        Args:
+            audio_base64: base64 编码的 WAV 音频数据。
+
+        Returns:
+            识别出的文字，失败返回 None。
+        """
+        try:
+            registry = ModelClientRegistry()
+            model_set = self._asr_model_set
+            # model_set 是 list[dict]，每个元素即一个 ModelEntry
+            if not isinstance(model_set, list) or not model_set:
+                logger.debug("ASR model_set 中无可用模型")
+                return None
+
+            model_entry = model_set[0]
+            client = registry.get_asr_client_for_model(model_entry)
+            model_name = model_entry.get("model_identifier") if isinstance(model_entry, dict) else str(model_entry)
+
+            clean_b64 = self._extract_clean_base64(audio_base64)
+            audio_bytes = base64.b64decode(clean_b64)
+
+            text = await client.create_transcription(
+                model_name=model_name,
+                audio_bytes=audio_bytes,
+                request_name="voice_recognition",
+                model_set=model_entry,
+            )
+            return text.strip() if text else None
+        except Exception as e:
+            logger.error(f"ASR 请求失败: {e}", exc_info=True)
             return None
 
     async def _get_cached_description(
