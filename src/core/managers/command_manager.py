@@ -229,7 +229,7 @@ class CommandManager:
 
         # 创建 Command 实例并执行
         try:
-            command_instance = command_cls(plugin=plugin,stream_id=message.stream_id)
+            command_instance = command_cls(plugin=plugin, stream_id=message.stream_id, message_id=message.message_id)
             routed_text = self._extract_routed_text(command_text, command_path)
             # 传入 stream_id 以便命令可以访问聊天流信息
             result = await command_instance.execute(

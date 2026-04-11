@@ -78,14 +78,17 @@ class BaseCommand(ABC):
     # 组件级依赖（精确到组件签名）
     dependencies: list[str] = []  # 例如 ["other_plugin:service:config"]
 
-    def __init__(self, plugin: "BasePlugin",stream_id: str ) -> None:
+    def __init__(self, plugin: "BasePlugin", stream_id: str, message_id: str = "") -> None:
         """初始化命令组件。
 
         Args:
             plugin: 所属插件实例
+            stream_id: 聊天流 ID
+            message_id: 触发命令的消息 ID（可选，用于回复）
         """
         self.plugin = plugin
         self.stream_id = stream_id
+        self.message_id = message_id
         self._root = CommandNode(name="root")
         self._build_command_tree()
 

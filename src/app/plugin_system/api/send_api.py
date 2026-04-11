@@ -49,7 +49,8 @@ async def send_image(
     image_data: str,
     stream_id: str,
     platform: str | None = None,
-    processed_plain_text = "[图片]",
+    processed_plain_text: str = "[图片]",
+    reply_to: str | None = None,
 ) -> bool:
     """发送图片消息
 
@@ -57,12 +58,15 @@ async def send_image(
         image_data: 图片数据（base64 或 URL）
         stream_id: 聊天流 ID
         platform: 平台名称（可选）
+        processed_plain_text: 人类可读文本（可选）
+        reply_to: 要回复的消息 ID（可选）
 
     Returns:
         是否发送成功
 
     Example:
         success = await send_image(base64_image, "qq_group_123456")
+        success = await send_image(base64_image, "qq_group_123456", reply_to="msg_id_123")
     """
     return await _send_message(
         content=image_data,
@@ -70,6 +74,7 @@ async def send_image(
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
+        reply_to=reply_to,
     )
 
 
