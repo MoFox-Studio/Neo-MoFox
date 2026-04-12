@@ -200,6 +200,25 @@ class PluginManager:
                 logger.error(
                     f"调用插件 '{plugin_name}' 的 on_plugin_unloaded 钩子时出错: {e}"
                 )
+
+            # 触发插件卸载事件
+            from src.core.components.types import EventType
+            from src.kernel.event import get_event_bus
+
+            manifest = self._manifests.get(plugin_name)
+            try:
+                await get_event_bus().publish(
+                    EventType.ON_PLUGIN_UNLOADED,
+                    {
+                        "plugin_name": plugin_name,
+                        "manifest": manifest,
+                    },
+                )
+            except Exception as event_error:
+                logger.warning(
+                    f"触发 ON_PLUGIN_UNLOADED 事件失败 '{plugin_name}': {event_error}"
+                )
+
             from src.core.components.state_manager import get_global_state_manager
             from src.core.components.types import (
                 ComponentState,
@@ -301,6 +320,23 @@ class PluginManager:
             except Exception as e:
                 logger.warning(f"注销组件失败 '{signature}': {e}")
                 continue
+
+            # 触发组件卸载事件
+            from src.core.components.types import EventType
+            from src.kernel.event import get_event_bus
+
+            try:
+                await get_event_bus().publish(
+                    EventType.ON_COMPONENT_UNLOADED,
+                    {
+                        "signature": signature,
+                        "plugin_name": plugin_name,
+                    },
+                )
+            except Exception as event_error:
+                logger.warning(
+                    f"触发 ON_COMPONENT_UNLOADED 事件失败 '{signature}': {event_error}"
+                )
 
             try:
                 await state_manager.set_state_async(signature, ComponentState.UNLOADED)
@@ -647,6 +683,26 @@ class PluginManager:
                 # 设置组件元数据属性，供其他管理器反向查找
                 component_cls._signature_ = signature
                 component_cls._plugin_ = plugin_name
+
+                # 触发组件加载事件
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                try:
+                    await get_event_bus().publish(
+                        EventType.ON_COMPONENT_LOADED,
+                        {
+                            "signature": signature,
+                            "plugin_name": plugin_name,
+                            "component_type": component_type.value,
+                            "component_name": component_name,
+                            "component_class": component_cls,
+                        },
+                    )
+                except Exception as event_error:
+                    logger.warning(
+                        f"触发 ON_COMPONENT_LOADED 事件失败 '{signature}': {event_error}"
+                    )
 
                 # 设置组件状态
                 await state_manager.set_state_async(signature, ComponentState.ACTIVE)

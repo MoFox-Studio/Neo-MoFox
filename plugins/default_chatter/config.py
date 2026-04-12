@@ -40,6 +40,29 @@ class DefaultChatterConfig(BaseConfig):
                 order=1
             )
 
+        @config_section("custom_prompt", title="自定义提示词", tag="text", order=11)
+        class CustomPromptSection(SectionBase):
+            """用户自定义的按聊天类型区分的额外提示词，默认为空。"""
+
+            private: str = Field(
+                default="",
+                description="私聊场景的自定义额外提示词，留空则不注入",
+                label="私聊自定义提示",
+                input_type="textarea",
+                rows=3,
+                tag="text",
+                order=0,
+            )
+            group: str = Field(
+                default="",
+                description="群聊场景的自定义额外提示词，留空则不注入",
+                label="群聊自定义提示",
+                input_type="textarea",
+                rows=3,
+                tag="text",
+                order=1,
+            )
+
         enabled: bool = Field(
             default=True,
             description="是否启用 DefaultChatter",
@@ -78,6 +101,12 @@ class DefaultChatterConfig(BaseConfig):
             description="按聊天类型区分的额外提示词",
             label="场景引导配置",
             order=4
+        )
+        custom_prompt: CustomPromptSection = Field(
+            default_factory=CustomPromptSection,
+            description="用户自定义的按聊天类型区分的额外提示词",
+            label="自定义提示词配置",
+            order=5,
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)
