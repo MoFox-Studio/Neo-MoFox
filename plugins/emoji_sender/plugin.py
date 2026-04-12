@@ -15,6 +15,7 @@ from src.kernel.logger import get_logger
 
 from .action import SendEmojiMemeAction
 from .config import EmojiSenderConfig
+from .recognize_action import RecognizeEmojiAction
 from .service import EmojiSenderService
 
 
@@ -81,7 +82,7 @@ class EmojiSenderPlugin(BasePlugin):
 
     def get_components(self) -> list[type]:
         """返回本插件提供的组件类。"""
-        return [EmojiSenderService, SendEmojiMemeAction]
+        return [EmojiSenderService, SendEmojiMemeAction, RecognizeEmojiAction]
 
     async def on_plugin_loaded(self) -> None:
         """插件加载完成后：初始化配置并注册周期任务。"""

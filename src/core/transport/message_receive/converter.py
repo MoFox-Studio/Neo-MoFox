@@ -137,7 +137,10 @@ class MessageConverter:
             if self._should_skip_vlm_for_stream(stream_id):
                 logger.debug(f"聊天流 {stream_id[:8]} 已注册跳过 VLM 识别，保留原始媒体数据")
             else:
-                result = await self._recognize_media_with_manager(result)
+                # 判断是否为群聊（存在 group_info 且不为空即群聊）
+                group_info = message_info.get("group_info")
+                is_group_chat = group_info is not None and group_info != {}
+                result = await self._recognize_media_with_manager(result, is_group_chat)
 
         # 确定消息类型
         # 根据最终解析结果决定消息类型，比如 TEXT/IMAGE 等
@@ -575,11 +578,12 @@ class MessageConverter:
 
         return type_mapping.get(first_media_type, MessageType.UNKNOWN)
 
-    async def _recognize_media_with_manager(self, result: _ParseResult) -> _ParseResult:
+    async def _recognize_media_with_manager(self, result: _ParseResult, is_group_chat: bool) -> _ParseResult:
         """使用 MediaManager 识别媒体内容（图片、表情包）并更新文本描述。
         
         Args:
             result: 解析结果
+            is_group_chat: 是否为群聊消息
             
         Returns:
             更新后的解析结果
