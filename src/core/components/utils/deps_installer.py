@@ -256,6 +256,10 @@ class DependencyInstaller:
             installed_version_str = meta.version(req.name)
         except meta.PackageNotFoundError:
             return False
+        except (TypeError, KeyError):
+            # 包的 METADATA 文件损坏或缺少 Version 字段，视为未安装
+            logger.warning(f"包 {req.name!r} 的元数据损坏，将尝试重新安装")
+            return False
 
         if not req.specifier:
             return True
