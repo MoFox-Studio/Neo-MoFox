@@ -741,3 +741,115 @@ class TestLLMRequestSend:
 
         with pytest.raises(LLMRateLimitError):
             await request.send(stream=False)
+
+
+# ============================================================================
+# Error Logging Level Tests
+# ============================================================================
+
+
+class TestLLMRequestErrorLogging:
+    """Test that per-attempt errors are logged at the correct level."""
+
+    @staticmethod
+    def _no_retry_model_set(mock_model_set: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Return a single-model set with max_retry=0 for immediate failure."""
+        return [{**mock_model_set[0], "max_retry": 0}]
+
+    @pytest.mark.asyncio
+    async def test_5xx_api_error_logs_warning_not_error(
+        self, mock_model_set: list[dict[str, Any]]
+    ) -> None:
+        """Test that LLMAPIError with status_code>=500 is logged as WARNING."""
+        from unittest.mock import MagicMock, patch
+
+        from src.kernel.llm.exceptions import LLMAPIError
+
+        request = LLMRequest(self._no_retry_model_set(mock_model_set), "test")
+        request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
+        request.clients.openai = MockChatClient(
+            responses=[LLMAPIError("Internal server error", status_code=500)]
+        )
+
+        mock_logger = MagicMock()
+        with patch("src.kernel.llm.request.logger", mock_logger):
+            with pytest.raises(LLMAPIError):
+                await request.send(stream=False)
+
+        # Per-attempt log must be a warning
+        assert mock_logger.warning.called, "Expected warning for transient 5xx error"
+        warning_msgs = " ".join(str(c) for c in mock_logger.warning.call_args_list)
+        assert "暂时失败" in warning_msgs, "Warning should mention transient failure"
+        # Per-attempt must NOT produce a bare 'LLM 请求失败' error
+        error_msgs = " ".join(str(c) for c in mock_logger.error.call_args_list)
+        assert "请求失败" not in error_msgs or "重试已耗尽" in error_msgs
+
+    @pytest.mark.asyncio
+    async def test_503_api_error_logs_warning_not_error(
+        self, mock_model_set: list[dict[str, Any]]
+    ) -> None:
+        """Test that LLMAPIError with status_code=503 is logged as WARNING."""
+        from unittest.mock import MagicMock, patch
+
+        from src.kernel.llm.exceptions import LLMAPIError
+
+        request = LLMRequest(self._no_retry_model_set(mock_model_set), "test")
+        request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
+        request.clients.openai = MockChatClient(
+            responses=[LLMAPIError("Service unavailable", status_code=503)]
+        )
+
+        mock_logger = MagicMock()
+        with patch("src.kernel.llm.request.logger", mock_logger):
+            with pytest.raises(LLMAPIError):
+                await request.send(stream=False)
+
+        assert mock_logger.warning.called, "Expected warning for transient 503 error"
+        warning_msgs = " ".join(str(c) for c in mock_logger.warning.call_args_list)
+        assert "暂时失败" in warning_msgs
+        error_msgs = " ".join(str(c) for c in mock_logger.error.call_args_list)
+        assert "请求失败" not in error_msgs or "重试已耗尽" in error_msgs
+
+    @pytest.mark.asyncio
+    async def test_4xx_api_error_logs_error(
+        self, mock_model_set: list[dict[str, Any]]
+    ) -> None:
+        """Test that LLMAPIError with status_code<500 is logged as ERROR."""
+        from unittest.mock import MagicMock, patch
+
+        from src.kernel.llm.exceptions import LLMAPIError
+
+        request = LLMRequest(self._no_retry_model_set(mock_model_set), "test")
+        request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
+        request.clients.openai = MockChatClient(
+            responses=[LLMAPIError("Bad request", status_code=400)]
+        )
+
+        mock_logger = MagicMock()
+        with patch("src.kernel.llm.request.logger", mock_logger):
+            with pytest.raises(LLMAPIError):
+                await request.send(stream=False)
+
+        mock_logger.error.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_api_error_without_status_code_logs_error(
+        self, mock_model_set: list[dict[str, Any]]
+    ) -> None:
+        """Test that LLMAPIError with no status_code is logged as ERROR."""
+        from unittest.mock import MagicMock, patch
+
+        from src.kernel.llm.exceptions import LLMAPIError
+
+        request = LLMRequest(self._no_retry_model_set(mock_model_set), "test")
+        request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
+        request.clients.openai = MockChatClient(
+            responses=[LLMAPIError("Unknown API error")]
+        )
+
+        mock_logger = MagicMock()
+        with patch("src.kernel.llm.request.logger", mock_logger):
+            with pytest.raises(LLMAPIError):
+                await request.send(stream=False)
+
+        mock_logger.error.assert_called()

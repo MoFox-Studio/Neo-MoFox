@@ -20,7 +20,7 @@ from src.kernel.logger import get_logger
 from src.kernel.llm.payload.tooling import LLMUsable
 
 from .context import LLMContextManager
-from .exceptions import LLMConfigurationError, classify_exception
+from .exceptions import LLMAPIError, LLMConfigurationError, LLMRateLimitError, LLMTimeoutError, classify_exception
 from .model_client import ModelClientRegistry
 from .monitor import RequestMetrics, RequestTimer, get_global_collector
 from .payload import LLMPayload, Text, ToolResult
@@ -336,11 +336,36 @@ class LLMRequest:
                 classified_error = classify_exception(e, model=model_identifier)
                 last_error = classified_error
 
-                logger.error(
-                    f"LLM 请求失败: model={model_identifier}, request={self.request_name or '__default__'}, "
-                    f"error_type={type(classified_error).__name__}, reason={classified_error}",
-                    exc_info=True,
+                _err_type = type(classified_error).__name__
+                _5xx_status_code: int | None = (
+                    classified_error.status_code
+                    if isinstance(classified_error, LLMAPIError)
+                    and isinstance(classified_error.status_code, int)
+                    and classified_error.status_code >= 500
+                    else None
                 )
+                if isinstance(classified_error, asyncio.CancelledError):
+                    logger.debug(
+                        f"LLM 请求被取消: model={model_identifier}, request={self.request_name or '__default__'}",
+                        exc_info=True,
+                    )
+                elif isinstance(classified_error, (LLMTimeoutError, LLMRateLimitError, TimeoutError)) or _5xx_status_code is not None:
+                    _status_hint = f", status_code={_5xx_status_code}" if _5xx_status_code is not None else ""
+                    logger.warning(
+                        f"LLM 请求暂时失败: model={model_identifier}, "
+                        f"request={self.request_name or '__default__'}, error_type={_err_type}{_status_hint}"
+                    )
+                    logger.debug(
+                        f"LLM 请求暂时失败（详情）: model={model_identifier}, "
+                        f"request={self.request_name or '__default__'}, reason={classified_error}",
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        f"LLM 请求失败: model={model_identifier}, request={self.request_name or '__default__'}, "
+                        f"error_type={_err_type}, reason={classified_error}",
+                        exc_info=True,
+                    )
 
                 # 记录失败指标
                 if self.enable_metrics:
