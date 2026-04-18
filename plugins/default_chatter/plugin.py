@@ -547,6 +547,11 @@ class DefaultChatter(BaseChatter):
             if isinstance(plugin_config, DefaultChatterConfig)
             else False
         )
+        debug_mode = (
+            plugin_config.plugin.debug_mode
+            if isinstance(plugin_config, DefaultChatterConfig)
+            else False
+        )
         async for result in run_enhanced(
             chatter=self,
             chat_stream=chat_stream,
@@ -556,6 +561,7 @@ class DefaultChatter(BaseChatter):
             send_text_call_name=_SEND_TEXT,
             suspend_text=_SUSPEND_TEXT,
             enable_cooldown=enable_cooldown,
+            debug_mode=debug_mode,
         ):
             yield result
 
@@ -569,6 +575,11 @@ class DefaultChatter(BaseChatter):
             if isinstance(plugin_config, DefaultChatterConfig)
             else False
         )
+        debug_mode = (
+            plugin_config.plugin.debug_mode
+            if isinstance(plugin_config, DefaultChatterConfig)
+            else False
+        )
         async for result in run_classical(
             chatter=self,
             chat_stream=chat_stream,
@@ -578,6 +589,7 @@ class DefaultChatter(BaseChatter):
             send_text_call_name=_SEND_TEXT,
             suspend_text=_SUSPEND_TEXT,
             enable_cooldown=enable_cooldown,
+            debug_mode=debug_mode,
         ):
             yield result
 

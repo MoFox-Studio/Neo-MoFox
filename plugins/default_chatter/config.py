@@ -73,11 +73,19 @@ class DefaultChatterConfig(BaseConfig):
             hint="关闭可避免因 LLM 设置过长冷却时间导致长时间无法回复",
             order=3
         )
+        debug_mode: bool = Field(
+            default=False,
+            description="调试模式：开启后将在日志（INFO 级别）中完整打印每次发往 actor 模型的提示词",
+            label="调试模式",
+            tag="performance",
+            hint="仅用于开发调试，生产环境请关闭",
+            order=4
+        )
         theme_guide: ThemeGuideSection = Field(
             default_factory=ThemeGuideSection,
             description="按聊天类型区分的额外提示词",
             label="场景引导配置",
-            order=4
+            order=5
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)

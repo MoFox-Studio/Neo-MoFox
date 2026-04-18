@@ -25,6 +25,25 @@ _PLAIN_TEXT_RETRY_REMINDER = (
 )
 
 
+def _log_request_payloads(
+    payloads: list[LLMPayload],
+    label: str,
+    logger: Logger,
+) -> None:
+    """以 INFO 级别记录 LLM 请求的完整 payload（调试模式专用，不截断）。"""
+    parts: list[str] = [f"=== {label} 完整提示词 ==="]
+    for idx, payload in enumerate(payloads):
+        role = payload.role.value if hasattr(payload.role, "value") else str(payload.role)
+        parts.append(f"--- [{idx + 1}] {role.upper()} ---")
+        for item in payload.content:
+            if isinstance(item, Text):
+                parts.append(item.text)
+            else:
+                parts.append(repr(item))
+    parts.append(f"=== END {label} ===")
+    logger.info("\n".join(parts))
+
+
 class _ToolCallWorkflowPhase(str, Enum):
     """default_chatter 的 toolcall 工作流相位（简化 FSM）。
 
@@ -97,6 +116,7 @@ async def run_enhanced(
     send_text_call_name: str,
     suspend_text: str,
     enable_cooldown: bool = False,
+    debug_mode: bool = False,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
     """enhanced 模式执行流程。"""
     try:
@@ -182,6 +202,8 @@ async def run_enhanced(
         if rt.phase in (_ToolCallWorkflowPhase.MODEL_TURN, _ToolCallWorkflowPhase.FOLLOW_UP):
             # FOLLOW_UP 阶段严禁 flush 新未读；MODEL_TURN 才 flush 本轮采纳的 unread。
             try:
+                if debug_mode:
+                    _log_request_payloads(rt.response.payloads, "actor (enhanced)", logger)
                 rt.response = await rt.response.send(stream=False)
                 await rt.response
                 if rt.phase == _ToolCallWorkflowPhase.MODEL_TURN:
@@ -265,6 +287,7 @@ async def run_classical(
     send_text_call_name: str,
     suspend_text: str,
     enable_cooldown: bool = False,
+    debug_mode: bool = False,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, None]:
     """classical 模式执行流程。"""
     try:
@@ -323,6 +346,8 @@ async def run_classical(
 
         while True:
             try:
+                if debug_mode:
+                    _log_request_payloads(response.payloads, "actor (classical)", logger)
                 response = await response.send(stream=False)
                 await response
             except Exception as error:
