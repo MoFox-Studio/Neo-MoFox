@@ -55,37 +55,18 @@ class DisturbanceGuardConfig(BaseConfig):
             tag="behavior",
             order=2,
         )
-        quiet_intent_patterns: list[str] = Field(
-            default_factory=lambda: [
-                r"我先忙(?:一会|一下)?",
-                r"晚点聊",
-                r"回头聊",
-                r"有空再聊",
-                r"先不聊了",
-                r"先这样吧",
-                r"别吵",
-                r"不要打扰我",
-                r"先别烦我",
-                r"我去忙了",
-            ],
-            description="触发免打扰的正则表达式列表",
-            label="免打扰触发词",
-            tag="behavior",
+        model_task: str = Field(
+            default="utils_small",
+            description="用于意图判定的模型任务名称",
+            label="判定模型",
+            tag="ai",
             order=3,
         )
-        wake_intent_patterns: list[str] = Field(
-            default_factory=lambda: [
-                r"我回来了",
-                r"继续聊",
-                r"继续说",
-                r"现在有空",
-                r"聊聊",
-                r"在吗",
-                r"可以聊了",
-            ],
-            description="解除免打扰的正则表达式列表",
-            label="免打扰唤醒词",
-            tag="behavior",
+        llm_timeout: float = Field(
+            default=7.0,
+            description="LLM 意图判定的超时时间（秒）",
+            label="判定超时",
+            tag="ai",
             order=4,
         )
 
