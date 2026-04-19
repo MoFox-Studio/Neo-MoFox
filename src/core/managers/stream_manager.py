@@ -503,6 +503,58 @@ class StreamManager:
 
             return db_message
 
+    # ==================== Do-Not-Disturb ====================
+
+    def is_stream_do_not_disturb_active(self, stream_id: str) -> bool:
+        """检查流是否处于免打扰状态。
+
+        Args:
+            stream_id: 流ID
+
+        Returns:
+            bool: 免打扰未到期时返回 True
+        """
+        chat_stream = self._streams.get(stream_id)
+        if not chat_stream:
+            return False
+        return chat_stream.context.is_do_not_disturb_active()
+
+    def set_stream_do_not_disturb(
+        self,
+        stream_id: str,
+        *,
+        until: float,
+        reason: str,
+        trigger_message_id: str | None = None,
+    ) -> None:
+        """设置流的免打扰状态。
+
+        Args:
+            stream_id: 流ID
+            until: 免打扰到期时间戳
+            reason: 触发免打扰的原因
+            trigger_message_id: 触发免打扰的消息ID
+        """
+        chat_stream = self._streams.get(stream_id)
+        if not chat_stream:
+            return
+        chat_stream.context.set_do_not_disturb(
+            until=until,
+            reason=reason,
+            trigger_message_id=trigger_message_id,
+        )
+
+    def clear_stream_do_not_disturb(self, stream_id: str) -> None:
+        """清空流的免打扰状态。
+
+        Args:
+            stream_id: 流ID
+        """
+        chat_stream = self._streams.get(stream_id)
+        if not chat_stream:
+            return
+        chat_stream.context.clear_do_not_disturb()
+
     # ==================== Stream Lifecycle ====================
 
     async def delete_stream(

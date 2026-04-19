@@ -5,12 +5,16 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Pattern, cast
+from typing import TYPE_CHECKING
 
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.models.message import Message
 
 from .config import DisturbanceGuardConfig
+
+if TYPE_CHECKING:
+    from src.core.components.base.plugin import BasePlugin
+    from src.core.models.stream import ChatStream
 
 logger = get_logger("disturbance_guard_service")
 
@@ -33,11 +37,11 @@ class DisturbanceGuardService:
     4. 在需要静默时将消息直接写入 history，而不是进入 unread。
     """
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: BasePlugin) -> None:
         """初始化打扰感知服务。"""
         self.plugin = plugin
-        self._quiet_patterns: list[Pattern[str]] | None = None
-        self._wake_patterns: list[Pattern[str]] | None = None
+        self._quiet_patterns: list[re.Pattern[str]] | None = None
+        self._wake_patterns: list[re.Pattern[str]] | None = None
 
     def _get_config(self) -> DisturbanceGuardConfig:
         """获取已绑定插件配置。"""
@@ -45,7 +49,7 @@ class DisturbanceGuardService:
             return self.plugin.config
         return DisturbanceGuardConfig()
 
-    def _get_quiet_patterns(self) -> list[Pattern[str]]:
+    def _get_quiet_patterns(self) -> list[re.Pattern[str]]:
         """获取免打扰触发模式列表。"""
         if self._quiet_patterns is None:
             self._quiet_patterns = self._compile_patterns(
@@ -53,7 +57,7 @@ class DisturbanceGuardService:
             )
         return self._quiet_patterns
 
-    def _get_wake_patterns(self) -> list[Pattern[str]]:
+    def _get_wake_patterns(self) -> list[re.Pattern[str]]:
         """获取唤醒模式列表。"""
         if self._wake_patterns is None:
             self._wake_patterns = self._compile_patterns(
@@ -62,9 +66,9 @@ class DisturbanceGuardService:
         return self._wake_patterns
 
     @staticmethod
-    def _compile_patterns(patterns: list[str]) -> list[Pattern[str]]:
+    def _compile_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
         """编译正则表达式列表。"""
-        compiled: list[Pattern[str]] = []
+        compiled: list[re.Pattern[str]] = []
         for pattern in patterns:
             if not isinstance(pattern, str) or not pattern.strip():
                 continue
@@ -95,11 +99,11 @@ class DisturbanceGuardService:
         return False
 
     @staticmethod
-    def _matches_any(text: str, patterns: list[Pattern[str]]) -> bool:
+    def _matches_any(text: str, patterns: list[re.Pattern[str]]) -> bool:
         """检查文本是否命中任一正则。"""
         return any(pattern.search(text) for pattern in patterns)
 
-    async def _get_chat_stream(self, message: Message) -> Any:
+    async def _get_chat_stream(self, message: Message) -> ChatStream:
         """获取或创建消息所属聊天流。"""
         from src.core.managers import get_stream_manager
 
@@ -122,11 +126,19 @@ class DisturbanceGuardService:
             chat_type=message.chat_type,
         )
 
-    async def _persist_silently(self, message: Message) -> None:
-        """将消息静默写入历史，不进入 unread。"""
+    async def _get_stream_manager(self):
+        """获取 StreamManager 实例。
+
+        延迟导入以避免循环依赖。
+        """
         from src.core.managers import get_stream_manager
 
-        await get_stream_manager().add_received_message_to_history(message)
+        return get_stream_manager()
+
+    async def _persist_silently(self, message: Message) -> None:
+        """将消息静默写入历史，不进入 unread。"""
+        stream_manager = await self._get_stream_manager()
+        await stream_manager.add_received_message_to_history(message)
 
     async def handle_message(
         self,
@@ -144,16 +156,19 @@ class DisturbanceGuardService:
         if not normalized_text:
             return DisturbanceGuardDecision(False, "empty text")
 
-        chat_stream = await self._get_chat_stream(message)
-        context = chat_stream.context
+        # 确保流已创建
+        await self._get_chat_stream(message)
+        stream_manager = await self._get_stream_manager()
+        stream_id = message.stream_id
         now = time.time()
 
-        if context.do_not_disturb_until is not None and not context.is_do_not_disturb_active(now):
-            context.clear_do_not_disturb()
+        # 免打扰已过期，通过 manager 清理
+        if not stream_manager.is_stream_do_not_disturb_active(stream_id):
+            stream_manager.clear_stream_do_not_disturb(stream_id)
 
-        if context.is_do_not_disturb_active(now):
+        if stream_manager.is_stream_do_not_disturb_active(stream_id):
             if self._matches_any(normalized_text, self._get_wake_patterns()):
-                context.clear_do_not_disturb()
+                stream_manager.clear_stream_do_not_disturb(stream_id)
                 return DisturbanceGuardDecision(False, "wake intent matched")
 
             await self._persist_silently(message)
@@ -163,7 +178,8 @@ class DisturbanceGuardService:
             return DisturbanceGuardDecision(False, "no quiet intent matched")
 
         quiet_until = now + float(config.guard.quiet_minutes) * 60.0
-        context.set_do_not_disturb(
+        stream_manager.set_stream_do_not_disturb(
+            stream_id,
             until=quiet_until,
             reason=normalized_text,
             trigger_message_id=message.message_id or None,
