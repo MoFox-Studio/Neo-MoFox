@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -173,6 +174,28 @@ class TestStreamContext:
 
         assert isinstance(context.message_cache, deque)
         assert context.is_cache_enabled is False
+
+    def test_do_not_disturb_helpers(self):
+        """测试免打扰状态的设置、判定与清空。"""
+        context = StreamContext(stream_id="test")
+        until = time.time() + 60
+
+        context.set_do_not_disturb(
+            until=until,
+            reason="我先忙一下",
+            trigger_message_id="msg-001",
+        )
+
+        assert context.is_do_not_disturb_active(until - 1) is True
+        assert context.is_do_not_disturb_active(until + 1) is False
+        assert context.do_not_disturb_reason == "我先忙一下"
+        assert context.do_not_disturb_trigger_message_id == "msg-001"
+
+        context.clear_do_not_disturb()
+
+        assert context.do_not_disturb_until is None
+        assert context.do_not_disturb_reason is None
+        assert context.do_not_disturb_trigger_message_id is None
 
 
 class TestChatStream:

@@ -100,4 +100,5 @@ plugins/*
 !plugins/booku_memory/
 !plugins/emoji_sender/
 !plugins/perm_plugin/
+!plugins/disturbance_guard/
 
