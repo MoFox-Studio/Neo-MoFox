@@ -14,6 +14,7 @@ from src.core.components.base import (
     BaseTool,
     CommandNode,
     Failure,
+    Stop,
     Success,
     Wait,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "SectionBase",
     "config_section",
     "Failure",
+    "Stop",
     "Success",
     "Wait",
 ]
