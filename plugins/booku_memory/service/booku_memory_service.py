@@ -7,6 +7,7 @@ import math
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -371,8 +372,20 @@ class BookuMemoryService(BaseService):
         safe_bucket = bucket.strip().lower() or "emergent"
         if safe_bucket == "inherent":
             return "booku_memory__inherent"
-        safe_folder = folder_id.strip().lower() or "default"
-        return f"booku_memory__{safe_bucket}__{safe_folder}"
+        # 清洗 folder_id 中可能存在的脏数据（如 "['relations']" 或包含非法字符的值）
+        import re as _re
+        raw_folder = folder_id.strip()
+        if raw_folder.startswith("[") and raw_folder.endswith("]"):
+            import ast as _ast
+            try:
+                parsed = _ast.literal_eval(raw_folder)
+                if isinstance(parsed, list) and parsed:
+                    raw_folder = str(parsed[0])
+            except (ValueError, SyntaxError):
+                pass
+        safe_folder = _re.sub(r"[^a-zA-Z0-9_-]", "", raw_folder).lower() or "default"
+        safe_bucket_clean = _re.sub(r"[^a-zA-Z0-9_-]", "", safe_bucket) or "emergent"
+        return f"booku_memory__{safe_bucket_clean}__{safe_folder}"
 
     @staticmethod
     def _cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -865,14 +878,25 @@ class BookuMemoryService(BaseService):
             created_at、updated_at、last_activated_at、activation_count、
             is_deleted、deleted_at、tags、core_tags、diffusion_tags、opposing_tags 字段的字典。
         """
+        created_at = getattr(record, "created_at", 0.0)
+        updated_at = getattr(record, "updated_at", 0.0)
+
+        def _fmt(ts: float) -> str:
+            try:
+                return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
+            except (OSError, ValueError, OverflowError):
+                return ""
+
         return {
             "title": getattr(record, "title", ""),
             "folder_id": getattr(record, "folder_id", ""),
             "bucket": getattr(record, "bucket", ""),
             "source": getattr(record, "source", ""),
             "novelty_energy": getattr(record, "novelty_energy", 0.0),
-            "created_at": getattr(record, "created_at", 0.0),
-            "updated_at": getattr(record, "updated_at", 0.0),
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "created_at_readable": _fmt(created_at),
+            "updated_at_readable": _fmt(updated_at),
             "last_activated_at": getattr(record, "last_activated_at", 0.0),
             "activation_count": getattr(record, "activation_count", 0),
             "is_deleted": bool(getattr(record, "is_deleted", False)),
@@ -1362,11 +1386,14 @@ class BookuMemoryService(BaseService):
             default_folder_id=config.storage.default_folder_id,
         )
         n_results = top_k or config.retrieval.default_top_k
-        use_archived = (
-            config.retrieval.include_archived_default
-            if include_archived is None
-            else include_archived
-        )
+        if config.retrieval.force_full_retrieval:
+            use_archived = True
+        else:
+            use_archived = (
+                config.retrieval.include_archived_default
+                if include_archived is None
+                else include_archived
+            )
         use_knowledge = (
             config.retrieval.include_knowledge_default
             if include_knowledge is None
@@ -1609,18 +1636,9 @@ class BookuMemoryService(BaseService):
         for item in selected:
             memory_id = str(item.get("memory_id", ""))
             record = records.get(memory_id)
-            if record is not None:
-                output_item = self._build_record_item(record)
-            else:
-                text = str(item.get("document", "") or "")
-                title = self._extract_title(text)
-                output_item = {
-                    "id": memory_id,
-                    "title": title,
-                    "content_snippet": text[:280] + ("..." if len(text) > 280 else ""),
-                    "is_truncated": len(text) > 280,
-                    "metadata": item.get("metadata", {}),
-                }
+            if record is None:
+                continue
+            output_item = self._build_record_item(record)
             output_item["score"] = float(item.get("score", 0.0))
             output_item["collection"] = str(item.get("collection", ""))
             deduplicated.append(output_item)
@@ -1678,10 +1696,11 @@ class BookuMemoryService(BaseService):
             include=["documents", "metadatas", "embeddings"],
         )
 
-        ids = loaded.get("ids", []) or []
-        documents = loaded.get("documents", []) or []
-        metadatas = loaded.get("metadatas", []) or []
-        embeddings = loaded.get("embeddings", []) or []
+        ids = loaded.get("ids") or []
+        documents = loaded.get("documents") or []
+        metadatas = loaded.get("metadatas") or []
+        _emb = loaded.get("embeddings")
+        embeddings = _emb if _emb is not None else []
 
         archived_count = 0
         for index, memory_id in enumerate(ids):
