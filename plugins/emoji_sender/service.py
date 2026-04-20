@@ -483,20 +483,6 @@ class EmojiSenderService(BaseService):
             return None
         return random.choice(candidates)
 
-    async def _already_ingested(self, source_hash: str) -> bool:
-        """检查某个表情包（按 hash）是否已入库。"""
-        vdb = self._vector_db()
-        collection = self._collection_name()
-        await vdb.get_or_create_collection(collection)
-        data = await vdb.get(
-            collection_name=collection,
-            where={"source_hash": source_hash},
-            limit=1,
-            include=["metadatas"],
-        )
-        ids: list[str] = list(data.get("ids") or [])
-        return bool(ids)
-
     async def _vlm_decide_and_label(
         self,
         *,
@@ -632,7 +618,7 @@ class EmojiSenderService(BaseService):
                 return
 
             try:
-                payload = source.read_bytes()
+                payload = await asyncio.to_thread(source.read_bytes)
             except Exception as e:
                 logger.warning(f"读取候选表情包失败: {source} - {e}")
                 return
@@ -644,7 +630,7 @@ class EmojiSenderService(BaseService):
             # 压缩图片用于 VLM
             try:
                 mime = self._guess_mime(source.suffix)
-                vlm_bytes, vlm_mime, is_gif_collage = self._compress_image_for_vlm(payload, mime)
+                vlm_bytes, vlm_mime, is_gif_collage = await asyncio.to_thread(self._compress_image_for_vlm, payload, mime)
             except Exception as e:
                 logger.warning(f"压缩图片失败: {source} - {e}")
                 return
