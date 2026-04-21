@@ -34,6 +34,9 @@ class StreamContext:
         is_cache_enabled: 是否启用消息缓存
         last_message_time: 最近一次收到新消息的时间戳，None 表示尚未收到
         message_buffer_skip_count: 当前连续因消息缓冲机制跳过的 Tick 次数
+        do_not_disturb_until: 免打扰到期时间戳，None 表示未启用
+        do_not_disturb_reason: 最近一次进入免打扰的原因
+        do_not_disturb_trigger_message_id: 触发免打扰的消息 ID
     """
 
     stream_id: str
@@ -59,8 +62,45 @@ class StreamContext:
     last_message_time: float | None = None
     message_buffer_skip_count: int = 0
 
+    # 免打扰状态
+    do_not_disturb_until: float | None = None
+    do_not_disturb_reason: str | None = None
+    do_not_disturb_trigger_message_id: str | None = None
+
     # 流循环任务引用
     stream_loop_task: asyncio.Task | None = field(default=None, repr=False)
+
+    def is_do_not_disturb_active(self, now: float | None = None) -> bool:
+        """检查当前流是否处于免打扰状态。
+
+        Args:
+            now: 可选的当前时间戳；未提供时使用 ``time.time()``。
+
+        Returns:
+            bool: 免打扰未到期时返回 ``True``。
+        """
+        if self.do_not_disturb_until is None:
+            return False
+        current_time = time.time() if now is None else now
+        return current_time < self.do_not_disturb_until
+
+    def set_do_not_disturb(
+        self,
+        *,
+        until: float,
+        reason: str,
+        trigger_message_id: str | None = None,
+    ) -> None:
+        """设置流的免打扰状态。"""
+        self.do_not_disturb_until = until
+        self.do_not_disturb_reason = reason
+        self.do_not_disturb_trigger_message_id = trigger_message_id
+
+    def clear_do_not_disturb(self) -> None:
+        """清空流的免打扰状态。"""
+        self.do_not_disturb_until = None
+        self.do_not_disturb_reason = None
+        self.do_not_disturb_trigger_message_id = None
 
     def add_unread_message(self, message: "Message") -> None:
         """添加未读消息。

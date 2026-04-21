@@ -8,6 +8,7 @@ import pytest
 
 from src.core.managers.stream_manager import _serialize_content_for_db
 from src.core.models.message import Message
+from src.core.models.stream import ChatStream
 
 
 @pytest.mark.asyncio
@@ -132,6 +133,45 @@ async def test_add_message_persists_sender_person_id() -> None:
 
     created_data = manager._messages_crud.create.await_args.args[0]
     assert created_data["person_id"] == "hash_qq_user_123"
+
+
+@pytest.mark.asyncio
+async def test_add_received_message_to_history_moves_message_without_unread() -> None:
+    """静默落历史时，消息应写入 history 且从 unread 中移除。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    manager._messages_crud.get_by = AsyncMock(return_value=None)
+    manager._messages_crud.create = AsyncMock(return_value=SimpleNamespace(id=1))
+    manager._streams_crud.get_by = AsyncMock(return_value=SimpleNamespace(id=1))
+    manager._streams_crud.update = AsyncMock(return_value=None)
+
+    stream_id = "stream-history-001"
+    chat_stream = ChatStream(
+        stream_id=stream_id,
+        platform="qq",
+        chat_type="private",
+    )
+    manager._streams[stream_id] = chat_stream
+
+    message = Message(
+        message_id="m-history-001",
+        content="我先忙一下",
+        processed_plain_text="我先忙一下",
+        sender_id="user_123",
+        sender_name="Alice",
+        platform="qq",
+        chat_type="private",
+        stream_id=stream_id,
+        person_id="hash_qq_user_123",
+    )
+    chat_stream.context.add_unread_message(message)
+
+    await manager.add_received_message_to_history(message)
+
+    assert chat_stream.context.unread_messages == []
+    assert len(chat_stream.context.history_messages) == 1
+    assert chat_stream.context.history_messages[0].message_id == "m-history-001"
 
 
 @pytest.mark.asyncio

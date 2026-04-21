@@ -1,0 +1,19 @@
+{
+    "name": "disturbance_guard",
+    "version": "1.0.0",
+    "description": "识别免打扰/唤醒意图并静默处理消息",
+    "author": "MoFox Team",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "event_handler",
+            "component_name": "disturbance_guard_message_handler",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "min_core_version": "1.0.0"
+}

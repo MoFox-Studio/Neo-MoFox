@@ -440,6 +440,121 @@ class StreamManager:
 
             return db_message
 
+    async def add_received_message_to_history(
+        self,
+        message: "Message",
+    ) -> "Messages":
+        """添加“已接收但不进入 unread”的消息到流历史消息。
+
+        该入口用于需要保留消息历史、但不希望消息触发 Chatter 处理的场景，
+        例如免打扰期内的静默吞消息。
+
+        Args:
+            message: 运行时消息对象
+
+        Returns:
+            Messages: 创建或已存在的数据库消息记录
+        """
+        stream_id = message.stream_id
+
+        lock = self._get_stream_lock(stream_id)
+        async with lock:
+            person_id = self._resolve_person_id_from_message(message)
+
+            message_data = {
+                "message_id": message.message_id,
+                "stream_id": stream_id,
+                "person_id": person_id,
+                "time": message.time,
+                "message_type": message.message_type.value,
+                "content": _serialize_content_for_db(message.content),
+                "processed_plain_text": message.processed_plain_text,
+                "reply_to": message.reply_to,
+                "platform": message.platform,
+            }
+
+            db_message = await self._messages_crud.get_by(
+                message_id=message.message_id,
+                platform=message.platform,
+                stream_id=stream_id,
+            )
+            if not db_message:
+                db_message = await self._messages_crud.create(message_data)
+
+            chat_stream = self._streams.get(stream_id)
+            if chat_stream:
+                context = chat_stream.context
+                context.unread_messages = [
+                    unread
+                    for unread in context.unread_messages
+                    if unread.message_id != message.message_id
+                ]
+
+                exists_in_history = any(
+                    history.message_id == message.message_id
+                    for history in context.history_messages
+                )
+                if not exists_in_history:
+                    context.add_history_message(message)
+
+                chat_stream.update_active_time()
+
+            await self._update_stream_active_time(stream_id)
+
+            return db_message
+
+    # ==================== Do-Not-Disturb ====================
+
+    def is_stream_do_not_disturb_active(self, stream_id: str) -> bool:
+        """检查流是否处于免打扰状态。
+
+        Args:
+            stream_id: 流ID
+
+        Returns:
+            bool: 免打扰未到期时返回 True
+        """
+        chat_stream = self._streams.get(stream_id)
+        if not chat_stream:
+            return False
+        return chat_stream.context.is_do_not_disturb_active()
+
+    def set_stream_do_not_disturb(
+        self,
+        stream_id: str,
+        *,
+        until: float,
+        reason: str,
+        trigger_message_id: str | None = None,
+    ) -> None:
+        """设置流的免打扰状态。
+
+        Args:
+            stream_id: 流ID
+            until: 免打扰到期时间戳
+            reason: 触发免打扰的原因
+            trigger_message_id: 触发免打扰的消息ID
+        """
+        chat_stream = self._streams.get(stream_id)
+        if not chat_stream:
+            return
+        chat_stream.context.set_do_not_disturb(
+            until=until,
+            reason=reason,
+            trigger_message_id=trigger_message_id,
+        )
+
+    def clear_stream_do_not_disturb(self, stream_id: str) -> None:
+        """清空流的免打扰状态。
+
+        Args:
+            stream_id: 流ID
+        """
+        chat_stream = self._streams.get(stream_id)
+        if not chat_stream:
+            return
+        chat_stream.context.clear_do_not_disturb()
+
     # ==================== Stream Lifecycle ====================
 
     async def delete_stream(
