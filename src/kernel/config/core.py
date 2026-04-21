@@ -947,7 +947,9 @@ def _render_section_block(
 
         sig_parts = [f"值类型：{type_text}"]
         if default_text is not None:
-            sig_parts.append(f"默认值：{default_text}")
+            # 多行默认值不能嵌进单行注释，用占位文字代替
+            display_default = "（多行默认值）" if "\n" in default_text else default_text
+            sig_parts.append(f"默认值：{display_default}")
         else:
             sig_parts.append("默认值：<必填>")  # 无默认值的必填字段标记
 

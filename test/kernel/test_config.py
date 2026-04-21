@@ -559,8 +559,9 @@ foo = \"bar\"
             assert "# 数据库端口" in updated
             assert "# 功能开关配置" in updated
 
-            # 签名注释应存在
-            assert "# signature:" in updated
+            # 签名注释应存在（类型+默认值格式）
+            assert "# 值类型：str, 默认值：" in updated
+            assert "# 值类型：int, 默认值：" in updated
 
             # 多余节/字段被移除
             assert "[unused]" not in updated
@@ -570,6 +571,47 @@ foo = \"bar\"
             assert 'host = "db.example.com"' in updated
             assert "port = 3306" in updated
             assert "enable_cache = false" in updated
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_multiline_default_generates_valid_toml_and_comment(self) -> None:
+        """测试 Field(default=多行字符串) 时，生成的 TOML 合法且注释使用占位文字。"""
+
+        class MultilineConfig(ConfigBase):
+            @config_section("general")
+            class GeneralSection(SectionBase):
+                """通用配置"""
+
+                name: str = Field(default="hello", description="名称")
+                instructions: str = Field(
+                    default="第一行\n第二行\n第三行",
+                    description="多行说明",
+                )
+
+            general: GeneralSection = Field(default_factory=GeneralSection)
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            config_file = Path(temp_dir) / "multiline.toml"
+            config_file.write_text("", encoding="utf-8")
+
+            cfg = MultilineConfig.load(config_file, auto_update=True)
+
+            # 加载的值应为完整多行默认值
+            assert cfg.general.instructions == "第一行\n第二行\n第三行"
+
+            content = config_file.read_text(encoding="utf-8")
+
+            # 文件必须是合法 TOML（不会抛出异常）
+            import tomllib
+            parsed = tomllib.loads(content)
+            assert parsed["general"]["instructions"] == "第一行\n第二行\n第三行"
+
+            # 签名注释行应使用占位文字而非多行文本
+            assert "# 值类型：str, 默认值：（多行默认值）" in content
+
+            # 单行默认值的字段不受影响
+            assert '# 值类型：str, 默认值："hello"' in content
         finally:
             shutil.rmtree(temp_dir)
 
