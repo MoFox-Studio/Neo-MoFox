@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+from src.core.prompt import SystemReminderInsertType
 from src.kernel.llm.context import LLMContextManager
 from src.kernel.llm.payload import LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.request import LLMRequest
@@ -206,6 +207,55 @@ def test_context_manager_reminder_waits_through_tool_until_first_user() -> None:
     assert payloads[2].role == ROLE.USER
     assert cast(Text, payloads[2].content[0]).text == "<system_reminder>\n先给结论\n</system_reminder>"
     assert cast(Text, payloads[2].content[1]).text == "你好"
+
+
+def test_context_manager_dynamic_reminder_targets_last_user() -> None:
+    manager = LLMContextManager(max_payloads=20)
+    payloads = [LLMPayload(ROLE.USER, Text("第一条"))]
+
+    manager.reminder("跟进最近一条", insert_type=SystemReminderInsertType.DYNAMIC)
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("收到")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
+
+    assert cast(Text, payloads[0].content[0]).text == "第一条"
+    assert cast(Text, payloads[2].content[0]).text == "跟进最近一条"
+    assert cast(Text, payloads[2].content[1]).text == "第二条"
+
+
+def test_context_manager_dynamic_reminder_moves_to_new_last_user() -> None:
+    manager = LLMContextManager(max_payloads=20)
+    payloads: list[LLMPayload] = []
+
+    manager.reminder("只跟最后一条", insert_type=SystemReminderInsertType.DYNAMIC)
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第一条")))
+    assert cast(Text, payloads[0].content[0]).text == "只跟最后一条"
+    assert cast(Text, payloads[0].content[1]).text == "第一条"
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("回复")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
+
+    assert cast(Text, payloads[0].content[0]).text == "第一条"
+    assert cast(Text, payloads[2].content[0]).text == "只跟最后一条"
+    assert cast(Text, payloads[2].content[1]).text == "第二条"
+
+
+def test_context_manager_fixed_and_dynamic_reminders_target_different_users() -> None:
+    manager = LLMContextManager(max_payloads=20)
+    payloads: list[LLMPayload] = []
+
+    manager.reminder("固定开头")
+    manager.reminder("最近一条", insert_type=SystemReminderInsertType.DYNAMIC)
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第一条")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("回复")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
+
+    assert cast(Text, payloads[0].content[0]).text == "固定开头"
+    assert cast(Text, payloads[0].content[1]).text == "第一条"
+    assert cast(Text, payloads[2].content[0]).text == "最近一条"
+    assert cast(Text, payloads[2].content[1]).text == "第二条"
 
 
 def test_context_manager_defers_missing_tool_result_placeholder_at_tail() -> None:

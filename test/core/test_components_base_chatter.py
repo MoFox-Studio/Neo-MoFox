@@ -12,7 +12,11 @@ from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
 from src.core.components.types import ChatType
 from src.core.models.message import Message
-from src.core.prompt.system_reminder import get_system_reminder_store, reset_system_reminder_store
+from src.core.prompt.system_reminder import (
+    SystemReminderInsertType,
+    get_system_reminder_store,
+    reset_system_reminder_store,
+)
 from src.kernel.llm import LLMPayload, ROLE, Text
 
 
@@ -96,6 +100,32 @@ class TestBaseChatter:
     def test_create_request_registers_system_reminder(self, mock_plugin):
         """测试 create_request 可登记 system reminder，且不会把 SYSTEM 挤到 USER 后面。"""
         chatter = ConcreteChatter("stream_123", mock_plugin)
+
+        reset_system_reminder_store()
+
+    def test_create_request_registers_dynamic_system_reminder(self, mock_plugin):
+        """测试 dynamic reminder 会跟随最后一个 USER。"""
+        chatter = ConcreteChatter("stream_123", mock_plugin)
+
+        reset_system_reminder_store()
+        store = get_system_reminder_store()
+        store.set("actor", "goal", "跟随最后一条", insert_type=SystemReminderInsertType.DYNAMIC)
+
+        with patch("src.core.config.get_model_config") as mock_model_config, patch(
+            "src.core.config.get_core_config"
+        ) as mock_core_config:
+            mock_model_config.return_value.get_task.return_value = []
+            mock_core_config.return_value.chat.max_context_size = 10
+
+            request = chatter.create_request("actor", with_reminder="actor")
+
+        request.add_payload(LLMPayload(ROLE.USER, Text("hello")))
+        request.add_payload(LLMPayload(ROLE.ASSISTANT, Text("reply")))
+        request.add_payload(LLMPayload(ROLE.USER, Text("again")))
+
+        assert cast(Text, request.payloads[0].content[0]).text == "hello"
+        assert cast(Text, request.payloads[2].content[0]).text == "<system_reminder>\n[goal]\n跟随最后一条\n</system_reminder>"
+        assert cast(Text, request.payloads[2].content[1]).text == "again"
 
         reset_system_reminder_store()
         store = get_system_reminder_store()

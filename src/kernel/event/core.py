@@ -117,6 +117,7 @@ class EventBus:
         # 如果重复订阅同一个 handler，则更新 priority，保持最初 order 以稳定排序
         existing = self._subscribers[event_name].get(handler)
         if existing is None:
+            # 非重复
             self._subscribe_order += 1
             sub = _Subscriber(
                 handler=handler,
@@ -124,6 +125,7 @@ class EventBus:
                 order=self._subscribe_order,
             )
         else:
+            # 重复
             sub = _Subscriber(
                 handler=handler,
                 priority=int(priority),
@@ -321,6 +323,7 @@ class EventBus:
         return (decision, next_params)
 
     async def _execute_handler(self, sub: _Subscriber, event_name: str, params: EventParams) -> Any:
+        """执行处理器并返回结果，支持同步和异步处理器。"""
         result = sub.handler(event_name, params)
         if inspect.isawaitable(result):
             return await result

@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from threading import RLock
 from typing import Sequence, TypeAlias
@@ -41,7 +42,29 @@ class SystemReminderBucket(str, Enum):
     SUB_ACTOR = "sub_actor"
 
 
+class SystemReminderInsertType(str, Enum):
+    """system reminder 的插入位置类型。"""
+
+    FIXED = "fixed"
+    DYNAMIC = "dynamic"
+
+
 BucketLike: TypeAlias = str | SystemReminderBucket
+InsertTypeLike: TypeAlias = str | SystemReminderInsertType
+
+
+@dataclass(frozen=True, slots=True)
+class SystemReminderItem:
+    """单条 system reminder 记录。"""
+
+    name: str
+    content: str
+    insert_type: SystemReminderInsertType
+
+    def render(self) -> str:
+        """渲染为注入 LLM 前使用的文本块。"""
+
+        return f"[{self.name}]\n{self.content}"
 
 
 def _normalize_bucket(bucket: BucketLike) -> str:
@@ -65,6 +88,22 @@ def _validate_non_empty(value: str, name: str) -> None:
         raise ValueError(f"{name} 不能为空")
 
 
+def _normalize_insert_type(insert_type: InsertTypeLike) -> SystemReminderInsertType:
+    """规范化 insert_type 参数。"""
+
+    if isinstance(insert_type, SystemReminderInsertType):
+        return insert_type
+
+    if not isinstance(insert_type, str) or not insert_type.strip():
+        raise ValueError("insert_type 不能为空")
+
+    normalized = insert_type.strip().lower()
+    try:
+        return SystemReminderInsertType(normalized)
+    except ValueError as exc:
+        raise ValueError("insert_type 只能是 fixed 或 dynamic") from exc
+
+
 class SystemReminderStore:
     """system reminder存储类，提供线程安全的接口来设置和获取reminder。
 
@@ -76,23 +115,62 @@ class SystemReminderStore:
 
     def __init__(self) -> None:
         self._lock = RLock()
-        self._data: dict[str, dict[str, str]] = {}
+        self._data: dict[str, dict[str, SystemReminderItem]] = {}
 
-    def set(self, bucket: BucketLike, name: str, content: str) -> None:
+    def set(
+        self,
+        bucket: BucketLike,
+        name: str,
+        content: str,
+        insert_type: InsertTypeLike = SystemReminderInsertType.FIXED,
+    ) -> None:
         """设置一个reminder。
 
         Args:
             bucket: reminder所属的 bucket。
             name: reminder的名称，在 bucket 内唯一。
             content: reminder的内容文本。
+            insert_type: reminder 的插入位置类型。
         """
 
         bucket_key = _normalize_bucket(bucket)
         _validate_non_empty(name, "name")
         _validate_non_empty(content, "content")
+        normalized_name = name.strip()
+        normalized_insert_type = _normalize_insert_type(insert_type)
 
         with self._lock:
-            self._data.setdefault(bucket_key, {})[name.strip()] = content
+            self._data.setdefault(bucket_key, {})[normalized_name] = SystemReminderItem(
+                name=normalized_name,
+                content=content,
+                insert_type=normalized_insert_type,
+            )
+
+    def get_items(
+        self,
+        bucket: BucketLike,
+        names: Sequence[str] | None = None,
+    ) -> list[SystemReminderItem]:
+        """获取 bucket 下的 reminder 记录列表。"""
+
+        bucket_key = _normalize_bucket(bucket)
+
+        with self._lock:
+            bucket_map = dict(self._data.get(bucket_key, {}))
+
+        selected_items: list[SystemReminderItem]
+        if names is None:
+            selected_items = list(bucket_map.values())
+        else:
+            selected_items = []
+            for n in names:
+                if not isinstance(n, str) or not n.strip():
+                    raise ValueError("names 中包含空 name")
+                key = n.strip()
+                if key in bucket_map:
+                    selected_items.append(bucket_map[key])
+
+        return selected_items
 
     def get(self, bucket: BucketLike, names: Sequence[str] | None = None) -> str:
         """获取 bucket 下的reminder文本。
@@ -105,23 +183,7 @@ class SystemReminderStore:
             bucket 下的reminder文本，格式为 [name]\ncontent，多个reminder之间以 \n\n 分隔；如果没有找到任何reminder，则返回空字符串。
         """
 
-        bucket_key = _normalize_bucket(bucket)
-
-        with self._lock:
-            bucket_map = dict(self._data.get(bucket_key, {}))
-
-        selected_items: list[tuple[str, str]]
-        if names is None:
-            selected_items = list(bucket_map.items())
-        else:
-            selected_items = []
-            for n in names:
-                if not isinstance(n, str) or not n.strip():
-                    raise ValueError("names 中包含空 name")
-                key = n.strip()
-                if key in bucket_map:
-                    selected_items.append((key, bucket_map[key]))
-
+        selected_items = self.get_items(bucket=bucket, names=names)
         if not selected_items:
             return ""
 
@@ -129,9 +191,9 @@ class SystemReminderStore:
         # - names 为 None：按该 bucket 内的插入顺序拼接
         # - names 非 None：按 names 的给定顺序拼接
         blocks: list[str] = []
-        for name, content in selected_items:
+        for item in selected_items:
             # 组合格式尽量简洁；调用方如需额外包装，可自行处理。
-            blocks.append(f"[{name}]\n{content}")
+            blocks.append(item.render())
 
         return "\n\n".join(blocks)
 
@@ -195,6 +257,8 @@ def reset_system_reminder_store() -> None:
 
 __all__ = [
     "SystemReminderBucket",
+    "SystemReminderInsertType",
+    "SystemReminderItem",
     "SystemReminderStore",
     "get_system_reminder_store",
     "reset_system_reminder_store",

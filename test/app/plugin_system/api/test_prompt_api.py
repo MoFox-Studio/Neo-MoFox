@@ -6,6 +6,7 @@ import pytest
 
 from src.app.plugin_system.api import prompt_api
 from src.app.plugin_system.types import PromptTemplate
+from src.core.prompt import SystemReminderInsertType
 
 
 def test_get_template_requires_name() -> None:
@@ -107,15 +108,55 @@ def test_add_system_reminder_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     class _FakeStore:
-        def set(self, bucket: str, name: str, content: str) -> None:
+        def set(
+            self,
+            bucket: str,
+            name: str,
+            content: str,
+            insert_type: str | SystemReminderInsertType,
+        ) -> None:
             captured["bucket"] = bucket
             captured["name"] = name
             captured["content"] = content
+            captured["insert_type"] = insert_type
 
     monkeypatch.setattr(prompt_api, "_get_system_reminder_store", lambda: _FakeStore())
 
     prompt_api.add_system_reminder("actor", name="n", content="c")
-    assert captured == {"bucket": "actor", "name": "n", "content": "c"}
+    assert captured == {
+        "bucket": "actor",
+        "name": "n",
+        "content": "c",
+        "insert_type": SystemReminderInsertType.FIXED,
+    }
+
+
+def test_add_system_reminder_delegates_custom_insert_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """add_system_reminder 应透传自定义 insert_type。"""
+    captured: dict[str, object] = {}
+
+    class _FakeStore:
+        def set(
+            self,
+            bucket: str,
+            name: str,
+            content: str,
+            insert_type: str | SystemReminderInsertType,
+        ) -> None:
+            captured["bucket"] = bucket
+            captured["name"] = name
+            captured["content"] = content
+            captured["insert_type"] = insert_type
+
+    monkeypatch.setattr(prompt_api, "_get_system_reminder_store", lambda: _FakeStore())
+
+    prompt_api.add_system_reminder("actor", name="n", content="c", insert_type="dynamic")
+    assert captured == {
+        "bucket": "actor",
+        "name": "n",
+        "content": "c",
+        "insert_type": "dynamic",
+    }
 
 
 def test_get_system_reminder_delegates(monkeypatch: pytest.MonkeyPatch) -> None:

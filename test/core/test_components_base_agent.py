@@ -9,7 +9,11 @@ import pytest
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
 from src.core.components.types import ChatType
-from src.core.prompt.system_reminder import get_system_reminder_store, reset_system_reminder_store
+from src.core.prompt.system_reminder import (
+    SystemReminderInsertType,
+    get_system_reminder_store,
+    reset_system_reminder_store,
+)
 from src.kernel.llm import LLMPayload, Text
 from src.kernel.llm import ROLE
 
@@ -167,6 +171,28 @@ class TestBaseAgent:
         assert request.payloads[1].role == ROLE.USER
         assert cast(Text, request.payloads[1].content[0]).text == "<system_reminder>\n[goal]\n先给结论\n</system_reminder>"
         assert cast(Text, request.payloads[1].content[1]).text == "hello"
+
+        reset_system_reminder_store()
+
+    def test_create_llm_request_with_dynamic_reminder(self, mock_plugin):
+        """测试创建 LLMRequest 时 dynamic reminder 会跟随最后一个 USER。"""
+        agent = ConcreteAgent(stream_id="stream_123", plugin=mock_plugin)
+        reset_system_reminder_store()
+        store = get_system_reminder_store()
+        store.set("actor", "goal", "跟随最后一条", insert_type=SystemReminderInsertType.DYNAMIC)
+
+        request = agent.create_llm_request(
+            model_set=[],
+            request_name="agent_test",
+            with_reminder="actor",
+        )
+        request.add_payload(LLMPayload(ROLE.USER, Text("hello")))
+        request.add_payload(LLMPayload(ROLE.ASSISTANT, Text("reply")))
+        request.add_payload(LLMPayload(ROLE.USER, Text("again")))
+
+        assert cast(Text, request.payloads[0].content[0]).text == "hello"
+        assert cast(Text, request.payloads[2].content[0]).text == "<system_reminder>\n[goal]\n跟随最后一条\n</system_reminder>"
+        assert cast(Text, request.payloads[2].content[1]).text == "again"
 
         reset_system_reminder_store()
 

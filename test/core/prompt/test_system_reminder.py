@@ -6,6 +6,8 @@ import pytest
 
 from src.core.prompt.system_reminder import (
     SystemReminderBucket,
+    SystemReminderInsertType,
+    SystemReminderItem,
     SystemReminderStore,
     get_system_reminder_store,
     reset_system_reminder_store,
@@ -36,6 +38,38 @@ def test_store_get_empty_bucket_returns_empty_string() -> None:
     assert store.get(SystemReminderBucket.ACTOR) == ""
 
 
+def test_store_set_uses_fixed_insert_type_by_default() -> None:
+    """未显式指定 insert_type 时应默认使用 fixed。"""
+    store = SystemReminderStore()
+
+    store.set("actor", name="goal", content="A")
+
+    assert store.get_items("actor") == [
+        SystemReminderItem(
+            name="goal",
+            content="A",
+            insert_type=SystemReminderInsertType.FIXED,
+        )
+    ]
+
+
+def test_store_set_accepts_dynamic_insert_type() -> None:
+    """应支持为单条 reminder 指定 dynamic 插入方式。"""
+    store = SystemReminderStore()
+
+    store.set("actor", name="goal", content="A", insert_type="dynamic")
+
+    assert store.get_items("actor")[0].insert_type == SystemReminderInsertType.DYNAMIC
+
+
+def test_store_set_rejects_invalid_insert_type() -> None:
+    """非法 insert_type 应抛出 ValueError。"""
+    store = SystemReminderStore()
+
+    with pytest.raises(ValueError, match="insert_type 只能是 fixed 或 dynamic"):
+        store.set("actor", name="goal", content="A", insert_type="tail")
+
+
 def test_store_get_all_in_bucket() -> None:
     """不传 names 时应返回 bucket 下所有提醒。"""
     store = SystemReminderStore()
@@ -55,6 +89,20 @@ def test_store_get_filters_by_names_and_keeps_names_order() -> None:
 
     text = store.get("actor", names=["b", "a"])
     assert text == "[b]\nB\n\n[a]\nA"
+
+
+def test_store_get_items_filters_by_names_and_keeps_names_order() -> None:
+    """get_items 应保留元数据并按 names 顺序返回。"""
+    store = SystemReminderStore()
+    store.set("actor", name="a", content="A", insert_type="fixed")
+    store.set("actor", name="b", content="B", insert_type="dynamic")
+
+    items = store.get_items("actor", names=["b", "a"])
+
+    assert items == [
+        SystemReminderItem("b", "B", SystemReminderInsertType.DYNAMIC),
+        SystemReminderItem("a", "A", SystemReminderInsertType.FIXED),
+    ]
 
 
 def test_store_get_rejects_empty_name_in_names() -> None:

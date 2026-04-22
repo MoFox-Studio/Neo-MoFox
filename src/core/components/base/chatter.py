@@ -483,10 +483,11 @@ class BaseChatter(ABC):
         if with_reminder is not None:
             from src.core.prompt import get_system_reminder_store
 
-            reminder_text = get_system_reminder_store().get(with_reminder)
-            if reminder_text:
+            reminder_items = get_system_reminder_store().get_items(with_reminder)
+            for reminder_item in reminder_items:
                 context_manager.reminder(
-                    reminder_text,
+                    reminder_item.render(),
+                    insert_type=reminder_item.insert_type,
                     wrap_with_system_tag=True,
                 )
 

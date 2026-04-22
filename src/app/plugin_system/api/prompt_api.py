@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from src.core.prompt import SystemReminderInsertType
+
 if TYPE_CHECKING:
     from src.core.prompt import PromptManager, PromptTemplate
     from src.core.prompt import SystemReminderBucket
@@ -159,6 +161,7 @@ def add_system_reminder(
     bucket: str | SystemReminderBucket,
     name: str,
     content: str,
+    insert_type: str | SystemReminderInsertType = SystemReminderInsertType.FIXED,
 ) -> None:
     """添加（或覆盖）一条 system reminder。
 
@@ -169,6 +172,7 @@ def add_system_reminder(
         bucket: bucket 名称（推荐使用 SystemReminderBucket 预设值，如 actor/sub_actor）
         name: reminder 名称
         content: reminder 内容
+        insert_type: reminder 插入位置类型，支持 fixed 和 dynamic
 
     Returns:
         None
@@ -177,7 +181,12 @@ def add_system_reminder(
     # bucket 的空值校验在 store 内完成，这里保持与其它参数一致的提示
     _validate_non_empty(name, "name")
     _validate_non_empty(content, "content")
-    _get_system_reminder_store().set(bucket=bucket, name=name, content=content)
+    _get_system_reminder_store().set(
+        bucket=bucket,
+        name=name,
+        content=content,
+        insert_type=insert_type,
+    )
 
 
 def get_system_reminder(
