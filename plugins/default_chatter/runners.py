@@ -72,6 +72,20 @@ def _require_response(response: LLMConversationState) -> LLMResponseLike:
     raise TypeError("当前会话状态尚未进入响应阶段")
 
 
+def _print_actor_message_panel(response: LLMResponseLike, logger: Logger) -> None:
+    """在 actor 返回 message 时打印思考面板。"""
+    if not response.call_list:
+        return
+
+    message = response.message.strip() if response.message else ""
+    if not message:
+        return
+
+    print_panel = getattr(logger, "print_panel", None)
+    if callable(print_panel):
+        print_panel(message, title="Actor 思考", border_style="cyan")
+
+
 def _transition(
     *,
     rt: _EnhancedWorkflowRuntime,
@@ -199,6 +213,8 @@ async def run_enhanced(
 
         if rt.phase == _ToolCallWorkflowPhase.TOOL_EXEC:
             llm_response = _require_response(rt.response)
+
+            _print_actor_message_panel(llm_response, logger)
 
             if not llm_response.call_list:
                 if llm_response.message and llm_response.message.strip():
@@ -329,6 +345,8 @@ async def run_classical(
                 logger.error(f"LLM 请求失败: {error}", exc_info=True)
                 yield Failure("LLM 请求失败", error)
                 break
+
+            _print_actor_message_panel(response, logger)
 
             if not response.call_list:
                 if response.message and response.message.strip():
