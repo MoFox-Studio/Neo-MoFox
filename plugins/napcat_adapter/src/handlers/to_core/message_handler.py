@@ -231,11 +231,7 @@ class MessageHandler:
             return None
 
         try:
-            async with asyncio.timeout(10): # 兜底超时处理
-                image_base64 = await get_image_base64(image_url)
-        except TimeoutError:
-            logger.error(f"图片消息处理超时: {image_url}")
-            return {"type": "text", "data": "[图片处理超时]"}
+            image_base64 = await get_image_base64(image_url)
         except Exception as e:
             logger.error(f"图片消息处理失败: {e!s}")
             return None
@@ -353,7 +349,8 @@ class MessageHandler:
             if file_path and Path(file_path).exists():
                 # 本地文件处理
                 video_data = await asyncio.to_thread(Path(file_path).read_bytes)
-                video_base64 = base64.b64encode(video_data).decode("utf-8")
+                video_base64 = await asyncio.to_thread(base64.b64encode, video_data)
+                video_base64 = video_base64.decode("utf-8")
                 logger.debug(f"视频文件大小: {len(video_data) / (1024 * 1024):.2f} MB")
 
                 return {
@@ -377,7 +374,8 @@ class MessageHandler:
                     logger.warning(f"视频下载失败: {download_result.get('error', '未知错误')}")
                     return {"type": "text", "data": f"[视频消息] ({download_result.get('error', '下载失败')})"}
 
-                video_base64 = base64.b64encode(download_result["data"]).decode("utf-8")
+                video_base64 = await asyncio.to_thread(base64.b64encode, download_result["data"])
+                video_base64 = video_base64.decode("utf-8")
                 logger.debug(f"视频下载成功，大小: {len(download_result['data']) / (1024 * 1024):.2f} MB")
 
                 return {

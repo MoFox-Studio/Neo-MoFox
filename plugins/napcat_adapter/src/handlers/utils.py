@@ -257,7 +257,7 @@ async def get_image_base64(url: str) -> str:
 
         if not image_bytes:
             raise ValueError("图片内容为空")
-        return base64.b64encode(image_bytes).decode("utf-8")
+        return (await asyncio.to_thread(base64.b64encode, image_bytes)).decode("utf-8")
     except httpx.TimeoutException as e:
         logger.error(f"图片下载超时: {e!s}")
         raise

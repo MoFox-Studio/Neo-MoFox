@@ -690,9 +690,9 @@ class BookuKnowledgeService(BaseService):
             suffix = resolved_path.suffix.lower()
             is_markdown = suffix in {".md", ".markdown"}
             if suffix in {".txt", ".md", ".markdown", ".json", ".csv", ".log"}:
-                text = resolved_path.read_text(encoding="utf-8", errors="ignore")
+                text = await asyncio.to_thread(resolved_path.read_text, encoding="utf-8", errors="ignore")
             elif suffix == ".docx":
-                text = _extract_docx_text(resolved_path)
+                text = await asyncio.to_thread(_extract_docx_text, resolved_path)
             else:
                 raise ValueError("仅支持 txt/md/json/csv/log/docx 文件上传")
             if not title.strip():
