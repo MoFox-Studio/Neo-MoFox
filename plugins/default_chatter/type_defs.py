@@ -22,6 +22,7 @@ class LLMResponseLike(Protocol):
 
     payloads: list[LLMPayload]
     message: str | None
+    reasoning_content: str | None
     call_list: list[ToolCall] | None
 
     async def send(

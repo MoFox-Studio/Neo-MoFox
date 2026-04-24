@@ -92,7 +92,8 @@ def _build_actor_decision_panel(chat_stream: ChatStream, response: LLMResponseLi
         or getattr(chat_stream, "stream_id", "")
         or "未知聊天流"
     )
-    thought = response.message.strip() if response.message else "（无）"
+    thought = response.reasoning_content.strip() if response.reasoning_content else "（无）"
+    monologue = response.message.strip() if response.message else "（无）"
 
     tool_lines = []
     for call in response.call_list or []:
@@ -105,7 +106,8 @@ def _build_actor_decision_panel(chat_stream: ChatStream, response: LLMResponseLi
     tools_text = "\n".join(tool_lines) if tool_lines else "    （无）"
     return (
         f"聊天流名称：{stream_name}\n\n"
-        f"思考：{thought}\n"
+        f"思考：{thought}\n\n"
+        f"独白：{monologue}\n\n"
         f"调用工具：\n{tools_text}"
     )
 
