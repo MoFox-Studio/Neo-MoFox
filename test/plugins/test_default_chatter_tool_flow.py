@@ -11,6 +11,7 @@ from plugins.default_chatter.tool_flow import (
     append_suspend_payload_if_action_only,
     process_tool_calls,
 )
+from src.kernel.llm import ROLE
 
 
 class _FakeResponse:
@@ -19,8 +20,9 @@ class _FakeResponse:
     def __init__(self) -> None:
         self.payloads: list[Any] = []
 
-    def add_payload(self, payload: Any) -> None:
+    def add_payload(self, payload: Any, position: object = None) -> None:
         """记录 payload。"""
+        _ = position
         self.payloads.append(payload)
 
 
@@ -286,6 +288,7 @@ def test_append_suspend_payload_only_for_action_calls() -> None:
         logger=logger,
     )
     assert len(response.payloads) == 1
+    assert response.payloads[0].role == ROLE.ASSISTANT
 
     response_2 = _FakeResponse()
     append_suspend_payload_if_action_only(

@@ -351,26 +351,15 @@ async def test_run_enhanced_prints_actor_decision_panel_before_processing_tool_c
 
 
 @pytest.mark.asyncio
-async def test_run_enhanced_uses_model_followup_for_anthropic_action_only() -> None:
-    """Anthropic action-only 回合应进入真实 follow-up，而不是本地注入 SUSPEND。"""
+async def test_run_enhanced_waits_after_anthropic_action_only_suspend() -> None:
+    """Anthropic action-only 回合注入 SUSPEND 后应直接等待。"""
     resp = _FakeResponse(
         payload_roles=[ROLE.USER],
         message="",
         model_set=[{"client_type": "anthropic"}],
     )
-
-    async def _send(*, stream: bool = False) -> _FakeResponse:
-        _ = stream
-        resp.send_count += 1
-        if resp.send_count == 1:
-            resp.call_list = [SimpleNamespace(name="action-send_text", args={}, id="1")]
-            resp.message = ""
-        else:
-            resp.call_list = []
-            resp.message = "__SUSPEND__"
-        return resp
-
-    resp.send = _send  # type: ignore[method-assign]
+    resp.call_list = [SimpleNamespace(name="action-send_text", args={}, id="1")]
+    resp.reasoning_content = "think"
 
     chatter = _FakeChatterAllowUser(resp)
     chat_stream = cast(Any, SimpleNamespace(stream_id="s1", stream_name="测试流"))
@@ -388,30 +377,19 @@ async def test_run_enhanced_uses_model_followup_for_anthropic_action_only() -> N
 
     first = await anext(gen)
     assert first.__class__.__name__ == "Wait"
-    assert resp.send_count == 2
+    assert resp.send_count == 1
 
 
 @pytest.mark.asyncio
-async def test_run_classical_uses_model_followup_for_anthropic_action_only() -> None:
-    """classical 下 Anthropic action-only 回合也应走真实 follow-up。"""
+async def test_run_classical_waits_after_anthropic_action_only_suspend() -> None:
+    """classical 下 Anthropic action-only 回合注入 SUSPEND 后应直接等待。"""
     resp = _FakeResponse(
         payload_roles=[ROLE.USER],
         message="",
         model_set=[{"client_type": "anthropic"}],
     )
-
-    async def _send(*, stream: bool = False) -> _FakeResponse:
-        _ = stream
-        resp.send_count += 1
-        if resp.send_count == 1:
-            resp.call_list = [SimpleNamespace(name="action-send_text", args={}, id="1")]
-            resp.message = ""
-        else:
-            resp.call_list = []
-            resp.message = "__SUSPEND__"
-        return resp
-
-    resp.send = _send  # type: ignore[method-assign]
+    resp.call_list = [SimpleNamespace(name="action-send_text", args={}, id="1")]
+    resp.reasoning_content = "think"
 
     chatter = _FakeChatterAllowUser(resp)
     chat_stream = cast(Any, SimpleNamespace(stream_id="s1", stream_name="测试流"))
@@ -429,4 +407,4 @@ async def test_run_classical_uses_model_followup_for_anthropic_action_only() -> 
 
     first = await anext(gen)
     assert first.__class__.__name__ == "Wait"
-    assert resp.send_count == 2
+    assert resp.send_count == 1

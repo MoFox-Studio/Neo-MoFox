@@ -295,6 +295,7 @@ def _payloads_to_anthropic_messages(
     system_blocks: list[_ProviderPayload] = []
     messages: list[_ProviderPayload] = []
     tools: list[_ProviderPayload] = []
+    previous_role: ROLE | None = None
 
     for payload in payloads:
         if payload.role == ROLE.TOOL:
@@ -305,6 +306,7 @@ def _payloads_to_anthropic_messages(
                         tools.append(_to_openai_compatible_tool(tool))
                     else:
                         tools.append(_to_anthropic_tool(tool))
+            previous_role = payload.role
             continue
 
         if payload.role == ROLE.SYSTEM:
@@ -313,6 +315,7 @@ def _payloads_to_anthropic_messages(
                     system_blocks.append({"type": "text", "text": part.text})
                 else:
                     system_blocks.append({"type": "text", "text": str(part)})
+            previous_role = payload.role
             continue
 
         if payload.role == ROLE.TOOL_RESULT:
@@ -341,14 +344,18 @@ def _payloads_to_anthropic_messages(
                 "role": "user",
                 "content": content_blocks or [{"type": "text", "text": ""}],
             })
+            previous_role = payload.role
             continue
 
         role = "assistant" if payload.role == ROLE.ASSISTANT else "user"
         content_blocks: list[_ProviderPayload] = []
+        text_chunks: list[str] = []
+        has_reasoning_block = False
 
         for index, part in enumerate(payload.content):
             if isinstance(part, Text):
                 content_blocks.append({"type": "text", "text": part.text})
+                text_chunks.append(part.text)
                 continue
 
             if isinstance(part, Image):
@@ -392,6 +399,7 @@ def _payloads_to_anthropic_messages(
                     reasoning_block = _reasoning_part_to_anthropic_block(part)
                     if reasoning_block is not None:
                         content_blocks.append(reasoning_block)
+                        has_reasoning_block = True
                 continue
 
             to_text = getattr(part, "to_text", None)
@@ -405,10 +413,26 @@ def _payloads_to_anthropic_messages(
 
             content_blocks.append({"type": "text", "text": str(part)})
 
+        if (
+            payload.role == ROLE.ASSISTANT
+            and previous_role == ROLE.TOOL_RESULT
+            and not has_reasoning_block
+        ):
+            synthesized_thinking = "".join(chunk for chunk in text_chunks if isinstance(chunk, str)).strip()
+            if synthesized_thinking:
+                content_blocks.insert(
+                    0,
+                    {
+                        "type": "thinking",
+                        "thinking": synthesized_thinking,
+                    },
+                )
+
         messages.append({
             "role": role,
             "content": content_blocks or [{"type": "text", "text": ""}],
         })
+        previous_role = payload.role
 
     return messages, tools, system_blocks
 

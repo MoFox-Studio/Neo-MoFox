@@ -207,6 +207,31 @@ def test_convert_assistant_preserves_redacted_thinking_block() -> None:
     ]
 
 
+def test_convert_assistant_after_tool_result_synthesizes_missing_thinking() -> None:
+    """紧随 TOOL_RESULT 的 assistant 若缺少 reasoning block，应自动用文本补 thinking。"""
+    payloads = [
+        LLMPayload(
+            ROLE.ASSISTANT,
+            [ReasoningText("think", signature="sig_1"), ToolCall(id="toolu_1", name="get_weather", args={"city": "Paris"})],
+        ),
+        LLMPayload(
+            ROLE.TOOL_RESULT,
+            [ToolResult(value={"temp": 23}, call_id="toolu_1", name="get_weather")],
+        ),
+        LLMPayload(ROLE.ASSISTANT, Text("__SUSPEND__")),
+    ]
+
+    messages, _, _ = _payloads_to_anthropic_messages(payloads)
+
+    assert messages[2] == {
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "__SUSPEND__"},
+            {"type": "text", "text": "__SUSPEND__"},
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_create_non_stream_returns_text_tool_calls_and_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
     """测试非流式 create 路径。"""
