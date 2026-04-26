@@ -49,7 +49,7 @@ _SUB_AGENT_UNREAD_MESSAGE_BONUS = 0.05
 _SUB_AGENT_NEXT_TICK_REPLY_BONUS = 0.5
 _SUB_AGENT_NEXT_TICK_BONUS_ATTR = "_default_chatter_next_tick_bonus"
 _SEND_TEXT_TYPING_DELAY_PER_CHAR = 0.045
-_SEND_TEXT_TYPING_DELAY_MAX_SECONDS = 3.0
+_SEND_TEXT_TYPING_DELAY_MAX_SECONDS = 10.0
 
 
 def _set_next_tick_sub_agent_bonus(chat_stream: ChatStream, bonus: float) -> None:
