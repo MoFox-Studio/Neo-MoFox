@@ -20,6 +20,22 @@ ModelUsageStats = namedtuple(
 )
 
 
+def _normalize_max_retry(value: Any) -> int:
+    try:
+        max_retry = int(value) if value is not None else 2
+    except Exception:
+        max_retry = 0
+    return max(0, max_retry)
+
+
+def _normalize_retry_interval(value: Any) -> float:
+    try:
+        delay = float(value) if value is not None else 3.0
+    except Exception:
+        delay = 0.0
+    return max(0.0, delay)
+
+
 class LoadBalancedPolicy(Policy):
     """
     基于负载均衡和失败惩罚的动态模型选择策略。
@@ -124,13 +140,7 @@ class _LoadBalancedSession(PolicySession):
         # 计算最大尝试次数
         self._max_total_attempts = 0
         for m in model_set:
-            try:
-                mr = int(m.get("max_retry", 0))
-            except Exception:
-                mr = 0
-            if mr < 0:
-                mr = 0
-            self._max_total_attempts += 1 + mr
+            self._max_total_attempts += 1 + _normalize_max_retry(m.get("max_retry"))
         if self._max_total_attempts <= 0:
             self._max_total_attempts = len(model_set)
 
@@ -179,22 +189,8 @@ class _LoadBalancedSession(PolicySession):
             return ModelStep(model=None, meta={"reason": "model_not_found"})
         
         # 获取重试配置
-        max_retry = current_model.get("max_retry")
-        retry_interval = current_model.get("retry_interval")
-        
-        try:
-            max_retry_int = int(max_retry) if max_retry is not None else 2
-        except Exception:
-            max_retry_int = 0
-        if max_retry_int < 0:
-            max_retry_int = 0
-        
-        try:
-            delay = float(retry_interval) if retry_interval is not None else 3.0
-        except Exception:
-            delay = 0.0
-        if delay < 0:
-            delay = 0.0
+        max_retry_int = _normalize_max_retry(current_model.get("max_retry"))
+        delay = _normalize_retry_interval(current_model.get("retry_interval"))
         
         # 判断是否应该重试当前模型
         if self._model_retry_used < max_retry_int:
@@ -236,12 +232,38 @@ class _LoadBalancedSession(PolicySession):
             },
         )
 
+    def record_success(self, *, latency: float = 0.0, tokens: int = 0) -> None:
+        """记录当前模型成功完成一次请求，用于后续负载均衡评分。"""
+        if self._current_model_name is None:
+            return
+
+        model_name = self._current_model_name
+        self._update_usage_penalty(model_name, increase=False)
+        with self._lock:
+            stats = self._model_usage.get(model_name)
+            if stats is None:
+                return
+
+            request_count = stats.request_count + 1
+            normalized_latency = max(0.0, float(latency))
+            avg_latency = (
+                (stats.avg_latency * stats.request_count + normalized_latency)
+                / request_count
+            )
+            self._model_usage[model_name] = stats._replace(
+                total_tokens=stats.total_tokens + max(0, int(tokens)),
+                avg_latency=avg_latency,
+                request_count=request_count,
+            )
+
     def _select_best_model(self) -> dict[str, Any] | None:
         """
         选择负载均衡评分最低的可用模型。
         
         评分公式：
-        total_tokens + penalty * PENALTY_WEIGHT + usage_penalty * USAGE_PENALTY_WEIGHT + avg_latency * LATENCY_WEIGHT
+        total_tokens + penalty * PENALTY_WEIGHT
+        + (usage_penalty + request_count) * USAGE_PENALTY_WEIGHT
+        + avg_latency * LATENCY_WEIGHT
         """
         with self._lock:
             candidate_models = [
@@ -266,7 +288,8 @@ class _LoadBalancedSession(PolicySession):
                 score = (
                     stats.total_tokens
                     + stats.penalty * self._penalty_weight
-                    + stats.usage_penalty * self._usage_penalty_weight
+                    + (stats.usage_penalty + stats.request_count)
+                    * self._usage_penalty_weight
                     + stats.avg_latency * self._latency_weight
                 )
                 

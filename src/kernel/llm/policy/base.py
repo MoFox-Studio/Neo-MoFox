@@ -31,6 +31,9 @@ class PolicySession(Protocol):
     def next_after_error(self, error: BaseException) -> ModelStep:
         ...
 
+    def record_success(self, *, latency: float = 0.0, tokens: int = 0) -> None:
+        ...
+
 
 class Policy(Protocol):
     def new_session(self, *, model_set: Any, request_name: str) -> PolicySession:

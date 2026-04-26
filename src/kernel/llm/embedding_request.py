@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Self
+from typing import Self
 
 from src.kernel.logger import get_logger
 
@@ -98,6 +98,7 @@ class EmbeddingRequest:
                     )
                     get_global_collector().record_request(metrics)
 
+                session.record_success(latency=timer.elapsed)
                 return EmbeddingResponse(
                     embeddings=embeddings,
                     model_name=model_identifier,

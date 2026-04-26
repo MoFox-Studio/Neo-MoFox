@@ -8,7 +8,7 @@ import pytest
 
 from src.kernel.llm.exceptions import LLMTimeoutError
 from src.kernel.llm.policy.base import ModelStep, Policy, PolicySession
-from src.kernel.llm.policy.load_balanced import LoadBalancedPolicy, ModelUsageStats, _LoadBalancedSession
+from src.kernel.llm.policy.load_balanced import LoadBalancedPolicy
 from src.kernel.llm.policy.round_robin import RoundRobinPolicy, _RoundRobinSession
 
 
@@ -55,6 +55,7 @@ class TestPolicySession:
         # Check that protocol has required methods
         assert hasattr(PolicySession, "first")
         assert hasattr(PolicySession, "next_after_error")
+        assert hasattr(PolicySession, "record_success")
 
 
 class TestPolicy:
@@ -344,6 +345,19 @@ class TestRoundRobinSession:
         # Total: 6
         assert session._max_total_attempts == 6
 
+    def test_missing_max_retry_uses_same_default_for_limit_and_retry(self) -> None:
+        """缺失 max_retry 时，尝试上限应与实际重试默认值保持一致。"""
+        model_set = [
+            {"model_identifier": "a", "retry_interval": 0},
+            {"model_identifier": "b", "retry_interval": 0},
+        ]
+        session = _RoundRobinSession(model_set=model_set, start_index=0)
+
+        assert session.first().model == model_set[0]
+        assert session.next_after_error(LLMTimeoutError("x")).model == model_set[0]
+        assert session.next_after_error(LLMTimeoutError("x")).model == model_set[0]
+        assert session.next_after_error(LLMTimeoutError("x")).model == model_set[1]
+
     def test_negative_max_retry_treated_as_zero(self) -> None:
         """Test that negative max_retry is treated as zero."""
         model_set = [
@@ -618,6 +632,7 @@ class TestLoadBalancedPolicy:
         session = policy.new_session(model_set=mock_model_set, request_name="test")
         assert hasattr(session, "first")
         assert hasattr(session, "next_after_error")
+        assert hasattr(session, "record_success")
 
     def test_new_session_validates_model_set(self) -> None:
         """Test that new_session validates model_set."""
@@ -759,6 +774,36 @@ class TestLoadBalancedSession:
         stats = policy._model_usage[model_name]
         assert stats.usage_penalty == 1  # Should be incremented
 
+    def test_record_success_updates_stats_and_releases_usage_penalty(
+        self, policy: LoadBalancedPolicy, mock_model_set: list[dict]
+    ) -> None:
+        """成功反馈应释放临时使用惩罚，并更新负载均衡统计。"""
+        session = policy.new_session(model_set=mock_model_set, request_name="test")
+        step = session.first()
+        model_name = step.meta["model_name"]
+
+        session.record_success(latency=2.5, tokens=123)
+
+        stats = policy._model_usage[model_name]
+        assert stats.usage_penalty == 0
+        assert stats.request_count == 1
+        assert stats.avg_latency == 2.5
+        assert stats.total_tokens == 123
+
+    def test_successful_requests_affect_load_balancing(
+        self, policy: LoadBalancedPolicy, mock_model_set: list[dict]
+    ) -> None:
+        """成功请求也应影响后续选择，避免一直命中同一个模型。"""
+        session1 = policy.new_session(model_set=mock_model_set, request_name="req1")
+        step1 = session1.first()
+        first_model_name = step1.meta["model_name"]
+        session1.record_success(latency=0.1)
+
+        session2 = policy.new_session(model_set=mock_model_set, request_name="req2")
+        step2 = session2.first()
+
+        assert step2.meta["model_name"] != first_model_name
+
     def test_next_after_error_same_model_retry(self, policy: LoadBalancedPolicy, mock_model_set: list[dict]) -> None:
         """Test retrying same model on error."""
         session = policy.new_session(model_set=mock_model_set, request_name="test")
@@ -878,6 +923,21 @@ class TestLoadBalancedSession:
         # claude-3: 1 + 0 = 1
         # Total: 6
         assert session._max_total_attempts == 6
+
+    def test_missing_max_retry_uses_same_default_for_limit_and_retry(
+        self, policy: LoadBalancedPolicy
+    ) -> None:
+        """缺失 max_retry 时，尝试上限应与实际重试默认值保持一致。"""
+        model_set = [
+            {"model_identifier": "a", "retry_interval": 0},
+            {"model_identifier": "b", "retry_interval": 0},
+        ]
+        session = policy.new_session(model_set=model_set, request_name="test")
+
+        assert session.first().model == model_set[0]
+        assert session.next_after_error(LLMTimeoutError("x")).model == model_set[0]
+        assert session.next_after_error(LLMTimeoutError("x")).model == model_set[0]
+        assert session.next_after_error(LLMTimeoutError("x")).model == model_set[1]
 
     def test_negative_max_retry_treated_as_zero(self, policy: LoadBalancedPolicy) -> None:
         """Test that negative max_retry is treated as zero."""
@@ -1035,7 +1095,7 @@ class TestLoadBalancedPolicyIntegration:
         
         # First request to model-a
         session1 = policy.new_session(model_set=model_set, request_name="req1")
-        step1 = session1.first()
+        session1.first()
         
         # Fail model-a
         session1.next_after_error(LLMTimeoutError("Timeout"))

@@ -105,6 +105,7 @@ class RerankRequest:
                     )
                     get_global_collector().record_request(metrics)
 
+                session.record_success(latency=timer.elapsed)
                 items = [
                     RerankItem(
                         index=int(item.get("index", 0)),

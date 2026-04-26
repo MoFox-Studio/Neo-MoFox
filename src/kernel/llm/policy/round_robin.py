@@ -11,6 +11,22 @@ from typing import Any
 from .base import ModelStep, Policy, PolicySession
 
 
+def _normalize_max_retry(value: Any) -> int:
+    try:
+        max_retry = int(value) if value is not None else 2
+    except Exception:
+        max_retry = 0
+    return max(0, max_retry)
+
+
+def _normalize_retry_interval(value: Any) -> float:
+    try:
+        delay = float(value) if value is not None else 3.0
+    except Exception:
+        delay = 0.0
+    return max(0.0, delay)
+
+
 class RoundRobinPolicy(Policy):
     """简单轮询：在 `model_set`（list[dict]）上循环选择。"""
 
@@ -44,13 +60,7 @@ class _RoundRobinSession(PolicySession):
         # 尝试次数上限：每个模型至少试 1 次，并允许 max_retry 次重试。
         self._max_total_attempts = 0
         for m in model_set:
-            try:
-                mr = int(m.get("max_retry", 0))
-            except Exception:
-                mr = 0
-            if mr < 0:
-                mr = 0
-            self._max_total_attempts += 1 + mr
+            self._max_total_attempts += 1 + _normalize_max_retry(m.get("max_retry"))
         if self._max_total_attempts <= 0:
             self._max_total_attempts = len(model_set)
 
@@ -65,22 +75,8 @@ class _RoundRobinSession(PolicySession):
             return ModelStep(model=None, meta={"reason": "exhausted"})
 
         model = self._models[self._idx]
-        max_retry = model.get("max_retry")
-        retry_interval = model.get("retry_interval")
-
-        try:
-            max_retry_int = int(max_retry) if max_retry is not None else 2
-        except Exception:
-            max_retry_int = 0
-        if max_retry_int < 0:
-            max_retry_int = 0
-
-        try:
-            delay = float(retry_interval) if retry_interval is not None else 3.0
-        except Exception:
-            delay = 0.0
-        if delay < 0:
-            delay = 0.0
+        max_retry_int = _normalize_max_retry(model.get("max_retry"))
+        delay = _normalize_retry_interval(model.get("retry_interval"))
 
         # 同模型重试
         if self._model_retry_used < max_retry_int:
@@ -97,3 +93,6 @@ class _RoundRobinSession(PolicySession):
         self._model_retry_used = 0
         self._attempts_used += 1
         return ModelStep(model=self._models[self._idx], meta={"model_index": self._idx, "attempt": self._attempts_used, "switch": True})
+
+    def record_success(self, *, latency: float = 0.0, tokens: int = 0) -> None:
+        return None
