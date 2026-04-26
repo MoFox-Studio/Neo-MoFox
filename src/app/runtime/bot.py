@@ -388,7 +388,7 @@ class Bot:
         self.ui.update_phase_status("LLM 预检", "进行中...")
 
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for provider in providers:
+            async def _check_provider(provider) -> None:
                 base_url = str(provider.base_url).rstrip("/")
                 url = f"{base_url}/models"
                 headers: dict[str, str] = {}
@@ -411,6 +411,11 @@ class Bot:
                     self.logger.warning(
                         f"LLM 预检失败: {provider.name} {elapsed:.2f}s ({url}) -> {e}"
                     )
+
+            await asyncio.gather(
+                *(_check_provider(provider) for provider in providers),
+                return_exceptions=True,
+            )
 
         self.ui.update_phase_status("LLM 预检", "已完成")
 

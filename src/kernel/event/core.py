@@ -234,9 +234,11 @@ class EventBus:
             key=lambda s: (-s.priority, s.order),
         )
 
-        logger.debug(
-            f"正在按顺序向 {len(subs)} 个处理器发布事件 '{event_name}'"
-        )
+        # 过滤一下 log_output 事件，不然太吵了
+        if event_name != "log_output":
+            logger.debug(
+                f"正在按顺序向 {len(subs)} 个处理器发布事件 '{event_name}'"
+            )
 
         expected_keys = set(params.keys())
         current_params: EventParams = dict(params)
