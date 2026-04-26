@@ -14,7 +14,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Literal, TypeVar, Self, get_args, get_origin
+from typing import Any, Callable, Literal, TypeVar, Self, get_args, get_origin
 
 import tomllib
 from pydantic import BaseModel, ConfigDict, TypeAdapter
@@ -662,7 +662,9 @@ def _merge_section_fields(
     - 若 ``raw_section`` 中存在该字段且能通过类型校验，则保留用户值。
     - 否则使用字段的 ``default`` / ``default_factory``，最后回退到类型占位值。
 
-    返回严格按模型字段顺序组装的字典，不含模型未定义的键。
+    默认返回严格按模型字段顺序组装的字典，不含模型未定义的键。
+    若 section_model 声明了 ``__config_extra_section_model__``，则会额外保留
+    raw_section 中未定义的字典子节，并按该模型补齐默认字段。
     """
     section_out: dict[str, Any] = {}
     for key, field in section_model.model_fields.items():
@@ -744,6 +746,14 @@ def _merge_section_fields(
             section_out[key] = _placeholder_for_type(
                 annotation
             )  # 最终兜底：按类型生成占位值
+
+    extra_section_model = getattr(section_model, "__config_extra_section_model__", None)
+    if isinstance(extra_section_model, type) and issubclass(extra_section_model, SectionBase):
+        for key, value in raw_section.items():
+            if key in section_model.model_fields:
+                continue
+            raw_extra = value if isinstance(value, dict) else {}
+            section_out[key] = _merge_section_fields(extra_section_model, raw_extra)
 
     return section_out
 
@@ -966,6 +976,21 @@ def _render_section_block(
             f"{field_name} = {_toml_format_value(value)}"
         )  # 写出 key = value 行
         lines.append("")  # 字段间插入空行，提升可读性
+
+    extra_section_model = getattr(section_model, "__config_extra_section_model__", None)
+    if isinstance(extra_section_model, type) and issubclass(extra_section_model, SectionBase):
+        for extra_name, extra_data in section_data.items():
+            if extra_name in section_model.model_fields or not isinstance(extra_data, dict):
+                continue
+            lines.append("")
+            _render_section_block(
+                lines,
+                f"{section_name}.{extra_name}",
+                extra_section_model,
+                extra_data,
+                is_list=False,
+                include_doc=True,
+            )
 
     while lines and lines[-1] == "":
         lines.pop()  # 去除节尾多余空行（节间空行由上层渲染逻辑统一管理）
