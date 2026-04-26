@@ -125,17 +125,23 @@ class BookuMemoryReadAgent(BaseAgent):
 
             "### 阶段1：任务解析与目标设定\n"
             "- 仔细理解传入的 task/query 参数，明确用户真正需要什么\n"
-            "- 自动补全检索标签：从query中提取/推断可能的 tags（如偏好\\事件\\人物等）\n"
-            "- 确定检索目标：是找事实？找偏好？还是找历史对话进展？\n\n"
+            "- 自动补全检索标签：从query中提取/推断可能的 tags（如偏好、事件、人物等）\n"
+            "  **标签生成准则（严格遵守）**：\n"
+            "  - 数量：core_tags 1-2 个，diffusion_tags 2-3 个\n"
+            "  - 粒度：优先使用上位概念，宽泛覆盖语义领域而非锁定具体细节\n"
+            "  - 宽泛优先：宽泛标签覆盖面广，窄标签易漏查；首次检索必须使用宽泛标签，禁止使用具体词\n"
+            "  - **人物查询特例**：若任务涉及特定人物，core_tags 中**必须**包含该人物的名称/昵称/ID（实体名称本身就是最重要的 core_tag）\n"
+            "- 确定检索目标：是找事实？找偏好？还是找历史对话进展？\n"
+            "- **人物查询**：若任务涉及特定人物且已知其平台ID，同时用名称和ID两个角度检索\n"
+            "  → 先 memory_retrieve 语义检索，无果时用 memory_grep 分别尝试名称和ID\n\n"
 
             "### 阶段2：主检索（必须首先执行）\n"
-            "- 调用 memory_retrieve，使用三种标签组合策略进行语义动力学检索：\n"
-            "  • 精确匹配：query原词 + 推断tags\n"
-            "  • 语义扩展：query同义/相关词 + 宽泛tags\n"
-            "  • 场景关联：从任务场景反推可能的记忆类型\n"
-            "- 建议先设置 include_archived=false，若无结果再尝试 true\n"
-            "- 若问题与专业知识相关，建议设置 include_knowledge=true, 若无需访问知识库或已经访问过但无结果则设为 false\n"
-            "- user如果在payload中显式设置了include_knowledge=true或include_archived=true, 那这些参数必须被严格遵守, 不能忽略或改变\n\n"
+            "- 调用 memory_retrieve，使用三种角度覆盖语义空间：\n"
+            "  • 实体维度：以人名/物名/事件名为核心，宽泛 tags 覆盖关联领域\n"
+            "  • 语义维度：query 的同义/上位概念展开，不局限于原词\n"
+            "  • 场景维度：从查询意图反推对应的记忆类型（偏好/经历/计划等）\n"
+            "- 至少发起 **2 次** memory_retrieve 调用，每次从不同维度出发，尽量覆盖更多方向\n"
+            "- 若问题与专业知识相关，建议设置 include_knowledge=true；若无需访问知识库或已经访问过但无结果则设为 false\n\n"
 
             "### 阶段3：结果评估与全文读取\n"
             "- 阅读 memory_retrieve 返回的片段结果，判断：\n"
@@ -148,6 +154,7 @@ class BookuMemoryReadAgent(BaseAgent):
             "  • 优先检索 title/summary 字段快速定位\n"
             "  • 无果时扩展至 content/tags 字段\n"
             "  • 可尝试更换关键词角度（同义词/上下位词/场景词）\n"
+            "  • 人物类查询：若有ID，也用ID作为关键词尝试；scopes 必须包含 tags，否则会遗漏按人名打标的记忆；topk 设为 50，include_archived=true\n"
             "- 对 memory_grep 命中的高价值id，按需调用 memory_read_full_content 读取全文\n"
             "- 💡 技巧：memory_grep 返回的 metadata 可帮助判断是否值得读全文\n\n"
 
@@ -166,28 +173,34 @@ class BookuMemoryReadAgent(BaseAgent):
             "- 每次迭代检索后，重新评估结果质量，最多尝试2-3个方向\n\n"
 
             "### 阶段7：总结与返回（强制）\n"
-            "- 整合所有获取的信息，用自然中文输出：\n"
-            "  ① 核心结论（直接回答任务）\n"
-            "  ② 关键依据（引用记忆片段+对应id）\n"
-            "  ③ 不确定性说明（如有）\n"
+            "- 整合所有获取的信息，按输出格式要求生成内容：\n"
+            "  ① 【结论】：综合归纳，按维度/话题组织，不逐条转述原文；含时间范围（若跨度 >30 天）\n"
+            "  ② 【来源】：简短溯源列表，每条含日期和 id，作为证据附录\n"
+            "  ③ 【不确定】：（可选）有明显信息缺口或记录过旧时才写\n"
             "- 最后必须调用 memory_finish_task(content=总结文本)\n"
             "- ❌ 禁止直接输出最终答案，必须通过 memory_finish_task 返回\n"
             "- ✅ 即使失败/无结果，也要调用 memory_finish_task 说明原因+已尝试步骤\n\n"
 
             "## ⚙️ 高级策略与约束\n"
             "- memory_inherent_read 使用建议：仅当任务明显依赖全局背景/规则时调用，否则跳过\n"
-            "- 标签补全技巧：从query提取实体→映射tags→组合检索，例如'喜欢吃什么'→tags=['偏好','饮食']\n"
+            "- 标签补全技巧：从query提取实体→映射上位概念tags→组合检索，标签应覆盖语义领域而非具体细节\n"
             "- 截断处理：memory_retrieve/memory_grep 返回的 summary 若含‘...’或长度接近limit，优先 memory_read_full_content\n"
             "- 多id处理：若多个id相关，按相关性排序，优先读取top-3，避免token浪费\n"
-            "- 不确定性表达：使用'根据现有记忆...''未找到明确记录，但...等措辞\n\n"
+            "- 不确定性表达：使用'根据现有记忆...''未找到明确记录，但...等措辞\n"
+            "- **时间判断准则**：metadata 中的 `created_at_readable` 和 `updated_at_readable` 是人类可读的创建/更新时间（格式 YYYY-MM-DD HH:MM）。\n"
+            "  处理涉及时间的查询时，以这两个字段判断记忆新旧，优先引用较新的记忆作为结论依据。\n\n"
 
             "## 🎯 输出格式要求\n"
-            "memory_finish_task 的 content 参数应包含：\n"
-            "【结论】<1-2句核心回答>\n"
-            "【依据】\n"
-            "• <记忆片段1> (id:xxx)\n"
-            "• <记忆片段2> (id:yyy)\n"
-            "【备注】<不确定性/建议/后续行动>（可选）\n\n"
+            "memory_finish_task 的 content 按以下结构组织：\n\n"
+            "【结论】\n"
+            "综合各条记忆后的核心知识，按话题/维度归纳，而非逐条转述原文。\n"
+            "若记忆时间跨度超过 30 天，在此处标注：（信息时间范围：YYYY-MM-DD ～ YYYY-MM-DD）\n\n"
+            "【来源】（溯源用，不是主体，简短即可）\n"
+            "• [YYYY-MM-DD] <片段摘要> (id:xxx)\n"
+            "• [YYYY-MM-DD] <片段摘要> (id:yyy)\n\n"
+            "【不确定】（可选，仅当有明显信息缺口时才写）\n"
+            "未找到的信息 / 记录时间较旧可能已过期 / 建议后续补充\n\n"
+            "逻辑要求：结论是综合分析，来源是证据列表，不要把来源内容再原文贴到结论里。\n\n"
 
             "## 🚫 绝对禁止\n"
             "- 编造不存在的记忆内容或id\n"
@@ -199,7 +212,7 @@ class BookuMemoryReadAgent(BaseAgent):
     async def execute(
         self,
         intent_text: Annotated[str, "意图描述，描述想要了解的内容，应清晰描述「想知道什么」，而非泛泛一问"],
-        core_tags: Annotated[list[str], "核心语义标签，最优先匹配，是目标记忆最相关的关键词"],
+        core_tags: Annotated[list[str], "核心语义标签，最优先匹配，是目标记忆最相关的关键词；查询特定人物时若已知其平台ID，必须将ID也加入此列表"],
         diffusion_tags: Annotated[list[str], "扩散联想标签，表示目标记忆可能的相关标签"],
         opposing_tags: Annotated[list[str], "对立标签，抑制不希望召回的方向"],
         context: Annotated[str, "当前对话上下文（可选），辅助语义精确化，推荐填写以帮助agent理解检索场景"] = "",
@@ -273,12 +286,16 @@ class BookuMemoryReadAgent(BaseAgent):
             response = await request.send(stream=False)
             await response
             tool_traces: list[dict[str, Any]] = []
+            _retrieve_hint: str = ""
 
             for step_index in range(max_steps):
                 calls = response.call_list or []
                 if not calls:
                     logger.warning("LLM 未返回任何工具调用，可能是模型配置问题，建议更换模型。")
                     return False, {"error": "LLM 未返回任何工具调用，可能是模型配置问题，建议更换模型。"}
+
+                step_retrieve_result_count: int | None = None
+
                 for call in calls:
                     logger.info(f"调用工具：{call.name}")
                     logger.debug(f"工具调用请求：{call.name}，参数：{call.args}")
@@ -307,6 +324,33 @@ class BookuMemoryReadAgent(BaseAgent):
                         )
                     )
 
+                    # 追踪本步骤 memory_retrieve 的结果数量
+                    if normalized_name == "memory_retrieve" and success and isinstance(result, dict):
+                        step_retrieve_result_count = len(result.get("items", []))
+
+                # 根据本步骤 retrieve 结果计算动态提示
+                if step_retrieve_result_count is not None:
+                    if step_retrieve_result_count == 0:
+                        _retrieve_hint = (
+                            "⚠️ 向量检索未找到结果，标签可能过窄或与记忆内容不匹配。"
+                            "请尝试：① 使用 `memory_grep` 提取 query 中的关键词（人名、地名、事件名）进行精确匹配；"
+                            "② 或将 core_tags 更换为更宽泛的上位词（如'旅行'代替'某城市旅行'）再次检索。"
+                        )
+                    elif step_retrieve_result_count < 2:
+                        _retrieve_hint = (
+                            "⚠️ 检索结果少于 2 条，可能标签过窄。"
+                            "请将 core_tags 减少到 1 个并使用更宽泛的上位词后再次检索。"
+                        )
+                    else:
+                        _retrieve_hint = ""
+
+                ongoing_instruction = (
+                    f"{_retrieve_hint}\n" if _retrieve_hint else ""
+                ) + (
+                    "请控制工具调用数量，必要时在最后一轮调用 "
+                    "memory_finish_task(content=...) 返回当前结论与依据。"
+                )
+
                 response.payloads = with_single_system_payload(
                     response.payloads,
                     base_system_prompt=base_system_prompt,
@@ -318,10 +362,7 @@ class BookuMemoryReadAgent(BaseAgent):
                             "不要再调用 memory_retrieve/memory_grep/memory_read_full_content/"
                             "memory_status/memory_inherent_read 等其他工具。"
                         ),
-                        ongoing_instruction=(
-                            "请控制工具调用数量，必要时在最后一轮调用 "
-                            "memory_finish_task(content=...) 返回当前结论与依据。"
-                        ),
+                        ongoing_instruction=ongoing_instruction,
                     ),
                 )
                 response = await response.send(stream=False)

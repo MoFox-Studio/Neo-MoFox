@@ -91,7 +91,7 @@ class BookuMemoryConfig(BaseConfig):
         """检索与重塑配置。"""
 
         default_top_k: int = Field(
-            default=5,
+            default=15,
             description="默认召回条数",
             label="默认召回数",
             ge=1,
@@ -106,12 +106,19 @@ class BookuMemoryConfig(BaseConfig):
             tag="general",
             order=1
         )
+        force_full_retrieval: bool = Field(
+            default=False,
+            description="强制全量检索：开启后所有 memory_retrieve 调用均包含归档层，忽略调用方传入的 include_archived 参数",
+            label="强制全量检索",
+            tag="general",
+            order=2
+        )
         include_knowledge_default: bool = Field(
             default=False,
             description="默认是否检索知识库",
             label="默认检索知识库",
             tag="general",
-            order=2
+            order=3
         )
         deduplication_threshold: float = Field(
             default=0.88,

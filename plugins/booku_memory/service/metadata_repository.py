@@ -9,9 +9,9 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import delete, distinct, func, or_, select, update
+from sqlalchemy import and_, delete, distinct, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src.app.plugin_system.api.storage_api import PluginDatabase
@@ -52,6 +52,7 @@ class BookuMemoryMetadataRepository:
         Args:
             db_path: SQLite 数据库文件路径。
         """
+        self._db_path = db_path
         self._db = PluginDatabase(db_path, [BookuMemoryRecordModel, BookuMemoryTagModel])
 
     async def initialize(self) -> None:
@@ -504,17 +505,20 @@ class BookuMemoryMetadataRepository:
         Returns:
             滿足条件的 ``BookuMemoryRecord`` 列表，不包含已删除条目。
         """
-        rows = await (
-            self._db.query(BookuMemoryRecordModel)
-            .filter(
-                folder_id=folder_id,
-                bucket="emergent",
-                created_at__lt=before_timestamp,
-                is_deleted=0,
-            )
-            .all()
+        rows = cast(
+            list[BookuMemoryRecordModel],
+            await (
+                self._db.query(BookuMemoryRecordModel)
+                .filter(
+                    folder_id=folder_id,
+                    bucket="emergent",
+                    created_at__lt=before_timestamp,
+                    is_deleted=0,
+                )
+                .all()
+            ),
         )
-        return [self._to_record(r) for r in rows]  # type: ignore[arg-type]
+        return [self._to_record(r) for r in rows]
 
     async def get_bucket_counts(
         self,
@@ -574,8 +578,8 @@ class BookuMemoryMetadataRepository:
             qb = qb.filter(bucket__ne="archived")
         if not include_deleted:
             qb = qb.filter(is_deleted=0)
-        rows = await qb.order_by("-updated_at").limit(max(1, limit)).all()
-        return [self._to_record(r) for r in rows]  # type: ignore[arg-type]
+        rows = cast(list[BookuMemoryRecordModel], await qb.order_by("-updated_at").limit(max(1, limit)).all())
+        return [self._to_record(r) for r in rows]
 
     async def list_knowledge_chunk_titles(
         self,
@@ -633,8 +637,8 @@ class BookuMemoryMetadataRepository:
             qb = qb.filter(folder_id=folder_id)
         if not include_deleted:
             qb = qb.filter(is_deleted=0)
-        rows = await qb.order_by("-updated_at").limit(max(1, int(limit))).all()
-        return [self._to_record(r) for r in rows]  # type: ignore[arg-type]
+        rows = cast(list[BookuMemoryRecordModel], await qb.order_by("-updated_at").limit(max(1, int(limit))).all())
+        return [self._to_record(r) for r in rows]
 
     async def list_memory_ids_by_folder(
         self,
@@ -662,8 +666,8 @@ class BookuMemoryMetadataRepository:
             qb = qb.filter(bucket__ne="archived")
         if not include_deleted:
             qb = qb.filter(is_deleted=0)
-        rows = await qb.order_by("-updated_at").limit(max(1, limit)).all()
-        return [r.memory_id for r in rows]  # type: ignore[union-attr]
+        rows = cast(list[BookuMemoryRecordModel], await qb.order_by("-updated_at").limit(max(1, limit)).all())
+        return [r.memory_id for r in rows]
 
     async def search_records_grep(
         self,
@@ -818,3 +822,73 @@ class BookuMemoryMetadataRepository:
             )
             result = await s.execute(stmt)
             return [str(row[0]) for row in result.all()]
+
+    async def list_records_paginated(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 50,
+        search: str = "",
+        folder_id: str | None = None,
+        bucket: str | None = None,
+        include_deleted: bool = False,
+    ) -> tuple[list[BookuMemoryRecord], int]:
+        """分页列出记忆记录（支持关键词搜索和字段过滤），供管理 WebUI 使用。
+
+        Args:
+            page: 页码（从 1 开始）。
+            limit: 每页条数（最大 200）。
+            search: 在 title 和 content 中进行 LIKE 模糊搜索的关键词，空字符串则不过滤。
+            folder_id: 限定 folder；为 None 时不限定。
+            bucket: 限定 bucket；为 None 时不限定。
+            include_deleted: 是否包含已删除记录，默认 False。
+
+        Returns:
+            ``(records, total)`` 元组：records 为当前页记录列表，total 为满足条件的总条数。
+        """
+        R = BookuMemoryRecordModel
+        T = BookuMemoryTagModel
+        page = max(1, page)
+        limit = max(1, min(limit, 200))
+        offset = (page - 1) * limit
+
+        conds: list[Any] = []
+        if not include_deleted:
+            conds.append(R.is_deleted == 0)
+        if folder_id:
+            conds.append(R.folder_id == folder_id)
+        if bucket:
+            conds.append(R.bucket == bucket)
+        if search:
+            kw = f"%{search}%"
+            conds.append(or_(R.title.like(kw), R.content.like(kw)))
+
+        where = and_(*conds)
+
+        async with self._db.session() as s:
+            total: int = (
+                await s.execute(select(func.count()).select_from(R).where(where))
+            ).scalar_one()
+
+            rows = (
+                await s.execute(
+                    select(R).where(where).order_by(R.updated_at.desc()).limit(limit).offset(offset)
+                )
+            ).scalars().all()
+
+            if not rows:
+                return [], total
+
+            found_ids = [r.memory_id for r in rows]
+            tag_rows = (
+                await s.execute(select(T).where(T.memory_id.in_(found_ids)))
+            ).scalars().all()
+
+        tags_by_id: dict[str, dict[str, list[str]]] = {}
+        for tag in tag_rows:
+            mid = tag.memory_id
+            if mid not in tags_by_id:
+                tags_by_id[mid] = {}
+            tags_by_id[mid].setdefault(tag.tag_type, []).append(tag.tag_value)
+
+        return [self._to_record(r, tags_by_id) for r in rows], total

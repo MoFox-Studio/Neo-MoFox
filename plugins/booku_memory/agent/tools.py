@@ -164,8 +164,8 @@ class BookuMemoryRetrieveTool(BaseTool):
     async def execute(
         self,
         query_text: Annotated[str, "检索文本"],
-        core_tags: Annotated[list[str], "核心标签"],
-        diffusion_tags: Annotated[list[str], "扩散标签"],
+        core_tags: Annotated[list[str], "核心标签（1-2个，优先宽泛上位概念）"],
+        diffusion_tags: Annotated[list[str], "扩散标签（2-3个，语义邻域联想，比 core_tags 更宽泛）"],
         opposing_tags: Annotated[list[str], "对立标签"],
         topk: Annotated[int | None, "召回条数，默认使用系统配置"] = None,
         include_archived: Annotated[bool | None, "是否检索归档层"] = None,
@@ -228,7 +228,7 @@ class BookuMemoryGrepTool(BaseTool):
         query: Annotated[str, "关键词检索文本或正则表达式（use_regex=true 时）"],
         scopes: Annotated[list[GrepScopeLiteral], "grep 范围多选：title/summary/tags/content/metadata"],
         folder_id: Annotated[FolderLiteral | None, "在指定 folder 中检索"] = None,
-        include_archived: Annotated[bool, "是否检索归档层"] = False,
+        include_archived: Annotated[bool, "是否检索归档层"] = True,
         topk: Annotated[int, "返回条数"] = 10,
         use_regex: Annotated[bool, "为 true 时将 query 视为 Python 正则表达式（re.search），默认 false（LIKE 子串匹配）"] = False,
     ) -> tuple[bool, str | dict]:
@@ -246,7 +246,7 @@ class BookuMemoryGrepTool(BaseTool):
             query: 关键词检索文本（``use_regex=False``）或 Python 正则表达式（``use_regex=True``）。
             scopes: 搜索范围的多选列表，可为 ``title``/``summary``/``tags``/``content``/``metadata``。
             folder_id: 限定在指定 folder 中检索，``None`` 时搜索所有 folder。
-            include_archived: 是否同时检索归档层，默认 False。
+            include_archived: 是否同时检索归档层，默认 True。
             topk: 最大返回条数，默认为 10。
             use_regex: 是否启用正则匹配，默认 False。
 
