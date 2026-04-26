@@ -27,6 +27,8 @@ from .payload import (
 	Image,
 	LLMPayload,
 	LLMUsable,
+	LLMUsableExecution,
+	LLMUsableExecutionStatus,
 	ReasoningText,
 	Text,
 	ToolCall,
@@ -84,6 +86,8 @@ __all__ = [
 	"ToolResult",
 	"ToolCall",
 	"LLMUsable",
+	"LLMUsableExecution",
+	"LLMUsableExecutionStatus",
 	"ToolRegistry",
 	# 监控相关
 	"RequestMetrics",

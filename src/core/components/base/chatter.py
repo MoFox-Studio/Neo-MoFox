@@ -15,7 +15,6 @@ from src.core.components.types import ChatType
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
-from src.core.components.utils import should_strip_auto_reason_argument
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger, COLOR
 
@@ -391,13 +390,20 @@ class BaseChatter(ABC):
     ) -> tuple[bool, Any]:
         """执行指定的 LLMUsable 组件。
 
+        此方法执行单个 Tool、Action 或 Agent，并委托统一执行器处理 coroutine
+        与异步生成器两种 execute 写法。异步生成器约定最后一次非空 ``yield``
+        为返回结果。
+
         Args:
-            usable_cls: LLMUsable 组件类
-            message: 触发的消息
-            **kwargs: 传递给组件的参数
+            usable_cls: 要执行的 LLMUsable 组件类。
+            message: 触发本次调用的消息；Action 会用它恢复发送上下文。
+            **kwargs: 传递给组件 ``execute`` 的关键字参数。
 
         Returns:
-            tuple[bool, Any]: (是否成功, 返回结果)
+            tuple[bool, Any]: ``(是否执行成功, 返回结果)``。
+
+        Raises:
+            ValueError: 组件未注入插件签名、传入 Chatter，或类型不受支持时抛出。
 
         Examples:
             >>> success, result = await self.exec_llm_usable(
@@ -412,27 +418,22 @@ class BaseChatter(ABC):
         if not sig:
             raise ValueError("LLMUsable 组件未注入插件名称，无法执行")
 
-        from src.core.managers import get_tool_use, get_action_manager
-        
         if issubclass(usable_cls, BaseChatter):
             raise ValueError("无法直接执行 Chatter 组件")
 
-        if issubclass(usable_cls, BaseTool):
-            owner_plugin = self._resolve_component_plugin(sig)
-            manager = get_tool_use()
-            return await manager.execute_tool(sig, owner_plugin, message, **kwargs)
-        elif issubclass(usable_cls, BaseAction):
-            owner_plugin = self._resolve_component_plugin(sig)
-            manager = get_action_manager()
-            return await manager.execute_action(sig, owner_plugin, message, **kwargs)
-        elif issubclass(usable_cls, BaseAgent):
-            owner_plugin = self._resolve_component_plugin(sig)
-            agent_instance = usable_cls(stream_id=self.stream_id, plugin=owner_plugin)
-            if should_strip_auto_reason_argument(agent_instance.execute, kwargs):
-                kwargs.pop("reason", None)
-            return await agent_instance.execute(**kwargs)
-        else:
+        if not issubclass(usable_cls, (BaseTool, BaseAction, BaseAgent)):
             raise ValueError("未知的 LLMUsable 组件类型，无法执行")
+
+        from src.core.utils.llm_tool_call import exec_llm_usable
+
+        owner_plugin = self._resolve_component_plugin(sig)
+        return await exec_llm_usable(
+            usable_cls,
+            plugin=owner_plugin,
+            stream_id=self.stream_id,
+            message=message,
+            kwargs=kwargs,
+        )
 
     def create_request(
         self,
@@ -523,62 +524,39 @@ class BaseChatter(ABC):
 
     async def run_tool_call(
         self,
-        call: Any,
+        calls: Any,
         response: Any,
         usable_map: "ToolRegistry",
         trigger_msg: "Message | None",
-    ) -> tuple[bool, bool]:
-        """执行单个普通 tool call 并将 TOOL_RESULT 追加到 response。
+    ) -> list[tuple[bool, bool]]:
+        """执行一次响应中的普通 tool calls 并写回 TOOL_RESULT。
 
-        处理「查找工具 → 调用 exec_llm_usable → 异常处理 → 追加 TOOL_RESULT」的固定模式。
-        仅适用于非控制流工具（pass_and_wait / stop_conversation 等应由调用方自行处理）。
+        此方法面向一批 call，实际执行会委托统一调度器：可并发的 coroutine
+        会并发运行，顺序敏感的异步生成器会在 ``"_READY"`` 阶段按原始顺序门控。
+        控制流工具（pass_and_wait / stop_conversation 等）仍应由调用方先行处理。
 
         Args:
-            call: LLM 返回的工具调用对象（含 name / id / args）
-            response: 当前 LLM 响应对象，TOOL_RESULT payload 将追加于此
-            trigger_msg: 触发本次对话的消息；为 None 且工具有效时跳过执行
+            calls: LLM 返回的一批工具调用对象，按模型输出顺序排列。
+            response: 当前 LLM 响应对象，TOOL_RESULT payload 将按 ``calls`` 顺序追加。
+            usable_map: 可调用组件注册表，用 call name 查找组件类。
+            trigger_msg: 触发本次对话的消息；为 None 时跳过实际执行并写回结果。
 
         Returns:
-            tuple[bool, bool]: (appended, exec_success)
-                appended: 是否向 response 追加了 TOOL_RESULT
-                exec_success: 底层工具是否执行成功；跳过时为 False
+            list[tuple[bool, bool]]: 与 ``calls`` 顺序一致的结果列表。
+            每项为 ``(是否已写回 TOOL_RESULT, execute 是否成功)``。
         """
-        from src.kernel.llm import LLMPayload, ROLE, ToolResult
+        from src.core.utils.llm_tool_call import run_tool_call
 
-        _logger = get_logger("chatter")
-        args = dict(call.args) if isinstance(call.args, dict) else {}
-        args.pop("reason", None)
-
-        exec_success = False
-        usable_cls = usable_map.get(call.name)
-        if not usable_cls:
-            result_text = f"未知的工具: {call.name}"
-            _logger.warning(result_text)
-        else:
-            if trigger_msg is None:
-                # 无触发消息时无法执行，但仍需追加 TOOL_RESULT 以保证对话历史完整性，
-                # 否则 ASSISTANT 的 tool_calls 缺少对应 tool 消息会导致 API Field required 错误。
-                result_text = "无触发消息，跳过执行"
-                _logger.debug(f"[{self.chatter_name}] 无触发消息，跳过工具调用: {call.name}")
-            else:
-                try:
-                    exec_success, result = await self.exec_llm_usable(usable_cls, trigger_msg, **args)
-                    result_text = str(result) if exec_success else f"执行失败: {result}"
-                except Exception as e:
-                    result_text = f"执行异常: {e}"
-                    _logger.error(f"执行 {call.name} 异常: {e}", exc_info=True)
-
-        response.add_payload(
-            LLMPayload(
-                ROLE.TOOL_RESULT,
-                ToolResult(  # type: ignore[arg-type]
-                    value=result_text,
-                    call_id=call.id,
-                    name=call.name,
-                ),
-            )
+        return await run_tool_call(
+            calls=calls,
+            response=response,
+            usable_map=usable_map,
+            trigger_msg=trigger_msg,
+            plugin=self.plugin,
+            stream_id=self.stream_id,
+            resolve_component_plugin=self._resolve_component_plugin,
+            display_name=self.chatter_name,
         )
-        return True, exec_success
 
     @staticmethod
     def _format_role(role: str | None) -> str:

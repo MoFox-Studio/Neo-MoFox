@@ -1,3 +1,10 @@
+"""插件侧 LLM API 便捷入口。
+
+除请求构造和模型配置查询外，本模块也导出统一 tool call 执行函数：
+``exec_llm_usable`` 用于执行单个组件，``run_tool_call``
+用于执行一次响应中的一批工具调用，并保持 TOOL_RESULT 写回顺序。
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -12,6 +19,21 @@ from src.kernel.llm import (
     ToolRegistry,
 )
 from src.core.config import get_model_config
+from src.core.utils.llm_tool_call import (
+    exec_llm_usable,
+    run_tool_call,
+)
+
+__all__ = [
+    "create_llm_request",
+    "create_embedding_request",
+    "create_rerank_request",
+    "get_model_set_by_task",
+    "get_model_set_by_name",
+    "create_tool_registry",
+    "exec_llm_usable",
+    "run_tool_call",
+]
 
 if TYPE_CHECKING:
     from src.core.prompt import SystemReminderBucket

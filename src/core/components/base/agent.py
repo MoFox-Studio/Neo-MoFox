@@ -11,8 +11,8 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Any, TYPE_CHECKING, cast
 
 from src.core.components.types import ChatType
-from src.core.components.utils import parse_function_signature, should_strip_auto_reason_argument
-from src.kernel.llm import LLMUsable, LLMRequest, LLMPayload, ROLE
+from src.core.components.utils import parse_function_signature
+from src.kernel.llm import LLMUsable, LLMRequest, LLMPayload, LLMUsableExecution, ROLE
 from src.kernel.logger import get_logger
 
 logger = get_logger("agent")
@@ -106,6 +106,22 @@ class BaseAgent(ABC, LLMUsable):
     ) -> tuple[Annotated[bool, "是否成功"], Annotated[str | dict, "返回结果"]]:
         """执行 Agent 的核心逻辑。"""
         ...
+
+    def _wrap_execute(self, *args: Any, **kwargs: Any) -> LLMUsableExecution:
+        """包装 ``execute``，供统一 tool call 调度器使用。
+
+        ``execute`` 可以保持普通 coroutine 写法并返回 ``(success, result)``；
+        也可以写成异步生成器，在准备完成后 ``yield None`` 暂停，最后一次
+        非空 ``yield`` 作为返回结果。
+
+        Args:
+            *args: 传给 ``execute`` 的位置参数。
+            **kwargs: 传给 ``execute`` 的关键字参数。
+
+        Returns:
+            LLMUsableExecution: 已启动的执行包装对象。
+        """
+        return LLMUsableExecution(self.execute(*args, **kwargs))
 
     @classmethod
     def to_schema(cls) -> dict[str, Any]:
@@ -211,23 +227,21 @@ class BaseAgent(ABC, LLMUsable):
     ) -> tuple[bool, Any]:
         """执行 Agent 私有 usable。
 
-        注意：此方法只在 Agent 私有 usables 范围内查找，不访问全局注册表。
+        仅在当前 Agent 的私有 usables 范围内查找，不访问全局注册表。
+        找到组件后会委托统一执行器，因此同时支持 coroutine execute 和
+        “最后一次非空 yield 为返回值”的异步生成器 execute。
 
         Args:
-            usable_name: usable 名称（对应 schema.function.name）
-            message: 当前消息（可选）
-            **kwargs: 传递给 usable execute 的参数
+            usable_name: usable 名称，可传 schema.function.name 或去掉前缀后的短名。
+            message: 当前消息；Action 会用它恢复发送上下文。
+            **kwargs: 传递给 usable ``execute`` 的关键字参数。
 
         Returns:
-            tuple[bool, Any]: (是否成功, 返回结果)
+            tuple[bool, Any]: ``(是否执行成功, 返回结果)``。
 
         Raises:
-            ValueError: 当 usable_name 不在私有 usables 中或类型不支持时
+            ValueError: ``usable_name`` 不在私有 usables 中，或组件类型不支持。
         """
-        from src.core.components.base.action import BaseAction
-        from src.core.components.base.tool import BaseTool
-        from src.core.managers.stream_manager import get_stream_manager
-
         local_index: dict[str, type[LLMUsable]] = {}
         for usable_cls in self.get_local_usables():
             schema = usable_cls.to_schema()
@@ -241,37 +255,12 @@ class BaseAgent(ABC, LLMUsable):
         if not usable_cls:
             raise ValueError(f"Agent 私有 usable 不存在: {usable_name}")
 
-        if issubclass(usable_cls, BaseTool):
-            instance = usable_cls(plugin=self.plugin)
-            if should_strip_auto_reason_argument(instance.execute, kwargs):
-                kwargs.pop("reason", None)
-            return await instance.execute(**kwargs)
+        from src.core.utils.llm_tool_call import exec_llm_usable
 
-        if issubclass(usable_cls, BaseAction):
-            chat_stream = await get_stream_manager().get_or_create_stream(
-                stream_id=self.stream_id
-            )
-            instance = usable_cls(chat_stream=chat_stream, plugin=self.plugin)
-
-            current_msg = chat_stream.context.current_message
-            if current_msg:
-                instance._last_message = (
-                    current_msg.processed_plain_text
-                    if current_msg.processed_plain_text
-                    else str(current_msg.content or "")
-                )
-
-            if should_strip_auto_reason_argument(instance.execute, kwargs):
-                kwargs.pop("reason", None)
-            return await instance.execute(**kwargs)
-
-        if issubclass(usable_cls, BaseAgent):
-            instance = usable_cls(stream_id=self.stream_id, plugin=self.plugin)
-            if should_strip_auto_reason_argument(instance.execute, kwargs):
-                kwargs.pop("reason", None)
-            return await instance.execute(**kwargs)
-
-        raise ValueError(
-            f"Agent 私有 usable 类型不受支持: {usable_cls.__name__}，"
-            "仅支持 BaseTool / BaseAction / BaseAgent 子类"
+        return await exec_llm_usable(
+            usable_cls,
+            plugin=self.plugin,
+            stream_id=self.stream_id,
+            message=message,
+            kwargs=kwargs,
         )

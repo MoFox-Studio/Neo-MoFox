@@ -281,64 +281,42 @@ print(f"Available tools: {', '.join(names)}")
 
 ---
 
-## ToolExecutor（工具执行器）
+## LLMUsableExecution（执行包装器）
+
+`LLMUsableExecution` 是框架内部的执行包装对象，用于让 Tool / Action / Agent
+共享同一套并行调度逻辑。
 
 ```python
-@dataclass
-class ToolExecutor:
-    """工具执行器，支持超时、错误处理。"""
-    
-    timeout: float = 30.0              # 执行超时（秒）
-    on_error: str = "return_error"     # "return_error" | "raise"
+LLMUsableExecutionStatus = Literal["_WORKING", "_READY", "_DONE"]
 ```
 
-管理工具的执行，提供超时和错误处理功能。
+状态含义：
 
-### execute 方法
+- `_WORKING`：执行仍在运行，调度器会先跳过
+- `_READY`：异步生成器已经准备完毕并暂停，等待统一调度器继续推进
+- `_DONE`：执行已经完成，结果可读取
+
+`execute()` 支持两种写法：
 
 ```python
-async def execute(
-    self,
-    tool_call: ToolCall,
-    execute_func: Any,
-) -> ToolResult:
-    """执行工具调用。
-    
-    Args:
-        tool_call: 工具调用信息。
-        execute_func: 工具执行函数（可以是普通函数或异步函数）。
-                    接收 (name: str, args: dict) 参数，返回结果。
-    
-    Returns:
-        ToolResult: 工具执行结果。
-    
-    Raises:
-        asyncio.TimeoutError: 如果 on_error="raise" 且执行超时。
-        Exception: 如果 on_error="raise" 且执行出错。
-    """
+# 普通 coroutine：适合查询、搜索、记忆读取等顺序不敏感能力
+async def execute(self, query: str) -> tuple[bool, str]:
+    result = await search(query)
+    return True, result
+
+
+# 异步生成器：适合 send_text 这类顺序敏感动作
+async def execute(self, content: str):
+    prepared = content.strip()
+    yield None
+    success = await self.send(prepared)
+    yield success, f"已发送消息: {prepared}"
 ```
 
-**使用示例：**
-```python
-from src.kernel.llm import ToolExecutor, ToolCall
-
-async def search_impl(name: str, args: dict):
-    """搜索实现"""
-    query = args.get("query")
-    # 执行搜索
-    return {"results": [...]}
-
-executor = ToolExecutor(timeout=10.0, on_error="return_error")
-
-tool_call = ToolCall(
-    id="call_123",
-    name="search",
-    args={"query": "Python"}
-)
-
-result = await executor.execute(tool_call, search_impl)
-print(result.value)
-```
+异步生成器的最后一次非空 `yield` 会作为最终结果；空 `yield` 只表示“已经准备好，
+可以等待统一调度”。一次 LLM 响应中的普通 tool calls 会通过
+`src.core.utils.llm_tool_call.run_tool_call()` 批量执行，结果按原始 call 顺序写回
+`TOOL_RESULT`。
 
 ---
 
@@ -532,14 +510,19 @@ for schema in schemas:
     request.add_payload(LLMPayload(ROLE.TOOL, Tool(...)))
 ```
 
-### 模式 4：使用 ToolExecutor
+### 模式 4：批量执行一次响应中的工具调用
 
 ```python
-executor = ToolExecutor(timeout=30.0, on_error="return_error")
+from src.core.utils.llm_tool_call import run_tool_call
 
-for tool_call in response.call_list:
-    result = await executor.execute(tool_call, execute_tool)
-    request.add_payload(LLMPayload(ROLE.TOOL_RESULT, result))
+await run_tool_call(
+    calls=response.call_list,
+    response=response,
+    usable_map=usable_map,
+    trigger_msg=message,
+    plugin=plugin,
+    stream_id=stream_id,
+)
 ```
 
 ---
@@ -649,11 +632,17 @@ async def run_tool_loop(request, max_iterations=10):
 
 ### Q: 如何处理工具异常？
 
-A: 使用 `ToolExecutor` 的 `on_error` 参数：
+A: 统一执行器会捕获单个 tool call 的异常，并为对应调用写回失败的
+`TOOL_RESULT`，不会因为一个调用失败而打乱整批结果的写回顺序：
+
 ```python
-executor = ToolExecutor(timeout=30.0, on_error="return_error")
-# on_error="raise" 会抛出异常
-# on_error="return_error" 会返回错误信息
+await run_tool_call(
+    calls=response.call_list,
+    response=response,
+    usable_map=usable_map,
+    trigger_msg=message,
+    plugin=plugin,
+)
 ```
 
 ### Q: 能否动态注册工具？
@@ -667,10 +656,9 @@ for tool_class in available_tools:
 
 ### Q: 工具调用会超时吗？
 
-A: 可以设置超时。使用 `ToolExecutor`：
-```python
-executor = ToolExecutor(timeout=10.0)
-```
+A: 当前公共 tool call 执行器负责并行调度和结果写回，不在这里直接配置超时。
+需要超时保护时，应在具体组件的 `execute()` 内部使用 `asyncio.timeout()`，
+或交给更外层的任务/watchdog 机制处理。
 
 ### Q: 能否在工具中调用其他工具？
 

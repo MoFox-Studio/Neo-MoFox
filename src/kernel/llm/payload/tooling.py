@@ -9,11 +9,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from .content import Content
+
+LLMUsableExecutionStatus = Literal["_WORKING", "_READY", "_DONE"]
 
 
 @runtime_checkable
@@ -22,6 +26,109 @@ class LLMUsable(Protocol):
     def to_schema(cls) -> dict[str, Any]:
         """将组件描述为可被 LLM 调用的 schema。"""
         ...
+
+
+class LLMUsableExecution:
+    """包装一次 LLMUsable.execute 调用，并向调度器暴露执行状态。
+
+    coroutine 会直接运行到返回值并进入 ``"_DONE"`` 状态；异步生成器或手写
+    async iterator 会先运行到下一次 ``yield``，此时进入 ``"_READY"`` 状态，
+    等待统一调度器决定何时继续。生成器的最后一次非空 ``yield`` 值会作为
+    最终返回结果，空 ``yield`` 仅表示“准备完成，暂停等待调度”。
+
+    Args:
+        execution: ``execute`` 返回的 coroutine、异步生成器、async iterator，
+            或已经同步得到的结果对象。
+
+    Attributes:
+        _status: 调度状态。``"_WORKING"`` 表示仍在运行，``"_READY"`` 表示
+            已暂停并等待继续，``"_DONE"`` 表示已经完成。
+        result: 执行完成后的标准化前结果。
+        exception: 执行过程中捕获到的异常；调度器会在汇总阶段重新处理。
+    """
+
+    def __init__(self, execution: Any) -> None:
+        self._status: LLMUsableExecutionStatus = "_WORKING"
+        self.result: Any = None
+        self.exception: BaseException | None = None
+        self._last_non_empty_yield: Any = None
+        self._aiter: Any | None = None
+        self._task: asyncio.Task[None] | None = None
+
+        if hasattr(execution, "__aiter__") and hasattr(execution, "__anext__"):
+            self._aiter = execution.__aiter__()
+            self._task = asyncio.create_task(self._advance_iterator())
+        elif inspect.isawaitable(execution):
+            self._task = asyncio.create_task(self._await_result(execution))
+        else:
+            self.result = execution
+            self._status = "_DONE"
+
+    @property
+    def task(self) -> asyncio.Task[None] | None:
+        """返回当前后台推进任务；没有正在运行的任务时返回 None。"""
+        return self._task
+
+    async def _await_result(self, execution: Any) -> None:
+        """等待 coroutine 完成，并记录返回值或异常。"""
+        try:
+            self.result = await execution
+        except BaseException as exc:
+            self.exception = exc
+            raise
+        finally:
+            self._status = "_DONE"
+
+    async def _advance_iterator(self) -> None:
+        """推进 async iterator 到下一次 yield 或完成。"""
+        if self._aiter is None:
+            self._status = "_DONE"
+            return
+
+        try:
+            item = await anext(self._aiter)
+        except StopAsyncIteration:
+            self.result = self._last_non_empty_yield
+            self._status = "_DONE"
+        except BaseException as exc:
+            self.exception = exc
+            self._status = "_DONE"
+            raise
+        else:
+            if item is not None:
+                self._last_non_empty_yield = item
+            self._status = "_READY"
+
+    def resume(self) -> None:
+        """继续一个处于 ``"_READY"`` 状态的异步迭代执行。"""
+        if self._status != "_READY" or self._aiter is None:
+            return
+        self._status = "_WORKING"
+        self._task = asyncio.create_task(self._advance_iterator())
+
+    async def wait_done(self) -> Any:
+        """持续推进直到完成，并返回最终结果。
+
+        Returns:
+            Any: coroutine 的返回值，或异步迭代器最后一次非空 ``yield`` 的值。
+
+        Raises:
+            BaseException: 重新抛出执行过程中捕获到的异常。
+        """
+        while self._status != "_DONE":
+            if self._status == "_READY":
+                self.resume()
+            task = self._task
+            if task is not None:
+                await task
+            else:
+                await asyncio.sleep(0)
+
+        if self._task is not None:
+            await self._task
+        if self.exception is not None:
+            raise self.exception
+        return self.result
 
 
 @dataclass(frozen=True, slots=True)

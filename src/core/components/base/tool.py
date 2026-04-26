@@ -9,7 +9,7 @@ from typing import Annotated, Any, TYPE_CHECKING
 
 from src.core.components.types import ChatType
 from src.core.components.utils import parse_function_signature
-from src.kernel.llm.payload.tooling import LLMUsable
+from src.kernel.llm.payload.tooling import LLMUsable, LLMUsableExecution
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -107,6 +107,22 @@ class BaseTool(ABC, LLMUsable):
             tool 管理器会自动识别类型提示和文档字符串并生成对应的 Tool Schema。
         """
         ...
+
+    def _wrap_execute(self, *args: Any, **kwargs: Any) -> LLMUsableExecution:
+        """包装 ``execute``，供统一 tool call 调度器使用。
+
+        ``execute`` 可以保持普通 coroutine 写法并返回 ``(success, result)``；
+        也可以写成异步生成器，在准备完成后 ``yield None`` 暂停，最后一次
+        非空 ``yield`` 作为返回结果。
+
+        Args:
+            *args: 传给 ``execute`` 的位置参数。
+            **kwargs: 传给 ``execute`` 的关键字参数。
+
+        Returns:
+            LLMUsableExecution: 已启动的执行包装对象。
+        """
+        return LLMUsableExecution(self.execute(*args, **kwargs))
 
     @classmethod
     def to_schema(cls) -> dict[str, Any]:

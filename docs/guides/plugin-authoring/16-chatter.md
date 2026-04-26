@@ -122,7 +122,7 @@
 - `get_llm_usables()`：收集当前可用的 Action / Agent / Tool
 - `modify_llm_usables()`：按会话条件和激活状态过滤 usable
 - `inject_usables()`：把过滤后的 usable 注入 request
-- `run_tool_call()`：执行单个 tool call 并回写 `TOOL_RESULT`
+- `run_tool_call()`：执行一次响应中的一批普通 tool calls，并按原始顺序回写 `TOOL_RESULT`
 - `fetch_unreads()`：读取当前流中的未读消息
 - `flush_unreads()`：把已处理未读移入 history
 - `format_message_line()`：把消息格式化成统一的 prompt 文本
@@ -343,7 +343,7 @@ yield Stop(0)
 - `get_llm_usables()` 收集全局可用组件
 - `modify_llm_usables()` 根据当前会话筛 usable
 - `inject_usables()` 把筛出来的能力注入 request
-- `run_tool_call()` 负责执行单个 tool call 并把结果回写
+- `run_tool_call()` 负责执行一批普通 tool calls，并把结果按模型输出顺序回写
 
 所以更准确的说法是：
 
@@ -437,7 +437,7 @@ yield Stop(0)
 | `get_llm_usables() -> list` | 从全局注册表获取本 Chatter 可用的所有 LLMUsable 组件 |
 | `modify_llm_usables(usables) -> list` | 对可用组件列表做激活判定和平台过滤 |
 | `inject_usables(request) -> ToolRegistry` | 一步完成「获取 → 过滤 → 注册 → 注入 TOOL payload」全链路 |
-| `run_tool_call(call, response, usable_map, trigger_msg)` | 执行单个 tool call 并将 `TOOL_RESULT` 追加到 response |
+| `run_tool_call(calls, response, usable_map, trigger_msg)` | 执行一次响应中的一批普通 tool calls，并将 `TOOL_RESULT` 按原始顺序追加到 response |
 | `fetch_unreads(time_format) -> tuple[str, list[Message]]` | 读取未读消息，返回格式化文本和消息列表（不修改上下文） |
 | `flush_unreads(unread_messages) -> int` | 将指定的未读消息批次移入历史记录，返回实际 flush 数量 |
 | `create_request(model_set, ...) -> LLMRequest` | 快速创建 LLMRequest 对象 |

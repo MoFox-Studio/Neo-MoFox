@@ -185,6 +185,7 @@ tool_call: [send_text, send_emoji]
 
 <extra_info>
 # 其他信息
+现在是 {current_time}。
 你目前正在聊天的平台是：{platform}，聊天类型是 {chat_type}。
 
 你的行为应当与当前的平台和聊天类型相匹配，例如你不应该在群聊中过于热情，也不应该在私聊中过于冷淡。
@@ -843,13 +844,24 @@ class DefaultChatter(BaseChatter):
 
     async def run_tool_call(
         self,
-        call,
+        calls,
         response: LLMResponseLike,
         usable_map,
         trigger_msg: Message | None,
-    ) -> tuple[bool, bool]:
-        """执行工具调用并将结果写回响应上下文。"""
-        return await super().run_tool_call(call, response, usable_map, trigger_msg)
+    ) -> list[tuple[bool, bool]]:
+        """执行一次响应中的一批普通工具调用并写回响应上下文。
+
+        Args:
+            calls: 待执行的 tool call 列表，按 LLM 输出顺序排列。
+            response: 当前响应对象；执行结果会按 ``calls`` 顺序写回。
+            usable_map: 可调用组件注册表。
+            trigger_msg: 触发本轮对话的消息。
+
+        Returns:
+            list[tuple[bool, bool]]: 与 ``calls`` 顺序一致的
+            ``(是否已写回 TOOL_RESULT, execute 是否成功)`` 列表。
+        """
+        return await super().run_tool_call(calls, response, usable_map, trigger_msg)
 
 
 # ─── Plugin ─────────────────────────────────────────────────

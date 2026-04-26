@@ -115,19 +115,20 @@ Action 虽然也返回 `(success, result)`，但这个 `result` 更像：
 
 这不是概念区分，而是运行时真的分开了。
 
-在 `BaseChatter.exec_llm_usable()` 里，系统会根据组件类型把三类能力分流：
+在 `BaseChatter.exec_llm_usable()` 里，系统会把 Tool / Action / Agent
+统一交给公共执行器。公共执行器会根据组件类型实例化对象，并把
+`execute()` 包装成可调度的执行对象：
 
-- `BaseTool` 走 tool manager
-- `BaseAction` 走 action manager
-- `BaseAgent` 直接实例化后执行
+- 普通 coroutine 会直接并发执行并在返回后完成
+- 异步生成器可以先准备资源，`yield None` 暂停，等待统一调度
+- 最后一次非空 `yield` 会被视为执行结果
 
-这意味着 Action 在运行链上的定位是明确的，不是“Tool 的一个别名”。
-
-而 `ActionManager.execute_action()` 里面做的事情也很符合这个定位：
+这意味着 Action 在运行链上的定位是明确的：它仍然不是“Tool 的一个别名”，
+但它和 Tool / Agent 共享同一个调度入口。这个入口在创建 Action 时会做几件事：
 
 1. 先根据消息定位或激活对应的 `ChatStream`
 2. 用当前流和插件实例创建 Action 实例
-3. 调用 `execute()`
+3. 调用并包装 `execute()`，让顺序敏感的最终发送动作可以交给统一调度器安排
 
 也就是说，Action 的天然工作上下文不是“纯函数式输入输出”，而是：
 

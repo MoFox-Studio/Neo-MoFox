@@ -127,12 +127,23 @@ class DefaultChatterRuntime(Protocol):
 
     async def run_tool_call(
         self,
-        call: ToolCall,
+        calls: list[ToolCall],
         response: LLMResponseLike,
         usable_map: ToolRegistry,
         trigger_msg: Message | None,
-    ) -> tuple[bool, bool]:
-        """执行单个工具调用。"""
+    ) -> list[tuple[bool, bool]]:
+        """执行一次响应中的一批普通工具调用。
+
+        Args:
+            calls: 待执行的 tool call 列表，按 LLM 输出顺序排列。
+            response: 当前响应对象；执行结果会按 ``calls`` 顺序写回。
+            usable_map: 可调用组件注册表。
+            trigger_msg: 触发本轮对话的消息。
+
+        Returns:
+            list[tuple[bool, bool]]: 与 ``calls`` 顺序一致的
+            ``(是否已写回 TOOL_RESULT, execute 是否成功)`` 列表。
+        """
         ...
 
     async def _build_classical_user_text(

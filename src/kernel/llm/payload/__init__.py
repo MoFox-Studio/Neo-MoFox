@@ -2,7 +2,14 @@
 
 from .content import Audio, Content, File, Image, ReasoningText, Text, Video
 from .payload import LLMPayload
-from .tooling import LLMUsable, ToolCall, ToolResult, ToolRegistry
+from .tooling import (
+	LLMUsable,
+	LLMUsableExecution,
+	LLMUsableExecutionStatus,
+	ToolCall,
+	ToolResult,
+	ToolRegistry,
+)
 
 __all__ = [
 	"Content",
@@ -16,5 +23,7 @@ __all__ = [
 	"ToolCall",
 	"LLMPayload",
 	"LLMUsable",
+	"LLMUsableExecution",
+	"LLMUsableExecutionStatus",
 	"ToolRegistry",
 ]
