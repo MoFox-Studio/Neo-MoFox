@@ -296,8 +296,8 @@ class StreamHeartbeat:
 | `stream_id` | `str` | 聊天流唯一标识符 |
 | `last_tick` | `datetime` | 最后一次心跳时间 |
 | `tick_interval` | `float` | 正常 tick 间隔（秒） |
-| `warning_threshold` | `float` | 警告阈值（相对于 tick_interval 的倍数） |
-| `restart_threshold` | `float` | 重启阈值（相对于 tick_interval 的倍数） |
+| `warning_threshold` | `float` | 警告阈值（秒） |
+| `restart_threshold` | `float` | 重启阈值（秒） |
 | `restart_callback` | `Callable \| None` | 重启回调函数 |
 
 ### 使用示例

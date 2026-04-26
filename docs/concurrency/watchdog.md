@@ -156,8 +156,8 @@ atexit.register(watchdog.stop)
 heartbeat = watchdog.register_stream(
     stream_id: str,
     tick_interval: float = 1.0,
-    warning_threshold: float = 2.0,
-    restart_threshold: float = 5.0,
+    warning_threshold: float = 150.0,
+    restart_threshold: float = 300.0,
     restart_callback: Callable | None = None
 ) -> StreamHeartbeat
 ```
@@ -168,16 +168,16 @@ heartbeat = watchdog.register_stream(
 |------|------|--------|------|
 | `stream_id` | `str` | - | 聊天流唯一标识符 |
 | `tick_interval` | `float` | 1.0 | 正常 tick 间隔（秒） |
-| `warning_threshold` | `float` | 2.0 | 警告阈值（相对于 tick_interval 的倍数） |
-| `restart_threshold` | `float` | 5.0 | 重启阈值（相对于 tick_interval 的倍数） |
+| `warning_threshold` | `float` | 150.0 | 警告阈值（秒） |
+| `restart_threshold` | `float` | 300.0 | 重启阈值（秒） |
 | `restart_callback` | `Callable \| None` | None | 触发重启时的回调函数 |
 
 **阈值说明**：
 
-- `tick_interval` = 1.0s, `warning_threshold` = 2.0
-  - 距离上次心跳超过 2.0s 时输出警告
-- `tick_interval` = 1.0s, `restart_threshold` = 5.0
-  - 距离上次心跳超过 5.0s 时尝试重启
+- `warning_threshold` = 150.0
+  - 距离上次心跳超过 150.0s 时输出警告
+- `restart_threshold` = 300.0
+  - 距离上次心跳超过 300.0s 时尝试重启
 
 **返回值**：`StreamHeartbeat` 对象
 
@@ -194,8 +194,8 @@ def on_restart():
 heartbeat = watchdog.register_stream(
     stream_id="chat_stream_001",
     tick_interval=2.0,      # 期望每 2 秒一次心跳
-    warning_threshold=3.0,  # 超过 6 秒输出警告
-    restart_threshold=4.0,  # 超过 8 秒尝试重启
+    warning_threshold=150.0,  # 超过 150 秒输出警告
+    restart_threshold=300.0,  # 超过 300 秒尝试重启
     restart_callback=on_restart
 )
 
@@ -478,8 +478,8 @@ class StreamHeartbeat:
     stream_id: str                          # 流 ID
     last_tick: datetime                     # 最后心跳时间
     tick_interval: float                    # 正常 tick 间隔
-    warning_threshold: float                # 警告阈值倍数
-    restart_threshold: float                # 重启阈值倍数
+    warning_threshold: float                # 警告阈值（秒）
+    restart_threshold: float                # 重启阈值（秒）
     restart_callback: Callable | None       # 重启回调
 ```
 
@@ -598,16 +598,16 @@ A: 根据应用特点调整阈值：
 watchdog.register_stream(
     stream_id="fast_stream",
     tick_interval=0.5,
-    warning_threshold=2.0,  # 1 秒无响应警告
-    restart_threshold=3.0   # 1.5 秒重启
+    warning_threshold=1.0,  # 1 秒无响应警告
+    restart_threshold=1.5   # 1.5 秒重启
 )
 
 # 稳定的流
 watchdog.register_stream(
     stream_id="stable_stream",
     tick_interval=5.0,
-    warning_threshold=3.0,  # 15 秒无响应警告
-    restart_threshold=5.0   # 25 秒重启
+    warning_threshold=15.0,  # 15 秒无响应警告
+    restart_threshold=25.0   # 25 秒重启
 )
 ```
 

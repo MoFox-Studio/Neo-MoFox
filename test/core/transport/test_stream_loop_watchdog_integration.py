@@ -13,8 +13,8 @@ from src.core.transport.distribution.stream_loop_manager import StreamLoopManage
 
 
 @pytest.mark.asyncio
-async def test_start_stream_loop_registers_watchdog_with_multiplier_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
-    """启动流循环时应使用倍率阈值，并注入可调用的重启回调。"""
+async def test_start_stream_loop_registers_watchdog_with_exact_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """启动流循环时应使用精确秒级阈值，并注入可调用的重启回调。"""
     manager = StreamLoopManager()
     stream_id = "stream_watchdog_threshold"
 
@@ -33,8 +33,8 @@ async def test_start_stream_loop_registers_watchdog_with_multiplier_thresholds(m
         lambda: SimpleNamespace(
             bot=SimpleNamespace(
                 tick_interval=30.0,
-                stream_warning_threshold=2.0,
-                stream_restart_threshold=5.0,
+                stream_warning_threshold=150.0,
+                stream_restart_threshold=300.0,
             )
         ),
     )
@@ -63,8 +63,8 @@ async def test_start_stream_loop_registers_watchdog_with_multiplier_thresholds(m
     assert started is True
     assert registered_kwargs["stream_id"] == stream_id
     assert registered_kwargs["tick_interval"] == 30.0
-    assert registered_kwargs["warning_threshold"] == 2.0
-    assert registered_kwargs["restart_threshold"] == 5.0
+    assert registered_kwargs["warning_threshold"] == 150.0
+    assert registered_kwargs["restart_threshold"] == 300.0
     assert registered_kwargs["restart_cooldown"] == 30.0
     assert callable(registered_kwargs["restart_callback"])
 

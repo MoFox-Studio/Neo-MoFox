@@ -29,16 +29,16 @@ class StreamHeartbeat:
         stream_id: 聊天流 ID
         last_tick: 最后一次心跳时间
         tick_interval: 正常 tick 间隔（秒）
-        warning_threshold: 警告阈值（倍数），超过此值输出警告
-        restart_threshold: 重启阈值（倍数），超过此值尝试重启
+        warning_threshold: 警告阈值（秒），超过此值输出警告
+        restart_threshold: 重启阈值（秒），超过此值尝试重启
         restart_callback: 重启回调函数
     """
 
     stream_id: str
     last_tick: datetime = field(default_factory=datetime.now)
     tick_interval: float = 1.0  # 默认 1 秒
-    warning_threshold: float = 2.0  # 超过 2 倍警告
-    restart_threshold: float = 5.0  # 超过 5 倍重启
+    warning_threshold: float = 150.0  # 超过 150 秒警告
+    restart_threshold: float = 300.0  # 超过 300 秒重启
     restart_callback: Callable[[], Any] | None = None
     restart_cooldown: float = 0.0
     next_restart_allowed_at: float = 0.0
@@ -147,15 +147,15 @@ class WatchDog:
             delta = (now - heartbeat.last_tick).total_seconds()
 
             # 检查是否超过警告阈值
-            if delta > heartbeat.tick_interval * heartbeat.warning_threshold:
+            if delta > heartbeat.warning_threshold:
                 logger.warning(
                     f"聊天流 '{stream_id}' 响应缓慢: "
                     f"距离上次心跳 {delta:.2f}s "
-                    f"(正常间隔 {heartbeat.tick_interval}s)",
+                    f"(警告阈值 {heartbeat.warning_threshold}s)",
                 )
 
             # 检查是否超过重启阈值
-            if delta > heartbeat.tick_interval * heartbeat.restart_threshold:
+            if delta > heartbeat.restart_threshold:
                 if now_monotonic < heartbeat.next_restart_allowed_at:
                     continue
 
@@ -217,8 +217,8 @@ class WatchDog:
         self,
         stream_id: str,
         tick_interval: float = 1.0,
-        warning_threshold: float = 2.0,
-        restart_threshold: float = 5.0,
+        warning_threshold: float = 150.0,
+        restart_threshold: float = 300.0,
         restart_callback: Callable[[], Any] | None = None,
         restart_cooldown: float | None = None,
     ) -> StreamHeartbeat:
@@ -227,8 +227,8 @@ class WatchDog:
         Args:
             stream_id: 聊天流 ID
             tick_interval: 正常 tick 间隔（秒）
-            warning_threshold: 警告阈值（倍数）
-            restart_threshold: 重启阈值（倍数）
+            warning_threshold: 警告阈值（秒）
+            restart_threshold: 重启阈值（秒）
             restart_callback: 重启回调函数
             restart_cooldown: 重启冷却时间（秒），冷却内不会重复提交重启请求
 

@@ -338,8 +338,8 @@ class TestWatchDog:
         heartbeat = wd.register_stream(
             stream_id="test_stream",
             tick_interval=0.1,
-            warning_threshold=0.2,
-            restart_threshold=0.5,
+            warning_threshold=150.0,
+            restart_threshold=300.0,
         )
 
         assert isinstance(heartbeat, StreamHeartbeat)
@@ -1049,7 +1049,7 @@ class TestWatchDogStreamMonitoring:
         wd.register_stream(
             stream_id="slow_stream",
             tick_interval=0.01,
-            warning_threshold=2.0,
+            warning_threshold=0.001,
         )
 
         # 等待足够长的时间触发警告
@@ -1074,7 +1074,7 @@ class TestWatchDogStreamMonitoring:
         wd.register_stream(
             stream_id="restart_stream",
             tick_interval=0.01,
-            restart_threshold=2.0,
+            restart_threshold=0.001,
             restart_callback=restart_callback,
         )
 
@@ -1122,7 +1122,7 @@ class TestWatchDogStreamMonitoring:
         wd.register_stream(
             stream_id="failing_restart_stream",
             tick_interval=0.01,
-            restart_threshold=2.0,
+            restart_threshold=0.001,
             restart_callback=failing_callback,
         )
 
@@ -1820,9 +1820,6 @@ class TestAdditionalCoverage:
         async with tg:
             tg.create_task(slow_task())
 
-            # 创建外部取消源
-            cancel_event = asyncio.Event()
-
             async def wait_and_cancel():
                 await asyncio.sleep(0.05)
                 # 取消当前正在运行的任务
@@ -1902,9 +1899,6 @@ class TestAdditionalCoverage:
 
         async def failing_task():
             raise RuntimeError("Callback test error")
-
-        # 创建组
-        group = tm.group(name="callback_path_test")
 
         # 直接在组外创建任务但设置 group_name
         # 这样可以手动控制回调的触发
