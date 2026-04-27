@@ -50,6 +50,45 @@ async def test_ready_executions_resume_in_call_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ready_execution_waits_for_all_previous_executions_done() -> None:
+    events: list[str] = []
+
+    async def first():
+        events.append("first-prepare")
+        yield None
+        events.append("first-final")
+        yield (True, "first")
+
+    async def second():
+        events.append("second-prepare")
+        yield None
+        events.append("second-final")
+        yield (True, "second")
+
+    async def third():
+        events.append("third-prepare")
+        yield None
+        events.append("third-final")
+        yield (True, "third")
+
+    executions = [
+        LLMUsableExecution(first()),
+        LLMUsableExecution(second()),
+        LLMUsableExecution(third()),
+    ]
+    await run_llm_usable_executions(executions)
+
+    assert events.index("third-prepare") < events.index("first-final")
+    assert events.index("first-final") < events.index("second-final")
+    assert events.index("second-final") < events.index("third-final")
+    assert [execution.result for execution in executions] == [
+        (True, "first"),
+        (True, "second"),
+        (True, "third"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_run_tool_call_runs_concurrently_and_appends_in_call_order() -> None:
     events: list[str] = []
 

@@ -180,7 +180,7 @@ async def run_llm_usable_executions(
     """按 READY 顺序门控运行一组已包装的执行对象。
 
     所有执行对象会先并发进入 ``"_WORKING"``；当异步生成器暂停到
-    ``"_READY"`` 时，只有它前一个执行对象不再是 ``"_WORKING"``，调度器
+    ``"_READY"`` 时，只有它前面所有执行对象都已经 ``"_DONE"``，调度器
     才会继续推进它，从而兼顾并行准备和顺序敏感的最终动作。
 
     Args:
@@ -198,8 +198,10 @@ async def run_llm_usable_executions(
             if execution is None or execution._status != "_READY":
                 continue
 
-            previous = executions[index - 1] if index > 0 else None
-            if previous is not None and previous._status == "_WORKING":
+            if any(
+                previous is not None and previous._status != "_DONE"
+                for previous in executions[:index]
+            ):
                 continue
 
             execution.resume()
@@ -325,5 +327,4 @@ async def run_tool_call(
         )
 
     return [(True, item.exec_success) for item in prepared]
-
 
