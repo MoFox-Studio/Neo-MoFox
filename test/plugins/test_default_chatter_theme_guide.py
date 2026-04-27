@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from plugins.default_chatter.config import DefaultChatterConfig
 from plugins.default_chatter.plugin import DefaultChatter, DefaultChatterPlugin
 from src.core.models.stream import ChatStream
@@ -46,7 +48,7 @@ def test_system_prompt_uses_private_theme_guide() -> None:
         bot_nickname="MoFox",
     )
 
-    prompt = chatter._build_system_prompt(stream)
+    prompt = asyncio.run(chatter._build_system_prompt(stream))
     assert "theme:PRIVATE_THEME_GUIDE" in prompt
 
 
@@ -63,7 +65,7 @@ def test_system_prompt_uses_group_theme_guide() -> None:
         bot_nickname="MoFox",
     )
 
-    prompt = chatter._build_system_prompt(stream)
+    prompt = asyncio.run(chatter._build_system_prompt(stream))
     assert "theme:GROUP_THEME_GUIDE" in prompt
 
 
@@ -80,7 +82,7 @@ def test_system_prompt_falls_back_to_empty_theme_for_other_chat_type() -> None:
         bot_nickname="MoFox",
     )
 
-    prompt = chatter._build_system_prompt(stream)
+    prompt = asyncio.run(chatter._build_system_prompt(stream))
     assert "theme:" in prompt
     assert "PRIVATE_THEME_GUIDE" not in prompt
     assert "GROUP_THEME_GUIDE" not in prompt

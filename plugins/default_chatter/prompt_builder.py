@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 from collections.abc import Callable
 
 from src.core.components.types import ChatType
@@ -45,19 +46,6 @@ class DefaultChatterPromptBuilder:
         chat_stream: ChatStream,
     ) -> str:
         """构建系统提示词。"""
-        from src.app.plugin_system.api import adapter_api
-
-        bot_info = await adapter_api.get_bot_info_by_platform(chat_stream.platform) or {}
-        platform_name = str(
-            bot_info.get("bot_name")
-            or chat_stream.bot_nickname
-            or "未知"
-        )
-        platform_id = str(
-            bot_info.get("bot_id")
-            or chat_stream.bot_id
-            or "未知"
-        )
         selected_theme_guide = ""
         if plugin_config is not None:
             chat_type_raw = str(chat_stream.chat_type or "").lower()
@@ -71,11 +59,7 @@ class DefaultChatterPromptBuilder:
         if not tmpl:
             return ""
         return await (
-            tmpl.set("platform", chat_stream.platform)
-            .set("chat_type", chat_stream.chat_type)
-            .set("nickname", chat_stream.bot_nickname)
-            .set("platform_id", platform_id)
-            .set("platform_name", platform_name)
+            tmpl.set("nickname", chat_stream.bot_nickname)
             .set("theme_guide", selected_theme_guide)
             .build()
         )
@@ -88,6 +72,19 @@ class DefaultChatterPromptBuilder:
         extra: str = "",
     ) -> str:
         """通过 user prompt 模板构建用户提示词。"""
+        from src.app.plugin_system.api import adapter_api
+
+        bot_info = await adapter_api.get_bot_info_by_platform(chat_stream.platform) or {}
+        platform_name = str(
+            bot_info.get("bot_name")
+            or chat_stream.bot_nickname
+            or "未知"
+        )
+        platform_id = str(
+            bot_info.get("bot_id")
+            or chat_stream.bot_id
+            or "未知"
+        )
         stream_name = chat_stream.stream_name
         tmpl = get_prompt_manager().get_template("default_chatter_user_prompt")
         assert tmpl, "缺少 default_chatter_user_prompt 模板，请检查提示词管理器配置"
@@ -95,6 +92,12 @@ class DefaultChatterPromptBuilder:
         return await (
             tmpl
             .set("stream_name", stream_name)
+            .set("current_time", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            .set("platform", chat_stream.platform)
+            .set("chat_type", chat_stream.chat_type)
+            .set("platform_id", platform_id)
+            .set("platform_name", platform_name)
+            .set("extra_info", "")
             .set("history", history_text)
             .set("unreads", unread_lines)
             .set("extra", extra)

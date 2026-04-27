@@ -93,10 +93,10 @@ def test_build_system_prompt_uses_private_theme(
     assert prompt == "theme=PRIVATE_THEME"
 
 
-def test_build_system_prompt_prefers_bot_name_for_platform_name(
+def test_build_user_prompt_prefers_bot_name_for_platform_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """系统提示词应优先使用适配器返回的 bot_name 填充平台昵称。"""
+    """用户提示词应优先使用适配器返回的 bot_name 填充平台昵称。"""
     stream = ChatStream(
         stream_id="s2",
         platform="qq",
@@ -135,16 +135,20 @@ def test_build_system_prompt_prefers_bot_name_for_platform_name(
     )
 
     prompt = asyncio.run(
-        DefaultChatterPromptBuilder.build_system_prompt(None, stream)
+        DefaultChatterPromptBuilder.build_user_prompt(
+            stream,
+            history_text="history",
+            unread_lines="unread",
+        )
     )
 
     assert prompt == "platform_name=MoFox|platform_id=3602291932"
 
 
-def test_build_system_prompt_falls_back_to_stream_values(
+def test_build_user_prompt_falls_back_to_stream_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """系统提示词在 bot_name 缺失时应回退到 chat_stream。"""
+    """用户提示词在 bot_name 缺失时应回退到 chat_stream。"""
     stream = ChatStream(
         stream_id="s3",
         platform="qq",
@@ -183,7 +187,11 @@ def test_build_system_prompt_falls_back_to_stream_values(
     )
 
     prompt = asyncio.run(
-        DefaultChatterPromptBuilder.build_system_prompt(None, stream)
+        DefaultChatterPromptBuilder.build_user_prompt(
+            stream,
+            history_text="history",
+            unread_lines="unread",
+        )
     )
 
     assert prompt == "platform_name=stream-name|platform_id=stream-id"
