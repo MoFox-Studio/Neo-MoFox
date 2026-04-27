@@ -1,6 +1,6 @@
 [project]
 name = "neo-mofox"
-version = "1.1.0-alpha.1"
+version = "1.1.0-alpha.2"
 description = "一个全新重构的 AI 聊天机器人框架，它的目标不仅仅是回答问题，而是创造一个真正的数字生命体。"
 readme = "README.md"
 requires-python = ">=3.11"
