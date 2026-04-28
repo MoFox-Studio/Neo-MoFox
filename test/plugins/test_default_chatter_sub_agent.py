@@ -155,6 +155,127 @@ def test_send_text_typing_delay_uses_length_and_max_cap() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_text_reply_to_uses_quoted_group_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = ChatStream(stream_id="s_group", platform="qq", chat_type="group")
+    quoted = Message(
+        message_id="msg_a",
+        sender_id="user_a",
+        sender_name="A",
+        platform="qq",
+        chat_type="group",
+        stream_id="s_group",
+        group_id="group_a",
+        group_name="Group A",
+    )
+    later = Message(
+        message_id="msg_b",
+        sender_id="user_b",
+        sender_name="B",
+        platform="qq",
+        chat_type="group",
+        stream_id="s_group",
+        group_id="group_b",
+        group_name="Group B",
+    )
+    stream.context.history_messages = [quoted]
+    stream.context.unread_messages = [later]
+
+    sent: dict[str, Message] = {}
+    monkeypatch.setattr(SendTextAction, "_sleep_for_typing_delay", AsyncMock())
+    monkeypatch.setattr(
+        "src.core.managers.adapter_manager.get_adapter_manager",
+        lambda: SimpleNamespace(
+            get_bot_info_by_platform=AsyncMock(
+                return_value={"bot_id": "bot", "bot_name": "Bot"}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "src.core.transport.message_send.get_message_sender",
+        lambda: SimpleNamespace(
+            send_message=AsyncMock(
+                side_effect=lambda message: (sent.__setitem__("message", message), True)[1]
+            )
+        ),
+    )
+
+    action = SendTextAction(
+        chat_stream=stream,
+        plugin=DefaultChatterPlugin(config=DefaultChatterConfig()),
+    )
+    success, _detail = await action._wrap_execute(
+        content="reply",
+        reply_to="msg_a",
+    ).wait_done()
+
+    assert success is True
+    assert sent["message"].reply_to == "msg_a"
+    assert sent["message"].extra["target_group_id"] == "group_a"
+    assert sent["message"].extra["target_group_name"] == "Group A"
+
+
+@pytest.mark.asyncio
+async def test_send_text_reply_to_uses_quoted_private_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = ChatStream(stream_id="s_private", platform="qq", chat_type="private")
+    quoted = Message(
+        message_id="msg_a",
+        sender_id="user_a",
+        sender_name="A",
+        platform="qq",
+        chat_type="private",
+        stream_id="s_private",
+    )
+    later = Message(
+        message_id="msg_b",
+        sender_id="user_b",
+        sender_name="B",
+        platform="qq",
+        chat_type="private",
+        stream_id="s_private",
+    )
+    stream.context.history_messages = [quoted]
+    stream.context.unread_messages = [later]
+    stream.context.triggering_user_id = "user_b"
+
+    sent: dict[str, Message] = {}
+    monkeypatch.setattr(SendTextAction, "_sleep_for_typing_delay", AsyncMock())
+    monkeypatch.setattr(
+        "src.core.managers.adapter_manager.get_adapter_manager",
+        lambda: SimpleNamespace(
+            get_bot_info_by_platform=AsyncMock(
+                return_value={"bot_id": "bot", "bot_name": "Bot"}
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "src.core.transport.message_send.get_message_sender",
+        lambda: SimpleNamespace(
+            send_message=AsyncMock(
+                side_effect=lambda message: (sent.__setitem__("message", message), True)[1]
+            )
+        ),
+    )
+
+    action = SendTextAction(
+        chat_stream=stream,
+        plugin=DefaultChatterPlugin(config=DefaultChatterConfig()),
+    )
+    success, _detail = await action._wrap_execute(
+        content="reply",
+        reply_to="msg_a",
+    ).wait_done()
+
+    assert success is True
+    assert sent["message"].reply_to == "msg_a"
+    assert sent["message"].extra["target_user_id"] == "user_a"
+    assert sent["message"].extra["target_user_name"] == "A"
+
+
+@pytest.mark.asyncio
 async def test_sub_agent_skips_programmatic_controller_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -334,24 +334,18 @@ class SendTextAction(BaseAction):
             target_user_name = None
             target_group_name = None
             
-            def _get_last_context_message() -> Message | None:
-                if context.unread_messages:
-                    return context.unread_messages[-1]
-                if context.history_messages:
-                    return context.history_messages[-1]
-                return context.current_message
-            
-            last_msg = _get_last_context_message()
+            target_msg = self._get_context_message_for_target(reply_to)
             
             if chat_type == "group":
-                if last_msg:
-                    target_group_id = last_msg.extra.get("group_id")
-                    target_group_name = last_msg.extra.get("group_name")
+                if target_msg:
+                    target_group_id = target_msg.extra.get("group_id")
+                    target_group_name = target_msg.extra.get("group_name")
             else:
-                target_user_id = context.triggering_user_id
-                if not target_user_id and last_msg:
-                    target_user_id = last_msg.sender_id
-                    target_user_name = last_msg.sender_name
+                if target_msg:
+                    target_user_id = target_msg.sender_id
+                    target_user_name = target_msg.sender_name
+                if not target_user_id:
+                    target_user_id = context.triggering_user_id
             
             extra: dict[str, str] = {}
             if target_user_id:
@@ -414,13 +408,6 @@ class SendTextAction(BaseAction):
 
             bot_info = await get_adapter_manager().get_bot_info_by_platform(platform)
 
-            def _get_last_context_message() -> Message | None:
-                if context.unread_messages:
-                    return context.unread_messages[-1]
-                if context.history_messages:
-                    return context.history_messages[-1]
-                return context.current_message
-
             if at_hint.isdigit():
                 at_user_id = at_hint
             else:
@@ -436,7 +423,7 @@ class SendTextAction(BaseAction):
 
             target_group_id = None
             target_group_name = None
-            last_msg = _get_last_context_message()
+            last_msg = self._get_context_message_for_target()
             if last_msg:
                 target_group_id = last_msg.extra.get("group_id")
                 target_group_name = last_msg.extra.get("group_name")
