@@ -63,15 +63,7 @@ def create_llm_request(
     )
 
     if with_reminder is not None and request.context_manager is not None:
-        from src.core.prompt import get_system_reminder_store
-
-        reminder_items = get_system_reminder_store().get_items(with_reminder)
-        for reminder_item in reminder_items:
-            request.context_manager.reminder(
-                reminder_item.render(),
-                insert_type=reminder_item.insert_type,
-                wrap_with_system_tag=True,
-            )
+        request.context_manager.reminder_bucket(str(with_reminder), wrap_with_system_tag=True)
 
     return request
 

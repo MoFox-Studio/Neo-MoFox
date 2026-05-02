@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+import src.kernel.event.core as event_core
 from src.core.prompt.template import PromptTemplate, PROMPT_BUILD_EVENT
 from src.core.prompt.policies import trim, min_len, header
 from src.kernel.event import get_event_bus, EventDecision
@@ -316,6 +319,27 @@ class TestOnPromptBuildEvent:
         tmpl = PromptTemplate(name="fallback_test", template="Hello {name}")
         result = await tmpl.set("name", "Charlie").build()
         assert result == "Hello Charlie"
+
+    @pytest.mark.asyncio
+    async def test_build_subscriber_timeout_is_silenced(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """订阅者卡住时，build 应在超时后降级并继续渲染。"""
+
+        async def hung_handler(event_name: str, params: dict):
+            await asyncio.Event().wait()
+            return (EventDecision.SUCCESS, params)
+
+        monkeypatch.setattr(event_core, "EVENT_HANDLER_TIMEOUT_SECONDS", 0.01)
+
+        bus = get_event_bus()
+        bus.subscribe(PROMPT_BUILD_EVENT, hung_handler)
+
+        tmpl = PromptTemplate(name="timeout_test", template="Hello {name}")
+        result = await tmpl.set("name", "Delta").build()
+
+        assert result == "Hello Delta"
 
     @pytest.mark.asyncio
     async def test_build_no_subscriber_skips_event(self) -> None:

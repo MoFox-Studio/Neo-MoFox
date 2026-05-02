@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from src.core.prompt import SystemReminderInsertType
+from src.core.prompt import SystemReminderInsertType, get_system_reminder_store, reset_system_reminder_store
 from src.kernel.llm.context import LLMContextManager
 from src.kernel.llm.payload import LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.request import LLMRequest
@@ -256,6 +256,29 @@ def test_context_manager_fixed_and_dynamic_reminders_target_different_users() ->
     assert cast(Text, payloads[0].content[1]).text == "第一条"
     assert cast(Text, payloads[2].content[0]).text == "最近一条"
     assert cast(Text, payloads[2].content[1]).text == "第二条"
+
+
+def test_context_manager_reminder_bucket_refreshes_updated_dynamic_content() -> None:
+    reset_system_reminder_store()
+    store = get_system_reminder_store()
+    store.set("actor", "screen", "第一次", insert_type=SystemReminderInsertType.DYNAMIC)
+
+    manager = LLMContextManager(max_payloads=20)
+    payloads: list[LLMPayload] = []
+    manager.reminder_bucket("actor", wrap_with_system_tag=True)
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第一条")))
+    assert cast(Text, payloads[0].content[0]).text == "<system_reminder>\n[screen]\n第一次\n</system_reminder>"
+
+    store.set("actor", "screen", "第二次", insert_type=SystemReminderInsertType.DYNAMIC)
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("回复")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
+
+    assert cast(Text, payloads[0].content[0]).text == "第一条"
+    assert cast(Text, payloads[2].content[0]).text == "<system_reminder>\n[screen]\n第二次\n</system_reminder>"
+    assert cast(Text, payloads[2].content[1]).text == "第二条"
+
+    reset_system_reminder_store()
 
 
 def test_context_manager_defers_missing_tool_result_placeholder_at_tail() -> None:
