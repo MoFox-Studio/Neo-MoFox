@@ -12,6 +12,7 @@ import asyncio
 
 import pytest
 
+import src.kernel.event.core as event_core
 from src.core.components.types import EventType
 from src.kernel.event import EventBus, EventDecision
 
@@ -176,6 +177,30 @@ class TestEventBusPublish:
             return (EventDecision.SUCCESS, params)
 
         bus.subscribe("e", boom, priority=20)
+        bus.subscribe("e", ok, priority=10)
+
+        decision, out = await bus.publish("e", {"x": 1})
+        assert decision == EventDecision.SUCCESS
+        assert out == {"x": 2}
+
+    @pytest.mark.asyncio
+    async def test_publish_handler_timeout_is_ignored(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        bus = EventBus()
+
+        async def hung(event_name: str, params: dict):
+            await asyncio.Event().wait()
+            return (EventDecision.SUCCESS, params)
+
+        async def ok(event_name: str, params: dict):
+            params["x"] = 2
+            return (EventDecision.SUCCESS, params)
+
+        monkeypatch.setattr(event_core, "EVENT_HANDLER_TIMEOUT_SECONDS", 0.01)
+
+        bus.subscribe("e", hung, priority=20)
         bus.subscribe("e", ok, priority=10)
 
         decision, out = await bus.publish("e", {"x": 1})

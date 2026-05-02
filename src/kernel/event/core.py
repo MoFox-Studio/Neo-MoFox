@@ -32,6 +32,8 @@ logger = get_logger(
     enable_event_broadcast=False,
 )
 
+EVENT_HANDLER_TIMEOUT_SECONDS = 5.0
+
 EventParams = dict[str, Any]
 
 
@@ -248,6 +250,12 @@ class EventBus:
             handler = sub.handler
             try:
                 raw_result = await self._execute_handler(sub, event_name, dict(current_params))
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"处理器 '{getattr(handler, '__name__', repr(handler))}' 在事件 '{event_name}' 中执行超时，已跳过"
+                )
+                last_decision = EventDecision.PASS
+                continue
             except Exception as e:
                 logger.error(
                     f"处理器 '{getattr(handler, '__name__', repr(handler))}' 在事件 "
@@ -328,6 +336,11 @@ class EventBus:
         """执行处理器并返回结果，支持同步和异步处理器。"""
         result = sub.handler(event_name, params)
         if inspect.isawaitable(result):
+            if EVENT_HANDLER_TIMEOUT_SECONDS > 0:
+                return await asyncio.wait_for(
+                    result,
+                    timeout=EVENT_HANDLER_TIMEOUT_SECONDS,
+                )
             return await result
         return result
 
