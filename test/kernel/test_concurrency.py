@@ -7,9 +7,11 @@ Concurrency 模块单元测试
 from __future__ import annotations
 
 import asyncio
-import pytest
 from datetime import datetime
+from unittest.mock import Mock
 from unittest.mock import patch
+
+import pytest
 
 from src.kernel.concurrency import (
     get_task_manager,
@@ -229,6 +231,36 @@ class TestTaskManager:
                 await tm.to_process(process_sleep, 0.3, timeout=0.05)
         finally:
             tm.shutdown_process_pool(wait=False)
+
+    def test_shutdown_process_pool_terminates_workers_when_not_waiting(self) -> None:
+        """非阻塞关闭进程池时应主动终止残留 worker。"""
+        tm = TaskManager(process_workers=1)
+
+        process_alive = Mock()
+        process_alive.is_alive.side_effect = [True, False, False]
+        process_alive.terminate = Mock()
+        process_alive.join = Mock()
+        process_alive.kill = Mock()
+
+        process_stopped = Mock()
+        process_stopped.is_alive.return_value = False
+        process_stopped.terminate = Mock()
+        process_stopped.join = Mock()
+        process_stopped.kill = Mock()
+
+        pool = Mock()
+        pool._processes = {1: process_alive, 2: process_stopped}
+        pool.shutdown = Mock()
+        tm._process_pool = pool
+
+        tm.shutdown_process_pool(wait=False)
+
+        pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+        process_alive.terminate.assert_called_once_with()
+        process_alive.join.assert_called_once_with(timeout=0.2)
+        process_alive.kill.assert_not_called()
+        process_stopped.terminate.assert_not_called()
+        process_stopped.kill.assert_not_called()
 
 
 class TestTaskGroup:

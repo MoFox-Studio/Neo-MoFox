@@ -39,6 +39,15 @@ class MessageHandler:
     def __init__(self, adapter: "NapcatAdapter"):
         self.adapter = adapter
         self._video_downloader = None
+
+    def _get_video_io_timeout(self) -> float:
+        """获取视频 IO 相关操作的超时时间。"""
+        default_timeout = 30.0
+        if not self.adapter.plugin or not self.adapter.plugin.config:
+            return default_timeout
+
+        config = cast(NapcatAdapterConfig, self.adapter.plugin.config)
+        return max(1.0, float(config.features.video_download_timeout))
     
     def _init_video_downloader(self) -> None:
         """根据配置初始化视频下载器"""
@@ -353,7 +362,8 @@ class MessageHandler:
         try:
             if file_path and Path(file_path).exists():
                 # 本地文件处理
-                video_data = await asyncio.to_thread(Path(file_path).read_bytes)
+                async with asyncio.timeout(self._get_video_io_timeout()):
+                    video_data = await asyncio.to_thread(Path(file_path).read_bytes)
                 video_base64 = await get_task_manager().to_process(
                     base64_encode_bytes,
                     video_data,
@@ -400,6 +410,9 @@ class MessageHandler:
                 logger.warning("既没有有效的本地文件路径，也没有有效的视频URL")
                 return {"type": "text", "data": "[视频消息]"}
 
+        except TimeoutError:
+            logger.error(f"视频消息处理超时: {video_source}")
+            return {"type": "text", "data": "[视频处理超时]"}
         except Exception as e:
             logger.error(f"视频消息处理失败: {e!s}")
             return {"type": "text", "data": "[视频消息处理出错]"}

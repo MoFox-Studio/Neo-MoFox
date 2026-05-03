@@ -302,11 +302,19 @@ class NapcatAdapter(BaseAdapter):
         ).decode()
 
         try:
+            loop = asyncio.get_running_loop()
+            started_at = loop.time()
+
             # 发送请求
-            await self._ws.send(request)
+            await asyncio.wait_for(self._ws.send(request), timeout=timeout)
+
+            elapsed = loop.time() - started_at
+            remaining_timeout = timeout - elapsed
+            if remaining_timeout <= 0:
+                raise asyncio.TimeoutError()
 
             # 等待响应
-            response = await asyncio.wait_for(future, timeout=timeout)
+            response = await asyncio.wait_for(future, timeout=remaining_timeout)
             return response
 
         except asyncio.TimeoutError:

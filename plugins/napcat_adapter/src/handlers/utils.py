@@ -1,3 +1,4 @@
+import asyncio
 import io
 import time
 import weakref
@@ -35,6 +36,7 @@ GROUP_DETAIL_TTL = 300
 MEMBER_INFO_TTL = 180
 STRANGER_INFO_TTL = 300
 SELF_INFO_TTL = 300
+CACHE_IO_TIMEOUT_SECONDS = 5.0
 
 _adapter_ref: weakref.ReferenceType["NapcatAdapter"] | None = None
 
@@ -57,7 +59,11 @@ async def _ensure_cache_loaded() -> None:
     from src.kernel.storage import json_store
 
     try:
-        data = await json_store.load("napcat_cache")
+        async with asyncio.timeout(CACHE_IO_TIMEOUT_SECONDS):
+            data = await json_store.load("napcat_cache")
+    except TimeoutError as e:
+        logger.debug(f"Load napcat cache timed out: {e}")
+        data = None
     except Exception as e:
         logger.debug(f"Failed to load napcat cache: {e}")
         data = None
@@ -79,7 +85,10 @@ async def _save_cache_to_disk() -> None:
     from src.kernel.storage import json_store
 
     try:
-        await json_store.save("napcat_cache", _CACHE)
+        async with asyncio.timeout(CACHE_IO_TIMEOUT_SECONDS):
+            await json_store.save("napcat_cache", _CACHE)
+    except TimeoutError as e:
+        logger.debug(f"Write napcat cache timed out: {e}")
     except Exception as e:
         logger.debug(f"Write napcat cache failed: {e}")
 

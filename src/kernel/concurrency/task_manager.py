@@ -10,6 +10,7 @@ import asyncio
 import weakref
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing.process import BaseProcess
 from functools import partial
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Coroutine, ParamSpec, TypeVar
@@ -422,8 +423,32 @@ class TaskManager:
         if self._process_pool is None:
             return
 
-        self._process_pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+        process_pool = self._process_pool
+        worker_processes: list[BaseProcess] = list(
+            getattr(process_pool, "_processes", {}).values()
+        )
+        process_pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+        if not wait:
+            self._terminate_worker_processes(worker_processes)
+
         self._process_pool = None
+
+    def _terminate_worker_processes(
+        self,
+        worker_processes: list[BaseProcess],
+    ) -> None:
+        """终止未随 shutdown 退出的进程池 worker。"""
+        for process in worker_processes:
+            if not process.is_alive():
+                continue
+
+            process.terminate()
+            process.join(timeout=0.2)
+
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=0.2)
 
     def __repr__(self) -> str:
         """任务管理器字符串表示"""
