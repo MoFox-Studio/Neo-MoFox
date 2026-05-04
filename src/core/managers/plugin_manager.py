@@ -441,6 +441,98 @@ class PluginManager:
         """
         return plugin_name in self._loaded_plugins
 
+    def get_plugin_path(self, plugin_name: str) -> str | None:
+        """获取插件路径。
+
+        Args:
+            plugin_name: 插件名称
+
+        Returns:
+            str | None: 插件路径，如果未找到则返回 None
+
+        Examples:
+            >>> path = manager.get_plugin_path("my_plugin")
+            >>> print(path)
+            'plugins/my_plugin'
+        """
+        return self._plugin_paths.get(plugin_name)
+
+    async def get_unloaded_plugins_info(
+        self
+    ) -> dict[str, dict[str, Any]]:
+        """获取所有未加载插件的信息。
+
+        扫描插件目录，返回所有未加载插件的详细信息，包括未主动加载的插件和加载失败的插件。
+
+        Args:
+            plugins_dir: 插件目录路径
+
+        Returns:
+            dict[str, dict[str, Any]]: 插件名到插件信息的字典，格式为：
+                {
+                    "plugin_name": {
+                        "name": str,
+                        "version": str,
+                        "description": str,
+                        "author": str,
+                        "path": str,
+                        "status": "not_loaded" | "failed",
+                        "reason": str | None,  # 失败原因
+                    }
+                }
+
+        Examples:
+            >>> unloaded = await manager.get_unloaded_plugins_info("plugins")
+            >>> for name, info in unloaded.items():
+            ...     print(f"{name}: {info['status']} - {info.get('reason', 'N/A')}")
+        """
+        from src.core.components.loader import PluginLoader, load_manifest
+
+        loader = PluginLoader()
+
+        # 发现所有插件
+        discovered_paths = await loader.discover_plugins(str("plugins"))
+
+        unloaded_info: dict[str, dict[str, Any]] = {}
+
+        for plugin_path in discovered_paths:
+            manifest = await load_manifest(plugin_path)
+            if not manifest:
+                # manifest 加载失败的插件
+                unloaded_info[plugin_path] = {
+                    "name": Path(plugin_path).stem,
+                    "version": "unknown",
+                    "description": "无法读取插件信息",
+                    "author": "unknown",
+                    "path": plugin_path,
+                    "status": "failed",
+                    "reason": "无法加载 manifest.json",
+                }
+                continue
+
+            plugin_name = manifest.name
+
+            # 跳过已加载的插件
+            if plugin_name in self._loaded_plugins:
+                continue
+
+            # 构建插件信息
+            status = "failed" if plugin_name in self._failed_plugins else "not_loaded"
+            reason = self._failed_plugins.get(plugin_name, None)
+
+            unloaded_info[plugin_name] = {
+                "name": manifest.name,
+                "version": manifest.version,
+                "description": manifest.description,
+                "author": manifest.author,
+                "path": plugin_path,
+                "status": status,
+                "reason": reason,
+            }
+
+        logger.debug(f"发现 {len(unloaded_info)} 个未加载插件")
+        return unloaded_info
+
     # === 私有方法 ===
 
     # manifest 读取 / 版本校验 / 依赖解析：已迁移至 loader.PluginLoader

@@ -154,6 +154,48 @@ def is_plugin_loaded(plugin_name: str) -> bool:
     return _get_plugin_manager().is_plugin_loaded(plugin_name)
 
 
+def get_plugin_path(plugin_name: str) -> str | None:
+    """获取插件路径。
+
+    Args:
+        plugin_name: 插件名称
+
+    Returns:
+        插件路径，未找到则返回 None
+    """
+    _validate_non_empty(plugin_name, "plugin_name")
+    return _get_plugin_manager().get_plugin_path(plugin_name)
+
+
+async def list_unloaded_plugins() -> dict[str, dict]:
+    """列出plugins目录下所有未加载的插件。
+
+    返回所有未加载插件的详细信息，包括未主动加载的插件和加载失败的插件。
+
+    Returns:
+        dict[str, dict]: 插件名到插件信息的字典，格式为：
+            {
+                "plugin_name": {
+                    "name": str,
+                    "version": str,
+                    "description": str,
+                    "author": str,
+                    "path": str,
+                    "status": "not_loaded" | "failed",
+                    "reason": str | None,  # 失败原因（仅status为failed时）
+                }
+            }
+
+    Examples:
+        >>> unloaded = await list_unloaded_plugins("plugins")
+        >>> for name, info in unloaded.items():
+        ...     print(f"{name}: {info['status']}")
+        ...     if info['reason']:
+        ...         print(f"  原因: {info['reason']}")
+    """
+    return await _get_plugin_manager().get_unloaded_plugins_info()
+
+
 __all__ = [
     "load_plugin_from_manifest",
     "load_plugin",
@@ -164,4 +206,6 @@ __all__ = [
     "list_loaded_plugins",
     "get_manifest",
     "is_plugin_loaded",
+    "get_plugin_path",
+    "list_unloaded_plugins",
 ]
