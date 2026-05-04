@@ -13,11 +13,11 @@ class DefaultChatterConfig(BaseConfig):
     config_name: ClassVar[str] = "config"
     config_description: ClassVar[str] = "DefaultChatter 配置"
 
-    @config_section("plugin", title="插件设置", tag="plugin", order=0)
+    @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):
         """插件基础配置。"""
 
-        @config_section("theme_guide", title="场景引导", tag="text", order=10)
+        @config_section("theme_guide", title="场景引导", tag="text")
         class ThemeGuideSection(SectionBase):
             """不同聊天类型的人设/语气引导。"""
 

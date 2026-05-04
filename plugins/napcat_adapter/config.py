@@ -12,7 +12,7 @@ class NapcatAdapterConfig(BaseConfig):
     config_name: ClassVar[str] = "config"
     config_description: ClassVar[str] = "Napcat/OneBot 11 适配器配置"
 
-    @config_section("plugin", title="插件设置", tag="plugin", order=0)
+    @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):
         """插件基本配置"""
 
@@ -32,7 +32,7 @@ class NapcatAdapterConfig(BaseConfig):
             order=1
         )
 
-    @config_section("bot", title="Bot 配置", tag="user", order=10)
+    @config_section("bot", title="Bot 配置", tag="user")
     class BotSection(SectionBase):
         """Bot 基本配置"""
 
@@ -51,7 +51,7 @@ class NapcatAdapterConfig(BaseConfig):
             order=1
         )
 
-    @config_section("napcat_server", title="Napcat 服务器", tag="network", order=20)
+    @config_section("napcat_server", title="Napcat 服务器", tag="network")
     class NapcatServerSection(SectionBase):
         """Napcat WebSocket 服务器配置"""
 
@@ -92,7 +92,7 @@ class NapcatAdapterConfig(BaseConfig):
             order=3
         )
 
-    @config_section("features", title="功能特性", tag="general", order=30)
+    @config_section("features", title="功能特性", tag="general")
     class FeaturesSection(SectionBase):
         """功能特性配置"""
 

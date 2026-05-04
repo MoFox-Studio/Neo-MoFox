@@ -26,7 +26,7 @@ class BookuMemoryConfig(BaseConfig):
     config_name: ClassVar[str] = "config"
     config_description: ClassVar[str] = "Booku Memory Agent 配置"
 
-    @config_section("plugin", title="插件设置", tag="plugin", order=0)
+    @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):
         """插件级开关。"""
 
@@ -57,7 +57,7 @@ class BookuMemoryConfig(BaseConfig):
             order=2
         )
 
-    @config_section("storage", title="存储配置", tag="database", order=10)
+    @config_section("storage", title="存储配置", tag="database")
     class StorageSection(SectionBase):
         """存储层配置。"""
 
@@ -86,7 +86,7 @@ class BookuMemoryConfig(BaseConfig):
             order=2
         )
 
-    @config_section("retrieval", title="检索配置", tag="ai", order=20)
+    @config_section("retrieval", title="检索配置", tag="ai")
     class RetrievalSection(SectionBase):
         """检索与重塑配置。"""
 
@@ -186,7 +186,7 @@ class BookuMemoryConfig(BaseConfig):
             order=9
         )
 
-    @config_section("write_conflict", title="写入冲突检测", tag="ai", order=30)
+    @config_section("write_conflict", title="写入冲突检测", tag="ai")
     class WriteConflictSection(SectionBase):
         """写入冲突检测配置。"""
 
@@ -211,7 +211,7 @@ class BookuMemoryConfig(BaseConfig):
             order=1
         )
 
-    @config_section("time_window", title="隐现记忆窗口", tag="timer", order=40)
+    @config_section("time_window", title="隐现记忆窗口", tag="timer")
     class TimeWindowSection(SectionBase):
         """隐现记忆时间窗口与晋升配置。"""
 
@@ -234,7 +234,7 @@ class BookuMemoryConfig(BaseConfig):
             order=1
         )
 
-    @config_section("internal_llm", title="内部 LLM 配置", tag="ai", order=50)
+    @config_section("internal_llm", title="内部 LLM 配置", tag="ai")
     class InternalLLMSection(SectionBase):
         """Agent 内部 LLM 决策配置。"""
 
@@ -257,7 +257,7 @@ class BookuMemoryConfig(BaseConfig):
             order=1
         )
 
-    @config_section("flashback", title="记忆闪回", tag="ai", order=60)
+    @config_section("flashback", title="记忆闪回", tag="ai")
     class FlashbackSection(SectionBase):
         """记忆闪回配置。
 
@@ -353,7 +353,7 @@ class BookuMemoryConfig(BaseConfig):
             order=6
         )
 
-    @config_section("chunking", title="分块配置", tag="ai", order=20)
+    @config_section("chunking", title="分块配置", tag="ai")
     class ChunkingSection(SectionBase):
         """文档切分参数配置。"""
 
@@ -376,7 +376,7 @@ class BookuMemoryConfig(BaseConfig):
             order=1,
         )
 
-    @config_section("startup_ingest", title="启动自动导入", tag="file", order=50)
+    @config_section("startup_ingest", title="启动自动导入", tag="file")
     class StartupIngestSection(SectionBase):
         """启动阶段本地知识库导入配置。（建议仅有未读文档需要导入时启用）"""
 

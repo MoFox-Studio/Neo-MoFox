@@ -65,7 +65,6 @@ def Field(  # noqa: N802
     ] | None = None,  # 预设标签（系统会映射到对应图标）
     placeholder: str | None = None,  # 输入框占位符文本
     hint: str | None = None,  # 帮助提示文本
-    order: int = 0,  # 显示顺序（越小越靠前）
     hidden: bool = False,  # 是否隐藏
     disabled: bool = False,  # 是否禁用（只读）
     # === 输入控件类型 ===
@@ -127,7 +126,6 @@ def Field(  # noqa: N802
         tag: 预设标签（如 "ai", "security"），系统会自动映射到对应图标
         placeholder: 输入框占位符
         hint: 帮助提示文本
-        order: 显示顺序（数字越小越靠前）
         hidden: 是否隐藏
         disabled: 是否禁用（只读）
 
@@ -212,7 +210,6 @@ def Field(  # noqa: N802
         "tag": tag,
         "placeholder": placeholder,
         "hint": hint,
-        "order": order,
         "hidden": hidden,
         "disabled": disabled,
         # 控件类型
@@ -281,7 +278,6 @@ def config_section(
         "notification",
         "plugin",
     ] | None = None,
-    order: int = 0,
 ) -> Callable[[type[SectionT]], type[SectionT]]:
     """配置节装饰器（增强版）。
 
@@ -292,7 +288,6 @@ def config_section(
         title: WebUI 显示标题（可选，不指定则使用节名美化）
         description: 节描述（可选，不指定则使用类 docstring 首行）
         tag: 预设标签（可选），系统会自动映射到对应图标
-        order: 显示顺序，数字越小越靠前（默认 0）
 
     Returns:
         装饰器函数
@@ -308,7 +303,6 @@ def config_section(
                 title="通用设置",
                 description="基本配置选项",
                 tag="general",
-                order=0,
             )
             class GeneralSection(SectionBase):
                 enabled: bool = Field(default=True, description="启用功能")
@@ -322,7 +316,6 @@ def config_section(
         cls.__config_section_title__ = title  # type: ignore[attr-defined]
         cls.__config_section_description__ = description  # type: ignore[attr-defined]
         cls.__config_section_tag__ = tag  # type: ignore[attr-defined]
-        cls.__config_section_order__ = order  # type: ignore[attr-defined]
         return cls
 
     return decorator
@@ -353,7 +346,6 @@ class ConfigBase(BaseModel):
                 title="通用设置",
                 description="基本配置选项",
                 tag="general",
-                order=0,
             )
             class GeneralSection(SectionBase):
                 enabled: bool = Field(default=True, description="启用功能")
@@ -365,7 +357,6 @@ class ConfigBase(BaseModel):
                 title="高级设置",
                 description="除非你知道自己在干什么，否则别动",
                 tag="advanced",
-                order=100,
             )
             class AdvancedSection(SectionBase):
                 debug_mode: bool = Field(default=False, description="调试模式")
