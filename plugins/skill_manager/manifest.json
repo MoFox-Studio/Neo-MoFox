@@ -1,0 +1,34 @@
+{
+  "name": "skill_manager",
+  "version": "1.0.0",
+  "description": "Skill 管理器：索引本地 skill 目录并按需注入 SKILL.md/引用文档/脚本能力",
+  "author": "MoFox Team",
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "event_handler",
+      "component_name": "skill_manager_load_handler",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "get_skill",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "get_reference",
+      "dependencies": []
+    },
+    {
+      "component_type": "tool",
+      "component_name": "get_script",
+      "dependencies": []
+    }
+  ],
+  "entry_point": "plugin.py",
+  "min_core_version": "1.0.0"
+}
