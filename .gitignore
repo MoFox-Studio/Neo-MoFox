@@ -101,4 +101,5 @@ plugins/*
 !plugins/emoji_sender/
 !plugins/perm_plugin/
 !plugins/utility_commands/
+!plugins/skill_manager/
 
