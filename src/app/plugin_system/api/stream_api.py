@@ -294,8 +294,84 @@ async def activate_stream(stream_id: str) -> "ChatStream | None":
     return await _get_stream_manager().activate_stream(stream_id)
 
 
+def clear_context(stream_id: str) -> bool:
+    """清空指定流的内存上下文（仅当流已在内存中时生效）。
+
+    将 StreamContext 的 history_messages 和 unread_messages 全部清空，
+    使 Chatter 下一轮从空白上下文开始处理。若流尚未加载到内存，返回 False。
+    重启后上下文会从数据库重新加载，该操作不影响持久化记录。
+
+    Args:
+        stream_id: 聊天流 ID
+
+    Returns:
+        True 表示成功清空，False 表示流不存在于内存中
+    """
+    _validate_non_empty(stream_id, "stream_id")
+    stream = _get_stream_manager()._streams.get(stream_id)
+    if stream is None:
+        return False
+    stream.context.history_messages.clear()
+    stream.context.unread_messages.clear()
+    return True
+
+
+async def load_and_clear_context(stream_id: str) -> bool:
+    """清空指定流的内存上下文。
+
+    若流已在内存中，立即清空；若流不在内存中，将其加入待清空标记集，
+    下次该流通过 get_or_create_stream 加载时自动应用清空。
+    此调用始终是瞬时的，不会触发数据库加载，因此适合批量操作。
+
+    Args:
+        stream_id: 聊天流 ID
+
+    Returns:
+        始终返回 True
+    """
+    _validate_non_empty(stream_id, "stream_id")
+    return await _get_stream_manager().clear_stream_context(stream_id)
+
+
+def get_all_stream_ids() -> list[str]:
+    """获取当前内存中所有活跃流的 ID 列表。
+
+    Returns:
+        流 ID 字符串列表
+    """
+    return list(_get_stream_manager()._streams.keys())
+
+
+async def get_stream_ids_from_db(chat_type: str = "") -> list[str]:
+    """从数据库查询流ID列表。
+
+    Args:
+        chat_type: 聊天类型（"group"/"private"），空字符串表示查询所有类型
+
+    Returns:
+        流ID列表
+    """
+    return await _get_stream_manager().get_stream_ids_by_chat_type(chat_type)
+
+
+async def bulk_clear_streams(chat_type: str = "") -> int:
+    """批量清空流上下文，持久化清空时间戳到数据库。
+
+    通过单条 UPDATE SQL 完成，效率极高。重启 bot 后清空效果依然生效，
+    因为 load_stream_context 只会加载 context_cleared_at 时间点之后的消息。
+
+    Args:
+        chat_type: 聊天类型（"group"/"private"），空字符串表示清空所有类型
+
+    Returns:
+        数据库中成功更新的流数量
+    """
+    return await _get_stream_manager().bulk_clear_streams(chat_type)
+
+
 __all__ = [
     "get_or_create_stream",
+    "get_stream",
     "build_stream_from_database",
     "load_stream_context",
     "add_message_to_stream",
@@ -307,4 +383,9 @@ __all__ = [
     "clear_stream_cache",
     "refresh_stream",
     "activate_stream",
+    "clear_context",
+    "load_and_clear_context",
+    "get_all_stream_ids",
+    "get_stream_ids_from_db",
+    "bulk_clear_streams",
 ]

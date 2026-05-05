@@ -16,8 +16,9 @@ import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 from async_lru import alru_cache
+from sqlalchemy import update as sa_update
 
-from src.kernel.db import CRUDBase, QueryBuilder
+from src.kernel.db import CRUDBase, QueryBuilder, get_db_session
 from src.kernel.logger import get_logger
 from src.core.config import get_core_config
 
@@ -293,8 +294,11 @@ class StreamManager:
                 chat_type="private",
             )
 
-        # 查询历史消息
-        query = QueryBuilder(self._Messages).filter(stream_id=stream_id).order_by("-id")
+        # 查询历史消息（如果有清空时间戳，只取该时间点之后的消息）
+        query = QueryBuilder(self._Messages).filter(stream_id=stream_id)
+        if stream_record.context_cleared_at is not None:
+            query = query.filter(time__gt=stream_record.context_cleared_at)
+        query = query.order_by("-id")
         if max_messages is not None:
             query = query.limit(max_messages)
         messages_records = await query.all()
@@ -629,7 +633,96 @@ class StreamManager:
             await self._update_stream_active_time(stream_id)
 
         return stream
-        
+
+    async def clear_stream_context(self, stream_id: str) -> bool:
+        """清空流的内存上下文，并将清空时间戳持久化到数据库。
+
+        若流已在内存中，立即清空其历史消息与未读消息；
+        同时将 ChatStreams.context_cleared_at 更新为当前时间，使清空效果在
+        重启后依然生效（重启后加载消息时只取该时间点以后的消息）。
+
+        若流在数据库中不存在（该流从未有过真实对话），则内存清空仍然执行，
+        但 DB 无需更新（该流没有历史消息可过滤）。
+
+        Args:
+            stream_id: 流ID
+
+        Returns:
+            始终返回 True
+
+        Examples:
+            >>> cleared = await sm.clear_stream_context("abc123")
+        """
+        clear_time = time.time()
+
+        # 清空内存中的流
+        stream = self._streams.get(stream_id)
+        if stream is not None:
+            stream.context.history_messages.clear()
+            stream.context.unread_messages.clear()
+            logger.debug(f"已直接清空内存流上下文: {stream_id}")
+
+        # 持久化清空时间戳到 DB（仅在有 DB 记录时更新）
+        record = await self._streams_crud.get_by(stream_id=stream_id)
+        if record:
+            await self._streams_crud.update(record.id, {"context_cleared_at": clear_time})
+            logger.debug(f"已持久化清空时间戳: {stream_id}")
+
+        return True
+
+    async def bulk_clear_streams(self, chat_type: str = "") -> int:
+        """批量清空流上下文，持久化清空时间戳到数据库。
+
+        此操作通过单条 UPDATE SQL 完成 DB 持久化，效率极高，
+        适用于 /清空上下文 私、/清空上下文 群、/清空上下文 all 等批量命令。
+
+        Args:
+            chat_type: 聊天类型（"group"/"private"），空字符串表示清空所有类型
+
+        Returns:
+            数据库中成功更新的流数量
+
+        Examples:
+            >>> count = await sm.bulk_clear_streams("private")
+        """
+        clear_time = time.time()
+
+        # 清空内存中符合条件的流
+        for stream in self._streams.values():
+            if not chat_type or stream.chat_type == chat_type:
+                stream.context.history_messages.clear()
+                stream.context.unread_messages.clear()
+
+        # 批量更新 DB 中的 context_cleared_at
+        async with get_db_session() as session:
+            stmt = sa_update(self._ChatStreams).values(context_cleared_at=clear_time)
+            if chat_type:
+                stmt = stmt.where(self._ChatStreams.chat_type == chat_type)
+            result = await session.execute(stmt)
+            await session.commit()
+            count = result.rowcount  # type: ignore[union-attr]
+
+        logger.debug(f"批量清空上下文，类型={chat_type or '全部'}，影响 {count} 条记录")
+        return count
+
+    async def get_stream_ids_by_chat_type(self, chat_type: str = "") -> list[str]:
+        """从数据库查询流ID列表。
+
+        Args:
+            chat_type: 聊天类型（"group"/"private"），空字符串返回所有类型
+
+        Returns:
+            流ID列表
+
+        Examples:
+            >>> ids = await sm.get_stream_ids_by_chat_type("private")
+        """
+        if chat_type:
+            records = await self._streams_crud.get_multi(limit=10000, chat_type=chat_type)
+        else:
+            records = await self._streams_crud.get_multi(limit=10000)
+        return [r.stream_id for r in records]
+
     # ==================== Private Helper Methods ====================
 
     async def _create_new_stream(

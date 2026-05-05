@@ -106,6 +106,12 @@ class ChatStreams(Base):
         index=True,
         comment="最后活跃时间"
     )
+    context_cleared_at: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+        default=None,
+        comment="上下文清空时间戳；加载消息时仅取此时间点之后的消息"
+    )
 
     __table_args__ = (
         Index("idx_chatstreams_person_id", "person_id"),
