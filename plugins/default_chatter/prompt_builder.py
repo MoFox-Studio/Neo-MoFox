@@ -18,6 +18,21 @@ class DefaultChatterPromptBuilder:
     """Default Chatter 提示词构建器。"""
 
     @staticmethod
+    def build_action_suspend_guidance(plugin_config: DefaultChatterConfig | None) -> str:
+        """构建 Action-only 回合的提示词说明。"""
+        enabled = True if plugin_config is None else bool(plugin_config.plugin.enable_action_suspend)
+        if enabled:
+            return (
+                'Action: 是你在互动过程中的“动作”，他是你主动的一个“行为”，例如发送消息、结束对话等。'
+                'Action本身不会给你返回信息，为满足上下文格式要求，当你只接收到Action的返回信息时，只需要输出"__SUSPEND__"表示挂起对话等待下一步指令即可；'
+            )
+        return (
+            'Action: 是你在互动过程中的“动作”，他是你主动的一个“行为”，例如发送消息、结束对话等。'
+            'Action会返回执行回执；当你只接收到Action的返回信息时，不要输出"__SUSPEND__"，而应把这些回执当作常规工具结果，继续决定下一步要调用的工具或动作。'
+            '如果你调用的是 pass_and_wait（或其他明确表示“等待”的动作），会进入等待，而不是继续追加新的调用。通常在你话说完后调用来暂时挂起对话。'
+        )
+
+    @staticmethod
     def get_mode(plugin_config: DefaultChatterConfig | None) -> str:
         """读取 DefaultChatter 执行模式。"""
         if plugin_config is not None:
@@ -61,6 +76,10 @@ class DefaultChatterPromptBuilder:
         return await (
             tmpl.set("nickname", chat_stream.bot_nickname)
             .set("theme_guide", selected_theme_guide)
+            .set(
+                "action_suspend_guidance",
+                DefaultChatterPromptBuilder.build_action_suspend_guidance(plugin_config),
+            )
             .build()
         )
 

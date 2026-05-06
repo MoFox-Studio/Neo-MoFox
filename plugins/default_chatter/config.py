@@ -74,6 +74,13 @@ class DefaultChatterConfig(BaseConfig):
             tag="ai",
             hint="关闭后群聊消息将始终经过 LLM sub-agent 过滤，不再使用本地概率直通逻辑"
         )
+        enable_action_suspend: bool = Field(
+            default=True,
+            description="是否启用纯 Action 回合的 SUSPEND 挂起机制。关闭后，纯 Action 结果会像常规工具结果一样继续 follow-up，而不是立即挂起等待。",
+            label="启用 Action 后暂停",
+            tag="ai",
+            hint="关闭后，纯 Action 回合不会注入 __SUSPEND__，模型会继续基于 Action 回执决定下一步调用"
+        )
         enable_stop_direct_message_wake: bool = Field(
             default=False,
             description="是否允许私聊或 @Bot 消息按概率提前解除 stop 冷却。",

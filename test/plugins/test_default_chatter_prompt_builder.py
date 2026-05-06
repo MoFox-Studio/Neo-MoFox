@@ -52,6 +52,26 @@ def test_build_negative_behaviors_extra_enabled_returns_text(
     assert "不要编造" in result
 
 
+def test_build_action_suspend_guidance_defaults_enabled() -> None:
+    """默认应启用 action suspend 提示。"""
+
+    config = DefaultChatterConfig.from_dict({"plugin": {"enable_action_suspend": True}})
+    result = DefaultChatterPromptBuilder.build_action_suspend_guidance(config)
+    assert "__SUSPEND__" in result
+    assert "继续决定下一步" not in result
+
+
+def test_build_action_suspend_guidance_supports_follow_up_mode() -> None:
+    """关闭 action suspend 时应改为 follow-up 提示。"""
+
+    config = DefaultChatterConfig.from_dict({"plugin": {"enable_action_suspend": False}})
+    result = DefaultChatterPromptBuilder.build_action_suspend_guidance(config)
+    assert "__SUSPEND__" in result
+    assert "不要输出" in result
+    assert "继续决定下一步" in result
+    assert "pass_and_wait" in result
+
+
 def test_build_system_prompt_uses_private_theme(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

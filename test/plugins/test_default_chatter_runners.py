@@ -432,6 +432,142 @@ async def test_run_classical_waits_after_anthropic_action_only_suspend() -> None
 
 
 @pytest.mark.asyncio
+async def test_run_enhanced_action_only_follows_up_when_suspend_disabled() -> None:
+    """enhanced 模式关闭 action suspend 后，纯 action 回合应直接继续 follow-up。"""
+
+    resp = _FakeResponse(payload_roles=[ROLE.USER], message="")
+
+    async def _send(*, stream: bool = False) -> _FakeResponse:
+        _ = stream
+        resp.send_count += 1
+        if resp.send_count == 1:
+            resp.call_list = [SimpleNamespace(name="action-send_text", args={}, id="1")]
+            resp.message = ""
+        else:
+            resp.call_list = []
+            resp.message = "finish"
+        return resp
+
+    resp.send = _send  # type: ignore[method-assign]
+
+    chatter = _FakeChatterAllowUser(resp)
+    chat_stream = cast(Any, SimpleNamespace(stream_id="s1", stream_name="测试流"))
+    fake_logger = cast(Any, _FakeLogger())
+
+    gen = run_enhanced(
+        chatter=cast(Any, chatter),
+        chat_stream=chat_stream,
+        logger=fake_logger,
+        pass_call_name="action-pass_and_wait",
+        stop_call_name="action-stop_conversation",
+        send_text_call_name="action-send_text",
+        suspend_text="__SUSPEND__",
+        enable_action_suspend=False,
+    )
+
+    first = await anext(gen)
+    assert isinstance(first, Stop)
+    assert resp.send_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_classical_action_only_follows_up_when_suspend_disabled() -> None:
+    """classical 模式关闭 action suspend 后，纯 action 回合应直接继续 follow-up。"""
+
+    resp = _FakeResponse(payload_roles=[ROLE.USER], message="")
+
+    async def _send(*, stream: bool = False) -> _FakeResponse:
+        _ = stream
+        resp.send_count += 1
+        if resp.send_count == 1:
+            resp.call_list = [SimpleNamespace(name="action-send_text", args={}, id="1")]
+            resp.message = ""
+        else:
+            resp.call_list = []
+            resp.message = "finish"
+        return resp
+
+    resp.send = _send  # type: ignore[method-assign]
+
+    chatter = _FakeChatterAllowUser(resp)
+    chat_stream = cast(Any, SimpleNamespace(stream_id="s1", stream_name="测试流"))
+    fake_logger = cast(Any, _FakeLogger())
+
+    gen = run_classical(
+        chatter=cast(Any, chatter),
+        chat_stream=chat_stream,
+        logger=fake_logger,
+        pass_call_name="action-pass_and_wait",
+        stop_call_name="action-stop_conversation",
+        send_text_call_name="action-send_text",
+        suspend_text="__SUSPEND__",
+        enable_action_suspend=False,
+    )
+
+    first = await anext(gen)
+    assert isinstance(first, Stop)
+    assert resp.send_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_enhanced_pass_and_wait_still_waits_when_suspend_disabled() -> None:
+    """关闭 action suspend 后，pass_and_wait 仍应保持等待语义。"""
+
+    resp = _FakeResponse(payload_roles=[ROLE.USER], message="")
+    resp.call_list = [
+        SimpleNamespace(name="action-pass_and_wait", args={"seconds": 5}, id="1")
+    ]
+
+    chatter = _FakeChatterAllowUser(resp)
+    chat_stream = cast(Any, SimpleNamespace(stream_id="s1", stream_name="测试流"))
+    fake_logger = cast(Any, _FakeLogger())
+
+    gen = run_enhanced(
+        chatter=cast(Any, chatter),
+        chat_stream=chat_stream,
+        logger=fake_logger,
+        pass_call_name="action-pass_and_wait",
+        stop_call_name="action-stop_conversation",
+        send_text_call_name="action-send_text",
+        suspend_text="__SUSPEND__",
+        enable_action_suspend=False,
+    )
+
+    first = await anext(gen)
+    assert first.__class__.__name__ == "Wait"
+    assert getattr(first, "time", None) == 5.0
+
+
+@pytest.mark.asyncio
+async def test_run_classical_pass_and_wait_still_waits_when_suspend_disabled() -> None:
+    """classical 关闭 action suspend 后，pass_and_wait 仍应保持等待语义。"""
+
+    resp = _FakeResponse(payload_roles=[ROLE.USER], message="")
+    resp.call_list = [
+        SimpleNamespace(name="action-pass_and_wait", args={"seconds": 4}, id="1")
+    ]
+
+    chatter = _FakeChatterAllowUser(resp)
+    chat_stream = cast(Any, SimpleNamespace(stream_id="s1", stream_name="测试流"))
+    fake_logger = cast(Any, _FakeLogger())
+
+    gen = run_classical(
+        chatter=cast(Any, chatter),
+        chat_stream=chat_stream,
+        logger=fake_logger,
+        pass_call_name="action-pass_and_wait",
+        stop_call_name="action-stop_conversation",
+        send_text_call_name="action-send_text",
+        suspend_text="__SUSPEND__",
+        enable_action_suspend=False,
+    )
+
+    first = await anext(gen)
+    assert first.__class__.__name__ == "Wait"
+    assert getattr(first, "time", None) == 4.0
+
+
+@pytest.mark.asyncio
 async def test_run_enhanced_proactively_resumes_after_timed_wait() -> None:
     """enhanced 模式下 Wait(seconds) 到期后应主动继续，不依赖新消息。"""
     resp = _FakeResponse(payload_roles=[ROLE.USER], message="")

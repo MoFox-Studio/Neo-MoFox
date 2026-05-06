@@ -145,6 +145,36 @@ async def test_send_text_marks_next_tick_bonus_after_success(
     assert getattr(stream.context, "_default_chatter_next_tick_bonus", None) == 0.5
 
 
+@pytest.mark.asyncio
+async def test_send_text_yields_before_typing_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """send_text 应先进入 READY，再执行 typing delay。"""
+
+    stream = ChatStream(stream_id="s_group", platform="qq", chat_type="group")
+    action = SendTextAction(
+        chat_stream=stream,
+        plugin=DefaultChatterPlugin(config=DefaultChatterConfig()),
+    )
+
+    sleep_mock = AsyncMock()
+    send_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(action, "_sleep_for_typing_delay", sleep_mock)
+    monkeypatch.setattr(action, "_send_to_stream", send_mock)
+
+    execution = action.execute(content="你好")
+
+    first = await anext(execution)
+    assert first is None
+    sleep_mock.assert_not_awaited()
+    send_mock.assert_not_awaited()
+
+    second = await anext(execution)
+    assert second == (True, "已发送消息:你好")
+    sleep_mock.assert_awaited_once_with("你好")
+    send_mock.assert_awaited_once_with("你好")
+
+
 def test_send_text_typing_delay_uses_length_and_max_cap() -> None:
     """send_text 打字延迟应随字符长度增长，并受最大等待时间限制。"""
     short_delay = SendTextAction._typing_delay_seconds("你好呀")

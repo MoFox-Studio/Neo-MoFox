@@ -179,6 +179,7 @@ async def run_enhanced(
     stop_call_name: str,
     send_text_call_name: str,
     suspend_text: str,
+    enable_action_suspend: bool = True,
     enable_cooldown: bool = False,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, WaitResumeEvent | None]:
     """enhanced 模式执行流程。"""
@@ -361,13 +362,17 @@ async def run_enhanced(
                 calls=current_calls,
                 response=llm_response,
                 suspend_text=suspend_text,
+                enable_action_suspend=enable_action_suspend,
                 logger=logger,
             )
 
             # 工具链已闭合，可以进入等待或接受新 user。
             if action_only_round and not call_outcome.should_wait:
-                resume_event = yield Wait()
-                _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="action-only round suspended")
+                if enable_action_suspend:
+                    resume_event = yield Wait()
+                    _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="action-only round suspended")
+                    continue
+                _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.FOLLOW_UP, logger=logger, reason="action-only round continues follow-up")
                 continue
 
             if call_outcome.should_wait:
@@ -386,6 +391,7 @@ async def run_classical(
     stop_call_name: str,
     send_text_call_name: str,
     suspend_text: str,
+    enable_action_suspend: bool = True,
     enable_cooldown: bool = False,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, WaitResumeEvent | None]:
     """classical 模式执行流程。"""
@@ -506,6 +512,7 @@ async def run_classical(
                     calls=current_calls,
                     response=response,
                     suspend_text=suspend_text,
+                    enable_action_suspend=enable_action_suspend,
                     logger=logger,
                 )
 
@@ -523,9 +530,11 @@ async def run_classical(
                 return
 
             if action_only_round and not call_outcome.should_wait:
-                await chatter.flush_unreads(unread_msgs)
-                resume_event = yield Wait()
-                break
+                if enable_action_suspend:
+                    await chatter.flush_unreads(unread_msgs)
+                    resume_event = yield Wait()
+                    break
+                continue
 
             if call_outcome.should_wait:
                 # 同 enhanced：若同时存在 pending 工具结果，优先 follow-up。

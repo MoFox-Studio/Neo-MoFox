@@ -241,6 +241,7 @@ def append_suspend_payload_if_action_only(
     calls: list[ToolCall],
     response: LLMResponseLike,
     suspend_text: str,
+    enable_action_suspend: bool,
     logger: Logger,
 ) -> None:
     """当本轮全是 action 调用时，补充 SUSPEND 占位 assistant 消息。
@@ -249,8 +250,9 @@ def append_suspend_payload_if_action_only(
         calls: 本轮 LLM 响应中的 tool call 列表。
         response: 当前 LLM 响应对象；需要时会写入 assistant 占位消息。
         suspend_text: 占位消息文本。
+        enable_action_suspend: 是否启用纯 Action 回合的挂起注入。
         logger: 用于记录调试信息的 logger。
     """
-    if calls and all(call.name.startswith("action-") for call in calls):
+    if enable_action_suspend and calls and all(call.name.startswith("action-") for call in calls):
         response.add_payload(LLMPayload(ROLE.ASSISTANT, Text(suspend_text)))
         logger.debug("已注入 SUSPEND 占位符（本轮全部为 action 调用）")

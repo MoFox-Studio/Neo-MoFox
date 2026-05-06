@@ -347,6 +347,7 @@ def test_append_suspend_payload_only_for_action_calls() -> None:
         ],
         response=response,
         suspend_text="__SUSPEND__",
+        enable_action_suspend=True,
         logger=logger,
     )
     assert len(response.payloads) == 1
@@ -360,6 +361,24 @@ def test_append_suspend_payload_only_for_action_calls() -> None:
         ],
         response=response_2,
         suspend_text="__SUSPEND__",
+        enable_action_suspend=True,
         logger=logger,
     )
     assert response_2.payloads == []
+
+
+def test_append_suspend_payload_respects_disable_flag() -> None:
+    """关闭 action suspend 时不应注入 SUSPEND。"""
+
+    response = _FakeResponse()
+    logger = SimpleNamespace(debug=lambda *_args, **_kwargs: None)
+
+    append_suspend_payload_if_action_only(
+        calls=[SimpleNamespace(name="action-send_text")],
+        response=response,
+        suspend_text="__SUSPEND__",
+        enable_action_suspend=False,
+        logger=logger,
+    )
+
+    assert response.payloads == []
