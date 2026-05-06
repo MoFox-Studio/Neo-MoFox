@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
 
@@ -43,15 +43,6 @@ class DefaultChatterConfig(BaseConfig):
             description="是否启用 DefaultChatter",
             label="启用插件",
             tag="plugin"
-        )
-        mode: Literal["enhanced", "classical"] = Field(
-            default="enhanced",
-            description="执行模式: enhanced/classical",
-            label="执行模式",
-            input_type="select",
-            choices=["enhanced", "classical"],
-            tag="performance",
-            hint="enhanced 模式更智能但消耗更多资源"
         )
         reinforce_negative_behaviors: bool = Field(
             default=True,

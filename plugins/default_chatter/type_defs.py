@@ -68,7 +68,7 @@ class DefaultChatterRuntime(Protocol):
         ...
 
     def _build_enhanced_history_text(self, chat_stream: ChatStream) -> str:
-        """构建 enhanced 模式历史文本。"""
+        """构建历史文本。"""
         ...
 
     async def inject_usables(self, request: LLMRequest) -> ToolRegistry:
@@ -145,15 +145,6 @@ class DefaultChatterRuntime(Protocol):
             ``(是否已写回 TOOL_RESULT, execute 是否成功)`` 列表。
         """
         ...
-
-    async def _build_classical_user_text(
-        self,
-        chat_stream: ChatStream,
-        unread_msgs: list[Message],
-    ) -> str:
-        """构建 classical 模式用户提示词。"""
-        ...
-
 
 class SupportsRequestCreation(Protocol):
     """支持创建 LLM 请求的最小能力集合。"""

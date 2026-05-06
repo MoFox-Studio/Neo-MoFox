@@ -33,13 +33,6 @@ class DefaultChatterPromptBuilder:
         )
 
     @staticmethod
-    def get_mode(plugin_config: DefaultChatterConfig | None) -> str:
-        """读取 DefaultChatter 执行模式。"""
-        if plugin_config is not None:
-            return plugin_config.plugin.mode
-        return "enhanced"
-
-    @staticmethod
     def build_negative_behaviors_extra(plugin_config: DefaultChatterConfig | None) -> str:
         """构建用于 user extra 板块的负面行为强调文本。"""
         if not (
@@ -131,35 +124,9 @@ class DefaultChatterPromptBuilder:
         chat_stream: ChatStream,
         formatter: Callable[[Message], str],
     ) -> str:
-        """构建 enhanced 模式的历史消息文本。"""
+        """构建历史消息文本。"""
         history_lines: list[str] = []
         for msg in chat_stream.context.history_messages:
             history_lines.append(formatter(msg))
 
         return "\n".join(history_lines)
-
-    @staticmethod
-    async def build_classical_user_text(
-        chat_stream: ChatStream,
-        unread_msgs: list[Message],
-        formatter: Callable[[Message], str],
-        extra: str,
-    ) -> str:
-        """构建 classical 模式 user 提示词。"""
-        history_lines = []
-        for msg in chat_stream.context.history_messages:
-            history_lines.append(formatter(msg))
-
-        unread_lines = []
-        for msg in unread_msgs:
-            unread_lines.append(formatter(msg))
-
-        history_block = "\n".join(history_lines) if history_lines else ""
-        unread_block = "\n".join(unread_lines) if unread_lines else ""
-
-        return await DefaultChatterPromptBuilder.build_user_prompt(
-            chat_stream,
-            history_text=history_block,
-            unread_lines=unread_block,
-            extra=extra,
-        )

@@ -37,7 +37,7 @@ from src.kernel.llm import LLMPayload, ROLE, Text
 from .config import DefaultChatterConfig
 from .decision_agent import decide_should_respond
 from .prompt_builder import DefaultChatterPromptBuilder
-from .runners import run_classical, run_enhanced
+from .runners import run_enhanced
 from .type_defs import LLMConversationState, LLMResponseLike, SubAgentDecision
 
 logger = get_logger("default_chatter")
@@ -505,7 +505,6 @@ class StopConversationAction(BaseAction):
 # 控制流标记名称，与 BaseAction.to_schema() 生成的 name 保持一致（含 action- 前缀）
 _PASS_AND_WAIT = "action-pass_and_wait"
 _STOP_CONVERSATION = "action-stop_conversation"
-_SEND_TEXT = "action-send_text"
 
 # SUSPEND 占位符：当 LLM 本轮全部调用的都是 action 时，注入此占位防止上下文缺少 assistant 轮次
 _SUSPEND_TEXT = "__SUSPEND__"
@@ -528,11 +527,6 @@ class DefaultChatter(BaseChatter):
     chat_type: ChatType = ChatType.ALL
 
     dependencies: list[str] = []
-
-    def _get_mode(self) -> str:
-        """读取 DefaultChatter 执行模式。"""
-        plugin_config = getattr(self.plugin, "config", None)
-        return DefaultChatterPromptBuilder.get_mode(plugin_config)
 
     @staticmethod
     def _message_text_for_probability(message: Message) -> str:
@@ -671,21 +665,8 @@ class DefaultChatter(BaseChatter):
             chat_stream,
         )
 
-    async def _build_classical_user_text(
-        self,
-        chat_stream: ChatStream,
-        unread_msgs: list[Message],
-    ) -> str:
-        """构建 classical 模式 user 提示词。"""
-        return await DefaultChatterPromptBuilder.build_classical_user_text(
-            chat_stream,
-            unread_msgs,
-            self.format_message_line,
-            self._build_negative_behaviors_extra(),
-        )
-
     def _build_enhanced_history_text(self, chat_stream: ChatStream) -> str:
-        """构建 enhanced 模式的历史消息文本。"""
+        """构建历史消息文本。"""
         return DefaultChatterPromptBuilder.build_enhanced_history_text(
             chat_stream,
             self.format_message_line,
@@ -801,14 +782,7 @@ class DefaultChatter(BaseChatter):
             yield Failure("无法激活聊天流")
             return
 
-        mode = self._get_mode()
-        logger.info(f"DefaultChatter 当前模式: {mode}")
-
-        runner = (
-            self._execute_classical(chat_stream)
-            if mode == "classical"
-            else self._execute_enhanced(chat_stream)
-        )
+        runner = self._execute_enhanced(chat_stream)
         resume_event: WaitResumeEvent | None = None
 
         while True:
@@ -821,7 +795,7 @@ class DefaultChatter(BaseChatter):
     async def _execute_enhanced(
         self, chat_stream: ChatStream
     ) -> AsyncGenerator[Wait | Success | Failure | Stop, WaitResumeEvent | None]:
-        """enhanced 模式执行流程（保留原有行为）。"""
+        """执行 DefaultChatter 对话流程。"""
         plugin_config = getattr(self.plugin, "config", None)
         enable_cooldown = (
             plugin_config.plugin.enable_cooldown
@@ -834,39 +808,6 @@ class DefaultChatter(BaseChatter):
             logger=logger,
             pass_call_name=_PASS_AND_WAIT,
             stop_call_name=_STOP_CONVERSATION,
-            send_text_call_name=_SEND_TEXT,
-            suspend_text=_SUSPEND_TEXT,
-            enable_action_suspend=self._is_action_suspend_enabled(),
-            enable_cooldown=enable_cooldown,
-        )
-        resume_event: WaitResumeEvent | None = None
-
-        while True:
-            try:
-                result = await runner.asend(resume_event)
-            except StopAsyncIteration:
-                return
-            if isinstance(result, Stop):
-                result = self._apply_stop_wake_config(result)
-            resume_event = yield result
-
-    async def _execute_classical(
-        self, chat_stream: ChatStream
-    ) -> AsyncGenerator[Wait | Success | Failure | Stop, WaitResumeEvent | None]:
-        """classical 模式执行流程。"""
-        plugin_config = getattr(self.plugin, "config", None)
-        enable_cooldown = (
-            plugin_config.plugin.enable_cooldown
-            if isinstance(plugin_config, DefaultChatterConfig)
-            else False
-        )
-        runner = run_classical(
-            chatter=self,
-            chat_stream=chat_stream,
-            logger=logger,
-            pass_call_name=_PASS_AND_WAIT,
-            stop_call_name=_STOP_CONVERSATION,
-            send_text_call_name=_SEND_TEXT,
             suspend_text=_SUSPEND_TEXT,
             enable_action_suspend=self._is_action_suspend_enabled(),
             enable_cooldown=enable_cooldown,

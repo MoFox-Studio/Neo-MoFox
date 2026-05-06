@@ -22,7 +22,7 @@ from src.core.models.stream import ChatStream
 
 def _build_chatter() -> DefaultChatter:
     """构造默认聊天器实例。"""
-    config = DefaultChatterConfig.from_dict({"plugin": {"enabled": True, "mode": "enhanced"}})
+    config = DefaultChatterConfig.from_dict({"plugin": {"enabled": True}})
     plugin = DefaultChatterPlugin(config=config)
     return DefaultChatter(stream_id="test_stream", plugin=plugin)
 
@@ -30,7 +30,7 @@ def _build_chatter() -> DefaultChatter:
 def _build_chatter_with_config(plugin_overrides: dict[str, object]) -> DefaultChatter:
     """使用指定插件配置覆盖项构造默认聊天器实例。"""
     config = DefaultChatterConfig.from_dict(
-        {"plugin": {"enabled": True, "mode": "enhanced", **plugin_overrides}}
+        {"plugin": {"enabled": True, **plugin_overrides}}
     )
     plugin = DefaultChatterPlugin(config=config)
     return DefaultChatter(stream_id="test_stream", plugin=plugin)

@@ -12,17 +12,6 @@ from plugins.default_chatter.prompt_builder import DefaultChatterPromptBuilder
 from src.core.models.stream import ChatStream
 
 
-def test_get_mode_returns_configured_value() -> None:
-    """应返回配置中的 mode。"""
-    config = DefaultChatterConfig.from_dict({"plugin": {"mode": "classical"}})
-    assert DefaultChatterPromptBuilder.get_mode(config) == "classical"
-
-
-def test_get_mode_fallbacks_to_enhanced() -> None:
-    """配置不可用时应回退为 enhanced。"""
-    assert DefaultChatterPromptBuilder.get_mode(None) == "enhanced"
-
-
 def test_build_negative_behaviors_extra_disabled_returns_empty() -> None:
     """未启用强化时应返回空字符串。"""
     config = DefaultChatterConfig.from_dict(

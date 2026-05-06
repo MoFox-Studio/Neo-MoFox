@@ -16,7 +16,6 @@ def _build_chatter() -> DefaultChatter:
         {
             "plugin": {
                 "enabled": True,
-                "mode": "enhanced",
                 "theme_guide": {
                     "private": "PRIVATE_THEME_GUIDE",
                     "group": "GROUP_THEME_GUIDE",

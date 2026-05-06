@@ -27,70 +27,6 @@ class _FakeResponse:
 
 
 @pytest.mark.asyncio
-async def test_process_tool_calls_stops_on_send_text_when_enabled() -> None:
-    """classical 模式下 send_text 成功后应立即停止同批次后续调用。"""
-    response = _FakeResponse()
-    calls = [
-        SimpleNamespace(name="action-send_text", args={}, id="1"),
-        SimpleNamespace(name="tool-any", args={}, id="2"),
-    ]
-
-    called_names: list[str] = []
-
-    async def _run_tool_call(calls: list[Any], _resp: Any, _usable: Any, _trigger: Any) -> list[tuple[bool, bool]]:
-        called_names.extend(call.name for call in calls)
-        return [(True, True) for _call in calls]
-
-    outcome = await process_tool_calls(
-        stream_id="s1",
-        calls=calls,
-        response=response,
-        run_tool_call=_run_tool_call,
-        usable_map={},
-        trigger_msg=None,
-        pass_call_name="action-pass_and_wait",
-        stop_call_name="action-stop_conversation",
-        send_text_call_name="action-send_text",
-        break_on_send_text=True,
-    )
-
-    assert outcome.sent_once is True
-    assert called_names == ["action-send_text"]
-
-
-@pytest.mark.asyncio
-async def test_process_tool_calls_allows_multiple_send_text_in_one_batch() -> None:
-    """classical 模式 break_on_send_text 也应允许同轮多次 send_text 分段回复。"""
-    response = _FakeResponse()
-    calls = [
-        SimpleNamespace(name="action-send_text", args={"content": "A"}, id="1"),
-        SimpleNamespace(name="action-send_text", args={"content": "B"}, id="2"),
-    ]
-
-    called_ids: list[str] = []
-
-    async def _run_tool_call(calls: list[Any], _resp: Any, _usable: Any, _trigger: Any) -> list[tuple[bool, bool]]:
-        called_ids.extend(call.id for call in calls)
-        return [(True, True) for _call in calls]
-
-    outcome = await process_tool_calls(
-        stream_id="s1",
-        calls=calls,
-        response=response,
-        run_tool_call=_run_tool_call,
-        usable_map={},
-        trigger_msg=SimpleNamespace(message_id="m1"),
-        pass_call_name="action-pass_and_wait",
-        stop_call_name="action-stop_conversation",
-        send_text_call_name="action-send_text",
-        break_on_send_text=True,
-    )
-
-    assert called_ids == ["1", "2"]
-    assert outcome.sent_once is False
-
-
-@pytest.mark.asyncio
 async def test_process_tool_calls_deduplicates_same_tool_and_args_in_one_batch() -> None:
     """同一轮内工具名和参数相同的调用应自动去重。"""
     response = _FakeResponse()
@@ -115,8 +51,6 @@ async def test_process_tool_calls_deduplicates_same_tool_and_args_in_one_batch()
         trigger_msg=SimpleNamespace(message_id="m1"),
         pass_call_name="action-pass_and_wait",
         stop_call_name="action-stop_conversation",
-        send_text_call_name="action-send_text",
-        break_on_send_text=False,
     )
 
     assert called_ids == ["1", "3"]
@@ -145,8 +79,6 @@ async def test_process_tool_calls_marks_wait_and_stop_and_pending() -> None:
         trigger_msg=None,
         pass_call_name="action-pass_and_wait",
         stop_call_name="action-stop_conversation",
-        send_text_call_name=None,
-        break_on_send_text=False,
     )
 
     assert outcome.should_wait is True
@@ -175,8 +107,6 @@ async def test_process_tool_calls_extracts_wait_seconds() -> None:
         trigger_msg=None,
         pass_call_name="action-pass_and_wait",
         stop_call_name="action-stop_conversation",
-        send_text_call_name=None,
-        break_on_send_text=False,
     )
 
     assert outcome.should_wait is True
@@ -207,8 +137,6 @@ async def test_process_tool_calls_allows_send_text_with_wait_seconds() -> None:
         trigger_msg=SimpleNamespace(message_id="m1"),
         pass_call_name="action-pass_and_wait",
         stop_call_name="action-stop_conversation",
-        send_text_call_name="action-send_text",
-        break_on_send_text=False,
     )
 
     assert called_names == ["action-send_text"]
@@ -249,12 +177,9 @@ async def test_process_tool_calls_deduplicates_same_send_text_content_in_one_bat
         trigger_msg=SimpleNamespace(message_id="m1"),
         pass_call_name="action-pass_and_wait",
         stop_call_name="action-stop_conversation",
-        send_text_call_name="action-send_text",
-        break_on_send_text=False,
     )
 
     assert called_ids == ["s1"]
-    assert outcome.sent_once is False
     assert outcome.has_pending_tool_results is False
 
 
@@ -282,8 +207,6 @@ async def test_process_tool_calls_action_call_does_not_mark_pending() -> None:
         trigger_msg=SimpleNamespace(message_id="m1"),
         pass_call_name="action-pass_and_wait",
         stop_call_name="action-stop_conversation",
-        send_text_call_name="action-send_text",
-        break_on_send_text=False,
     )
 
     assert outcome.has_pending_tool_results is False
@@ -313,8 +236,6 @@ async def test_process_tool_calls_deduplicates_across_rounds_when_state_provided
         trigger_msg=SimpleNamespace(message_id="m1"),
         pass_call_name="action-pass_and_wait",
         stop_call_name="action-stop_conversation",
-        send_text_call_name=None,
-        break_on_send_text=False,
         cross_round_seen_signatures=cross_round_seen,
     )
 
@@ -327,8 +248,6 @@ async def test_process_tool_calls_deduplicates_across_rounds_when_state_provided
         trigger_msg=SimpleNamespace(message_id="m1"),
         pass_call_name="action-pass_and_wait",
         stop_call_name="action-stop_conversation",
-        send_text_call_name=None,
-        break_on_send_text=False,
         cross_round_seen_signatures=cross_round_seen,
     )
 
