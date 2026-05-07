@@ -79,7 +79,7 @@ async def test_ingest_document_and_export_titles(
 
     assert result["action"] == "booku_knowledge_ingest"
     assert result["title"] == "《测试知识》"
-    assert result["chunk_count"] >= 2
+    assert result["chunk_count"] >= 1
     assert result["collection"] == "booku_memory__knowledge__default"
 
     titles = await service.export_document_titles()

@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, distinct, func, or_, select, update
+from sqlalchemy import delete, distinct, func, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src.app.plugin_system.api.storage_api import PluginDatabase
@@ -29,6 +29,20 @@ class BookuMemoryRecord:
     bucket: str
     content: str
     source: str
+    memory_type: str
+    status: str
+    person_id: str | None
+    relation_memory_ids: list[str]
+    relation_aliases: list[str]
+    event_start_at: float
+    event_end_at: float
+    related_people: list[str]
+    knowledge_type: str
+    address_or_coord: str
+    place_type: str
+    asset_type: str
+    disposition_status: str
+    procedure_type: str
     novelty_energy: float
     is_archived: bool
     is_deleted: bool
@@ -57,6 +71,7 @@ class BookuMemoryMetadataRepository:
     async def initialize(self) -> None:
         """初始化数据库（建表）。"""
         await self._db.initialize()
+        await self._ensure_schema_columns()
 
     async def close(self) -> None:
         """关闭底层 PluginDatabase 连接并清理资源。
@@ -87,6 +102,10 @@ class BookuMemoryMetadataRepository:
             含完整标签信息的 ``BookuMemoryRecord`` dataclass 实例。
         """
         td = (tags_by_id or {}).get(row.memory_id, {})
+        relation_memory_ids = self._parse_json_list(getattr(row, "relation_memory_ids", "[]"))
+        relation_aliases = self._parse_json_list(getattr(row, "relation_aliases", "[]"))
+        related_people = self._parse_json_list(getattr(row, "related_people", "[]"))
+
         return BookuMemoryRecord(
             memory_id=row.memory_id,
             title=row.title or "",
@@ -94,6 +113,20 @@ class BookuMemoryMetadataRepository:
             bucket=row.bucket,
             content=row.content,
             source=row.source,
+            memory_type=str(getattr(row, "memory_type", "knowledge") or "knowledge"),
+            status=str(getattr(row, "status", "active") or "active"),
+            person_id=getattr(row, "person_id", None),
+            relation_memory_ids=relation_memory_ids,
+            relation_aliases=relation_aliases,
+            event_start_at=float(getattr(row, "event_start_at", 0.0) or 0.0),
+            event_end_at=float(getattr(row, "event_end_at", 0.0) or 0.0),
+            related_people=related_people,
+            knowledge_type=str(getattr(row, "knowledge_type", "") or ""),
+            address_or_coord=str(getattr(row, "address_or_coord", "") or ""),
+            place_type=str(getattr(row, "place_type", "") or ""),
+            asset_type=str(getattr(row, "asset_type", "") or ""),
+            disposition_status=str(getattr(row, "disposition_status", "") or ""),
+            procedure_type=str(getattr(row, "procedure_type", "") or ""),
             novelty_energy=float(row.novelty_energy),
             is_archived=bool(row.is_archived),
             is_deleted=bool(row.is_deleted),
@@ -108,6 +141,62 @@ class BookuMemoryMetadataRepository:
             opposing_tags=td.get("opposing", []),
         )
 
+    @staticmethod
+    def _parse_json_list(raw_value: Any) -> list[str]:
+        """将 JSON 列文本解析为字符串列表，失败时返回空列表。"""
+        if isinstance(raw_value, list):
+            return [str(item) for item in raw_value if str(item).strip()]
+        if not isinstance(raw_value, str) or not raw_value.strip():
+            return []
+        try:
+            import json
+
+            parsed = json.loads(raw_value)
+        except Exception:  # noqa: BLE001
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed if str(item).strip()]
+
+    @staticmethod
+    def _dump_json_list(values: list[str] | None) -> str:
+        """将字符串列表序列化为 JSON 文本。"""
+        import json
+
+        normalized = [str(item).strip() for item in values or [] if str(item).strip()]
+        return json.dumps(normalized, ensure_ascii=False)
+
+    async def _ensure_schema_columns(self) -> None:
+        """为历史数据库补齐新版本所需列。"""
+        required_columns: dict[str, str] = {
+            "memory_type": "TEXT NOT NULL DEFAULT 'knowledge'",
+            "status": "TEXT NOT NULL DEFAULT 'active'",
+            "person_id": "TEXT",
+            "relation_memory_ids": "TEXT NOT NULL DEFAULT '[]'",
+            "relation_aliases": "TEXT NOT NULL DEFAULT '[]'",
+            "event_start_at": "REAL NOT NULL DEFAULT 0",
+            "event_end_at": "REAL NOT NULL DEFAULT 0",
+            "related_people": "TEXT NOT NULL DEFAULT '[]'",
+            "knowledge_type": "TEXT NOT NULL DEFAULT ''",
+            "address_or_coord": "TEXT NOT NULL DEFAULT ''",
+            "place_type": "TEXT NOT NULL DEFAULT ''",
+            "asset_type": "TEXT NOT NULL DEFAULT ''",
+            "disposition_status": "TEXT NOT NULL DEFAULT ''",
+            "procedure_type": "TEXT NOT NULL DEFAULT ''",
+        }
+
+        async with self._db.session() as s:
+            pragma_rows = (
+                await s.execute(text("PRAGMA table_info(booku_memory_records)"))
+            ).fetchall()
+            existing = {str(row[1]) for row in pragma_rows}
+            for name, ddl in required_columns.items():
+                if name in existing:
+                    continue
+                await s.execute(
+                    text(f"ALTER TABLE booku_memory_records ADD COLUMN {name} {ddl}")
+                )
+
     # ------------------------------------------------------------------
     # 写入 / upsert
     # ------------------------------------------------------------------
@@ -121,11 +210,25 @@ class BookuMemoryMetadataRepository:
         bucket: str,
         content: str,
         source: str,
-        novelty_energy: float,
-        tags: list[str],
-        core_tags: list[str],
-        diffusion_tags: list[str],
-        opposing_tags: list[str],
+        memory_type: str = "knowledge",
+        status: str = "active",
+        person_id: str | None = None,
+        relation_memory_ids: list[str] | None = None,
+        relation_aliases: list[str] | None = None,
+        event_start_at: float = 0.0,
+        event_end_at: float = 0.0,
+        related_people: list[str] | None = None,
+        knowledge_type: str = "",
+        address_or_coord: str = "",
+        place_type: str = "",
+        asset_type: str = "",
+        disposition_status: str = "",
+        procedure_type: str = "",
+        novelty_energy: float = 0.0,
+        tags: list[str] | None = None,
+        core_tags: list[str] | None = None,
+        diffusion_tags: list[str] | None = None,
+        opposing_tags: list[str] | None = None,
     ) -> None:
         """写入或更新记忆元数据与标签。
 
@@ -165,6 +268,20 @@ class BookuMemoryMetadataRepository:
                 bucket=bucket,
                 content=content,
                 source=source,
+                memory_type=memory_type,
+                status=status,
+                person_id=person_id,
+                relation_memory_ids=self._dump_json_list(relation_memory_ids),
+                relation_aliases=self._dump_json_list(relation_aliases),
+                event_start_at=event_start_at,
+                event_end_at=event_end_at,
+                related_people=self._dump_json_list(related_people),
+                knowledge_type=knowledge_type,
+                address_or_coord=address_or_coord,
+                place_type=place_type,
+                asset_type=asset_type,
+                disposition_status=disposition_status,
+                procedure_type=procedure_type,
                 novelty_energy=novelty_energy,
                 is_archived=is_archived,
                 is_deleted=0,
@@ -181,6 +298,20 @@ class BookuMemoryMetadataRepository:
                     bucket=bucket,
                     content=content,
                     source=source,
+                    memory_type=memory_type,
+                    status=status,
+                    person_id=person_id,
+                    relation_memory_ids=self._dump_json_list(relation_memory_ids),
+                    relation_aliases=self._dump_json_list(relation_aliases),
+                    event_start_at=event_start_at,
+                    event_end_at=event_end_at,
+                    related_people=self._dump_json_list(related_people),
+                    knowledge_type=knowledge_type,
+                    address_or_coord=address_or_coord,
+                    place_type=place_type,
+                    asset_type=asset_type,
+                    disposition_status=disposition_status,
+                    procedure_type=procedure_type,
                     novelty_energy=novelty_energy,
                     is_archived=is_archived,
                     is_deleted=0,
@@ -196,10 +327,10 @@ class BookuMemoryMetadataRepository:
             )
             tag_rows: list[dict[str, Any]] = []
             for tag_type, tag_values in [
-                ("tag", tags),
-                ("core", core_tags),
-                ("diffusion", diffusion_tags),
-                ("opposing", opposing_tags),
+                ("tag", tags or []),
+                ("core", core_tags or []),
+                ("diffusion", diffusion_tags or []),
+                ("opposing", opposing_tags or []),
             ]:
                 for v in tag_values:
                     if v:
@@ -284,6 +415,20 @@ class BookuMemoryMetadataRepository:
         source: str | None = None,
         bucket: str | None = None,
         folder_id: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        person_id: str | None = None,
+        relation_memory_ids: list[str] | None = None,
+        relation_aliases: list[str] | None = None,
+        event_start_at: float | None = None,
+        event_end_at: float | None = None,
+        related_people: list[str] | None = None,
+        knowledge_type: str | None = None,
+        address_or_coord: str | None = None,
+        place_type: str | None = None,
+        asset_type: str | None = None,
+        disposition_status: str | None = None,
+        procedure_type: str | None = None,
         tags: list[str] | None = None,
         core_tags: list[str] | None = None,
         diffusion_tags: list[str] | None = None,
@@ -333,6 +478,34 @@ class BookuMemoryMetadataRepository:
                 update_vals["is_archived"] = 1 if bucket == "archived" else 0
             if folder_id is not None:
                 update_vals["folder_id"] = folder_id
+            if memory_type is not None:
+                update_vals["memory_type"] = memory_type
+            if status is not None:
+                update_vals["status"] = status
+            if person_id is not None:
+                update_vals["person_id"] = person_id
+            if relation_memory_ids is not None:
+                update_vals["relation_memory_ids"] = self._dump_json_list(relation_memory_ids)
+            if relation_aliases is not None:
+                update_vals["relation_aliases"] = self._dump_json_list(relation_aliases)
+            if event_start_at is not None:
+                update_vals["event_start_at"] = event_start_at
+            if event_end_at is not None:
+                update_vals["event_end_at"] = event_end_at
+            if related_people is not None:
+                update_vals["related_people"] = self._dump_json_list(related_people)
+            if knowledge_type is not None:
+                update_vals["knowledge_type"] = knowledge_type
+            if address_or_coord is not None:
+                update_vals["address_or_coord"] = address_or_coord
+            if place_type is not None:
+                update_vals["place_type"] = place_type
+            if asset_type is not None:
+                update_vals["asset_type"] = asset_type
+            if disposition_status is not None:
+                update_vals["disposition_status"] = disposition_status
+            if procedure_type is not None:
+                update_vals["procedure_type"] = procedure_type
 
             await s.execute(
                 update(R).where(R.memory_id == memory_id).values(**update_vals)
@@ -635,6 +808,89 @@ class BookuMemoryMetadataRepository:
             qb = qb.filter(is_deleted=0)
         rows = await qb.order_by("-updated_at").limit(max(1, int(limit))).all()
         return [self._to_record(r) for r in rows]  # type: ignore[arg-type]
+
+    async def search_records(
+        self,
+        *,
+        keyword: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        person_id: str | None = None,
+        relation_of: str | None = None,
+        folder_id: str | None = None,
+        include_deleted: bool = False,
+        limit: int = 20,
+    ) -> list[BookuMemoryRecord]:
+        """按结构化约束查询记忆记录。"""
+        R = BookuMemoryRecordModel
+
+        async with self._db.session() as s:
+            stmt = select(R)
+            if folder_id is not None:
+                stmt = stmt.where(R.folder_id == folder_id)
+            if memory_type:
+                stmt = stmt.where(R.memory_type == memory_type)
+            if status:
+                stmt = stmt.where(R.status == status)
+            if person_id:
+                stmt = stmt.where(R.person_id == person_id)
+            if relation_of:
+                stmt = stmt.where(R.relation_memory_ids.like(f'%"{relation_of}"%'))
+            if not include_deleted:
+                stmt = stmt.where(R.is_deleted == 0)
+
+            cleaned_keyword = (keyword or "").strip()
+            if cleaned_keyword:
+                like_value = f"%{cleaned_keyword}%"
+                stmt = stmt.where(
+                    or_(
+                        R.title.like(like_value),
+                        R.content.like(like_value),
+                        R.memory_id.like(like_value),
+                    )
+                )
+
+            stmt = stmt.order_by(R.last_activated_at.desc(), R.updated_at.desc()).limit(max(1, int(limit)))
+            rows = (await s.execute(stmt)).scalars().all()
+
+        if not rows:
+            return []
+
+        ids = [row.memory_id for row in rows]
+        tags = await self.get_records_map(ids, include_deleted=include_deleted)
+        return [tags[row.memory_id] for row in rows if row.memory_id in tags]
+
+    async def list_distinct_folder_ids(self) -> list[str]:
+        """返回数据库中所有非 inherent 桶的不重复 folder_id 列表（不含已删除记录中的孤立 folder）。"""
+        R = BookuMemoryRecordModel
+        async with self._db.session() as s:
+            stmt = (
+                select(distinct(R.folder_id))
+                .where(R.bucket != "inherent", R.is_deleted == 0)
+                .order_by(R.folder_id)
+            )
+            rows = (await s.execute(stmt)).scalars().all()
+        return [r for r in rows if r]
+
+    async def list_recent_active_records(self, *, limit: int = 10) -> list[BookuMemoryRecord]:
+        """返回最近激活的 active 记忆记录。"""
+        R = BookuMemoryRecordModel
+        async with self._db.session() as s:
+            rows = (
+                await s.execute(
+                    select(R)
+                    .where(R.status == "active", R.is_deleted == 0)
+                    .order_by(R.last_activated_at.desc(), R.updated_at.desc())
+                    .limit(max(1, int(limit)))
+                )
+            ).scalars().all()
+
+        if not rows:
+            return []
+
+        ids = [row.memory_id for row in rows]
+        tags = await self.get_records_map(ids)
+        return [tags[row.memory_id] for row in rows if row.memory_id in tags]
 
     async def list_memory_ids_by_folder(
         self,

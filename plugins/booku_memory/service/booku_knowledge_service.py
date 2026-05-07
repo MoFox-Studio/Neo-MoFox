@@ -494,8 +494,25 @@ async def _build_document_chunks(
             overlap_chars=overlap_chars,
             memory_service=memory_service,
         )
+        if len(drafts) <= 1 and "\n\n" in _normalize_text(text):
+            fallback_chunks = _split_document_into_chunks(
+                text,
+                max_chunk_chars=max_chunk_chars,
+                overlap_chars=overlap_chars,
+            )
+            if len(fallback_chunks) > 1:
+                drafts = [
+                    _ChunkDraft(
+                        title=_build_semantic_title(chunk),
+                        content=chunk,
+                    )
+                    for chunk in fallback_chunks
+                ]
 
-    min_chunk_chars = max(80, int(max_chunk_chars * _SHORT_CHUNK_RATIO))
+    min_chunk_chars = min(
+        max_chunk_chars,
+        max(12, int(max_chunk_chars * _SHORT_CHUNK_RATIO)),
+    )
     return await _merge_short_chunks_by_title_similarity(
         drafts,
         min_chunk_chars=min_chunk_chars,
@@ -570,7 +587,7 @@ async def build_booku_knowledge_actor_reminder(plugin: Any) -> str:
         "## 知识检索引导\n"
         "以下是当前记忆内已学习的专业知识标题集合：\n"
         f"{lines}\n"
-        "当你的回答需要涉及专业知识时，请优先调用 booku_memory_read，并指定 include_knowledge=True 检索相关知识。\n"
+        "当你的回答需要涉及专业知识时，请优先调用 memory_command，使用 search -type knowledge -include_knowledge true 检索相关知识。\n"
         "不要把这些知识直接用于回答问题，不要暴露这些知识的标题，而应该根据问题的具体内容，从这些知识中提取相关信息。\n\n"
     )
 
@@ -819,5 +836,6 @@ class BookuKnowledgeService(BaseService):
         return {"action": "booku_knowledge_dump", "total": len(items), "items": items}
 
     async def remember_titles_json(self) -> str:
-        titles = await self.export_document_titles()
+        records = await self._list_knowledge_records(limit=5000)
+        titles = _collect_unique_titles(records)
         return json.dumps(titles, ensure_ascii=False)

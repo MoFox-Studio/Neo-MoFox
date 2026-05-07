@@ -20,14 +20,16 @@ from src.core.components import BaseService
 from src.kernel.logger import get_logger
 from src.kernel.vector_db import get_vector_db_service
 
-from ..config import PREDEFINED_FOLDERS, BookuMemoryConfig
+from ..config import BookuMemoryConfig
 from .metadata_repository import BookuMemoryMetadataRepository
 from .result_deduplicator import ResultDeduplicator
 
 logger = get_logger("booku_memory_service")
 
 _TARGET_REMINDER_BUCKET = "actor"
-_TARGET_REMINDER_NAME = "记忆引导语"
+_TARGET_REMINDER_NAME = "booku_memory"
+_TARGET_ACTIVE_REMINDER_NAME = "活跃记忆速览"
+_ACTIVE_REMINDER_LIMIT = 10
 
 
 _MEMORY_HINT = (
@@ -89,6 +91,25 @@ def _format_inherent_block(records: list[Any]) -> str:
     )
 
 
+def _format_active_memory_block(
+    records: list[Any], *, limit: int = _ACTIVE_REMINDER_LIMIT
+) -> str:
+    """将最新 active 记忆格式化为动态提示文本。"""
+
+    lines: list[str] = []
+    for index, record in enumerate(records[: max(1, limit)], start=1):
+        memory_id = str(getattr(record, "memory_id", "") or "").strip()
+        title = str(getattr(record, "title", "") or "").strip() or "未命名记忆"
+        if not memory_id:
+            continue
+        lines.append(f"{index}. {title} ({memory_id})")
+
+    if not lines:
+        return ""
+
+    return "## 最新活跃记忆\n" + "\n".join(lines)
+
+
 async def build_booku_memory_actor_reminder(plugin: Any) -> str:
     """构建需要同步到 actor bucket 的 reminder 文本。"""
 
@@ -133,13 +154,14 @@ async def build_booku_memory_actor_reminder(plugin: Any) -> str:
 async def sync_booku_memory_actor_reminder(plugin: Any) -> str:
     """将当前 booku_memory 提示同步到 actor bucket 的 system reminder。"""
 
-    from src.core.prompt import get_system_reminder_store
+    from src.core.prompt import SystemReminderInsertType, get_system_reminder_store
 
     store = get_system_reminder_store()
     reminder_content = await build_booku_memory_actor_reminder(plugin)
 
     if not reminder_content:
         store.delete(_TARGET_REMINDER_BUCKET, _TARGET_REMINDER_NAME)
+        store.delete(_TARGET_REMINDER_BUCKET, _TARGET_ACTIVE_REMINDER_NAME)
         logger.debug("booku_memory actor reminder 已清理")
         return ""
 
@@ -148,6 +170,33 @@ async def sync_booku_memory_actor_reminder(plugin: Any) -> str:
         name=_TARGET_REMINDER_NAME,
         content=reminder_content,
     )
+
+    config = getattr(plugin, "config", None)
+    repo: BookuMemoryMetadataRepository | None = None
+    try:
+        if isinstance(config, BookuMemoryConfig):
+            repo = BookuMemoryMetadataRepository(db_path=config.storage.metadata_db_path)
+            await repo.initialize()
+            active_records = await repo.list_recent_active_records(limit=_ACTIVE_REMINDER_LIMIT)
+            active_content = _format_active_memory_block(
+                active_records,
+                limit=_ACTIVE_REMINDER_LIMIT,
+            )
+            if active_content:
+                store.set(
+                    _TARGET_REMINDER_BUCKET,
+                    name=_TARGET_ACTIVE_REMINDER_NAME,
+                    content=active_content,
+                    insert_type=SystemReminderInsertType.DYNAMIC,
+                )
+            else:
+                store.delete(_TARGET_REMINDER_BUCKET, _TARGET_ACTIVE_REMINDER_NAME)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"同步活跃记忆动态提示失败：{exc}")
+    finally:
+        if repo is not None:
+            await repo.close()
+
     logger.debug("booku_memory actor reminder 已同步")
     return reminder_content
 
@@ -870,6 +919,20 @@ class BookuMemoryService(BaseService):
             "folder_id": getattr(record, "folder_id", ""),
             "bucket": getattr(record, "bucket", ""),
             "source": getattr(record, "source", ""),
+            "memory_type": getattr(record, "memory_type", "knowledge"),
+            "status": getattr(record, "status", "active"),
+            "person_id": getattr(record, "person_id", None),
+            "relation_memory_ids": list(getattr(record, "relation_memory_ids", [])),
+            "relation_aliases": list(getattr(record, "relation_aliases", [])),
+            "event_start_at": float(getattr(record, "event_start_at", 0.0) or 0.0),
+            "event_end_at": float(getattr(record, "event_end_at", 0.0) or 0.0),
+            "related_people": list(getattr(record, "related_people", [])),
+            "knowledge_type": getattr(record, "knowledge_type", ""),
+            "address_or_coord": getattr(record, "address_or_coord", ""),
+            "place_type": getattr(record, "place_type", ""),
+            "asset_type": getattr(record, "asset_type", ""),
+            "disposition_status": getattr(record, "disposition_status", ""),
+            "procedure_type": getattr(record, "procedure_type", ""),
             "novelty_energy": getattr(record, "novelty_energy", 0.0),
             "created_at": getattr(record, "created_at", 0.0),
             "updated_at": getattr(record, "updated_at", 0.0),
@@ -1111,35 +1174,6 @@ class BookuMemoryService(BaseService):
             return cls._safe_list(first)
         return rows
 
-    @staticmethod
-    def _resolve_search_folders(
-        folder_id: str | None, default_folder_id: str
-    ) -> list[str]:
-        """解析检索目标 folder 列表。
-
-        - 若 folder_id 有效，则会返回单元素列表。
-        - 若 folder_id 为空，则返回包含默认 folder 在内的全部预定义 folder 列表。
-
-        Args:
-            folder_id: 指定检索 folder，``None`` 或空字符串表示全部。
-            default_folder_id: 默认 folder，将为全局检索时排在首位。
-
-        Returns:
-            实一化呈现的有序不重复 folder_id 列表。
-        """
-        if folder_id and folder_id.strip():
-            return [folder_id.strip().lower()]
-
-        folder_candidates = [
-            default_folder_id.strip().lower(),
-            *[name.strip().lower() for name in PREDEFINED_FOLDERS],
-        ]
-        resolved: list[str] = []
-        for candidate in folder_candidates:
-            if candidate and candidate not in resolved:
-                resolved.append(candidate)
-        return resolved or ["default"]
-
     async def upsert_memory(
         self,
         content: str,
@@ -1151,6 +1185,20 @@ class BookuMemoryService(BaseService):
         core_tags: list[str] | None = None,
         diffusion_tags: list[str] | None = None,
         opposing_tags: list[str] | None = None,
+        memory_type: str = "knowledge",
+        status: str = "active",
+        person_id: str | None = None,
+        relation_memory_ids: list[str] | None = None,
+        relation_aliases: list[str] | None = None,
+        event_start_at: float = 0.0,
+        event_end_at: float = 0.0,
+        related_people: list[str] | None = None,
+        knowledge_type: str = "",
+        address_or_coord: str = "",
+        place_type: str = "",
+        asset_type: str = "",
+        disposition_status: str = "",
+        procedure_type: str = "",
         source: str = "agent",
     ) -> dict[str, Any]:
         """写入或自动合并记忆。
@@ -1181,7 +1229,11 @@ class BookuMemoryService(BaseService):
         config = self._get_config()
         rag_params = self._get_rag_params()
         repo = await self._get_repo()
+        normalized_memory_type = (memory_type or "knowledge").strip().lower()
+        normalized_status = (status or "active").strip().lower()
         normalized_bucket = bucket.strip().lower() if bucket else "emergent"
+        if normalized_status in {"archived", "expired"}:
+            normalized_bucket = "archived"
         # inherent 全局不按 folder 隔离，folder_id 字段存 "global"
         if normalized_bucket == "inherent":
             effective_folder_id = "global"
@@ -1268,11 +1320,26 @@ class BookuMemoryService(BaseService):
                 mode = "merged"
                 await vector_db.delete(collection_name=collection_name, ids=[memory_id])
 
+        if normalized_memory_type == "person" and person_id:
+            exists = await repo.search_records(
+                memory_type="person",
+                person_id=person_id,
+                include_deleted=False,
+                limit=1,
+            )
+            if exists:
+                memory_id = exists[0].memory_id
+                mode = "merged"
+                await vector_db.delete(collection_name=collection_name, ids=[memory_id])
+
         metadata: dict[str, Any] = {
             "title": resolved_title,
             "bucket": normalized_bucket,
             "folder_id": effective_folder_id,
             "source": source,
+            "memory_type": normalized_memory_type,
+            "status": normalized_status,
+            "person_id": person_id,
             "timestamp": now,
             "novelty_energy": novelty_energy,
         }
@@ -1293,6 +1360,20 @@ class BookuMemoryService(BaseService):
             bucket=normalized_bucket,
             content=merged_content,
             source=source,
+            memory_type=normalized_memory_type,
+            status=normalized_status,
+            person_id=person_id,
+            relation_memory_ids=relation_memory_ids,
+            relation_aliases=relation_aliases,
+            event_start_at=event_start_at,
+            event_end_at=event_end_at,
+            related_people=related_people,
+            knowledge_type=knowledge_type,
+            address_or_coord=address_or_coord,
+            place_type=place_type,
+            asset_type=asset_type,
+            disposition_status=disposition_status,
+            procedure_type=procedure_type,
             novelty_energy=novelty_energy,
             tags=tags or [],
             core_tags=normalized_core_tags,
@@ -1325,7 +1406,6 @@ class BookuMemoryService(BaseService):
         self,
         query_text: str,
         *,
-        folder_id: str | None = None,
         top_k: int | None = None,
         include_archived: bool | None = None,
         include_knowledge: bool | None = None,
@@ -1343,7 +1423,6 @@ class BookuMemoryService(BaseService):
 
         Args:
             query_text: 检索关键词文本。
-            folder_id: 限定检索的 folder，``None`` 时搜索所有 folder。
             top_k: 返回条数，``None`` 时使用配置默认值。
             include_archived: 是否检索归档层，``None`` 时使用配置默认开关。
             core_tags: 核心标签，提升匹配记忆的得分。
@@ -1357,10 +1436,13 @@ class BookuMemoryService(BaseService):
         config = self._get_config()
         rag_params = self._get_rag_params()
         repo = await self._get_repo()
-        search_folders = self._resolve_search_folders(
-            folder_id=folder_id,
-            default_folder_id=config.storage.default_folder_id,
-        )
+        # folder_id 已对外下线：统一执行全局检索，不再按调用参数限定 folder。
+        search_folders = await repo.list_distinct_folder_ids()
+        default = config.storage.default_folder_id.strip().lower()
+        if default and default not in search_folders:
+            search_folders.insert(0, default)
+        if not search_folders:
+            search_folders = ["default"]
         n_results = top_k or config.retrieval.default_top_k
         use_archived = (
             config.retrieval.include_archived_default
@@ -1612,15 +1694,7 @@ class BookuMemoryService(BaseService):
             if record is not None:
                 output_item = self._build_record_item(record)
             else:
-                text = str(item.get("document", "") or "")
-                title = self._extract_title(text)
-                output_item = {
-                    "id": memory_id,
-                    "title": title,
-                    "content_snippet": text[:280] + ("..." if len(text) > 280 else ""),
-                    "is_truncated": len(text) > 280,
-                    "metadata": item.get("metadata", {}),
-                }
+                continue
             output_item["score"] = float(item.get("score", 0.0))
             output_item["collection"] = str(item.get("collection", ""))
             deduplicated.append(output_item)
@@ -1631,6 +1705,8 @@ class BookuMemoryService(BaseService):
             meta = item.get("metadata", {})
             if mid and isinstance(meta, dict) and meta.get("bucket") != "inherent":
                 await self.update_activated(mid)
+
+        await _sync_booku_memory_actor_reminder(self.plugin)
 
         return {
             "query": query_text,
@@ -1726,11 +1802,24 @@ class BookuMemoryService(BaseService):
         *,
         title: str,
         content: str,
-        bucket: str,
-        folder_id: str,
-        core_tags: list[str],
-        diffusion_tags: list[str],
-        opposing_tags: list[str],
+        bucket: str = "emergent",
+        core_tags: list[str] | None = None,
+        diffusion_tags: list[str] | None = None,
+        opposing_tags: list[str] | None = None,
+        memory_type: str = "knowledge",
+        status: str = "active",
+        person_id: str | None = None,
+        relation_memory_ids: list[str] | None = None,
+        relation_aliases: list[str] | None = None,
+        event_start_at: float = 0.0,
+        event_end_at: float = 0.0,
+        related_people: list[str] | None = None,
+        knowledge_type: str = "",
+        address_or_coord: str = "",
+        place_type: str = "",
+        asset_type: str = "",
+        disposition_status: str = "",
+        procedure_type: str = "",
     ) -> dict[str, Any]:
         """创建记忆并返回标准工具项形式的结果。
 
@@ -1741,7 +1830,6 @@ class BookuMemoryService(BaseService):
             title: 记忆标题。
             content: 记忆正文。
             bucket: 存储桶名（emergent/archived/inherent）。
-            folder_id: 文件夹 ID。
             core_tags: 核心标签列表。
             diffusion_tags: 扩散标签列表。
             opposing_tags: 对立标签列表。
@@ -1749,18 +1837,34 @@ class BookuMemoryService(BaseService):
         Returns:
             包含 action/mode/total/items 字段的字典，mode 为 ``"created"`` 或 ``"merged"``。
         """
+        config = self._get_config()
+        fixed_folder_id = self._normalize_folder_id(None, config.storage.default_folder_id)
+
         result = await self.upsert_memory(
             title=title,
             content=content,
             bucket=bucket,
-            folder_id=folder_id,
+            folder_id=fixed_folder_id,
             core_tags=core_tags,
             diffusion_tags=diffusion_tags,
             opposing_tags=opposing_tags,
+            memory_type=memory_type,
+            status=status,
+            person_id=person_id,
+            relation_memory_ids=relation_memory_ids,
+            relation_aliases=relation_aliases,
+            event_start_at=event_start_at,
+            event_end_at=event_end_at,
+            related_people=related_people,
+            knowledge_type=knowledge_type,
+            address_or_coord=address_or_coord,
+            place_type=place_type,
+            asset_type=asset_type,
+            disposition_status=disposition_status,
+            procedure_type=procedure_type,
             source="agent",
         )
-        if str(bucket).strip().lower() == "inherent":
-            await _sync_booku_memory_actor_reminder(self.plugin)
+        await _sync_booku_memory_actor_reminder(self.plugin)
         return {
             "action": "create_memory",
             "mode": result.get("mode", "created"),
@@ -1846,7 +1950,6 @@ class BookuMemoryService(BaseService):
         """
         result = await self.retrieve_memories(
             query_text=query_text,
-            folder_id="global",
             top_k=top_k,
             include_archived=False,
         )
@@ -1999,6 +2102,120 @@ class BookuMemoryService(BaseService):
             "items": items,
         }
 
+    async def search_memory_entries(
+        self,
+        *,
+        top_n: int = 10,
+        query_text: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        person_id: str | None = None,
+        relation_of: str | None = None,
+        include_archived: bool = False,
+        include_knowledge: bool = True,
+        include_related: bool = False,
+    ) -> dict[str, Any]:
+        """按条件检索记忆，返回仅含 id/title/metadata 的结果。"""
+        repo = await self._get_repo()
+        config = self._get_config()
+
+        normalized_top_n = max(1, int(top_n))
+        normalized_type = (memory_type or "").strip().lower() or None
+        normalized_status = (status or "").strip().lower() or None
+        normalized_person_id = (person_id or "").strip() or None
+        normalized_relation_of = (relation_of or "").strip() or None
+        normalized_query = (query_text or "").strip() or None
+
+        entries: list[dict[str, Any]] = []
+
+        if normalized_query:
+            retrieved = await self.retrieve_memories(
+                query_text=normalized_query,
+                top_k=normalized_top_n * 3,
+                include_archived=include_archived,
+                include_knowledge=include_knowledge,
+            )
+            for item in retrieved.get("results", []):
+                if not isinstance(item, dict):
+                    continue
+                metadata = item.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    continue
+                if normalized_type and str(metadata.get("memory_type", "")).lower() != normalized_type:
+                    continue
+                if normalized_status and str(metadata.get("status", "")).lower() != normalized_status:
+                    continue
+                if normalized_person_id and str(metadata.get("person_id", "")).strip() != normalized_person_id:
+                    continue
+                if normalized_relation_of:
+                    related_ids = [str(value) for value in metadata.get("relation_memory_ids", [])]
+                    if normalized_relation_of not in related_ids:
+                        continue
+                entries.append(
+                    {
+                        "id": str(item.get("id", "")),
+                        "title": str(item.get("title", "")),
+                        "metadata": metadata,
+                    }
+                )
+                if len(entries) >= normalized_top_n:
+                    break
+        else:
+            records = await repo.search_records(
+                keyword=None,
+                memory_type=normalized_type,
+                status=normalized_status,
+                person_id=normalized_person_id,
+                relation_of=normalized_relation_of,
+                include_deleted=False,
+                limit=normalized_top_n,
+            )
+            for record in records:
+                if not include_archived and str(record.status).lower() == "archived":
+                    continue
+                if not include_knowledge and str(record.memory_type).lower() == "knowledge":
+                    continue
+                entries.append(
+                    {
+                        "id": record.memory_id,
+                        "title": record.title,
+                        "metadata": self._metadata_from_record(record),
+                    }
+                )
+
+        if include_related:
+            related_ids: list[str] = []
+            for entry in entries:
+                metadata = entry.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    continue
+                related_ids.extend([str(value) for value in metadata.get("relation_memory_ids", [])])
+            dedup_related_ids = list(dict.fromkeys([value for value in related_ids if value]))
+            if dedup_related_ids:
+                related_records = await repo.get_records_map(dedup_related_ids)
+                existing_ids = {str(entry.get("id", "")) for entry in entries}
+                for memory_id in dedup_related_ids:
+                    if memory_id in existing_ids:
+                        continue
+                    record = related_records.get(memory_id)
+                    if record is None:
+                        continue
+                    entries.append(
+                        {
+                            "id": record.memory_id,
+                            "title": record.title,
+                            "metadata": self._metadata_from_record(record),
+                        }
+                    )
+                    if len(entries) >= normalized_top_n:
+                        break
+
+        return {
+            "action": "search_memory_entries",
+            "total": len(entries[:normalized_top_n]),
+            "items": entries[:normalized_top_n],
+        }
+
     async def update_memory_by_id(
         self,
         *,
@@ -2008,6 +2225,20 @@ class BookuMemoryService(BaseService):
         core_tags: list[str] | None = None,
         diffusion_tags: list[str] | None = None,
         opposing_tags: list[str] | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        person_id: str | None = None,
+        relation_memory_ids: list[str] | None = None,
+        relation_aliases: list[str] | None = None,
+        event_start_at: float | None = None,
+        event_end_at: float | None = None,
+        related_people: list[str] | None = None,
+        knowledge_type: str | None = None,
+        address_or_coord: str | None = None,
+        place_type: str | None = None,
+        asset_type: str | None = None,
+        disposition_status: str | None = None,
+        procedure_type: str | None = None,
     ) -> dict[str, Any]:
         """按 memory_id 就地更新普通记忆的内容、标题及标签。
 
@@ -2089,6 +2320,20 @@ class BookuMemoryService(BaseService):
             core_tags=normalized_core_tags,
             diffusion_tags=normalized_diffusion_tags,
             opposing_tags=normalized_opposing_tags,
+            memory_type=memory_type,
+            status=status,
+            person_id=person_id,
+            relation_memory_ids=relation_memory_ids,
+            relation_aliases=relation_aliases,
+            event_start_at=event_start_at,
+            event_end_at=event_end_at,
+            related_people=related_people,
+            knowledge_type=knowledge_type,
+            address_or_coord=address_or_coord,
+            place_type=place_type,
+            asset_type=asset_type,
+            disposition_status=disposition_status,
+            procedure_type=procedure_type,
         )
         if not updated:
             return {"action": "update_memory_by_id", "updated": 0, "items": []}
@@ -2139,6 +2384,8 @@ class BookuMemoryService(BaseService):
             deleted = await repo.hard_delete_records(memory_ids)
             if affects_inherent:
                 await _sync_booku_memory_actor_reminder(self.plugin)
+            else:
+                await _sync_booku_memory_actor_reminder(self.plugin)
             return {
                 "action": "delete_memories",
                 "mode": "hard",
@@ -2148,6 +2395,8 @@ class BookuMemoryService(BaseService):
 
         deleted = await repo.soft_delete_records(memory_ids)
         if affects_inherent:
+            await _sync_booku_memory_actor_reminder(self.plugin)
+        else:
             await _sync_booku_memory_actor_reminder(self.plugin)
         return {
             "action": "delete_memories",
@@ -2305,34 +2554,7 @@ class BookuMemoryService(BaseService):
                 )
             except Exception:  # noqa: BLE001
                 pass
-            # BookuMemoryMetadataRepository 未暴露批量硬删接口，
-            # 此处通过 asyncio.to_thread + 原生 sqlite3 直连执行删除。
-            # TODO: 后续应将批量硬删逻辑封装到仓储层以消除此 anti-pattern。
-            placeholders = ",".join("?" for _ in discard_ids)
-            import asyncio
-            import sqlite3 as _sqlite3
-
-            def _delete_sync() -> int:
-                """在内嵌直连中删除指定记忆的元数据记录及其全部标签。
-
-                由于此操作需要直接操作 SQLite，经由 ``asyncio.to_thread`` 在线程池中执行。
-
-                Returns:
-                    实际被删除的记录数量。
-                """
-                with _sqlite3.connect(repo._db_path) as conn:
-                    cursor = conn.execute(
-                        f"DELETE FROM booku_memory_records WHERE memory_id IN ({placeholders})",
-                        tuple(discard_ids),
-                    )
-                    conn.execute(
-                        f"DELETE FROM booku_memory_tags WHERE memory_id IN ({placeholders})",
-                        tuple(discard_ids),
-                    )
-                    conn.commit()
-                    return int(cursor.rowcount)
-
-            discarded = await asyncio.to_thread(_delete_sync)
+            discarded = await repo.hard_delete_records(discard_ids)
 
         return {
             "promoted": promoted,

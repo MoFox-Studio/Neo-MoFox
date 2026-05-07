@@ -1,8 +1,8 @@
-"""Tests for booku_memory agent reasoning-step reminders.
+"""Tests for booku_memory memory_command behavior.
 
-These tests ensure that when the internal tool-loop reaches the configured
-reasoning step limit, the agent injects a strong reminder that forces the
-model to call ``finish_task`` immediately.
+此文件沿用原文件名，当前覆盖 memory_command 的关键语义：
+- search/read/create/update/delete 的分发
+- && 串联执行与失败短路
 """
 
 from __future__ import annotations
@@ -12,193 +12,127 @@ from typing import Any, cast
 
 import pytest
 
-from src.kernel.llm import LLMPayload, ROLE, Text, ToolCall
-from src.kernel.llm.context import LLMContextManager
+from plugins.booku_memory.agent.tools import BookuMemoryCommandTool
 
 
 @dataclass
 class _DummyPlugin:
-    """Minimal plugin stub for agent construction."""
+    """最小插件桩对象。"""
 
     config: Any = None
 
 
-class _FakeResponse:
-    """Minimal awaitable response object used to drive the agent loop."""
+class _FakeService:
+    """用于替换真实服务，记录调用并返回固定结果。"""
 
-    def __init__(self, *, payloads: list[LLMPayload], context_manager: LLMContextManager, call_list: list[ToolCall]):
-        self.payloads = payloads
-        self.context_manager = context_manager
-        self.call_list = call_list
-        self._send_impl: Any = None
-        self._appended_assistant: bool = False
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    def __await__(self):
-        if not self._appended_assistant:
-            self._appended_assistant = True
-            assistant_parts: list[Any] = []
-            if self.call_list:
-                assistant_parts.extend(self.call_list)
-            if assistant_parts:
-                self.payloads = self.context_manager.add_payload(
-                    self.payloads,
-                    LLMPayload(ROLE.ASSISTANT, assistant_parts),  # type: ignore[arg-type]
-                )
-        if False:  # pragma: no cover
-            yield None
-        return None
+    async def search_memory_entries(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("search", kwargs))
+        return {"action": "search_memory_entries", "total": 1, "items": [{"id": "m1", "title": "t1", "metadata": {}}]}
 
-    def add_payload(self, payload: LLMPayload, position=None):
-        if self.context_manager is not None:
-            self.payloads = self.context_manager.add_payload(
-                self.payloads,
-                payload,
-                position=int(position) if position is not None else None,
-            )
-            return self
-        if position is not None:
-            self.payloads.insert(int(position), payload)
-        else:
-            self.payloads.append(payload)
-        return self
+    async def read_full_content(self, *, memory_ids: list[str]) -> dict[str, Any]:
+        self.calls.append(("read", {"memory_ids": memory_ids}))
+        return {"action": "read_full_content", "requested": len(memory_ids), "total": len(memory_ids), "items": []}
 
-    async def send(self, stream: bool = False):
-        del stream
-        if self._send_impl is None:
-            raise RuntimeError("_send_impl not set")
-        return await self._send_impl(self)
+    async def create_memory(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("create", kwargs))
+        return {"action": "create_memory", "mode": "created", "total": 1, "items": [{"id": "m2"}]}
 
+    async def update_memory_by_id(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("update", kwargs))
+        return {"action": "update_memory_by_id", "updated": 1, "items": [{"id": kwargs.get("memory_id", "")}]}
 
-class _FakeRequest:
-    """Minimal request object used by the agent; only what execute() needs."""
-
-    def __init__(self):
-        self.context_manager = LLMContextManager()
-        self.payloads: list[LLMPayload] = []
-        self._next_index = 0
-        self.saw_force_finish = False
-        self.seen_system_texts: list[str] = []
-
-    def add_payload(self, payload: LLMPayload, position=None):
-        self.payloads = self.context_manager.add_payload(
-            self.payloads,
-            payload,
-            position=int(position) if position is not None else None,
-        )
-        return self
-
-    async def send(self, stream: bool = False):
-        del stream
-
-        async def _send_impl(resp: _FakeResponse):
-            # On the last follow-up send, the agent should have injected a strong
-            # SYSTEM reminder mentioning finish_task.
-            for payload in resp.payloads:
-                if payload.role != ROLE.SYSTEM:
-                    continue
-                for part in payload.content:
-                    if not isinstance(part, Text):
-                        continue
-                    self.seen_system_texts.append(part.text)
-                    if "你已到达最后一轮" in part.text and "finish_task" in part.text:
-                        self.saw_force_finish = True
-
-            self._next_index += 1
-            if self._next_index == 1:
-                # First follow-up response: still asks for tools.
-                nxt = _FakeResponse(
-                    payloads=resp.payloads,
-                    context_manager=resp.context_manager,
-                    call_list=[ToolCall(id="call_2", name="tool-status", args={})],
-                )
-                nxt._send_impl = _send_impl
-                return nxt
-            # After the last follow-up, end with no calls.
-            nxt = _FakeResponse(
-                payloads=resp.payloads,
-                context_manager=resp.context_manager,
-                call_list=[],
-            )
-            nxt._send_impl = _send_impl
-            return nxt
-
-        # Initial response always contains a tool call.
-        resp = _FakeResponse(
-            payloads=list(self.payloads),
-            context_manager=self.context_manager,
-            call_list=[ToolCall(id="call_1", name="tool-retrieve", args={})],
-        )
-        resp._send_impl = _send_impl
-        return resp
+    async def delete_memories(self, *, memory_ids: list[str], hard: bool = False) -> dict[str, Any]:
+        self.calls.append(("delete", {"memory_ids": memory_ids, "hard": hard}))
+        return {"action": "delete_memories", "mode": "hard" if hard else "soft", "deleted": len(memory_ids)}
 
 
 @pytest.mark.asyncio
-async def test_read_agent_injects_force_finish_reminder_on_last_round(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The read agent must force-finish on the last allowed follow-up round."""
+async def test_memory_command_dispatch_and_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """memory_command 应支持多命令串联并保持顺序执行。"""
 
-    from plugins.booku_memory.agent.read_agent import BookuMemoryReadAgent
+    fake_service = _FakeService()
+    monkeypatch.setattr("plugins.booku_memory.agent.tools._service", lambda _plugin: fake_service)
 
-    # Avoid accessing real model config.
-    monkeypatch.setattr(
-        "plugins.booku_memory.agent.read_agent.get_model_set_by_task",
-        lambda _task: [{"extra_params": {}}],
+    tool = BookuMemoryCommandTool(plugin=cast(Any, _DummyPlugin()))
+    ok, payload = await tool.execute(
+        command=(
+            "search -type person -person_id qq:10001 -topn 3 "
+            "&& read -ids m1,m2 "
+            "&& delete -id m2 -hard true"
+        )
     )
 
-    agent = BookuMemoryReadAgent(stream_id="s", plugin=cast(Any, _DummyPlugin()))
-    monkeypatch.setattr(agent, "_max_reasoning_steps", lambda: 2)
+    assert ok is True
+    assert isinstance(payload, dict)
+    assert payload.get("ok") is True
+    assert payload.get("executed") == 3
 
-    fake_request = _FakeRequest()
-    monkeypatch.setattr(agent, "create_llm_request", lambda **_kwargs: fake_request)
-
-    async def _exec_local_usable(*_a: Any, **_k: Any) -> tuple[bool, Any]:
-        return True, {"ok": True}
-
-    monkeypatch.setattr(agent, "execute_local_usable", _exec_local_usable)
-
-    ok, _result = await agent.execute(
-        intent_text="x",
-        core_tags=[],
-        diffusion_tags=[],
-        opposing_tags=[],
-        context="",
-        include_archived=False,
-    )
-
-    assert ok is False
-    assert fake_request.saw_force_finish is True, fake_request.seen_system_texts
+    assert [name for name, _ in fake_service.calls] == ["search", "read", "delete"]
+    assert fake_service.calls[0][1]["memory_type"] == "person"
+    assert fake_service.calls[0][1]["person_id"] == "qq:10001"
 
 
 @pytest.mark.asyncio
-async def test_write_agent_injects_force_finish_reminder_on_last_round(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The write agent must force-finish on the last allowed follow-up round."""
+async def test_memory_command_folder_option_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """folder_id/folder 参数应被工具层忽略，不影响下游调用。"""
 
-    from plugins.booku_memory.agent.write_agent import BookuMemoryWriteAgent
+    fake_service = _FakeService()
+    monkeypatch.setattr("plugins.booku_memory.agent.tools._service", lambda _plugin: fake_service)
 
-    monkeypatch.setattr(
-        "plugins.booku_memory.agent.write_agent.get_model_set_by_task",
-        lambda _task: [{"extra_params": {}}],
+    tool = BookuMemoryCommandTool(plugin=cast(Any, _DummyPlugin()))
+    ok, payload = await tool.execute(
+        command=(
+            "search -query 复盘 -folder_id events "
+            "&& create -type event -title 年会 -content 内容 -folder archive"
+        )
     )
 
-    agent = BookuMemoryWriteAgent(stream_id="s", plugin=cast(Any, _DummyPlugin()))
-    monkeypatch.setattr(agent, "_max_reasoning_steps", lambda: 2)
+    assert ok is True
+    assert isinstance(payload, dict)
+    assert payload.get("ok") is True
+    assert [name for name, _ in fake_service.calls] == ["search", "create"]
+    assert "folder_id" not in fake_service.calls[0][1]
+    assert "folder_id" not in fake_service.calls[1][1]
 
-    fake_request = _FakeRequest()
-    monkeypatch.setattr(agent, "create_llm_request", lambda **_kwargs: fake_request)
 
-    async def _exec_local_usable(*_a: Any, **_k: Any) -> tuple[bool, Any]:
-        return True, {"ok": True}
+@pytest.mark.asyncio
+async def test_memory_command_requires_person_id_for_person_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """人物记忆创建必须携带 person_id。"""
 
-    monkeypatch.setattr(agent, "execute_local_usable", _exec_local_usable)
+    fake_service = _FakeService()
+    monkeypatch.setattr("plugins.booku_memory.agent.tools._service", lambda _plugin: fake_service)
 
-    ok, _result = await agent.execute(
-        title="标题",
-        content="内容",
-        core_tags=["事实"],
-        diffusion_tags=["场景"],
-        opposing_tags=["无关"],
-        folder="default",
-        bucket_hint="emergent",
+    tool = BookuMemoryCommandTool(plugin=cast(Any, _DummyPlugin()))
+    ok, payload = await tool.execute(
+        command="create -type person -title 张三 -content 测试人物"
     )
 
     assert ok is False
-    assert fake_request.saw_force_finish is True, fake_request.seen_system_texts
+    assert isinstance(payload, dict)
+    assert payload.get("ok") is False
+    first = payload.get("results", [])[0]
+    assert "person_id" in str(first.get("error", ""))
+
+
+@pytest.mark.asyncio
+async def test_memory_command_stops_on_first_failed_segment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """命令链出现失败时应短路，不继续执行后续命令。"""
+
+    fake_service = _FakeService()
+    monkeypatch.setattr("plugins.booku_memory.agent.tools._service", lambda _plugin: fake_service)
+
+    tool = BookuMemoryCommandTool(plugin=cast(Any, _DummyPlugin()))
+    ok, payload = await tool.execute(
+        command="read -ids m1 && unknown -x 1 && delete -id m1"
+    )
+
+    assert ok is False
+    assert isinstance(payload, dict)
+    assert payload.get("executed") == 2
+    # 只执行了 read，第二段报错后 short-circuit
+    assert [name for name, _ in fake_service.calls] == ["read"]

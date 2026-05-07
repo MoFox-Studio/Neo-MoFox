@@ -7,19 +7,6 @@ from typing import ClassVar
 from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
 
 
-# 预制文件夹定义：folder_id -> 中文显示名
-# 写入 Agent 会将此映射注入 system prompt，供内部 LLM 选择合适文件夹
-PREDEFINED_FOLDERS: dict[str, str] = {
-    "relations": "人物关系",
-    "plans": "未来规划",
-    "facts": "已知事实",
-    "preferences": "个人偏好",
-    "events": "重要事件",
-    "work": "工作学习",
-    "default": "未分类",
-}
-
-
 class BookuMemoryConfig(BaseConfig):
     """Booku Memory Agent 插件配置模型。"""
 
@@ -35,16 +22,6 @@ class BookuMemoryConfig(BaseConfig):
             description="是否启用插件",
             label="启用插件",
             tag="plugin"
-        )
-        enable_lite_mode: bool = Field(
-            default=False,
-            description=(
-                "是否启用轻量化模式。启用时对外暴露读取/写入两个 Tool, 最小化 LLM 调用, 平均召回时间在3s内；"
-                "关闭时采用 Agent 模式，对外暴露读取/写入两个 Agent, 执行完整记忆读写工作流。"
-            ),
-            label="轻量化模式",
-            tag="ai",
-            hint="开启后使用 Tool，关闭后使用 Agent"
         )
         inject_system_prompt: bool = Field(
             default=True,
@@ -272,15 +249,6 @@ class BookuMemoryConfig(BaseConfig):
             step=0.05,
             input_type="slider",
             tag="performance",
-            depends_on="enabled",
-            depends_value=True
-        )
-        folder_id: str | None = Field(
-            default=None,
-            description="限定抽取的 folder_id；为 None 时在所有 folder 中抽取",
-            label="限定文件夹",
-            placeholder="留空表示不限制",
-            tag="general",
             depends_on="enabled",
             depends_value=True
         )

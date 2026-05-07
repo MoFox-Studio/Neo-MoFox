@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-from plugins.booku_memory.agent import (
-    BookuMemoryCreateTool,
-    BookuMemoryEditInherentTool,
-    BookuMemoryReadAgent,
-    BookuMemoryRetrieveTool,
-    BookuMemoryWriteAgent,
-)
+from plugins.booku_memory.agent import BookuMemoryCommandTool
 from plugins.booku_memory.config import BookuMemoryConfig
 from plugins.booku_memory.event_handler import (
     BookuMemoryStartupIngestHandler,
@@ -18,58 +12,37 @@ from plugins.booku_memory.plugin import BookuMemoryAgentPlugin
 from plugins.booku_memory.service import BookuKnowledgeService, BookuMemoryService
 
 
-def test_get_components_returns_agent_mode_by_default() -> None:
-    """缺少配置对象时应回退为 agent 代理模式。"""
+def _expected_components() -> list[type]:
+    """返回命令模式下期望组件列表。"""
+
+    return [
+        BookuMemoryCommandTool,
+        BookuMemoryService,
+        BookuKnowledgeService,
+        MemoryFlashbackInjector,
+        BookuMemoryStartupIngestHandler,
+    ]
+
+
+def test_get_components_returns_command_mode_by_default() -> None:
+    """缺少配置对象时应回退为命令模式。"""
 
     plugin = BookuMemoryAgentPlugin(config=None)
-
-    assert plugin.get_components() == [
-        BookuMemoryWriteAgent,
-        BookuMemoryReadAgent,
-        BookuMemoryService,
-        BookuKnowledgeService,
-        BookuMemoryStartupIngestHandler,
-        MemoryFlashbackInjector,
-    ]
+    assert plugin.get_components() == _expected_components()
 
 
-def test_get_components_returns_agent_mode_when_enabled() -> None:
-    """开启代理模式时应暴露读写 Agent。"""
+def test_get_components_returns_command_mode_when_enabled() -> None:
+    """插件启用时应始终暴露命令模式组件。"""
 
     cfg = BookuMemoryConfig()
-    cfg.plugin.enable_agent_proxy_mode = True
+    cfg.plugin.enabled = True
     plugin = BookuMemoryAgentPlugin(config=cfg)
 
-    assert plugin.get_components() == [
-        BookuMemoryWriteAgent,
-        BookuMemoryReadAgent,
-        BookuMemoryService,
-        BookuKnowledgeService,
-        BookuMemoryStartupIngestHandler,
-        MemoryFlashbackInjector,
-    ]
-
-
-def test_get_components_returns_tool_mode_when_proxy_disabled() -> None:
-    """关闭代理模式时应改为直接暴露工具。"""
-
-    cfg = BookuMemoryConfig()
-    cfg.plugin.enable_agent_proxy_mode = False
-    plugin = BookuMemoryAgentPlugin(config=cfg)
-
-    assert plugin.get_components() == [
-        BookuMemoryRetrieveTool,
-        BookuMemoryCreateTool,
-        BookuMemoryEditInherentTool,
-        BookuMemoryService,
-        BookuKnowledgeService,
-        MemoryFlashbackInjector,
-        BookuMemoryStartupIngestHandler,
-    ]
+    assert plugin.get_components() == _expected_components()
 
 
 def test_get_components_returns_empty_when_plugin_disabled() -> None:
-    """插件被禁用时不应暴露任何组件。"""
+    """插件禁用时不应暴露任何组件。"""
 
     cfg = BookuMemoryConfig()
     cfg.plugin.enabled = False

@@ -105,7 +105,6 @@ async def test_flashback_injector_injects_into_extra(tmp_path: Path) -> None:
     cfg.flashback.enabled = True
     cfg.flashback.trigger_probability = 1.0
     cfg.flashback.archived_probability = 1.0
-    cfg.flashback.folder_id = "folder_a"
     cfg.flashback.candidate_limit = 50
     cfg.flashback.activation_weight_exponent = 1.0
 
@@ -213,7 +212,6 @@ async def test_flashback_injector_dedup_in_cooldown_window(tmp_path: Path) -> No
     cfg.flashback.enabled = True
     cfg.flashback.trigger_probability = 1.0
     cfg.flashback.archived_probability = 1.0
-    cfg.flashback.folder_id = "folder_a"
     cfg.flashback.candidate_limit = 50
     cfg.flashback.activation_weight_exponent = 1.0
     cfg.flashback.cooldown_seconds = 60

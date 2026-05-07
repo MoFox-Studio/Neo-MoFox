@@ -301,13 +301,8 @@ class MemoryFlashbackInjector(BaseEventHandler):
         )
         repo = await self._get_repo()
 
-        folder_id = fb.folder_id
-        if isinstance(folder_id, str) and not folder_id.strip():
-            folder_id = None
-
         records = await repo.list_records_by_bucket(
             bucket=bucket,
-            folder_id=folder_id,
             limit=int(fb.candidate_limit),
             include_deleted=False,
         )
@@ -325,13 +320,13 @@ class MemoryFlashbackInjector(BaseEventHandler):
             if not records:
                 logger.info(
                     "flashback 已触发但候选均处于冷却期（"
-                    f"bucket={bucket}, folder_id={folder_id}, cooldown_seconds={cooldown_seconds}, candidates={before_count}）"
+                    f"bucket={bucket}, cooldown_seconds={cooldown_seconds}, candidates={before_count}）"
                 )
                 return EventDecision.SUCCESS, params
 
         if not records:
             logger.info(
-                f"flashback 已触发但无候选记忆（bucket={bucket}, folder_id={folder_id}, limit={int(fb.candidate_limit)}）"
+                f"flashback 已触发但无候选记忆（bucket={bucket}, limit={int(fb.candidate_limit)}）"
             )
             return EventDecision.SUCCESS, params
 
