@@ -103,3 +103,5 @@ skill/*
 !plugins/perm_plugin/
 !plugins/utility_commands/
 !plugins/skill_manager/
+
+!skill/booku-memory

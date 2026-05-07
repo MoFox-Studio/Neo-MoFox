@@ -36,7 +36,7 @@ async def repo(tmp_path: Path) -> AsyncGenerator[BookuMemoryMetadataRepository, 
         await r.close()
 
 
-def _sample_kwargs(memory_id: str = "m1", bucket: str = "emergent") -> dict:
+def _sample_kwargs(memory_id: str = "m1", bucket: str = "memory") -> dict:
     return dict(
         memory_id=memory_id,
         title="测试标题",
@@ -140,23 +140,25 @@ async def test_update_record_missing(repo: BookuMemoryMetadataRepository) -> Non
 
 @pytest.mark.asyncio
 async def test_mark_archived(repo: BookuMemoryMetadataRepository) -> None:
-    """mark_archived 应将指定 ID 的 bucket 设为 archived。"""
-    await repo.upsert_record(**_sample_kwargs("ar1", bucket="emergent"))
+    """mark_archived 应保留 memory bucket，并将 status 设为 archived。"""
+    await repo.upsert_record(**_sample_kwargs("ar1", bucket="memory"))
     count = await repo.mark_archived(["ar1"])
     assert count == 1
     rec = await repo.get_record("ar1")
-    assert rec is not None and rec.bucket == "archived"
+    assert rec is not None
+    assert rec.bucket == "memory"
+    assert rec.status == "archived"
 
 
 @pytest.mark.asyncio
 async def test_move_records(repo: BookuMemoryMetadataRepository) -> None:
-    """move_records 应更新 bucket 和 folder_id。"""
+    """move_records 应将旧 bucket 归一化为 memory，并更新 folder_id。"""
     await repo.upsert_record(**_sample_kwargs("mv1"))
     count = await repo.move_records(["mv1"], to_bucket="inherent", to_folder_id="folder_b")
     assert count == 1
     rec = await repo.get_record("mv1")
     assert rec is not None
-    assert rec.bucket == "inherent"
+    assert rec.bucket == "memory"
     assert rec.folder_id == "folder_b"
 
 
@@ -204,8 +206,8 @@ async def test_update_activated(repo: BookuMemoryMetadataRepository) -> None:
 
 @pytest.mark.asyncio
 async def test_get_stale_emergent(repo: BookuMemoryMetadataRepository) -> None:
-    """get_stale_emergent 应返回 bucket=emergent 且 created_at 早于给定时间戳的记录。"""
-    await repo.upsert_record(**_sample_kwargs("stale1", bucket="emergent"))
+    """get_stale_emergent 应返回常规 memory bucket 且 created_at 早于给定时间戳的记录。"""
+    await repo.upsert_record(**_sample_kwargs("stale1", bucket="memory"))
     future = time.time() + 100
     result = await repo.get_stale_emergent("folder_a", future)
     assert any(r.memory_id == "stale1" for r in result)
@@ -218,14 +220,13 @@ async def test_get_stale_emergent(repo: BookuMemoryMetadataRepository) -> None:
 
 @pytest.mark.asyncio
 async def test_get_bucket_counts(repo: BookuMemoryMetadataRepository) -> None:
-    """get_bucket_counts 应准确统计各 bucket 数量。"""
-    await repo.upsert_record(**_sample_kwargs("e1", bucket="emergent"))
-    await repo.upsert_record(**_sample_kwargs("e2", bucket="emergent"))
-    await repo.upsert_record(**_sample_kwargs("a1", bucket="archived"))
+    """get_bucket_counts 应准确统计 memory/knowledge 两类 bucket 数量。"""
+    await repo.upsert_record(**_sample_kwargs("e1", bucket="memory"))
+    await repo.upsert_record(**_sample_kwargs("e2", bucket="memory"))
+    await repo.upsert_record(**_sample_kwargs("a1", bucket="knowledge"))
     counts = await repo.get_bucket_counts()
-    assert counts["emergent"] == 2
-    assert counts["archived"] == 1
-    assert counts["inherent"] == 0
+    assert counts["memory"] == 2
+    assert counts["knowledge"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -258,20 +259,51 @@ async def test_list_records_by_bucket_filters_and_limits(
     repo: BookuMemoryMetadataRepository,
 ) -> None:
     """list_records_by_bucket 应按 bucket/folder 过滤并按 limit 截断。"""
-    await repo.upsert_record(**_sample_kwargs("e1", bucket="emergent"))
-    await repo.upsert_record(**_sample_kwargs("e2", bucket="emergent"))
-    await repo.upsert_record(**_sample_kwargs("a1", bucket="archived"))
-    await repo.upsert_record(**{**_sample_kwargs("e_other", bucket="emergent"), "folder_id": "folder_b"})
+    await repo.upsert_record(**_sample_kwargs("e1", bucket="memory"))
+    await repo.upsert_record(**_sample_kwargs("e2", bucket="memory"))
+    await repo.upsert_record(**_sample_kwargs("a1", bucket="knowledge"))
+    await repo.upsert_record(**{**_sample_kwargs("e_other", bucket="memory"), "folder_id": "folder_b"})
 
-    emergent_all = await repo.list_records_by_bucket(bucket="emergent", folder_id=None, limit=10)
-    assert all(r.bucket == "emergent" for r in emergent_all)
-    assert {r.memory_id for r in emergent_all} >= {"e1", "e2", "e_other"}
+    memory_all = await repo.list_records_by_bucket(bucket="memory", folder_id=None, limit=10)
+    assert all(r.bucket == "memory" for r in memory_all)
+    assert {r.memory_id for r in memory_all} >= {"e1", "e2", "e_other"}
 
-    emergent_folder_a = await repo.list_records_by_bucket(bucket="emergent", folder_id="folder_a", limit=10)
-    assert {r.memory_id for r in emergent_folder_a} == {"e1", "e2"}
+    memory_folder_a = await repo.list_records_by_bucket(bucket="memory", folder_id="folder_a", limit=10)
+    assert {r.memory_id for r in memory_folder_a} == {"e1", "e2"}
 
-    limited = await repo.list_records_by_bucket(bucket="emergent", folder_id=None, limit=1)
+    limited = await repo.list_records_by_bucket(bucket="memory", folder_id=None, limit=1)
     assert len(limited) == 1
+
+
+@pytest.mark.asyncio
+async def test_initialize_migrates_legacy_bucket_values(tmp_path: Path) -> None:
+    """initialize 应将历史 bucket 值迁移为 memory/knowledge，并同步 archived 状态。"""
+
+    repo = BookuMemoryMetadataRepository(str(tmp_path / "legacy_bucket.db"))
+    await repo.initialize()
+    await repo.upsert_record(**_sample_kwargs("legacy", bucket="memory"))
+
+    async with repo._db.session() as session:  # pyright: ignore[reportPrivateUsage]
+        from sqlalchemy import text
+
+        await session.execute(
+            text(
+                "UPDATE booku_memory_records SET bucket = 'archived', status = 'active' WHERE memory_id = 'legacy'"
+            )
+        )
+
+    await repo.close()
+
+    migrated_repo = BookuMemoryMetadataRepository(str(tmp_path / "legacy_bucket.db"))
+    await migrated_repo.initialize()
+    try:
+        record = await migrated_repo.get_record("legacy")
+        assert record is not None
+        assert record.bucket == "memory"
+        assert record.status == "archived"
+        assert record.is_archived is True
+    finally:
+        await migrated_repo.close()
 
 
 # ---------------------------------------------------------------------------

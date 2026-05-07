@@ -26,6 +26,11 @@ from .result_deduplicator import ResultDeduplicator
 
 logger = get_logger("booku_memory_service")
 
+_MEMORY_BUCKET = "memory"
+_KNOWLEDGE_BUCKET = "knowledge"
+_INHERENT_FOLDER_ID = "global"
+_INHERENT_MEMORY_TITLE = "固有记忆"
+
 _TARGET_REMINDER_BUCKET = "actor"
 _TARGET_REMINDER_NAME = "booku_memory"
 _TARGET_ACTIVE_REMINDER_NAME = "活跃记忆速览"
@@ -126,8 +131,8 @@ async def build_booku_memory_actor_reminder(plugin: Any) -> str:
         repo = BookuMemoryMetadataRepository(db_path=config.storage.metadata_db_path)
         await repo.initialize()
         inherent_records = await repo.list_records_by_bucket(
-            bucket="inherent",
-            folder_id=None,
+            bucket=_MEMORY_BUCKET,
+            folder_id=_INHERENT_FOLDER_ID,
             limit=50,
             include_deleted=False,
         )
@@ -407,21 +412,91 @@ class BookuMemoryService(BaseService):
     def _collection_name(bucket: str, folder_id: str) -> str:
         """构建向量库集合名称。
 
-        固有记忆（inherent）全局共享，不按 folder 隔离，固定返回 ``"booku_memory__inherent"``。
-        其他层级按 ``"booku_memory__{bucket}__{folder_id}"`` 格式隔离。
+        当前仅保留 ``memory`` 与 ``knowledge`` 两类 bucket。
+        memory 按 folder 隔离，knowledge 为全局共享集合。
 
         Args:
-            bucket: 存储桶名称，如 ``"emergent"``、``"archived"`` 或 ``"inherent"``。
-            folder_id: 文件夹 ID，即便为空字符串也是安全的（inherent 时忽略）。
+            bucket: 存储桶名称，仅支持 ``"memory"`` 或 ``"knowledge"``。
+            folder_id: 文件夹 ID，即便为空字符串也是安全的。
 
         Returns:
             向量库集合名称字符串。
         """
-        safe_bucket = bucket.strip().lower() or "emergent"
-        if safe_bucket == "inherent":
-            return "booku_memory__inherent"
+        safe_bucket = BookuMemoryService._normalize_bucket(bucket)
+        if safe_bucket == _KNOWLEDGE_BUCKET:
+            return "booku_memory__knowledge"
         safe_folder = folder_id.strip().lower() or "default"
-        return f"booku_memory__{safe_bucket}__{safe_folder}"
+        return f"booku_memory__memory__{safe_folder}"
+
+    @staticmethod
+    def _normalize_bucket(bucket: str | None) -> str:
+        """将 bucket 归一化为 memory/knowledge。"""
+
+        normalized = str(bucket or "").strip().lower()
+        if normalized == _KNOWLEDGE_BUCKET:
+            return _KNOWLEDGE_BUCKET
+        return _MEMORY_BUCKET
+
+    @staticmethod
+    def _is_archived_status(status: str | None) -> bool:
+        """判断状态是否代表已归档。"""
+
+        normalized = str(status or "").strip().lower()
+        return normalized in {"archived", "expired"}
+
+    @classmethod
+    def _is_inherent_record(cls, record: Any) -> bool:
+        """判断记录是否为固有记忆。"""
+
+        title = str(getattr(record, "title", "") or "").strip()
+        folder_id = str(getattr(record, "folder_id", "") or "").strip().lower()
+        return title == _INHERENT_MEMORY_TITLE or folder_id == _INHERENT_FOLDER_ID
+
+    @classmethod
+    def _memory_collection_candidates(cls, folder_id: str) -> list[str]:
+        """返回 memory 记录可能所在的新旧集合。"""
+
+        safe_folder = folder_id.strip().lower() or "default"
+        candidates = [
+            cls._collection_name(_MEMORY_BUCKET, safe_folder),
+            f"booku_memory__emergent__{safe_folder}",
+            f"booku_memory__archived__{safe_folder}",
+        ]
+        if safe_folder == _INHERENT_FOLDER_ID:
+            candidates.append("booku_memory__inherent")
+        deduped: list[str] = []
+        for item in candidates:
+            if item not in deduped:
+                deduped.append(item)
+        return deduped
+
+    @classmethod
+    def _collection_candidates(cls, bucket: str, folder_id: str) -> list[str]:
+        """返回 bucket 对应的候选集合。"""
+
+        normalized_bucket = cls._normalize_bucket(bucket)
+        if normalized_bucket == _KNOWLEDGE_BUCKET:
+            return [cls._collection_name(_KNOWLEDGE_BUCKET, "default")]
+        return cls._memory_collection_candidates(folder_id)
+
+    async def _resolve_collection_name(
+        self,
+        *,
+        memory_id: str,
+        bucket: str,
+        folder_id: str,
+    ) -> str:
+        """定位指定记忆当前所在的向量集合。"""
+
+        config = self._get_config()
+        vector_db = get_vector_db_service(config.storage.vector_db_path)
+        for collection_name in self._collection_candidates(bucket, folder_id):
+            if await vector_db.count(collection_name) <= 0:
+                continue
+            loaded = await vector_db.get(collection_name=collection_name, ids=[memory_id], include=[])
+            if loaded.get("ids"):
+                return collection_name
+        return self._collection_name(bucket, folder_id)
 
     @staticmethod
     def _cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -917,7 +992,7 @@ class BookuMemoryService(BaseService):
         return {
             "title": getattr(record, "title", ""),
             "folder_id": getattr(record, "folder_id", ""),
-            "bucket": getattr(record, "bucket", ""),
+            "bucket": BookuMemoryService._normalize_bucket(getattr(record, "bucket", "")),
             "source": getattr(record, "source", ""),
             "memory_type": getattr(record, "memory_type", "knowledge"),
             "status": getattr(record, "status", "active"),
@@ -1179,7 +1254,7 @@ class BookuMemoryService(BaseService):
         content: str,
         *,
         title: str | None = None,
-        bucket: str = "emergent",
+        bucket: str = _MEMORY_BUCKET,
         folder_id: str | None = None,
         tags: list[str] | None = None,
         core_tags: list[str] | None = None,
@@ -1206,13 +1281,13 @@ class BookuMemoryService(BaseService):
         写入前检索邻域向量并计算新颖度能量比：
         - 能量比 >= energy_cutoff：内容新颖，创建新记忆（mode="created"）。
         - 能量比 < energy_cutoff：内容重复，自动合并到最相似的现有记忆（mode="merged"）。
-        固有记忆（inherent）不按 folder 隔离，如例外应需 folder_id 传 None。
+        固有记忆作为内部特殊记忆保留，但 bucket 统一为 memory。
 
         Args:
             content: 记忆正文，不能为空字符串。
             title: 记忆标题（可选），为空时从 content 首行自动提取。
-            bucket: 存储桶，默认 ``"emergent"``，支持 ``"archived"``/``"inherent"``。
-            folder_id: 记忆所属文件夹——inherent 时无效。
+            bucket: 存储桶，默认 ``"memory"``，仅支持 ``"memory"``/``"knowledge"``。
+            folder_id: 记忆所属文件夹。
             tags: 通用标签列表，可为 None。
             core_tags: 核心标签列表，检索时最优先。
             diffusion_tags: 扩散标签列表。
@@ -1231,17 +1306,15 @@ class BookuMemoryService(BaseService):
         repo = await self._get_repo()
         normalized_memory_type = (memory_type or "knowledge").strip().lower()
         normalized_status = (status or "active").strip().lower()
-        normalized_bucket = bucket.strip().lower() if bucket else "emergent"
-        if normalized_status in {"archived", "expired"}:
-            normalized_bucket = "archived"
-        # inherent 全局不按 folder 隔离，folder_id 字段存 "global"
-        if normalized_bucket == "inherent":
-            effective_folder_id = "global"
-        else:
-            effective_folder_id = self._normalize_folder_id(
+        normalized_bucket = self._normalize_bucket(bucket)
+        effective_folder_id = (
+            _INHERENT_FOLDER_ID
+            if (title or "").strip() == _INHERENT_MEMORY_TITLE
+            else self._normalize_folder_id(
                 folder_id,
                 config.storage.default_folder_id,
             )
+        )
         text = content.strip()
         if not text:
             raise ValueError("content 不能为空")
@@ -1802,6 +1875,7 @@ class BookuMemoryService(BaseService):
         *,
         title: str,
         content: str,
+        folder_id: str | None = None,
         bucket: str = "emergent",
         core_tags: list[str] | None = None,
         diffusion_tags: list[str] | None = None,
@@ -1838,7 +1912,10 @@ class BookuMemoryService(BaseService):
             包含 action/mode/total/items 字段的字典，mode 为 ``"created"`` 或 ``"merged"``。
         """
         config = self._get_config()
-        fixed_folder_id = self._normalize_folder_id(None, config.storage.default_folder_id)
+        fixed_folder_id = self._normalize_folder_id(
+            folder_id,
+            config.storage.default_folder_id,
+        )
 
         result = await self.upsert_memory(
             title=title,
@@ -1887,7 +1964,7 @@ class BookuMemoryService(BaseService):
         result = await self.upsert_memory(
             title="固有记忆",
             content=content,
-            bucket="inherent",
+            bucket=_MEMORY_BUCKET,
             folder_id=None,
             source="agent",
         )
@@ -1910,6 +1987,45 @@ class BookuMemoryService(BaseService):
         Returns:
             包含 folder_id、counts〈vector/metadata〉、recent、folder_memory_ids 字段的字典。
         """
+        if folder_id is None:
+            repo = await self._get_repo()
+            vector_db = get_vector_db_service(self._get_config().storage.vector_db_path)
+
+            memory_collections: list[str] = []
+            for known_folder_id in await repo.list_distinct_folder_ids():
+                for collection_name in self._memory_collection_candidates(known_folder_id):
+                    if collection_name not in memory_collections:
+                        memory_collections.append(collection_name)
+            for collection_name in self._memory_collection_candidates(_INHERENT_FOLDER_ID):
+                if collection_name not in memory_collections:
+                    memory_collections.append(collection_name)
+
+            vector_counts = {
+                "memory": 0,
+                "knowledge": await vector_db.count(
+                    self._collection_name(_KNOWLEDGE_BUCKET, "default")
+                ),
+            }
+            for collection_name in memory_collections:
+                vector_counts["memory"] += await vector_db.count(collection_name)
+
+            recent_records = await repo.get_recent_records(
+                limit=8,
+                folder_id=None,
+                include_archived=True,
+            )
+            return {
+                "folder_id": "all",
+                "counts": {
+                    "vector": vector_counts,
+                    "metadata": await repo.get_bucket_counts(None),
+                },
+                "recent": [
+                    self._build_record_item(record) for record in recent_records
+                ],
+                "folder_memory_ids": [],
+            }
+
         status = await self.query_memory_status(folder_id=folder_id)
         return {
             "folder_id": status.get("folder_id", "default"),
@@ -1919,6 +2035,120 @@ class BookuMemoryService(BaseService):
             },
             "recent": status.get("recent", []),
             "folder_memory_ids": status.get("folder_memory_ids", []),
+        }
+
+    async def list_folder_ids(self) -> dict[str, Any]:
+        """列出当前记忆库中可用的 folder_id。
+
+        Returns:
+            包含 action、total、items 字段的字典。
+        """
+        repo = await self._get_repo()
+        folders = await repo.list_distinct_folder_ids()
+        config = self._get_config()
+        default_folder = self._normalize_folder_id(None, config.storage.default_folder_id)
+        normalized = [default_folder]
+        for folder_id in folders:
+            clean_folder_id = (folder_id or "").strip().lower()
+            if clean_folder_id and clean_folder_id not in normalized:
+                normalized.append(clean_folder_id)
+        return {
+            "action": "list_folder_ids",
+            "total": len(normalized),
+            "items": normalized,
+        }
+
+    async def get_memory_detail(
+        self,
+        *,
+        memory_id: str,
+        include_deleted: bool = True,
+    ) -> dict[str, Any]:
+        """读取单条记忆的完整详情。
+
+        Args:
+            memory_id: 目标记忆 ID。
+            include_deleted: 是否允许读取软删除记录，默认 True。
+
+        Returns:
+            包含 action、found、item 字段的字典。
+        """
+        repo = await self._get_repo()
+        record = await repo.get_record(memory_id, include_deleted=include_deleted)
+        if record is None:
+            return {
+                "action": "get_memory_detail",
+                "found": False,
+                "item": None,
+            }
+        return {
+            "action": "get_memory_detail",
+            "found": True,
+            "item": self._build_record_item(record, include_full_content=True),
+        }
+
+    async def list_memory_entries(
+        self,
+        *,
+        keyword: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        person_id: str | None = None,
+        folder_id: str | None = None,
+        bucket: str | None = None,
+        include_archived: bool = True,
+        include_deleted: bool = False,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """按后台管理所需的结构化条件列出记忆。
+
+        Args:
+            keyword: 标题、正文、ID 的模糊关键词。
+            memory_type: 记忆类型过滤。
+            status: 状态过滤。
+            person_id: 人物 ID 过滤。
+            folder_id: folder 过滤。
+            bucket: bucket 过滤。
+            include_archived: 是否包含 archived bucket，默认 True。
+            include_deleted: 是否包含软删除记录，默认 False。
+            limit: 最大返回条数。
+
+        Returns:
+            包含 action、total、items 字段的字典。
+        """
+        repo = await self._get_repo()
+        config = self._get_config()
+        normalized_folder_id = None
+        if folder_id is not None and folder_id.strip():
+            normalized_folder_id = self._normalize_folder_id(
+                folder_id,
+                config.storage.default_folder_id,
+            )
+
+        normalized_bucket = (bucket or "").strip().lower() or None
+        records = await repo.search_records(
+            keyword=(keyword or "").strip() or None,
+            memory_type=(memory_type or "").strip().lower() or None,
+            status=(status or "").strip().lower() or None,
+            person_id=(person_id or "").strip() or None,
+            folder_id=normalized_folder_id,
+            include_deleted=include_deleted,
+            limit=max(1, int(limit)),
+        )
+
+        filtered_records: list[Any] = []
+        for record in records:
+            record_bucket = str(getattr(record, "bucket", "") or "").strip().lower()
+            if normalized_bucket and record_bucket != normalized_bucket:
+                continue
+            if not include_archived and record_bucket == "archived":
+                continue
+            filtered_records.append(record)
+
+        return {
+            "action": "list_memory_entries",
+            "total": len(filtered_records),
+            "items": [self._build_record_item(record) for record in filtered_records],
         }
 
     async def update_activated(self, memory_id: str) -> None:
@@ -1939,7 +2169,7 @@ class BookuMemoryService(BaseService):
     ) -> dict[str, Any]:
         """全局语义搜索固有记忆（inherent bucket），无 folder 约束。
 
-        内部调用 ``retrieve_memories`` 并过滤出 bucket == "inherent" 的项。
+        内部调用 ``retrieve_memories`` 并过滤出全局固有记忆项。
 
         Args:
             query_text: 检索语义文本。
@@ -1957,7 +2187,7 @@ class BookuMemoryService(BaseService):
             item
             for item in result.get("results", [])
             if isinstance(item, dict)
-            and item.get("metadata", {}).get("bucket") == "inherent"
+            and item.get("metadata", {}).get("folder_id") == _INHERENT_FOLDER_ID
         ]
         return {
             "query": query_text,
@@ -2049,10 +2279,12 @@ class BookuMemoryService(BaseService):
         )
         vector_db = get_vector_db_service(config.storage.vector_db_path)
 
-        vector_counts: dict[str, int] = {}
-        for bucket in ("inherent", "emergent", "archived"):
-            collection = self._collection_name(bucket, effective_folder_id)
-            vector_counts[bucket] = await vector_db.count(collection)
+        vector_counts: dict[str, int] = {"memory": 0, "knowledge": 0}
+        for collection in self._memory_collection_candidates(effective_folder_id):
+            vector_counts["memory"] += await vector_db.count(collection)
+        vector_counts["knowledge"] = await vector_db.count(
+            self._collection_name(_KNOWLEDGE_BUCKET, "default")
+        )
 
         metadata_counts = await repo.get_bucket_counts(effective_folder_id)
         recent_records = await repo.get_recent_records(
@@ -2263,18 +2495,22 @@ class BookuMemoryService(BaseService):
         if record is None:
             return {"action": "update_memory_by_id", "updated": 0, "items": []}
 
-        if record.bucket == "inherent":
+        if self._is_inherent_record(record):
             return {
                 "action": "update_memory_by_id",
                 "updated": 0,
-                "error": "inherent 记忆请使用 edit_inherent_memory",
+                "error": "固有记忆请使用 edit_inherent_memory",
             }
 
         normalized_core_tags = self._normalize_tags(core_tags)
         normalized_diffusion_tags = self._normalize_tags(diffusion_tags)
         normalized_opposing_tags = self._normalize_tags(opposing_tags)
 
-        old_collection = self._collection_name(record.bucket, record.folder_id)
+        old_collection = await self._resolve_collection_name(
+            memory_id=memory_id,
+            bucket=record.bucket,
+            folder_id=record.folder_id,
+        )
         resolved_title = (
             (title or "").strip() or record.title or self._extract_title(record.content)
         )
@@ -2368,13 +2604,17 @@ class BookuMemoryService(BaseService):
         config = self._get_config()
         records = await repo.get_records_map(memory_ids, include_deleted=True)
         affects_inherent = any(
-            record.bucket == "inherent" for record in records.values()
+            self._is_inherent_record(record) for record in records.values()
         )
         vector_db = get_vector_db_service(config.storage.vector_db_path)
 
         if hard:
             for record in records.values():
-                collection = self._collection_name(record.bucket, record.folder_id)
+                collection = await self._resolve_collection_name(
+                    memory_id=record.memory_id,
+                    bucket=record.bucket,
+                    folder_id=record.folder_id,
+                )
                 try:
                     await vector_db.delete(
                         collection_name=collection, ids=[record.memory_id]
@@ -2430,7 +2670,7 @@ class BookuMemoryService(BaseService):
         if to_bucket is None and to_folder_id is None:
             return {"action": "move_memories", "moved": 0, "items": []}
 
-        target_bucket = to_bucket.strip().lower() if to_bucket else None
+        target_bucket = self._normalize_bucket(to_bucket) if to_bucket else None
         target_folder = (
             self._normalize_folder_id(to_folder_id, config.storage.default_folder_id)
             if to_folder_id is not None
@@ -2441,8 +2681,8 @@ class BookuMemoryService(BaseService):
         vector_db = get_vector_db_service(config.storage.vector_db_path)
         moved_items: list[dict[str, Any]] = []
         affects_inherent = (
-            any(record.bucket == "inherent" for record in records.values())
-            or target_bucket == "inherent"
+            any(self._is_inherent_record(record) for record in records.values())
+            or target_folder == _INHERENT_FOLDER_ID
         )
 
         for memory_id in memory_ids:
@@ -2450,13 +2690,17 @@ class BookuMemoryService(BaseService):
             if record is None:
                 continue
 
-            new_bucket = target_bucket or record.bucket
+            new_bucket = target_bucket or self._normalize_bucket(record.bucket)
             new_folder = (
-                "global"
-                if new_bucket == "inherent"
+                _INHERENT_FOLDER_ID
+                if self._is_inherent_record(record)
                 else (target_folder or record.folder_id)
             )
-            old_collection = self._collection_name(record.bucket, record.folder_id)
+            old_collection = await self._resolve_collection_name(
+                memory_id=memory_id,
+                bucket=record.bucket,
+                folder_id=record.folder_id,
+            )
             new_collection = self._collection_name(new_bucket, new_folder)
 
             if old_collection != new_collection:

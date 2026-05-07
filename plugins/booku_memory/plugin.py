@@ -8,6 +8,7 @@ from src.kernel.logger import get_logger
 from .agent import BookuMemoryCommandTool
 from .config import BookuMemoryConfig
 from .event_handler import MemoryFlashbackInjector, BookuMemoryStartupIngestHandler
+from .router import BookuMemoryAdminRouter
 from .service import BookuMemoryService, BookuKnowledgeService, sync_booku_memory_actor_reminder
 
 logger = get_logger("booku_memory_plugin")
@@ -32,6 +33,7 @@ class BookuMemoryAgentPlugin(BasePlugin):
             BookuMemoryCommandTool,
             BookuMemoryService,
             BookuKnowledgeService,
+            BookuMemoryAdminRouter,
             MemoryFlashbackInjector,
             BookuMemoryStartupIngestHandler,
         ]

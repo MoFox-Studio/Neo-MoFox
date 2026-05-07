@@ -22,6 +22,11 @@
             "component_type": "service",
             "component_name": "booku_knowledge",
             "dependencies": []
+        },
+        {
+            "component_type": "router",
+            "component_name": "memory_admin",
+            "dependencies": []
         }
     ],
     "entry_point": "plugin.py",

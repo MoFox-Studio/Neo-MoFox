@@ -161,12 +161,12 @@ class BookuMemoryCommandTool(BaseTool):
         "主动写入或检索记忆，而不是依赖对话上下文。"
         "仅接受 command 字符串，"
         "支持 search/read/create/update/delete，支持 && 串联执行。"
-        "首次使用前请先阅读SKILL.md中的使用说明。"
+        "首次使用前请先阅读booku_memory的SKILL.md中的使用说明。"
     )
 
     async def execute(
         self,
-        command: Annotated[str, "命令字符串，例如：search -type person -person_id qq:10001 -topn 10"],
+        command: Annotated[str, "命令字符串，参数列表参考booku_memory的SKILL.md中的说明"],
     ) -> tuple[bool, str | dict]:
         """执行命令字符串。"""
 

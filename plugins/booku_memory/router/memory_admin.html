@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__PAGE_MODE__ | Booku Memory Console</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4efe7;
+      --panel: rgba(255, 251, 245, 0.84);
+      --panel-strong: #fffaf2;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: rgba(148, 110, 77, 0.18);
+      --accent: #b45309;
+      --accent-deep: #7c2d12;
+      --accent-soft: rgba(217, 119, 6, 0.14);
+      --danger: #b42318;
+      --shadow: 0 24px 70px rgba(109, 76, 44, 0.14);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Avenir Next", "Segoe UI Variable", "PingFang SC", "Noto Sans SC", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(217, 119, 6, 0.18), transparent 28%),
+        radial-gradient(circle at right 12% top 12%, rgba(124, 45, 18, 0.12), transparent 20%),
+        linear-gradient(135deg, #f8f4ee 0%, #efe3d1 46%, #f7efe7 100%);
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(124, 45, 18, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(124, 45, 18, 0.03) 1px, transparent 1px);
+      background-size: 34px 34px;
+      mask-image: radial-gradient(circle at center, black 35%, transparent 88%);
+    }
+
+    .shell {
+      position: relative;
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 18px;
+      padding: 24px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      backdrop-filter: blur(22px);
+      box-shadow: var(--shadow);
+    }
+
+    .sidebar {
+      padding: 22px;
+      position: sticky;
+      top: 24px;
+      height: fit-content;
+    }
+
+    .brand {
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 18px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      text-transform: uppercase;
+      font-size: 12px;
+      letter-spacing: 0.24em;
+      color: var(--accent-deep);
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 40px);
+      line-height: 1;
+      letter-spacing: -0.04em;
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .page-nav {
+      display: flex;
+      gap: 10px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+
+    .page-link {
+      text-decoration: none;
+      padding: 10px 14px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--accent-deep);
+      background: rgba(255,255,255,0.72);
+      border: 1px solid rgba(148, 110, 77, 0.2);
+    }
+
+    .page-link.active {
+      background: linear-gradient(135deg, #d97706, #92400e);
+      color: white;
+      border-color: transparent;
+    }
+
+    .deprecated {
+      display: none !important;
+    }
+
+    .control-grid,
+    .form-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .control-grid {
+      margin-top: 18px;
+    }
+
+    label {
+      display: grid;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent-deep);
+    }
+
+    input,
+    select,
+    textarea,
+    button {
+      font: inherit;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      border: 1px solid rgba(148, 110, 77, 0.22);
+      background: rgba(255, 255, 255, 0.86);
+      color: var(--ink);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      outline: none;
+      transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+      border-color: rgba(180, 83, 9, 0.56);
+      box-shadow: 0 0 0 4px rgba(217, 119, 6, 0.12);
+      transform: translateY(-1px);
+    }
+
+    textarea {
+      min-height: 160px;
+      resize: vertical;
+    }
+
+    .main {
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero {
+      padding: 24px 28px;
+      overflow: hidden;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .metric {
+      padding: 16px;
+      border-radius: var(--radius-lg);
+      background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(250, 240, 225, 0.82));
+      border: 1px solid rgba(148, 110, 77, 0.18);
+    }
+
+    .metric strong {
+      display: block;
+      font-size: 30px;
+      line-height: 1;
+      margin-top: 10px;
+      letter-spacing: -0.05em;
+    }
+
+    .content-grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 0.95fr) minmax(420px, 1.25fr);
+      gap: 18px;
+    }
+
+    .list-panel,
+    .editor-panel {
+      padding: 18px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .section-head h2 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.03em;
+    }
+
+    .memory-list {
+      display: grid;
+      gap: 10px;
+      max-height: 66vh;
+      overflow: auto;
+      padding-right: 6px;
+    }
+
+    .memory-card {
+      border: 1px solid rgba(148, 110, 77, 0.14);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.76);
+      padding: 14px;
+      cursor: pointer;
+      transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }
+
+    .memory-card:hover,
+    .memory-card.active {
+      transform: translateY(-2px);
+      border-color: rgba(180, 83, 9, 0.4);
+      box-shadow: 0 16px 32px rgba(124, 45, 18, 0.12);
+    }
+
+    .memory-card h3 {
+      margin: 0 0 10px;
+      font-size: 15px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .badge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      background: var(--accent-soft);
+      color: var(--accent-deep);
+      font-weight: 700;
+    }
+
+    .memory-card p,
+    .helper,
+    .status-bar {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 13px;
+    }
+
+    .editor-panel form {
+      display: grid;
+      gap: 14px;
+    }
+
+    .form-grid.two {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .actions,
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 24px rgba(124, 45, 18, 0.12);
+    }
+
+    button.primary {
+      background: linear-gradient(135deg, #d97706, #92400e);
+      color: white;
+    }
+
+    button.secondary {
+      background: rgba(255, 255, 255, 0.84);
+      color: var(--ink);
+      border: 1px solid rgba(148, 110, 77, 0.2);
+    }
+
+    button.danger {
+      background: linear-gradient(135deg, #ef4444, #991b1b);
+      color: white;
+    }
+
+    .toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border: 1px dashed rgba(148, 110, 77, 0.32);
+      border-radius: 16px;
+      background: rgba(255,255,255,0.54);
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .toggle input {
+      width: auto;
+      margin: 0;
+    }
+
+    .status-bar {
+      padding: 10px 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.72);
+      border: 1px solid rgba(148, 110, 77, 0.14);
+      min-height: 44px;
+    }
+
+    .empty {
+      padding: 22px;
+      text-align: center;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.66);
+      color: var(--muted);
+      border: 1px dashed rgba(148, 110, 77, 0.28);
+    }
+
+    @media (max-width: 1180px) {
+      .shell,
+      .content-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        position: static;
+      }
+
+      .hero-grid,
+      .form-grid.two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 720px) {
+      .shell {
+        padding: 14px;
+      }
+
+      .hero-grid,
+      .form-grid.two {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar panel">
+      <div class="brand">
+        <p class="eyebrow">Memory Admin</p>
+        <h1 id="page-heading">Booku Memory</h1>
+        <p class="subtitle" id="page-subtitle">一个直接可用的记忆后台。左侧过滤与检索，右侧编辑完整条目，覆盖常用 CRUD 流程。</p>
+        <div class="page-nav">
+          <a class="page-link" id="nav-memory" href="./memory">常规记忆</a>
+          <a class="page-link" id="nav-knowledge" href="./knowledge">知识库</a>
+        </div>
+      </div>
+
+      <div class="control-grid">
+        <label>
+          关键词
+          <input id="filter-keyword" type="text" placeholder="标题、内容、memory_id" />
+        </label>
+        <label class="deprecated">
+          Folder
+          <select id="filter-folder">
+            <option value="">全部 folder</option>
+          </select>
+        </label>
+        <label class="deprecated">
+          Bucket
+          <select id="filter-bucket">
+            <option value="memory">memory</option>
+            <option value="knowledge">knowledge</option>
+          </select>
+        </label>
+        <label>
+          Type
+          <select id="filter-type">
+            <option value="">全部类型</option>
+            <option value="knowledge">knowledge</option>
+            <option value="person">person</option>
+            <option value="event">event</option>
+            <option value="place">place</option>
+            <option value="asset">asset</option>
+            <option value="procedure">procedure</option>
+          </select>
+        </label>
+        <label>
+          Status
+          <select id="filter-status">
+            <option value="">全部状态</option>
+            <option value="active">active</option>
+            <option value="archived">archived</option>
+            <option value="expired">expired</option>
+          </select>
+        </label>
+        <label class="toggle">
+          <input id="filter-deleted" type="checkbox" />
+          包含已软删记录
+        </label>
+        <div class="quick-actions">
+          <button class="primary" id="refresh-button" type="button">刷新列表</button>
+          <button class="secondary" id="create-button" type="button">新建记忆</button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <section class="hero panel">
+        <p class="eyebrow">Console</p>
+        <div class="section-head">
+          <div>
+            <h2>记忆库存概览</h2>
+            <p class="helper" id="hero-helper">当前页面只操作一种 bucket，重点通过 type 和 status 做管理。</p>
+          </div>
+        </div>
+        <div class="hero-grid">
+          <div class="metric">
+            <span>Memory</span>
+            <strong id="metric-memory">0</strong>
+          </div>
+          <div class="metric">
+            <span>Knowledge</span>
+            <strong id="metric-knowledge">0</strong>
+          </div>
+          <div class="metric">
+            <span>Archived Status</span>
+            <strong id="metric-archived">0</strong>
+          </div>
+          <div class="metric">
+            <span>Page</span>
+            <strong id="metric-page">memory</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-grid">
+        <div class="list-panel panel">
+          <div class="section-head">
+            <div>
+              <h2>记忆列表</h2>
+              <p class="helper" id="list-summary">等待加载</p>
+            </div>
+          </div>
+          <div class="memory-list" id="memory-list"></div>
+        </div>
+
+        <div class="editor-panel panel">
+          <div class="section-head">
+            <div>
+              <h2>编辑器</h2>
+              <p class="helper">字段按 Booku Memory 元数据结构直接映射，便于精细调整。</p>
+            </div>
+          </div>
+
+          <form id="editor-form">
+            <input id="memory-id" type="hidden" />
+            <div class="form-grid two">
+              <label>
+                标题
+                <input id="field-title" type="text" placeholder="例如：用户偏好使用日语输入法" required />
+              </label>
+              <label class="deprecated">
+                Folder
+                <select id="field-folder">
+                  <option value="">默认 folder</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="form-grid two">
+              <label class="deprecated">
+                Bucket
+                <select id="field-bucket">
+                  <option value="memory">memory</option>
+                  <option value="knowledge">knowledge</option>
+                </select>
+              </label>
+              <label>
+                Type
+                <select id="field-memory-type">
+                  <option value="knowledge">knowledge</option>
+                  <option value="person">person</option>
+                  <option value="event">event</option>
+                  <option value="place">place</option>
+                  <option value="asset">asset</option>
+                  <option value="procedure">procedure</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="form-grid two">
+              <label>
+                Status
+                <select id="field-status">
+                  <option value="active">active</option>
+                  <option value="archived">archived</option>
+                  <option value="expired">expired</option>
+                </select>
+              </label>
+              <label>
+                Person ID
+                <input id="field-person-id" type="text" placeholder="platform:id" />
+              </label>
+            </div>
+
+            <label>
+              正文
+              <textarea id="field-content" placeholder="输入完整记忆正文" required></textarea>
+            </label>
+
+            <div class="form-grid two">
+              <label>
+                Core Tags
+                <input id="field-core-tags" type="text" placeholder="tag1, tag2" />
+              </label>
+              <label>
+                Diffusion Tags
+                <input id="field-diffusion-tags" type="text" placeholder="tag1, tag2" />
+              </label>
+            </div>
+
+            <div class="form-grid two">
+              <label>
+                Opposing Tags
+                <input id="field-opposing-tags" type="text" placeholder="tag1, tag2" />
+              </label>
+              <label>
+                Related People
+                <input id="field-related-people" type="text" placeholder="alice, bob" />
+              </label>
+            </div>
+
+            <div class="form-grid two">
+              <label>
+                Relation Memory IDs
+                <input id="field-relation-memory-ids" type="text" placeholder="memory-1, memory-2" />
+              </label>
+              <label>
+                Relation Aliases
+                <input id="field-relation-aliases" type="text" placeholder="同学, 项目伙伴" />
+              </label>
+            </div>
+
+            <div class="form-grid two">
+              <label>
+                Event Start At
+                <input id="field-event-start" type="number" step="0.01" placeholder="0" />
+              </label>
+              <label>
+                Event End At
+                <input id="field-event-end" type="number" step="0.01" placeholder="0" />
+              </label>
+            </div>
+
+            <div class="form-grid two">
+              <label>
+                Knowledge Type
+                <input id="field-knowledge-type" type="text" placeholder="concept / quote / model" />
+              </label>
+              <label>
+                Address / Coord
+                <input id="field-address" type="text" placeholder="地址或坐标" />
+              </label>
+            </div>
+
+            <div class="form-grid two">
+              <label>
+                Place Type
+                <input id="field-place-type" type="text" placeholder="office / home" />
+              </label>
+              <label>
+                Asset Type
+                <input id="field-asset-type" type="text" placeholder="device / document" />
+              </label>
+            </div>
+
+            <div class="form-grid two">
+              <label>
+                Disposition Status
+                <input id="field-disposition-status" type="text" placeholder="in_use / idle" />
+              </label>
+              <label>
+                Procedure Type
+                <input id="field-procedure-type" type="text" placeholder="workflow / checklist" />
+              </label>
+            </div>
+
+            <div class="actions">
+              <button class="primary" id="save-button" type="submit">保存</button>
+              <button class="secondary" id="reset-button" type="button">清空表单</button>
+              <button class="danger" id="soft-delete-button" type="button">软删除</button>
+              <button class="danger" id="hard-delete-button" type="button">硬删除</button>
+            </div>
+
+            <div class="status-bar" id="status-bar">准备就绪</div>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const API_BASE = './api';
+    const PAGE_MODE = '__PAGE_MODE__';
+    const PAGE_LABEL = PAGE_MODE === 'knowledge' ? '知识库' : '常规记忆';
+    const state = {
+      selectedId: null,
+      items: [],
+      counts: {
+        memory: 0,
+        knowledge: 0
+      }
+    };
+
+    const filterKeyword = document.getElementById('filter-keyword');
+    const filterFolder = document.getElementById('filter-folder');
+    const filterBucket = document.getElementById('filter-bucket');
+    const filterType = document.getElementById('filter-type');
+    const filterStatus = document.getElementById('filter-status');
+    const filterDeleted = document.getElementById('filter-deleted');
+    const memoryList = document.getElementById('memory-list');
+    const listSummary = document.getElementById('list-summary');
+    const statusBar = document.getElementById('status-bar');
+    const form = document.getElementById('editor-form');
+
+    function setStatus(message, isError = false) {
+      statusBar.textContent = message;
+      statusBar.style.color = isError ? 'var(--danger)' : 'var(--muted)';
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function toCsv(values) {
+      return Array.isArray(values) ? values.join(', ') : '';
+    }
+
+    function fromCsv(text) {
+      return String(text || '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+
+    async function request(path, options = {}) {
+      const response = await fetch(`${API_BASE}${path}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers || {})
+        },
+        ...options
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || response.statusText);
+      }
+      return response.json();
+    }
+
+    function currentFilters() {
+      const params = new URLSearchParams();
+      if (filterKeyword.value.trim()) params.set('keyword', filterKeyword.value.trim());
+      params.set('bucket', PAGE_MODE);
+      if (filterFolder.value) params.set('folder_id', filterFolder.value);
+      if (filterType.value) params.set('memory_type', filterType.value);
+      if (filterStatus.value) params.set('status', filterStatus.value);
+      params.set('include_deleted', String(filterDeleted.checked));
+      params.set('include_archived', 'true');
+      params.set('limit', '60');
+      return params;
+    }
+
+    function renderMetrics() {
+      document.getElementById('metric-memory').textContent = String(state.counts.memory || 0);
+      document.getElementById('metric-knowledge').textContent = String(state.counts.knowledge || 0);
+      const archivedCount = state.items.filter((item) => (item.metadata?.status || '') === 'archived').length;
+      document.getElementById('metric-archived').textContent = String(archivedCount);
+      document.getElementById('metric-page').textContent = PAGE_MODE;
+    }
+
+    async function loadFolders() {
+      const result = await request('/folders');
+      const folders = Array.isArray(result.items) ? result.items : [];
+      const selects = [filterFolder, document.getElementById('field-folder')];
+      selects.forEach((select) => {
+        const keep = select.value;
+        const firstOption = select === filterFolder
+          ? '<option value="">全部 folder</option>'
+          : '<option value="">默认 folder</option>';
+        select.innerHTML = firstOption + folders.map((folder) => `<option value="${escapeHtml(folder)}">${escapeHtml(folder)}</option>`).join('');
+        select.value = folders.includes(keep) ? keep : '';
+      });
+    }
+
+    async function loadStatus() {
+      const params = new URLSearchParams();
+      if (filterFolder.value) params.set('folder_id', filterFolder.value);
+      const result = await request(`/status?${params.toString()}`);
+      state.counts = {
+        memory: Number(result.counts?.metadata?.memory || 0),
+        knowledge: Number(result.counts?.metadata?.knowledge || 0)
+      };
+      renderMetrics();
+    }
+
+    function renderList() {
+      if (!state.items.length) {
+        memoryList.innerHTML = '<div class="empty">当前过滤条件下没有记录</div>';
+        listSummary.textContent = '共 0 条';
+        return;
+      }
+
+      listSummary.textContent = `共 ${state.items.length} 条`;
+      memoryList.innerHTML = state.items.map((item) => {
+        const metadata = item.metadata || {};
+        const isActive = item.id === state.selectedId ? 'active' : '';
+        return `
+          <article class="memory-card ${isActive}" data-id="${escapeHtml(item.id)}">
+            <h3>${escapeHtml(item.title || '未命名记忆')}</h3>
+            <div class="badge-row">
+              <span class="badge">${escapeHtml(metadata.bucket || '-')}</span>
+              <span class="badge">${escapeHtml(metadata.memory_type || '-')}</span>
+              <span class="badge">${escapeHtml(metadata.status || '-')}</span>
+            </div>
+            <p>${escapeHtml(item.content_snippet || '')}</p>
+          </article>
+        `;
+      }).join('');
+
+      memoryList.querySelectorAll('.memory-card').forEach((card) => {
+        card.addEventListener('click', () => loadDetail(card.dataset.id));
+      });
+    }
+
+    async function loadList(preserveSelection = true) {
+      const result = await request(`/memories?${currentFilters().toString()}`);
+      state.items = Array.isArray(result.items) ? result.items : [];
+      if (!preserveSelection || !state.items.some((item) => item.id === state.selectedId)) {
+        state.selectedId = null;
+      }
+      renderList();
+      renderMetrics();
+    }
+
+    function fillField(id, value) {
+      const node = document.getElementById(id);
+      node.value = value ?? '';
+    }
+
+    function resetForm() {
+      state.selectedId = null;
+      fillField('memory-id', '');
+      fillField('field-title', '');
+      fillField('field-folder', '');
+      fillField('field-bucket', PAGE_MODE);
+      fillField('field-memory-type', PAGE_MODE === 'knowledge' ? 'knowledge' : 'person');
+      fillField('field-status', 'active');
+      fillField('field-person-id', '');
+      fillField('field-content', '');
+      fillField('field-core-tags', '');
+      fillField('field-diffusion-tags', '');
+      fillField('field-opposing-tags', '');
+      fillField('field-related-people', '');
+      fillField('field-relation-memory-ids', '');
+      fillField('field-relation-aliases', '');
+      fillField('field-event-start', '0');
+      fillField('field-event-end', '0');
+      fillField('field-knowledge-type', '');
+      fillField('field-address', '');
+      fillField('field-place-type', '');
+      fillField('field-asset-type', '');
+      fillField('field-disposition-status', '');
+      fillField('field-procedure-type', '');
+      renderList();
+      setStatus('已切换到新建模式');
+    }
+
+    function populateEditor(item) {
+      const metadata = item.metadata || {};
+      state.selectedId = item.id;
+      fillField('memory-id', item.id || '');
+      fillField('field-title', item.title || '');
+      fillField('field-folder', metadata.folder_id || '');
+      fillField('field-bucket', metadata.bucket || PAGE_MODE);
+      fillField('field-memory-type', metadata.memory_type || 'knowledge');
+      fillField('field-status', metadata.status || 'active');
+      fillField('field-person-id', metadata.person_id || '');
+      fillField('field-content', item.content || '');
+      fillField('field-core-tags', toCsv(metadata.core_tags));
+      fillField('field-diffusion-tags', toCsv(metadata.diffusion_tags));
+      fillField('field-opposing-tags', toCsv(metadata.opposing_tags));
+      fillField('field-related-people', toCsv(metadata.related_people));
+      fillField('field-relation-memory-ids', toCsv(metadata.relation_memory_ids));
+      fillField('field-relation-aliases', toCsv(metadata.relation_aliases));
+      fillField('field-event-start', metadata.event_start_at ?? 0);
+      fillField('field-event-end', metadata.event_end_at ?? 0);
+      fillField('field-knowledge-type', metadata.knowledge_type || '');
+      fillField('field-address', metadata.address_or_coord || '');
+      fillField('field-place-type', metadata.place_type || '');
+      fillField('field-asset-type', metadata.asset_type || '');
+      fillField('field-disposition-status', metadata.disposition_status || '');
+      fillField('field-procedure-type', metadata.procedure_type || '');
+      renderList();
+    }
+
+    async function loadDetail(memoryId) {
+      if (!memoryId) return;
+      const detail = await request(`/memories/${encodeURIComponent(memoryId)}`);
+      if (detail.item) {
+        populateEditor(detail.item);
+        setStatus(`已加载 ${memoryId}`);
+      }
+    }
+
+    function buildPayload() {
+      return {
+        title: document.getElementById('field-title').value.trim(),
+        content: document.getElementById('field-content').value.trim(),
+        folder_id: null,
+        bucket: PAGE_MODE,
+        memory_type: document.getElementById('field-memory-type').value,
+        status: document.getElementById('field-status').value,
+        person_id: document.getElementById('field-person-id').value.trim() || null,
+        core_tags: fromCsv(document.getElementById('field-core-tags').value),
+        diffusion_tags: fromCsv(document.getElementById('field-diffusion-tags').value),
+        opposing_tags: fromCsv(document.getElementById('field-opposing-tags').value),
+        related_people: fromCsv(document.getElementById('field-related-people').value),
+        relation_memory_ids: fromCsv(document.getElementById('field-relation-memory-ids').value),
+        relation_aliases: fromCsv(document.getElementById('field-relation-aliases').value),
+        event_start_at: Number(document.getElementById('field-event-start').value || 0),
+        event_end_at: Number(document.getElementById('field-event-end').value || 0),
+        knowledge_type: document.getElementById('field-knowledge-type').value.trim(),
+        address_or_coord: document.getElementById('field-address').value.trim(),
+        place_type: document.getElementById('field-place-type').value.trim(),
+        asset_type: document.getElementById('field-asset-type').value.trim(),
+        disposition_status: document.getElementById('field-disposition-status').value.trim(),
+        procedure_type: document.getElementById('field-procedure-type').value.trim()
+      };
+    }
+
+    async function saveMemory(event) {
+      event.preventDefault();
+      const payload = buildPayload();
+      if (!payload.title) {
+        setStatus('标题不能为空', true);
+        return;
+      }
+      if (!payload.content) {
+        setStatus('正文不能为空', true);
+        return;
+      }
+
+      try {
+        const memoryId = document.getElementById('memory-id').value;
+        const path = memoryId ? `/memories/${encodeURIComponent(memoryId)}` : '/memories';
+        const method = memoryId ? 'PUT' : 'POST';
+        const detail = await request(path, { method, body: JSON.stringify(payload) });
+        if (detail.item) {
+          populateEditor(detail.item);
+        }
+        await loadFolders();
+        await loadStatus();
+        await loadList();
+        setStatus(memoryId ? '记忆已更新' : '记忆已创建');
+      } catch (error) {
+        setStatus(`保存失败：${error.message}`, true);
+      }
+    }
+
+    async function removeMemory(hard) {
+      const memoryId = document.getElementById('memory-id').value;
+      if (!memoryId) {
+        setStatus('请先选择一条记忆', true);
+        return;
+      }
+      const confirmed = window.confirm(hard ? '确认硬删除这条记忆？该操作不可恢复。' : '确认软删除这条记忆？');
+      if (!confirmed) return;
+      try {
+        await request(`/memories/${encodeURIComponent(memoryId)}?hard=${String(hard)}`, { method: 'DELETE' });
+        resetForm();
+        await loadStatus();
+        await loadList(false);
+        setStatus(hard ? '已硬删除' : '已软删除');
+      } catch (error) {
+        setStatus(`删除失败：${error.message}`, true);
+      }
+    }
+
+    document.getElementById('refresh-button').addEventListener('click', async () => {
+      try {
+        await loadStatus();
+        await loadList();
+        setStatus('列表已刷新');
+      } catch (error) {
+        setStatus(`刷新失败：${error.message}`, true);
+      }
+    });
+
+    document.getElementById('create-button').addEventListener('click', resetForm);
+    document.getElementById('reset-button').addEventListener('click', resetForm);
+    document.getElementById('soft-delete-button').addEventListener('click', () => removeMemory(false));
+    document.getElementById('hard-delete-button').addEventListener('click', () => removeMemory(true));
+    form.addEventListener('submit', saveMemory);
+
+    [filterFolder, filterType, filterStatus, filterDeleted].forEach((node) => {
+      node.addEventListener('change', async () => {
+        try {
+          await loadStatus();
+          await loadList(false);
+        } catch (error) {
+          setStatus(`筛选失败：${error.message}`, true);
+        }
+      });
+    });
+
+    let keywordTimer = null;
+    filterKeyword.addEventListener('input', () => {
+      window.clearTimeout(keywordTimer);
+      keywordTimer = window.setTimeout(async () => {
+        try {
+          await loadList(false);
+        } catch (error) {
+          setStatus(`搜索失败：${error.message}`, true);
+        }
+      }, 220);
+    });
+
+    async function boot() {
+      try {
+        document.getElementById('page-heading').textContent = PAGE_LABEL;
+        document.getElementById('page-subtitle').textContent = PAGE_MODE === 'knowledge'
+          ? '知识库页面固定操作 knowledge bucket，适合维护知识条目、知识类型与状态。'
+          : '常规记忆页面固定操作 memory bucket，适合维护人物、事件、地点、资产和流程类记忆。';
+        document.getElementById('hero-helper').textContent = PAGE_MODE === 'knowledge'
+          ? '知识库页不再暴露 bucket/folder，重点通过 type、status 与关键词管理知识条目。'
+          : '常规记忆页不再暴露 bucket/folder，重点通过 type、status 与关键词管理长期记忆。';
+        document.getElementById('nav-memory').classList.toggle('active', PAGE_MODE === 'memory');
+        document.getElementById('nav-knowledge').classList.toggle('active', PAGE_MODE === 'knowledge');
+        document.getElementById('field-memory-type').disabled = PAGE_MODE === 'knowledge';
+        if (PAGE_MODE === 'knowledge') {
+          document.getElementById('filter-type').value = 'knowledge';
+          document.getElementById('field-memory-type').value = 'knowledge';
+        }
+        await loadStatus();
+        await loadList(false);
+        resetForm();
+        setStatus('后台已准备就绪');
+      } catch (error) {
+        setStatus(`初始化失败：${error.message}`, true);
+      }
+    }
+
+    boot();
+  </script>
+</body>
+</html>

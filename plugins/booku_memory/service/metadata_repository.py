@@ -60,6 +60,9 @@ class BookuMemoryRecord:
 class BookuMemoryMetadataRepository:
     """Booku Memory 的 SQLAlchemy + PluginDatabase 元数据仓储。"""
 
+    _MEMORY_BUCKET: str = "memory"
+    _KNOWLEDGE_BUCKET: str = "knowledge"
+
     def __init__(self, db_path: str) -> None:
         """初始化仓储。
 
@@ -72,6 +75,7 @@ class BookuMemoryMetadataRepository:
         """初始化数据库（建表）。"""
         await self._db.initialize()
         await self._ensure_schema_columns()
+        await self._migrate_legacy_bucket_values()
 
     async def close(self) -> None:
         """关闭底层 PluginDatabase 连接并清理资源。
@@ -110,7 +114,7 @@ class BookuMemoryMetadataRepository:
             memory_id=row.memory_id,
             title=row.title or "",
             folder_id=row.folder_id,
-            bucket=row.bucket,
+            bucket=self._normalize_bucket_value(row.bucket),
             content=row.content,
             source=row.source,
             memory_type=str(getattr(row, "memory_type", "knowledge") or "knowledge"),
@@ -128,7 +132,7 @@ class BookuMemoryMetadataRepository:
             disposition_status=str(getattr(row, "disposition_status", "") or ""),
             procedure_type=str(getattr(row, "procedure_type", "") or ""),
             novelty_energy=float(row.novelty_energy),
-            is_archived=bool(row.is_archived),
+            is_archived=self._is_archived_status(getattr(row, "status", "active")),
             is_deleted=bool(row.is_deleted),
             deleted_at=float(row.deleted_at) if row.deleted_at else 0.0,
             created_at=float(row.created_at),
@@ -166,6 +170,22 @@ class BookuMemoryMetadataRepository:
         normalized = [str(item).strip() for item in values or [] if str(item).strip()]
         return json.dumps(normalized, ensure_ascii=False)
 
+    @classmethod
+    def _normalize_bucket_value(cls, bucket: str | None) -> str:
+        """将 bucket 归一化为仅允许的 memory/knowledge 两值。"""
+
+        normalized = str(bucket or "").strip().lower()
+        if normalized == cls._KNOWLEDGE_BUCKET:
+            return cls._KNOWLEDGE_BUCKET
+        return cls._MEMORY_BUCKET
+
+    @staticmethod
+    def _is_archived_status(status: str | None) -> bool:
+        """判断状态是否代表已归档。"""
+
+        normalized = str(status or "").strip().lower()
+        return normalized in {"archived", "expired"}
+
     async def _ensure_schema_columns(self) -> None:
         """为历史数据库补齐新版本所需列。"""
         required_columns: dict[str, str] = {
@@ -196,6 +216,43 @@ class BookuMemoryMetadataRepository:
                 await s.execute(
                     text(f"ALTER TABLE booku_memory_records ADD COLUMN {name} {ddl}")
                 )
+
+    async def _migrate_legacy_bucket_values(self) -> None:
+        """将历史 bucket 值收敛到 memory/knowledge。"""
+
+        async with self._db.session() as s:
+            await s.execute(
+                text(
+                    """
+                    UPDATE booku_memory_records
+                    SET
+                        status = CASE
+                            WHEN bucket = 'archived' AND (status IS NULL OR status = '' OR status = 'active')
+                                THEN 'archived'
+                            ELSE status
+                        END,
+                        bucket = CASE
+                            WHEN bucket = 'knowledge' THEN 'knowledge'
+                            ELSE 'memory'
+                        END,
+                        is_archived = CASE
+                            WHEN lower(COALESCE(
+                                CASE
+                                    WHEN bucket = 'archived' AND (status IS NULL OR status = '' OR status = 'active')
+                                        THEN 'archived'
+                                    ELSE status
+                                END,
+                                'active'
+                            )) IN ('archived', 'expired') THEN 1
+                            ELSE 0
+                        END
+                    WHERE bucket NOT IN ('knowledge', 'memory')
+                       OR bucket IS NULL
+                       OR bucket = ''
+                       OR (bucket = 'archived' AND (status IS NULL OR status = '' OR status = 'active'))
+                    """
+                )
+            )
 
     # ------------------------------------------------------------------
     # 写入 / upsert
@@ -249,7 +306,9 @@ class BookuMemoryMetadataRepository:
             opposing_tags: 对立标签列表。
         """
         now = time.time()
-        is_archived = 1 if bucket == "archived" else 0
+        normalized_bucket = self._normalize_bucket_value(bucket)
+        normalized_status = str(status or "active").strip().lower() or "active"
+        is_archived = 1 if self._is_archived_status(normalized_status) else 0
 
         async with self._db.session() as s:
             # 保留已有记录的 created_at
@@ -265,11 +324,11 @@ class BookuMemoryMetadataRepository:
                 memory_id=memory_id,
                 title=title,
                 folder_id=folder_id,
-                bucket=bucket,
+                bucket=normalized_bucket,
                 content=content,
                 source=source,
                 memory_type=memory_type,
-                status=status,
+                status=normalized_status,
                 person_id=person_id,
                 relation_memory_ids=self._dump_json_list(relation_memory_ids),
                 relation_aliases=self._dump_json_list(relation_aliases),
@@ -295,11 +354,11 @@ class BookuMemoryMetadataRepository:
                 set_=dict(
                     title=title,
                     folder_id=folder_id,
-                    bucket=bucket,
+                    bucket=normalized_bucket,
                     content=content,
                     source=source,
                     memory_type=memory_type,
-                    status=status,
+                    status=normalized_status,
                     person_id=person_id,
                     relation_memory_ids=self._dump_json_list(relation_memory_ids),
                     relation_aliases=self._dump_json_list(relation_aliases),
@@ -474,14 +533,14 @@ class BookuMemoryMetadataRepository:
             if source is not None:
                 update_vals["source"] = source
             if bucket is not None:
-                update_vals["bucket"] = bucket
-                update_vals["is_archived"] = 1 if bucket == "archived" else 0
+                update_vals["bucket"] = self._normalize_bucket_value(bucket)
             if folder_id is not None:
                 update_vals["folder_id"] = folder_id
             if memory_type is not None:
                 update_vals["memory_type"] = memory_type
             if status is not None:
                 update_vals["status"] = status
+                update_vals["is_archived"] = 1 if self._is_archived_status(status) else 0
             if person_id is not None:
                 update_vals["person_id"] = person_id
             if relation_memory_ids is not None:
@@ -551,7 +610,7 @@ class BookuMemoryMetadataRepository:
             stmt = update(R).where(R.memory_id.in_(memory_ids), R.is_deleted == 0)
             if folder_id is not None:
                 stmt = stmt.where(R.folder_id == folder_id)
-            stmt = stmt.values(bucket="archived", is_archived=1, updated_at=now)
+            stmt = stmt.values(bucket=self._MEMORY_BUCKET, status="archived", is_archived=1, updated_at=now)
             result = await s.execute(stmt)
             return int(getattr(result, "rowcount", 0) or 0)
 
@@ -580,8 +639,7 @@ class BookuMemoryMetadataRepository:
         now = time.time()
         update_vals: dict[str, Any] = {"updated_at": now}
         if to_bucket is not None:
-            update_vals["bucket"] = to_bucket
-            update_vals["is_archived"] = 1 if to_bucket == "archived" else 0
+            update_vals["bucket"] = self._normalize_bucket_value(to_bucket)
         if to_folder_id is not None:
             update_vals["folder_id"] = to_folder_id
         if len(update_vals) == 1:
@@ -681,7 +739,7 @@ class BookuMemoryMetadataRepository:
             self._db.query(BookuMemoryRecordModel)
             .filter(
                 folder_id=folder_id,
-                bucket="emergent",
+                bucket=self._MEMORY_BUCKET,
                 created_at__lt=before_timestamp,
                 is_deleted=0,
             )
@@ -702,9 +760,9 @@ class BookuMemoryMetadataRepository:
             include_deleted: 是否包含软删除的记录，默认 False。
 
         Returns:
-            ``{bucket_name: count}`` 字典，默认包含 inherent、emergent、archived三个键。
+            ``{bucket_name: count}`` 字典，默认包含 memory、knowledge 两个键。
         """
-        counts: dict[str, int] = {"inherent": 0, "emergent": 0, "archived": 0}
+        counts: dict[str, int] = {"memory": 0, "knowledge": 0}
         R = BookuMemoryRecordModel
         async with self._db.session() as s:
             stmt = (
@@ -717,7 +775,7 @@ class BookuMemoryMetadataRepository:
             if not include_deleted:
                 stmt = stmt.where(R.is_deleted == 0)
             for bucket, cnt in (await s.execute(stmt)).all():
-                key = str(bucket)
+                key = self._normalize_bucket_value(str(bucket))
                 counts[key] = counts.get(key, 0) + int(cnt)
         return counts
 
@@ -744,7 +802,7 @@ class BookuMemoryMetadataRepository:
         if folder_id is not None:
             qb = qb.filter(folder_id=folder_id)
         if not include_archived:
-            qb = qb.filter(bucket__ne="archived")
+            qb = qb.filter(status__ne="archived")
         if not include_deleted:
             qb = qb.filter(is_deleted=0)
         rows = await qb.order_by("-updated_at").limit(max(1, limit)).all()
@@ -792,7 +850,7 @@ class BookuMemoryMetadataRepository:
         为避免全表扫描，结果按 updated_at 倒序并截断到 limit。
 
         Args:
-            bucket: 目标 bucket（如 "emergent"、"archived"、"inherent"）。
+            bucket: 目标 bucket（仅支持 "memory"、"knowledge"）。
             folder_id: 限定文件夹；为 None 时不限定。
             limit: 最大返回条数，至少为 1。
             include_deleted: 是否包含已删除记录，默认 False。
@@ -800,8 +858,9 @@ class BookuMemoryMetadataRepository:
         Returns:
             满足条件的 ``BookuMemoryRecord`` 列表（按 updated_at 倒序）。
         """
+        normalized_bucket = self._normalize_bucket_value(bucket)
 
-        qb = self._db.query(BookuMemoryRecordModel).filter(bucket=bucket)
+        qb = self._db.query(BookuMemoryRecordModel).filter(bucket=normalized_bucket)
         if folder_id is not None:
             qb = qb.filter(folder_id=folder_id)
         if not include_deleted:
@@ -861,12 +920,12 @@ class BookuMemoryMetadataRepository:
         return [tags[row.memory_id] for row in rows if row.memory_id in tags]
 
     async def list_distinct_folder_ids(self) -> list[str]:
-        """返回数据库中所有非 inherent 桶的不重复 folder_id 列表（不含已删除记录中的孤立 folder）。"""
+        """返回数据库中所有常规记忆的不重复 folder_id 列表。"""
         R = BookuMemoryRecordModel
         async with self._db.session() as s:
             stmt = (
                 select(distinct(R.folder_id))
-                .where(R.bucket != "inherent", R.is_deleted == 0)
+                .where(R.bucket == self._MEMORY_BUCKET, R.is_deleted == 0)
                 .order_by(R.folder_id)
             )
             rows = (await s.execute(stmt)).scalars().all()
@@ -915,7 +974,7 @@ class BookuMemoryMetadataRepository:
         """
         qb = self._db.query(BookuMemoryRecordModel).filter(folder_id=folder_id)
         if not include_archived:
-            qb = qb.filter(bucket__ne="archived")
+            qb = qb.filter(status__ne="archived")
         if not include_deleted:
             qb = qb.filter(is_deleted=0)
         rows = await qb.order_by("-updated_at").limit(max(1, limit)).all()
@@ -986,7 +1045,7 @@ class BookuMemoryMetadataRepository:
                 if folder_id is not None:
                     where_parts.append(R.folder_id == folder_id)
                 if not include_archived:
-                    where_parts.append(R.bucket != "archived")
+                    where_parts.append(R.status.not_in(["archived", "expired"]))
                 if not include_deleted:
                     where_parts.append(R.is_deleted == 0)
 
@@ -1040,7 +1099,7 @@ class BookuMemoryMetadataRepository:
             if folder_id is not None:
                 where_parts_like.append(R.folder_id == folder_id)
             if not include_archived:
-                where_parts_like.append(R.bucket != "archived")
+                where_parts_like.append(R.status.not_in(["archived", "expired"]))
             if not include_deleted:
                 where_parts_like.append(R.is_deleted == 0)
 
