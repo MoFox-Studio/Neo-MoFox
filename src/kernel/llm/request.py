@@ -12,7 +12,6 @@ LLMRequest 支持：
 from __future__ import annotations
 
 import asyncio
-import math
 from dataclasses import dataclass, field
 from typing import Any, Self
 
@@ -29,7 +28,6 @@ from .policy.base import Policy
 from .response import LLMResponse
 from .roles import ROLE
 from .types import ModelEntry, ModelSet, RequestType
-from .token_counter import count_payload_tokens
 
 
 logger = get_logger("kernel.llm.request", display="LLM 请求")
@@ -161,91 +159,6 @@ class LLMRequest:
             self.payloads.append(payload)
         return self
 
-    def _compute_effective_context_budget(self, model: ModelEntry) -> int | None:
-        """计算在考虑上下文保留策略后的有效上下文预算。
-
-        1. 从 model.max_context 获取模型的最大上下文长度。
-        2. 从 model.extra_params 中获取 context_reserve_tokens 和 context_reserve_ratio。
-        3. 计算固定保留和比例保留，取两者的最大值作为总保留。
-        4. 有效预算 = max_context - reserve，确保至少为 1。
-        """
-        # 验证 max_context
-        max_context = model.get("max_context")
-        if not isinstance(max_context, int) or max_context <= 0:
-            return None
-
-        # 验证 extra_params
-        extra_params = model.get("extra_params")
-        if not isinstance(extra_params, dict):
-            extra_params = {}
-
-        # 计算保留的上下文长度
-        reserve_tokens = extra_params.get("context_reserve_tokens")
-        fixed_reserve = (
-            reserve_tokens
-            if isinstance(reserve_tokens, int) and reserve_tokens > 0
-            else 0
-        )
-
-        # 计算比例保留的上下文长度
-        reserve_ratio = extra_params.get("context_reserve_ratio")
-        ratio = 0.0
-        if isinstance(reserve_ratio, (int, float)):
-            ratio = max(0.0, float(reserve_ratio))
-        ratio_reserve = int(math.floor(max_context * ratio))
-
-        # 取固定保留和比例保留的最大值作为总保留
-        reserve = max(fixed_reserve, ratio_reserve)
-
-        # 计算有效预算
-        effective_budget = max_context - reserve
-        return effective_budget if effective_budget > 0 else 1
-
-    def _maybe_trim_payloads_for_model(
-        self, payloads: list[LLMPayload], model: ModelEntry
-    ) -> list[LLMPayload]:
-        """
-        根据模型的上下文限制和保留策略，裁剪 payloads 以适应当前模型。
-        """
-        if not self.context_manager:
-            return payloads
-        
-        budget = self._compute_effective_context_budget(model)
-        model_identifier = model.get("model_identifier")
-
-        # 如果无法计算有效预算，或者 model_identifier 无效，则直接使用 context_manager 的默认裁剪逻辑（基于 max_payloads）。
-        if (
-            budget is None
-            or not isinstance(model_identifier, str)
-            or not model_identifier
-        ):
-            return self.context_manager.maybe_trim(payloads)
-
-        try:
-            # 首先快速检查当前 payloads 是否已经在预算内，如果是，则直接返回（避免不必要的裁剪和 token 计数）。
-            if (
-                count_payload_tokens(payloads, model_identifier=model_identifier)
-                <= budget
-            ):
-                return self.context_manager.maybe_trim(payloads)
-        except RuntimeError:
-            return self.context_manager.maybe_trim(payloads)
-
-        def token_counter(items: list[LLMPayload]) -> int:
-            """
-            计算给定 payloads 的 token 数量。
-            """
-            try:
-                return count_payload_tokens(items, model_identifier=model_identifier)
-            except RuntimeError:
-                return 0
-
-        return self.context_manager.maybe_trim(
-            payloads,
-            max_token_budget=budget,
-            token_counter=token_counter,
-        )
-
     async def send(
         self, auto_append_response: bool = True, *, stream: bool = True
     ) -> LLMResponse:
@@ -288,7 +201,13 @@ class LLMRequest:
 
             # 根据当前模型的上下文限制和保留策略，裁剪 payloads 以适应当前模型
             # 注意：裁剪结果仅用于本次请求，不回写 self.payloads，避免重试时基于已裁剪的结果再裁剪
-            trimmed_payloads = self._maybe_trim_payloads_for_model(payloads, model)
+            trimmed_payloads = list(payloads)
+            if self.context_manager is not None:
+                trimmed_payloads = await self.context_manager.prepare_payloads_for_model(
+                    trimmed_payloads,
+                    model,
+                    request=self,
+                )
 
             # 严格上下文校验：不允许带着不完整/不合法的 tool 链路发起请求。
             # 该错误属于“本地逻辑错误”，不应进入重试链。

@@ -487,9 +487,7 @@ class MediaManager:
                 return None
 
             # 创建 VLM 请求
-            context_manager = LLMContextManager(
-                max_payloads=3,
-            )
+            context_manager = LLMContextManager()
             request = create_llm_request(
                 self._vlm_model_set,
                 "image_recognition",

@@ -103,6 +103,18 @@ class TestBaseChatter:
 
         reset_system_reminder_store()
 
+    def test_create_request_enables_default_context_compression(self, mock_plugin):
+        """测试 create_request 默认启用基于 token 的上下文压缩。"""
+        chatter = ConcreteChatter("stream_123", mock_plugin)
+
+        with patch("src.core.config.get_model_config") as mock_model_config:
+            mock_model_config.return_value.get_task.return_value = []
+
+            request = chatter.create_request("actor")
+
+        assert request.context_manager is not None
+        assert request.context_manager.context_compression_handler is not None
+
     def test_create_request_registers_dynamic_system_reminder(self, mock_plugin):
         """测试 dynamic reminder 会跟随最后一个 USER。"""
         chatter = ConcreteChatter("stream_123", mock_plugin)
@@ -111,11 +123,8 @@ class TestBaseChatter:
         store = get_system_reminder_store()
         store.set("actor", "goal", "跟随最后一条", insert_type=SystemReminderInsertType.DYNAMIC)
 
-        with patch("src.core.config.get_model_config") as mock_model_config, patch(
-            "src.core.config.get_core_config"
-        ) as mock_core_config:
+        with patch("src.core.config.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
-            mock_core_config.return_value.chat.max_llm_messages = 10
 
             request = chatter.create_request("actor", with_reminder="actor")
 
@@ -131,11 +140,8 @@ class TestBaseChatter:
         store = get_system_reminder_store()
         store.set("actor", "goal", "先给结论")
 
-        with patch("src.core.config.get_model_config") as mock_model_config, patch(
-            "src.core.config.get_core_config"
-        ) as mock_core_config:
+        with patch("src.core.config.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
-            mock_core_config.return_value.chat.max_llm_messages = 10
 
             request = chatter.create_request("actor", with_reminder="actor")
 

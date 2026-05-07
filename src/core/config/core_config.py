@@ -204,15 +204,6 @@ class CoreConfig(ConfigBase):
             input_type="slider",
             hint="保留在运行态历史中的消息数量",
         )
-        max_llm_messages: int = Field(
-            default=20,
-            ge=0,
-            description="单次 LLM 请求允许携带的最大消息数，设为 0 表示不限制",
-            label="最大 LLM 消息数",
-            tag="ai",
-            input_type="slider",
-            hint="设为 0 表示不限制 LLM 请求消息数",
-        )
         image_recognition_prompt: str = Field(
             default="",
             description="自定义识图提示词，留空则使用内置默认提示词",
@@ -768,7 +759,7 @@ def _inject_kernel_llm_policy(config: CoreConfig) -> None:
 
 
 def _migrate_legacy_chat_context_config(config_path: Path) -> None:
-    """迁移旧的 chat.max_context_size 到拆分后的配置字段。"""
+    """迁移旧的 chat.max_context_size 到新的历史上下文字段。"""
     import tomllib
 
     with config_path.open("rb") as file:
@@ -780,7 +771,6 @@ def _migrate_legacy_chat_context_config(config_path: Path) -> None:
 
     legacy_value = chat_config.pop("max_context_size")
     chat_config.setdefault("max_history_messages", legacy_value)
-    chat_config.setdefault("max_llm_messages", legacy_value)
 
     from src.kernel.config.core import _merge_with_model_defaults, _render_toml_with_signature
 

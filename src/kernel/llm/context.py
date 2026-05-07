@@ -2,21 +2,36 @@
 
 from __future__ import annotations
 
+import math
 import uuid
+from collections.abc import Awaitable
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from src.core.prompt import SystemReminderInsertType
+from src.kernel.logger import get_logger
 
 from .payload import LLMPayload
 from .payload.content import Content, Text
 from .payload.tooling import LLMUsable, ToolCall, ToolResult
 from .roles import ROLE
 from .exceptions import LLMContextError
+from .token_counter import count_payload_tokens
+from .types import ModelEntry
 
-CompressionHook = Callable[[list[list[LLMPayload]], list[LLMPayload]], list[LLMPayload]]
+if TYPE_CHECKING:
+    from .request import LLMRequest
+
 TokenCounter = Callable[[list[LLMPayload]], int]
+AsyncContextCompressionHandler = Callable[
+    ["LLMRequest", list[list[LLMPayload]], list[LLMPayload], ModelEntry],
+    Awaitable[list[LLMPayload]],
+]
+
+logger = get_logger("kernel.llm.context", display="LLM 上下文")
+
+CONTEXT_COMPRESSION_TRIGGER_RATIO = 0.95
 
 
 @dataclass(slots=True, frozen=True)
@@ -45,13 +60,12 @@ class LLMContextManager:
     1. 接管 payload 列表写入（add_payload/system/tool）；
     2. 接管 reminder 的延迟登记；
     3. 在写入后执行结构校验（strict，不做自动修复）；
-    4. 最后按 max_payloads/token_budget 执行裁剪。
+    4. 最后按 token_budget 执行裁剪。
 
     对于 reminder：固定注入到“首个真实 USER 消息的首段”；若尚无 USER，则继续等待后续 USER。
     """
 
-    max_payloads: int | None = None
-    compression_hook: CompressionHook | None = None
+    context_compression_handler: AsyncContextCompressionHandler | None = None
     _reminders: list[RegisteredReminder] | None = None
     _reminder_sources: list[RegisteredReminderSource] | None = None
 
@@ -389,24 +403,15 @@ class LLMContextManager:
         token_counter: TokenCounter | None = None,
     ) -> list[LLMPayload]:
         """
-        根据 max_payloads 和 max_token_budget 对 payloads 进行裁剪。
+        根据 max_token_budget 对 payloads 进行裁剪。
 
         裁剪策略：
         1. 保留开头的系统/工具消息（pinned prefix）。
         2. 将剩余消息按用户/助手对话分组，整体裁剪掉较早的对话组。
-        3. 如果提供了 compression_hook，则在裁剪掉一批对话组后，调用该 hook 生成压缩后的消息，并将其插入剩余消息的开头。
-        4. 如果 max_token_budget 仍然超出，则继续裁剪剩余的对话组，直到满足预算。
+        3. 如果 max_token_budget 仍然超出，则继续裁剪剩余的对话组，直到满足预算。
         """
 
         trimmed = payloads
-
-        # 首先根据 max_payloads 进行裁剪
-        if (
-            self.max_payloads is not None
-            and self.max_payloads > 0
-            and len(trimmed) > self.max_payloads
-        ):
-            trimmed = self._trim_by_payloads(trimmed, self.max_payloads)
 
         # 然后根据 max_token_budget 进行裁剪
         if (
@@ -418,6 +423,131 @@ class LLMContextManager:
             trimmed = self._trim_by_tokens(trimmed, max_token_budget, token_counter)
 
         return trimmed
+
+    async def prepare_payloads_for_model(
+        self,
+        payloads: list[LLMPayload],
+        model: ModelEntry,
+        *,
+        request: LLMRequest | None = None,
+    ) -> list[LLMPayload]:
+        """在发送前按模型上下文限制执行压缩与裁剪。"""
+
+        prepared = await self._maybe_compress_payloads(payloads, model, request=request)
+
+        budget = self._compute_effective_context_budget(model)
+        model_identifier = model.get("model_identifier")
+        if budget is None or not isinstance(model_identifier, str) or not model_identifier:
+            return prepared
+
+        try:
+            if count_payload_tokens(prepared, model_identifier=model_identifier) <= budget:
+                return prepared
+        except RuntimeError:
+            return prepared
+
+        def token_counter(items: list[LLMPayload]) -> int:
+            try:
+                return count_payload_tokens(items, model_identifier=model_identifier)
+            except RuntimeError:
+                return 0
+
+        return self.maybe_trim(
+            prepared,
+            max_token_budget=budget,
+            token_counter=token_counter,
+        )
+
+    def _compute_effective_context_budget(self, model: ModelEntry) -> int | None:
+        """计算在上下文保留策略生效后的有效 token 预算。"""
+
+        max_context = model.get("max_context")
+        if not isinstance(max_context, int) or max_context <= 0:
+            return None
+
+        extra_params = model.get("extra_params")
+        if not isinstance(extra_params, dict):
+            extra_params = {}
+
+        reserve_tokens = extra_params.get("context_reserve_tokens")
+        fixed_reserve = reserve_tokens if isinstance(reserve_tokens, int) and reserve_tokens > 0 else 0
+
+        reserve_ratio = extra_params.get("context_reserve_ratio")
+        ratio = max(0.0, float(reserve_ratio)) if isinstance(reserve_ratio, (int, float)) else 0.0
+        ratio_reserve = int(math.floor(max_context * ratio))
+
+        effective_budget = max_context - max(fixed_reserve, ratio_reserve)
+        return effective_budget if effective_budget > 0 else 1
+
+    async def _maybe_compress_payloads(
+        self,
+        payloads: list[LLMPayload],
+        model: ModelEntry,
+        *,
+        request: LLMRequest | None = None,
+    ) -> list[LLMPayload]:
+        """在发送前根据模型上下文占用率决定是否压缩历史对话。"""
+
+        if not self.context_compression_handler or request is None:
+            return payloads
+
+        model_identifier = model.get("model_identifier")
+        max_context = model.get("max_context")
+        if (
+            not isinstance(model_identifier, str)
+            or not model_identifier
+            or not isinstance(max_context, int)
+            or max_context <= 0
+        ):
+            return payloads
+
+        try:
+            total_tokens = count_payload_tokens(payloads, model_identifier=model_identifier)
+        except RuntimeError:
+            return payloads
+
+        compression_trigger = max(1, int(math.floor(max_context * CONTEXT_COMPRESSION_TRIGGER_RATIO)))
+        if total_tokens < compression_trigger:
+            return payloads
+
+        pinned, tail = self._split_pinned_prefix(payloads)
+        groups = self._build_qa_groups(tail)
+        if not groups:
+            return payloads
+
+        def token_counter(items: list[LLMPayload]) -> int:
+            try:
+                return count_payload_tokens(items, model_identifier=model_identifier)
+            except RuntimeError:
+                return 0
+
+        kept_groups = list(groups)
+        dropped_groups: list[list[LLMPayload]] = []
+        while len(kept_groups) > 1:
+            candidate = pinned + self._flatten_groups(kept_groups)
+            if token_counter(candidate) < compression_trigger:
+                break
+            dropped_groups.append(kept_groups.pop(0))
+
+        if not dropped_groups:
+            return payloads
+
+        remaining_payloads = self._flatten_groups(kept_groups)
+        try:
+            summary_payloads = await self.context_compression_handler(
+                request,
+                dropped_groups,
+                remaining_payloads,
+                model,
+            )
+        except Exception as exc:
+            logger.warning(f"上下文压缩失败，跳过压缩并继续原请求: {exc}")
+            return payloads
+
+        if not summary_payloads:
+            return payloads
+
+        return pinned + summary_payloads + remaining_payloads
 
     def _trim_by_tokens(
         self,
@@ -444,56 +574,7 @@ class LLMContextManager:
                 break
             dropped_groups.append(kept_groups.pop(0))
 
-        remaining_payloads = self._flatten_groups(kept_groups)
-
-        # 如果提供了 compression_hook，则在裁剪掉一批对话组后，调用该 hook 生成压缩后的消息，并将其插入剩余消息的开头
-        hook_payloads = self._apply_compression_hook(dropped_groups, remaining_payloads)
-        if hook_payloads:
-            combined = pinned + hook_payloads + remaining_payloads
-            while len(kept_groups) > 1 and token_counter(combined) > token_budget:
-                kept_groups.pop(0)
-                remaining_payloads = self._flatten_groups(kept_groups)
-                combined = pinned + hook_payloads + remaining_payloads
-            return combined
-
-        return pinned + remaining_payloads
-
-    def _trim_by_payloads(
-        self, payloads: list[LLMPayload], max_payloads: int
-    ) -> list[LLMPayload]:
-        """
-        根据 max_payloads 对 payloads 进行裁剪
-        """
-        pinned, tail = self._split_pinned_prefix(payloads)
-        groups = self._build_qa_groups(tail)
-        if not groups:
-            return payloads
-
-        kept_groups = list(groups)
-        dropped_groups: list[list[LLMPayload]] = []
-
-        # 先尝试直接裁剪对话组，保留 pinned 和尽可能多的对话组，直到满足 max_payloads 约束
-        while (
-            len(kept_groups) > 1
-            and self._payload_len(pinned, kept_groups) > max_payloads
-        ):
-            dropped_groups.append(kept_groups.pop(0))
-
-        remaining_payloads = self._flatten_groups(kept_groups)
-
-        # 如果提供了 compression_hook，则在裁剪掉一批对话组后，调用该 hook 生成压缩后的消息，并将其插入剩余消息的开头
-        hook_payloads = self._apply_compression_hook(dropped_groups, remaining_payloads)
-        if hook_payloads:
-            remaining_payloads = self._flatten_groups(kept_groups)
-
-        # 最后检查一次总长度，如果仍然超出 max_payloads，则继续裁剪剩余的对话组，直到满足约束
-        while len(kept_groups) > 1 and (
-            len(pinned) + len(hook_payloads) + len(remaining_payloads) > max_payloads
-        ):
-            kept_groups.pop(0)
-            remaining_payloads = self._flatten_groups(kept_groups)
-
-        return pinned + hook_payloads + remaining_payloads
+        return pinned + self._flatten_groups(kept_groups)
 
     def _split_pinned_prefix(
         self, payloads: list[LLMPayload]
@@ -538,24 +619,6 @@ class LLMContextManager:
 
         return groups
 
-    def _apply_compression_hook(
-        self,
-        dropped_groups: list[list[LLMPayload]],
-        remaining_payloads: list[LLMPayload],
-    ) -> list[LLMPayload]:
-        """调用压缩 hook 生成压缩后的消息"""
-        if not self.compression_hook or not dropped_groups:
-            return []
-        return self.compression_hook(dropped_groups, remaining_payloads)
-
     def _flatten_groups(self, groups: list[list[LLMPayload]]) -> list[LLMPayload]:
         """将分组扁平化为单一列表"""
         return [payload for group in groups for payload in group]
-
-    def _payload_len(
-        self, pinned: list[LLMPayload], groups: list[list[LLMPayload]]
-    ) -> int:
-        """
-        计算有效负载的总长度，包括 pinned 消息和对话组消息
-        """
-        return len(pinned) + sum(len(group) for group in groups)

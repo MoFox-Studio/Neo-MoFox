@@ -57,7 +57,6 @@ class DefaultChatterRuntime(Protocol):
         self,
         task: str = "actor",
         request_name: str = "",
-        max_context: int | None = None,
         with_reminder: str | None = None,
     ) -> LLMRequest:
         """创建 LLM 请求。"""
@@ -153,7 +152,6 @@ class SupportsRequestCreation(Protocol):
         self,
         task: str = "actor",
         request_name: str = "",
-        max_context: int | None = None,
         with_reminder: str | None = None,
     ) -> LLMRequest:
         """创建 LLM 请求。"""

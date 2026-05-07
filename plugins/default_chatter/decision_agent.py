@@ -104,7 +104,6 @@ async def decide_should_respond(
         request = chatter.create_request(
             "sub_actor",
             "sub_agent",
-            max_context=5,
             with_reminder="sub_actor",
         )
     except (ValueError, KeyError):

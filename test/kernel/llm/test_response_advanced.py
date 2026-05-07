@@ -16,7 +16,7 @@ import pytest
 from src.kernel.llm.exceptions import LLMError
 from src.kernel.llm.context import LLMContextManager
 from src.kernel.llm.model_client.base import StreamEvent
-from src.kernel.llm.payload import LLMPayload, Text, ToolResult
+from src.kernel.llm.payload import LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.request import LLMRequest
 from src.kernel.llm.response import LLMResponse, _ToolCallAccumulator
 from src.kernel.llm.roles import ROLE
@@ -448,7 +448,7 @@ async def test_response_add_payload_uses_context_manager_add_payload() -> None:
 
     class SpyManager(LLMContextManager):
         def __init__(self) -> None:
-            super().__init__(max_payloads=20)
+            super().__init__()
             self.called = False
 
         def add_payload(self, payloads, payload, position=None):
@@ -461,7 +461,16 @@ async def test_response_add_payload_uses_context_manager_add_payload() -> None:
         _stream=None,
         _upper=req,
         _auto_append_response=False,
-        payloads=[LLMPayload(ROLE.USER, Text("first"))],
+        payloads=[
+            LLMPayload(ROLE.USER, Text("first")),
+            LLMPayload(
+                ROLE.ASSISTANT,
+                [
+                    ToolCall(id="call_1", name="tool_a", args={}),
+                    ToolCall(id="call_2", name="tool_b", args={}),
+                ],
+            ),
+        ],
         model_set=req.model_set,
         context_manager=manager,
     )
@@ -477,7 +486,7 @@ async def test_response_add_call_reflex_uses_context_manager_add_payload() -> No
 
     class SpyManager(LLMContextManager):
         def __init__(self) -> None:
-            super().__init__(max_payloads=20)
+            super().__init__()
             self.called_count = 0
 
         def add_payload(self, payloads, payload, position=None):
@@ -490,7 +499,16 @@ async def test_response_add_call_reflex_uses_context_manager_add_payload() -> No
         _stream=None,
         _upper=req,
         _auto_append_response=False,
-        payloads=[LLMPayload(ROLE.USER, Text("first"))],
+        payloads=[
+            LLMPayload(ROLE.USER, Text("first")),
+            LLMPayload(
+                ROLE.ASSISTANT,
+                [
+                    ToolCall(id="call_1", name="tool_a", args={}),
+                    ToolCall(id="call_2", name="tool_b", args={}),
+                ],
+            ),
+        ],
         model_set=req.model_set,
         context_manager=manager,
     )

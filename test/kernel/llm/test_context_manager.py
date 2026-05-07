@@ -39,7 +39,7 @@ def dummy_model() -> dict[str, Any]:
 
 
 def test_context_manager_trims_full_groups() -> None:
-    manager = LLMContextManager(max_payloads=5)
+    manager = LLMContextManager()
     payloads = [
         LLMPayload(ROLE.SYSTEM, Text("sys")),
         LLMPayload(ROLE.TOOL, DummyTool),
@@ -50,7 +50,11 @@ def test_context_manager_trims_full_groups() -> None:
         LLMPayload(ROLE.ASSISTANT, Text("a2")),
     ]
 
-    trimmed = manager.maybe_trim(payloads)
+    trimmed = manager.maybe_trim(
+        payloads,
+        max_token_budget=45,
+        token_counter=lambda items: len(items) * 10,
+    )
 
     assert len(trimmed) == 4
     assert trimmed[0].role == ROLE.SYSTEM
@@ -60,37 +64,10 @@ def test_context_manager_trims_full_groups() -> None:
     assert trimmed[3].role == ROLE.ASSISTANT
 
 
-def test_context_manager_applies_hook() -> None:
-    called = {"value": False}
-
-    def hook(dropped_groups, remaining_payloads):
-        called["value"] = True
-        return [LLMPayload(ROLE.ASSISTANT, Text("summary"))]
-
-    manager = LLMContextManager(max_payloads=4, compression_hook=hook)
-    payloads = [
-        LLMPayload(ROLE.SYSTEM, Text("sys")),
-        LLMPayload(ROLE.USER, Text("q1")),
-        LLMPayload(ROLE.ASSISTANT, Text("a1")),
-        LLMPayload(ROLE.USER, Text("q2")),
-        LLMPayload(ROLE.ASSISTANT, Text("a2")),
-    ]
-
-    trimmed = manager.maybe_trim(payloads)
-
-    assert called["value"] is True
-    assert len(trimmed) == 4
-    assert trimmed[0].role == ROLE.SYSTEM
-    assert trimmed[1].role == ROLE.ASSISTANT
-    assert trimmed[1].content[0].text == "summary"
-    assert trimmed[2].role == ROLE.USER
-    assert trimmed[2].content[0].text == "q2"
-
-
 def test_llm_request_uses_custom_context_manager() -> None:
     class CustomManager(LLMContextManager):
         def __init__(self) -> None:
-            super().__init__(max_payloads=10)
+            super().__init__()
             self.called = False
 
         def maybe_trim(self, payloads: list[LLMPayload]) -> list[LLMPayload]:
@@ -105,7 +82,7 @@ def test_llm_request_uses_custom_context_manager() -> None:
 
 
 def test_context_manager_trims_by_token_budget() -> None:
-    manager = LLMContextManager(max_payloads=10)
+    manager = LLMContextManager()
     payloads = [
         LLMPayload(ROLE.USER, Text("q1")),
         LLMPayload(ROLE.ASSISTANT, Text("a1")),
@@ -128,8 +105,36 @@ def test_context_manager_trims_by_token_budget() -> None:
     assert trimmed[1].role == ROLE.ASSISTANT
 
 
+@pytest.mark.asyncio
+async def test_context_manager_prepare_payloads_for_model_applies_budget(monkeypatch) -> None:
+    manager = LLMContextManager()
+    payloads = [
+        LLMPayload(ROLE.USER, Text("q1")),
+        LLMPayload(ROLE.ASSISTANT, Text("a1")),
+        LLMPayload(ROLE.USER, Text("q2")),
+        LLMPayload(ROLE.ASSISTANT, Text("a2")),
+        LLMPayload(ROLE.USER, Text("q3")),
+        LLMPayload(ROLE.ASSISTANT, Text("a3")),
+    ]
+
+    monkeypatch.setattr(
+        "src.kernel.llm.context.count_payload_tokens",
+        lambda items, model_identifier=None: len(items) * 10,
+    )
+
+    prepared = await manager.prepare_payloads_for_model(
+        payloads,
+        {**dummy_model(), "max_context": 25},
+    )
+
+    assert len(prepared) == 2
+    assert prepared[0].role == ROLE.USER
+    assert prepared[0].content[0].text == "q3"
+    assert prepared[1].role == ROLE.ASSISTANT
+
+
 def test_context_manager_system_tool_equivalent_add_payload() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads: list[LLMPayload] = []
 
     payloads = manager.system(payloads, Text("sys"))
@@ -142,7 +147,7 @@ def test_context_manager_system_tool_equivalent_add_payload() -> None:
 
 
 def test_context_manager_reminder_only_registers_until_next_payload() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads = [LLMPayload(ROLE.SYSTEM, Text("sys"))]
 
     manager.reminder("你必须先输出结论")
@@ -158,7 +163,7 @@ def test_context_manager_reminder_only_registers_until_next_payload() -> None:
 
 
 def test_context_manager_register_reminder_defers_until_first_user() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads: list[LLMPayload] = []
 
     manager.reminder("先给结论")
@@ -176,7 +181,7 @@ def test_context_manager_register_reminder_defers_until_first_user() -> None:
 
 
 def test_context_manager_reminder_wraps_system_text() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads: list[LLMPayload] = []
 
     manager.reminder("[goal]\n先给结论", wrap_with_system_tag=True)
@@ -192,7 +197,7 @@ def test_context_manager_reminder_wraps_system_text() -> None:
 
 
 def test_context_manager_reminder_waits_through_tool_until_first_user() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads = [LLMPayload(ROLE.SYSTEM, Text("sys"))]
 
     manager.reminder("先给结论", wrap_with_system_tag=True)
@@ -210,7 +215,7 @@ def test_context_manager_reminder_waits_through_tool_until_first_user() -> None:
 
 
 def test_context_manager_dynamic_reminder_targets_last_user() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads = [LLMPayload(ROLE.USER, Text("第一条"))]
 
     manager.reminder("跟进最近一条", insert_type=SystemReminderInsertType.DYNAMIC)
@@ -224,7 +229,7 @@ def test_context_manager_dynamic_reminder_targets_last_user() -> None:
 
 
 def test_context_manager_dynamic_reminder_moves_to_new_last_user() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads: list[LLMPayload] = []
 
     manager.reminder("只跟最后一条", insert_type=SystemReminderInsertType.DYNAMIC)
@@ -242,7 +247,7 @@ def test_context_manager_dynamic_reminder_moves_to_new_last_user() -> None:
 
 
 def test_context_manager_fixed_and_dynamic_reminders_target_different_users() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads: list[LLMPayload] = []
 
     manager.reminder("固定开头")
@@ -263,7 +268,7 @@ def test_context_manager_reminder_bucket_refreshes_updated_dynamic_content() -> 
     store = get_system_reminder_store()
     store.set("actor", "screen", "第一次", insert_type=SystemReminderInsertType.DYNAMIC)
 
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads: list[LLMPayload] = []
     manager.reminder_bucket("actor", wrap_with_system_tag=True)
 
@@ -282,7 +287,7 @@ def test_context_manager_reminder_bucket_refreshes_updated_dynamic_content() -> 
 
 
 def test_context_manager_defers_missing_tool_result_placeholder_at_tail() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads = [LLMPayload(ROLE.USER, Text("帮我调用工具"))]
 
     payloads = manager.add_payload(
@@ -302,7 +307,7 @@ def test_context_manager_defers_missing_tool_result_placeholder_at_tail() -> Non
 
 
 def test_context_manager_keeps_multiple_tool_results_in_merged_payload() -> None:
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads = [LLMPayload(ROLE.USER, Text("请执行两个工具"))]
 
     payloads = manager.add_payload(
@@ -347,7 +352,7 @@ def test_context_manager_keeps_multiple_tool_results_in_merged_payload() -> None
 
 def test_context_manager_raises_when_tool_chain_is_broken_by_new_user() -> None:
     """strict 模式下：不自动补齐 tool_result；若 tool_calls 未闭合就进入下一条 USER，应直接报错。"""
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads = [LLMPayload(ROLE.USER, Text("帮我调用工具"))]
 
     payloads = manager.add_payload(
@@ -367,7 +372,7 @@ def test_context_manager_raises_when_tool_chain_is_broken_by_new_user() -> None:
 
 def test_context_manager_raises_when_user_follows_tool_result_without_assistant() -> None:
     """strict 模式下：TOOL_RESULT 后必须由 ASSISTANT 承接；否则直接报错。"""
-    manager = LLMContextManager(max_payloads=20)
+    manager = LLMContextManager()
     payloads = [LLMPayload(ROLE.USER, Text("先调用工具"))]
 
     payloads = manager.add_payload(

@@ -85,12 +85,10 @@ async def test_decide_should_respond_requests_sub_actor_reminder(
             self,
             task: str = "actor",
             request_name: str = "",
-            max_context: int | None = None,
             with_reminder: str | None = None,
         ) -> _FakeResponse:
             captured["task"] = task
             captured["request_name"] = request_name
-            captured["max_context"] = max_context
             captured["with_reminder"] = with_reminder
             return _FakeResponse()
 
@@ -115,6 +113,5 @@ async def test_decide_should_respond_requests_sub_actor_reminder(
     assert captured == {
         "task": "sub_actor",
         "request_name": "sub_agent",
-        "max_context": 5,
         "with_reminder": "sub_actor",
     }

@@ -118,10 +118,9 @@ class _FakeChatter:
         self,
         task: str = "actor",
         request_name: str = "",
-        max_context: int | None = None,
         with_reminder: str | None = None,
     ) -> _FakeResponse:
-        _ = (request_name, max_context)
+        _ = request_name
         self.create_request_calls.append((task, with_reminder))
         return self._response
 

@@ -229,7 +229,7 @@ def test_llm_request_add_payload_uses_context_manager_add() -> None:
 
     class SpyManager(LLMContextManager):
         def __init__(self) -> None:
-            super().__init__(max_payloads=20)
+            super().__init__()
             self.called = False
 
         def add_payload(self, payloads, payload, position=None):
