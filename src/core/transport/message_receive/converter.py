@@ -132,12 +132,9 @@ class MessageConverter:
         
         # 如果解析过程中发现有媒体资源，则后续需要考虑是否运行视觉语言模型识别
         if result.media:
-            # 提前提取 stream_id 用于判断是否跳过 VLM
+            # 提前提取 stream_id 以供逐项过滤 VLM
             stream_id = extract_stream_id(message_info)
-            if self._should_skip_vlm_for_stream(stream_id):
-                logger.debug(f"聊天流 {stream_id[:8]} 已注册跳过 VLM 识别，保留原始媒体数据")
-            else:
-                result = await self._recognize_media_with_manager(result)
+            result = await self._recognize_media_with_manager(result, stream_id)
 
         # 确定消息类型
         # 根据最终解析结果决定消息类型，比如 TEXT/IMAGE 等
@@ -586,28 +583,38 @@ class MessageConverter:
 
         return type_mapping.get(first_media_type, MessageType.UNKNOWN)
 
-    async def _recognize_media_with_manager(self, result: _ParseResult) -> _ParseResult:
+    async def _recognize_media_with_manager(
+        self,
+        result: _ParseResult,
+        stream_id: str,
+    ) -> _ParseResult:
         """使用 MediaManager 识别媒体内容（图片、表情包、语音）并更新文本描述。
-        
+
         Args:
             result: 解析结果
-            
+            stream_id: 聊天流 ID，用于逐项查询 ``should_skip_vlm`` 跳过选定类型的 VLM 识别
+
         Returns:
             更新后的解析结果
         """
         try:
             # 延迟导入避免循环依赖
             from src.core.managers.media_manager import get_media_manager
-            
+
             manager = get_media_manager()
-            
-            # 收集需要识别的媒体（图片、表情包、语音）
+
+            # 收集需要识别的媒体（图片、表情包、语音），逐项过滤已注册跳过的类型
             media_to_recognize = []
             voice_to_recognize = []
             for i, media in enumerate(result.media):
-                if media["type"] in ("image", "emoji"):
+                media_type = media["type"]
+                if media_type in ("image", "emoji"):
+                    if manager.should_skip_vlm(stream_id, media_type):
+                        continue
                     media_to_recognize.append((i, media))
-                elif media["type"] == "voice":
+                elif media_type == "voice":
+                    if manager.should_skip_vlm(stream_id, media_type):
+                        continue
                     voice_to_recognize.append((i, media))
             
             # 早退策略：没有待识别媒体就直接返回原结果
@@ -674,23 +681,6 @@ class MessageConverter:
             logger.error(f"MediaManager 识别失败: {e}", exc_info=True)
         
         return result
-    
-    @staticmethod
-    def _should_skip_vlm_for_stream(stream_id: str) -> bool:
-        """检查指定聊天流是否已注册跳过 VLM 识别。
-
-        Args:
-            stream_id: 聊天流 ID
-
-        Returns:
-            True 表示应跳过 VLM 识别
-        """
-        # 如果查询发生异常则安全起见返回 False
-        try:
-            from src.core.managers.media_manager import get_media_manager
-            return get_media_manager().should_skip_vlm(stream_id)
-        except Exception:
-            return False
 
     @staticmethod
     def _build_content(result: _ParseResult, message_type: MessageType) -> str | Any:
