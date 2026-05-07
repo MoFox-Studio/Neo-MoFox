@@ -10,10 +10,11 @@ from src.core.components.base import Wait, WaitResumeEvent, Success, Failure, St
 from src.core.models.message import Message
 from src.core.models.stream import ChatStream
 from src.kernel.logger import Logger
-from src.kernel.llm import LLMPayload, ROLE, Text
+from src.kernel.llm import LLMPayload, ROLE, Text, Content, LLMUsable
 
 from .type_defs import DefaultChatterRuntime, LLMConversationState, LLMResponseLike
 from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
+from .multimodal import ImageBudget, build_multimodal_content, extract_images_from_messages
 
 # LLM 返回纯文本（非 tool call）时的最大重试次数
 _MAX_PLAIN_TEXT_RETRIES = 0
@@ -186,6 +187,42 @@ def _transition(
     rt.phase = to_phase
 
 
+def _append_unread_user_payload(
+    response: LLMConversationState,
+    chatter: DefaultChatterRuntime,
+    formatted_text: str,
+    unread_msgs: list[Message],
+    native_multimodal: bool,
+    image_budget: ImageBudget,
+    logger: Logger,
+) -> None:
+    """将未读消息 payload 追加到 response。"""
+    content_list: list[Content | LLMUsable]
+    if native_multimodal and not image_budget.is_exhausted():
+        images = extract_images_from_messages(unread_msgs, image_budget.remaining)
+        content_list = build_multimodal_content(formatted_text, images)
+        image_budget.consume(len(images))
+        if images:
+            logger.debug(f"已提取 {len(images)} 张图片, 剩余图片配额 {image_budget.remaining}")
+    else:
+        content_list = [Text(formatted_text)]
+
+    # 尝试合并到最后一个 USER payload
+    if response.payloads and response.payloads[-1].role == ROLE.USER:
+        last_payload = response.payloads[-1]
+        if last_payload.content and isinstance(last_payload.content[-1], Text) and isinstance(content_list[0], Text):
+            # 两个文本可以合并
+            existing_text = last_payload.content[-1].text
+            last_payload.content[-1] = Text(f"{existing_text}\n{content_list[0].text}")
+            last_payload.content.extend(content_list[1:])
+        else:
+            # 直接追加
+            last_payload.content.extend(content_list)
+    else:
+        # 创建新 USER payload
+        response.add_payload(LLMPayload(ROLE.USER, content_list))
+
+
 async def run_enhanced(
     chatter: DefaultChatterRuntime,
     chat_stream: ChatStream,
@@ -195,8 +232,23 @@ async def run_enhanced(
     suspend_text: str,
     enable_action_suspend: bool = True,
     enable_cooldown: bool = False,
+    native_multimodal: bool = False,
+    max_images_per_payload: int = 4,
 ) -> AsyncGenerator[Wait | Success | Failure | Stop, WaitResumeEvent | None]:
-    """enhanced 模式执行流程。"""
+    """enhanced 模式执行流程。
+
+    Args:
+        native_multimodal: 启用后将 image 媒体以 base64 直接打包进 USER payload，
+            同时为当前 stream 持久注册 "image" 类型的 VLM 跳过（表情包 emoji 仍由框架
+            VLM 生成描述，受益于哈希缓存）。注册后**不会在执行结束后取消**，
+            防止该 stream 下一条图片在执行间隙被 VLM 处理。
+        max_images_per_payload: 单次 payload 的总图片配额。
+    """
+    if native_multimodal:
+        from src.core.managers.media_manager import get_media_manager
+        get_media_manager().skip_vlm_for_stream(chat_stream.stream_id, ["image"])
+        logger.debug(f"已为 stream {chat_stream.stream_id[:8]} 注册跳过 image 类型的 VLM 识别")
+
     try:
         request = chatter.create_request("actor", with_reminder="actor")
     except (ValueError, KeyError) as error:
@@ -209,6 +261,8 @@ async def run_enhanced(
 
     history_text = chatter._build_enhanced_history_text(chat_stream)
     usable_map = await chatter.inject_usables(request)
+
+    image_budget = ImageBudget(total_max=max_images_per_payload)
 
     rt = _EnhancedWorkflowRuntime(
         response=request,
@@ -289,9 +343,14 @@ async def run_enhanced(
                 resume_event = yield Wait()
                 continue
 
-            chatter._upsert_pending_unread_payload(
+            _append_unread_user_payload(
                 response=rt.response,
+                chatter=chatter,
                 formatted_text=unread_user_prompt,
+                unread_msgs=unread_msgs,
+                native_multimodal=native_multimodal,
+                image_budget=image_budget,
+                logger=logger,
             )
             _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.MODEL_TURN, logger=logger, reason="accepted unread batch")
 

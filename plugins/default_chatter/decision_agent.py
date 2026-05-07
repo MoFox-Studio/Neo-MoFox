@@ -110,11 +110,12 @@ async def decide_should_respond(
         return {"should_respond": True, "reason": "未找到 sub_actor 配置，默认响应"}
 
     nickname = get_core_config().personality.nickname
+    bot_id = chat_stream.bot_id or ""
     tmpl = get_prompt_manager().get_template("default_chatter_sub_agent_prompt")
     if tmpl:
-        sub_prompt = await tmpl.set("nickname", nickname).build()
+        sub_prompt = await tmpl.set("nickname", nickname).set("bot_id", bot_id).build()
     else:
-        sub_prompt = fallback_prompt.format(nickname=nickname)
+        sub_prompt = fallback_prompt.format(nickname=nickname, bot_id=bot_id)
 
     request.add_payload(LLMPayload(ROLE.SYSTEM, Text(sub_prompt)))
 
