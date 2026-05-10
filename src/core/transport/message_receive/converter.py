@@ -229,11 +229,20 @@ class MessageConverter:
                 })
         else:
             # 文本 / 混合消息
-            text = message.processed_plain_text or (
-                message.content if isinstance(message.content, str) else ""
-            )
-            if text:
-                seg_list.append({"type": "text", "data": text})
+            if isinstance(message.content, list):
+                for segment in message.content:
+                    if not isinstance(segment, dict):
+                        continue
+                    segment_type = segment.get("type")
+                    if not isinstance(segment_type, str) or not segment_type:
+                        continue
+                    seg_list.append(segment)  # type: ignore[arg-type]
+            else:
+                text = message.processed_plain_text or (
+                    message.content if isinstance(message.content, str) else ""
+                )
+                if text:
+                    seg_list.append({"type": "text", "data": text})
 
         # 构建额外媒体段（来自 extra["media"]）
         media_list: list[dict[str, Any]] = message.extra.get("media", [])

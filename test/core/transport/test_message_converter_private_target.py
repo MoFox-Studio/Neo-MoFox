@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -65,3 +66,82 @@ async def test_message_to_envelope_private_target_prefers_stream_person(monkeypa
     assert user_info.get("user_nickname") == "NeoBot"
     fake_stream_manager.get_stream_info.assert_awaited_once_with("stream-private-1")
     helper.person_crud.get_by.assert_awaited_once_with(person_id="hash_person_888")
+
+
+@pytest.mark.asyncio
+async def test_message_to_envelope_preserves_ordered_content_segments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """发送结构化段列表时应保留 text/at/text 的原始顺序。"""
+    converter = MessageConverter()
+    fake_stream_manager = SimpleNamespace(
+        get_stream_info=AsyncMock(return_value={
+            "group_id": "group-1",
+            "group_name": "测试群",
+        })
+    )
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: fake_stream_manager,
+    )
+    ordered_segments: list[dict[str, Any]] = [
+        {"type": "text", "data": "你好 "},
+        {"type": "at", "data": "user-123"},
+        {"type": "text", "data": " 吃了吗"},
+    ]
+    message = Message(
+        message_id="m-segments",
+        content=ordered_segments,
+        processed_plain_text="你好 @user-123 吃了吗",
+        message_type=MessageType.TEXT,
+        sender_id="bot-001",
+        sender_name="NeoBot",
+        platform="qq",
+        chat_type="group",
+        stream_id="stream-group-1",
+        group_id="group-1",
+        group_name="测试群",
+    )
+
+    envelope = await converter.message_to_envelope(message)
+
+    assert envelope.get("message_segment") == ordered_segments
+
+
+@pytest.mark.asyncio
+async def test_message_to_envelope_keeps_string_content_with_at_user_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """at_user_id 旧路径应保留字符串正文并前置 at 段。"""
+    converter = MessageConverter()
+    fake_stream_manager = SimpleNamespace(
+        get_stream_info=AsyncMock(return_value={
+            "group_id": "group-1",
+            "group_name": "测试群",
+        })
+    )
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: fake_stream_manager,
+    )
+    message = Message(
+        message_id="m-at-string",
+        content="hello world",
+        processed_plain_text="hello world",
+        message_type=MessageType.TEXT,
+        sender_id="bot-001",
+        sender_name="NeoBot",
+        platform="qq",
+        chat_type="group",
+        stream_id="stream-group-1",
+        group_id="group-1",
+        group_name="测试群",
+        at_user_id="user-123",
+    )
+
+    envelope = await converter.message_to_envelope(message)
+
+    assert envelope.get("message_segment") == [
+        {"type": "at", "data": "user-123"},
+        {"type": "text", "data": "hello world"},
+    ]
