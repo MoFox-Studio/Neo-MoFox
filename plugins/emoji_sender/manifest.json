@@ -1,5 +1,6 @@
 {
   "name": "emoji_sender",
+  "display_name": "表情包发送器",
   "version": "1.0.0",
   "description": "Emoji Sender — 从 media cache 随机挑选表情包，VLM 决策是否收藏并标注入库；按情感 tag + 向量检索发送表情包。",
   "author": "MoFox Team",

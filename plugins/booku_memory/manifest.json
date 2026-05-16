@@ -1,5 +1,6 @@
 {
     "name": "booku_memory",
+    "display_name": "Booku 记忆",
     "version": "1.0.0",
     "description": "命令驱动的 Booku 记忆系统插件，提供 memory_command 单工具接口",
     "author": "MoFox Team",

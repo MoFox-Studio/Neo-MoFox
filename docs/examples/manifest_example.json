@@ -1,7 +1,9 @@
 {
   "name": "example_plugin",
+  "display_name": "Example Plugin",
   "version": "1.0.0",
   "description": "示例插件，展示 manifest.json 的 include 字段用法",
+  "icon": "icon.png",
   "author": "MoFox Studio",
   "dependencies": {
     "plugins": ["my_plugin"],

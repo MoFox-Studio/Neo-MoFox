@@ -1,5 +1,6 @@
 {
     "name": "perm_plugin",
+    "display_name": "权限管理",
     "version": "1.0.0",
     "description": "系统权限管理插件，提供聊天内 /perm 命令，供机器人主人查询和修改用户权限",
     "author": "MoFox Team",

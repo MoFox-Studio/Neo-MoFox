@@ -11,17 +11,42 @@
 from __future__ import annotations
 
 import json
+import re
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from src.core.config import CORE_VERSION
 from src.kernel.logger import get_logger
 
 logger = get_logger("plugin_loader")
+
+
+_PLUGIN_DEPENDENCY_PATTERN = re.compile(
+    r"^(?P<name>[A-Za-z0-9_-]+)(?P<spec>\s*(?:===|==|!=|~=|>=|<=|>|<).+)?$"
+)
+
+
+def _split_plugin_dependency_ref(ref: str) -> tuple[str, str | None]:
+    """Split a plugin dependency reference into name and version constraint."""
+
+    value = str(ref or "").strip()
+    if not value:
+        return "", None
+
+    name, separator, remainder = value.partition(":")
+    if separator and remainder.lstrip().startswith(("===", "==", "!=", "~=", ">=", "<=", ">", "<")):
+        return name.strip(), remainder.strip() or None
+
+    match = _PLUGIN_DEPENDENCY_PATTERN.match(value)
+    if match:
+        return match.group("name"), (match.group("spec") or "").strip() or None
+
+    return value, None
 
 
 def _find_manifest_in_zip(zf: zipfile.ZipFile) -> str | None:
@@ -403,7 +428,20 @@ class PluginLoader:
             return False
 
     def _parse_plugin_ref(self, ref: str) -> str:
-        return ref.split(":")[0]
+        return _split_plugin_dependency_ref(ref)[0]
+
+    def _matches_plugin_dependency(self, dependency_version: str, version_spec: str | None) -> bool:
+        """Check whether a dependency plugin version satisfies the declared constraint."""
+
+        if not version_spec:
+            return True
+        try:
+            return Version(dependency_version) in SpecifierSet(version_spec)
+        except (InvalidSpecifier, InvalidVersion) as error:
+            logger.warning(
+                f"插件依赖版本约束无效，无法校验: version='{dependency_version}', spec='{version_spec}' - {error}"
+            )
+            return False
 
     def _prune_unloadable_plugins(
         self, manifests: dict[str, PluginManifest]
@@ -424,19 +462,33 @@ class PluginLoader:
             for name in list(loadable.keys()):
                 manifest = loadable[name]
                 deps = [
-                    self._parse_plugin_ref(dep_ref)
+                    _split_plugin_dependency_ref(dep_ref)
                     for dep_ref in manifest.dependencies.get("plugins", [])
                 ]
                 missing: list[str] = []
-                for dep in deps:
-                    if dep not in loadable:
-                        missing.append(dep)
+                incompatible: list[str] = []
+                invalid: list[str] = []
+                for dep_name, version_spec in deps:
+                    if not dep_name:
+                        invalid.append(str(version_spec or ""))
+                        continue
+                    dependency_manifest = loadable.get(dep_name)
+                    if dependency_manifest is None:
+                        missing.append(dep_name)
+                        continue
+                    if not self._matches_plugin_dependency(dependency_manifest.version, version_spec):
+                        incompatible.append(f"{dep_name}{version_spec or ''} (当前 {dependency_manifest.version})")
 
-                if missing:
+                if missing or incompatible or invalid:
                     # 依赖可能是“未发现”或“因不兼容/缺失被剔除”
-                    self._failed_plugins[name] = (
-                        "依赖插件不可用: " + ", ".join(sorted(set(missing)))
-                    )
+                    reasons: list[str] = []
+                    if missing:
+                        reasons.append("依赖插件不可用: " + ", ".join(sorted(set(missing))))
+                    if incompatible:
+                        reasons.append("依赖插件版本不满足: " + ", ".join(incompatible))
+                    if invalid:
+                        reasons.append("依赖声明无效: " + ", ".join(invalid))
+                    self._failed_plugins[name] = "；".join(reasons)
                     del loadable[name]
                     changed = True
 
@@ -666,7 +718,7 @@ class PluginDependencyResolver:
             >>> resolver._parse_plugin_ref("other_plugin")
             'other_plugin'
         """
-        return ref.split(":")[0]
+        return _split_plugin_dependency_ref(ref)[0]
 
     def clear(self) -> None:
         """清除解析器中的所有插件。

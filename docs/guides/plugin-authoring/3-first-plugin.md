@@ -89,8 +89,10 @@ plugins/
 ```json
 {
 	"name": "echo_demo",
+    "display_name": "Echo Demo",
 	"version": "1.0.0",
 	"description": "一个用于演示插件加载与命令执行的最小回显插件",
+    "icon": "icon.png",
 	"author": "MoFox Community",
 	"dependencies": {
 		"plugins": [],
