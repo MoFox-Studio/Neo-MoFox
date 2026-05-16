@@ -32,7 +32,14 @@ _PLUGIN_DEPENDENCY_PATTERN = re.compile(
 
 
 def _split_plugin_dependency_ref(ref: str) -> tuple[str, str | None]:
-    """Split a plugin dependency reference into name and version constraint."""
+    """解析插件依赖引用，返回名称和版本约束。
+
+    Args:
+        ref: 插件依赖引用字符串，例如 "plugin_name>=1.0.0"
+
+    Returns:
+        一个元组，包含插件名称和可选的版本约束字符串。
+    """
 
     value = str(ref or "").strip()
     if not value:
@@ -431,7 +438,15 @@ class PluginLoader:
         return _split_plugin_dependency_ref(ref)[0]
 
     def _matches_plugin_dependency(self, dependency_version: str, version_spec: str | None) -> bool:
-        """Check whether a dependency plugin version satisfies the declared constraint."""
+        """检查插件依赖版本是否满足约束。
+
+        Args:
+            dependency_version: 依赖插件的版本字符串
+            version_spec: 版本约束字符串，例如 ">=1.0.0"
+
+        Returns:
+            bool: 如果依赖版本满足约束，返回 True；否则返回 False
+        """
 
         if not version_spec:
             return True
