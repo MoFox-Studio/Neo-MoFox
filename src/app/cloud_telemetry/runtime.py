@@ -13,7 +13,7 @@ from .bootstrap import (
 )
 from .client import CloudTelemetryClient, CloudTelemetryClientConfig, CloudTelemetryPendingQueue
 
-CLOUD_TELEMETRY_INGEST_BASE_URL = "http://127.0.0.1:8765/_cloud_telemetry"
+CLOUD_TELEMETRY_INGEST_BASE_URL = "http://39.96.71.162:8765/_cloud_telemetry"
 
 _runtime_foundation: CloudTelemetryFoundation | None = None
 _runtime_client: CloudTelemetryClient | None = None
