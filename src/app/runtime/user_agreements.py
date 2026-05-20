@@ -103,10 +103,6 @@ def _prompt_for_choice(
         ui.display_warning("无效输入，请输入 view、agree 或 decline。")
 
 
-def _load_agreement_state(store: JSONStore) -> dict[str, Any]:
-    raise NotImplementedError
-
-
 async def _load_agreement_state_async(store: JSONStore) -> dict[str, Any]:
     state = await store.load(_STATE_FILE_NAME)
     if isinstance(state, dict):
