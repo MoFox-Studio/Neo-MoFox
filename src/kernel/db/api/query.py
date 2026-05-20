@@ -8,6 +8,7 @@
 """
 
 from collections.abc import AsyncIterator
+import time
 from typing import Any, Generic, TypeVar, Self
 
 from sqlalchemy import and_, asc, desc, func, or_, select
@@ -15,11 +16,36 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 # 导入 CRUD 辅助函数以避免重复定义
 from src.kernel.db.api.crud import _dict_to_model, _get_session_ctx, _model_to_dict
+from src.kernel.db.telemetry import record_db_operation_event
 from src.kernel.logger import get_logger
 
 logger = get_logger("database.query", display="DB Query")
 
 T = TypeVar("T", bound=Any)
+
+
+async def _record_query_operation(
+    *,
+    operation: str,
+    model_name: str,
+    started_at: float,
+    session_factory: async_sessionmaker | None,
+    success: bool,
+    result_count: int | None = None,
+    error: Exception | None = None,
+    attributes: dict[str, Any] | None = None,
+) -> None:
+    """记录 QueryBuilder/AggregateQuery 遥测。"""
+    await record_db_operation_event(
+        operation=operation,
+        model_name=model_name,
+        duration_ms=(time.perf_counter() - started_at) * 1000,
+        custom_session_factory=session_factory is not None,
+        success=success,
+        result_count=result_count,
+        error=error,
+        attributes=attributes,
+    )
 
 
 class QueryBuilder(Generic[T]):
@@ -192,32 +218,50 @@ class QueryBuilder(Generic[T]):
                     process(record)
         """
         offset = 0
+        started_at = time.perf_counter()
 
-        while True:
-            # 构建带分页的查询
-            paginated_stmt = self._stmt.offset(offset).limit(batch_size)
+        try:
+            while True:
+                paginated_stmt = self._stmt.offset(offset).limit(batch_size)
 
-            async with _get_session_ctx(self._session_factory) as session:
-                result = await session.execute(paginated_stmt)
-                instances = result.scalars().all()
+                async with _get_session_ctx(self._session_factory) as session:
+                    result = await session.execute(paginated_stmt)
+                    instances = result.scalars().all()
 
-                if not instances:
-                    # 没有更多数据
+                    if not instances:
+                        break
+
+                    instances_dicts = [_model_to_dict(inst) for inst in instances]
+
+                if as_dict:
+                    yield instances_dicts
+                else:
+                    yield [_dict_to_model(self.model, row) for row in instances_dicts]
+
+                if len(instances) < batch_size:
                     break
 
-                # 在 session 内部转换为字典列表，保证字段可用再释放连接
-                instances_dicts = [_model_to_dict(inst) for inst in instances]
+                offset += batch_size
 
-            if as_dict:
-                yield instances_dicts
-            else:
-                yield [_dict_to_model(self.model, row) for row in instances_dicts]
-
-            # 如果返回的记录数小于 batch_size，说明已经是最后一批
-            if len(instances) < batch_size:
-                break
-
-            offset += batch_size
+            await _record_query_operation(
+                operation="iter_batches",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=True,
+                attributes={"batch_size": batch_size},
+            )
+        except Exception as exc:
+            await _record_query_operation(
+                operation="iter_batches",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+                attributes={"batch_size": batch_size},
+            )
+            raise
 
     async def iter_all(
         self,
@@ -254,16 +298,35 @@ class QueryBuilder(Generic[T]):
         Returns:
             模型实例列表或字典列表
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            result = await session.execute(self._stmt)
-            instances = list(result.scalars().all())
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                result = await session.execute(self._stmt)
+                instances = list(result.scalars().all())
+                instances_dicts = [_model_to_dict(inst) for inst in instances]
 
-            # 在 session 内部转换为字典列表，此时所有字段都可安全访问
-            instances_dicts = [_model_to_dict(inst) for inst in instances]
+                await _record_query_operation(
+                    operation="all",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=len(instances_dicts),
+                )
 
-            if as_dict:
-                return instances_dicts
-            return [_dict_to_model(self.model, row) for row in instances_dicts]
+                if as_dict:
+                    return instances_dicts
+                return [_dict_to_model(self.model, row) for row in instances_dicts]
+        except Exception as exc:
+            await _record_query_operation(
+                operation="all",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+            )
+            raise
 
     async def first(self, *, as_dict: bool = False) -> T | dict[str, Any] | None:
         """获取第一条结果
@@ -274,19 +337,45 @@ class QueryBuilder(Generic[T]):
         Returns:
             模型实例、字典或 None
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            result = await session.execute(self._stmt)
-            instance = result.scalars().first()
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                result = await session.execute(self._stmt)
+                instance = result.scalars().first()
 
-            if instance is not None:
-                # 在 session 内部转换为字典，此时所有字段都可安全访问
-                instance_dict = _model_to_dict(instance)
+                if instance is not None:
+                    instance_dict = _model_to_dict(instance)
+                    await _record_query_operation(
+                        operation="first",
+                        model_name=self.model_name,
+                        started_at=started_at,
+                        session_factory=self._session_factory,
+                        success=True,
+                        result_count=1,
+                    )
+                    if as_dict:
+                        return instance_dict
+                    return _dict_to_model(self.model, instance_dict)
 
-                if as_dict:
-                    return instance_dict
-                return _dict_to_model(self.model, instance_dict)
-
-            return None
+                await _record_query_operation(
+                    operation="first",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=0,
+                )
+                return None
+        except Exception as exc:
+            await _record_query_operation(
+                operation="first",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+            )
+            raise
 
     async def count(self) -> int:
         """统计数量
@@ -295,10 +384,31 @@ class QueryBuilder(Generic[T]):
             记录数量
         """
         count_stmt = select(func.count()).select_from(self._stmt.subquery())
+        started_at = time.perf_counter()
 
-        async with _get_session_ctx(self._session_factory) as session:
-            result = await session.execute(count_stmt)
-            return result.scalar() or 0
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                result = await session.execute(count_stmt)
+                count_value = result.scalar() or 0
+                await _record_query_operation(
+                    operation="count",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=int(count_value),
+                )
+                return count_value
+        except Exception as exc:
+            await _record_query_operation(
+                operation="count",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+            )
+            raise
 
     async def exists(self) -> bool:
         """检查是否存在
@@ -323,24 +433,40 @@ class QueryBuilder(Generic[T]):
         Returns:
             (结果列表, 总数量)
         """
-        # 计算偏移量
         offset = (page - 1) * page_size
+        started_at = time.perf_counter()
 
-        # 获取总数
-        total = await self.count()
+        try:
+            total = await self.count()
+            paginated_stmt = self._stmt.offset(offset).limit(page_size)
 
-        # 获取当前页数据
-        paginated_stmt = self._stmt.offset(offset).limit(page_size)
+            async with _get_session_ctx(self._session_factory) as session:
+                result = await session.execute(paginated_stmt)
+                instances = list(result.scalars().all())
+                instances_dicts = [_model_to_dict(inst) for inst in instances]
+                items = [_dict_to_model(self.model, row) for row in instances_dicts]
 
-        async with _get_session_ctx(self._session_factory) as session:
-            result = await session.execute(paginated_stmt)
-            instances = list(result.scalars().all())
-
-            # 在 session 内部转换为字典列表
-            instances_dicts = [_model_to_dict(inst) for inst in instances]
-            items = [_dict_to_model(self.model, row) for row in instances_dicts]
-
-        return items, total  # type: ignore
+            await _record_query_operation(
+                operation="paginate",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=True,
+                result_count=len(items),
+                attributes={"page": page, "page_size": page_size, "total": total},
+            )
+            return items, total  # type: ignore
+        except Exception as exc:
+            await _record_query_operation(
+                operation="paginate",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+                attributes={"page": page, "page_size": page_size},
+            )
+            raise
 
 
 class AggregateQuery:

@@ -517,7 +517,7 @@ def _record_llm_stats(
         record = LLMRequestRecord(
             model_name=model.get("model_name", model_identifier),
             model_identifier=model_identifier,
-            api_provider=str(model.get("api_provider", "")),
+            api_provider=str(model.get("base_url") or ""),
             request_name=request_name,
             stream_id=meta_data.get("stream_id"),
             prompt_tokens=usage_data.get("prompt_tokens", 0),

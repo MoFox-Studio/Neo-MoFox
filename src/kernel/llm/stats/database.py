@@ -200,6 +200,7 @@ async def init_llm_stats(
     db_path: str = "data/llm_stats/llm_stats.db",
     enabled: bool = True,
     max_records: int = 100_000,
+    window_hours: float = 5.0,
 ) -> "LLMStatsCollector":
     """初始化 LLM 统计模块。
 
@@ -207,6 +208,7 @@ async def init_llm_stats(
         db_path: SQLite 数据库文件路径。
         enabled: 是否启用统计收集。
         max_records: 最大记录数。
+        window_hours: 聚合查询时间窗口（小时）。
 
     Returns:
         LLMStatsCollector 实例。
@@ -220,6 +222,7 @@ async def init_llm_stats(
         db_path=db_path,
         enabled=enabled,
         max_records=max_records,
+        window_hours=window_hours,
     )
     _global_db = LLMStatsDatabase(effective_config)
     await _global_db.initialize()

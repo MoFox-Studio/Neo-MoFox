@@ -146,7 +146,7 @@ def _log_anthropic_request_body(
     """将 Anthropic 请求体送入请求检视器。"""
     metadata: dict[str, object] = {}
     if isinstance(model_set, dict):
-        provider = model_set.get("api_provider") or model_set.get("client_type") or model_set.get("base_url")
+        provider = model_set.get("base_url")
         if provider is not None:
             metadata["api_provider"] = str(provider)
     if request_name:

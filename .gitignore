@@ -97,6 +97,9 @@ config/*
 plugins/*
 skill/*
 
+.agents/
+skills-lock.json
+
 !plugins/default_chatter/
 !plugins/napcat_adapter/
 !plugins/booku_memory/

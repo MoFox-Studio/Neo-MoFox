@@ -36,11 +36,15 @@ def load_ui_level_from_config(config_path: str = "config/core.toml") -> "UILevel
 async def main() -> None:
     """主函数"""
     from src.app.runtime import Bot
+    from src.app.runtime.user_agreements import ensure_startup_agreements
 
     # 从配置文件读取 UI 级别
     ui_level = load_ui_level_from_config("config/core.toml")
 
     # 创建 Bot 实例
+    if not await ensure_startup_agreements("config/core.toml", ui_level):
+        return
+
     bot = Bot(
         config_path="config/core.toml",
         plugins_dir="plugins",

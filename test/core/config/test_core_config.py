@@ -123,6 +123,34 @@ class TestPermissionSection:
         assert config.log_permission_granted is True
 
 
+class TestCloudTelemetrySection:
+    """测试云端遥测配置节。"""
+
+    def test_default_cloud_telemetry_config(self):
+        """测试默认云端遥测配置。"""
+        config = CoreConfig.CloudTelemetrySection()
+
+        assert config.client_enabled is False
+        assert config.identity_storage_dir == "data/cloud_telemetry/state"
+        assert config.pending_queue_max_bytes == 524288
+        assert config.pending_queue_max_windows == 128
+        assert config.default_heartbeat_interval_seconds == 300.0
+
+
+class TestLLMStatsSection:
+    """测试 LLM 统计配置节。"""
+
+    def test_default_llm_stats_config(self):
+        """测试默认 LLM 统计配置。"""
+
+        config = CoreConfig.LLMStatsSection()
+
+        assert config.enabled is True
+        assert config.db_path == "data/llm_stats/llm_stats.db"
+        assert config.max_records == 100000
+        assert config.window_hours == 5.0
+
+
 
 class TestChatSectionLegacyKeys:
     """测试 ChatSection 的旧字段兼容（通过 auto_update 剔除）。"""
@@ -166,6 +194,8 @@ class TestCoreConfig:
 
         assert isinstance(config.chat, CoreConfig.ChatSection)
         assert isinstance(config.llm, CoreConfig.LLMSection)
+        assert isinstance(config.telemetry, CoreConfig.TelemetrySection)
+        assert isinstance(config.cloud_telemetry, CoreConfig.CloudTelemetrySection)
         assert isinstance(config.database, CoreConfig.DatabaseSection)
         assert isinstance(config.permissions, CoreConfig.PermissionSection)
 
@@ -209,6 +239,13 @@ class TestCoreConfig:
                 max_history_messages=200,
             ),
             llm=CoreConfig.LLMSection(default_policy="round_robin"),
+            telemetry=CoreConfig.TelemetrySection(
+                enabled=True,
+                max_age_days=14,
+            ),
+            cloud_telemetry=CoreConfig.CloudTelemetrySection(
+                client_enabled=True,
+            ),
             database=CoreConfig.DatabaseSection(database_type="postgresql"),
             permissions=CoreConfig.PermissionSection(
                 owner_list=["qq:123", "telegram:456"],
@@ -221,8 +258,12 @@ class TestCoreConfig:
         assert config.chat.default_chat_mode == "priority"
         assert config.chat.max_history_messages == 200
         assert config.llm.default_policy == "round_robin"
+        assert config.telemetry.enabled is True
+        assert config.telemetry.max_age_days == 14
+        assert config.cloud_telemetry.client_enabled is True
         assert config.database.database_type == "postgresql"
         assert len(config.permissions.owner_list) == 2
+
 
 
 class TestGlobalCoreConfig:
@@ -259,6 +300,10 @@ max_context_size = 150
 [llm]
 default_policy = "round_robin"
 
+[telemetry]
+enabled = true
+max_age_days = 14
+
 [database]
 database_type = "postgresql"
 
@@ -273,6 +318,8 @@ allow_operator_promotion = true
             assert config.chat.default_chat_mode == "focus"
             assert config.chat.max_history_messages == 150
             assert config.llm.default_policy == "round_robin"
+            assert config.telemetry.enabled is True
+            assert config.telemetry.max_age_days == 14
             assert config.database.database_type == "postgresql"
             assert len(config.permissions.owner_list) == 2
             assert isinstance(create_default_policy(), RoundRobinPolicy)

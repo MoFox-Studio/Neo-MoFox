@@ -5,6 +5,7 @@
 """
 
 import operator
+import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.kernel.logger import get_logger
 
+from ..telemetry import record_db_operation_event
 from ..core.session import get_db_session
 
 logger = get_logger("database.crud", display="CRUD")
@@ -139,6 +141,30 @@ def _dict_to_model(model_class: type[T], data: dict[str, Any]) -> T:
     return instance
 
 
+async def _record_crud_operation(
+    *,
+    operation: str,
+    model_name: str,
+    started_at: float,
+    session_factory: async_sessionmaker | None,
+    success: bool,
+    result_count: int | None = None,
+    error: Exception | None = None,
+    attributes: dict[str, Any] | None = None,
+) -> None:
+    """记录 CRUD 操作遥测。"""
+    await record_db_operation_event(
+        operation=operation,
+        model_name=model_name,
+        duration_ms=(time.perf_counter() - started_at) * 1000,
+        custom_session_factory=session_factory is not None,
+        success=success,
+        result_count=result_count,
+        error=error,
+        attributes=attributes,
+    )
+
+
 class CRUDBase(Generic[T]):
     """基础 CRUD 操作类
 
@@ -166,17 +192,45 @@ class CRUDBase(Generic[T]):
         Returns:
             模型实例或 None
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            stmt = select(self.model).where(self.model.id == id)
-            result = await session.execute(stmt)
-            instance = result.scalar_one_or_none()
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                stmt = select(self.model).where(self.model.id == id)
+                result = await session.execute(stmt)
+                instance = result.scalar_one_or_none()
 
-            if instance is not None:
-                # 在会话内转换为字典，然后重建对象
-                instance_dict = _model_to_dict(instance)
-                return _dict_to_model(self.model, instance_dict)
+                if instance is not None:
+                    instance_dict = _model_to_dict(instance)
+                    typed_instance = _dict_to_model(self.model, instance_dict)
+                    await _record_crud_operation(
+                        operation="get",
+                        model_name=self.model_name,
+                        started_at=started_at,
+                        session_factory=self._session_factory,
+                        success=True,
+                        result_count=1,
+                    )
+                    return typed_instance
 
-            return None
+                await _record_crud_operation(
+                    operation="get",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=0,
+                )
+                return None
+        except Exception as exc:
+            await _record_crud_operation(
+                operation="get",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+            )
+            raise
 
     async def get_by(self, **filters: Any) -> T | None:
         """根据条件获取单条记录
@@ -187,21 +241,52 @@ class CRUDBase(Generic[T]):
         Returns:
             模型实例或 None
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            stmt = select(self.model)
-            for key, value in filters.items():
-                if hasattr(self.model, key):
-                    stmt = stmt.where(getattr(self.model, key) == value)
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                stmt = select(self.model)
+                for key, value in filters.items():
+                    if hasattr(self.model, key):
+                        stmt = stmt.where(getattr(self.model, key) == value)
 
-            result = await session.execute(stmt)
-            instance = result.scalars().first()
+                result = await session.execute(stmt)
+                instance = result.scalars().first()
 
-            if instance is not None:
-                # 在会话内转换为字典，然后重建对象
-                instance_dict = _model_to_dict(instance)
-                return _dict_to_model(self.model, instance_dict)
+                if instance is not None:
+                    instance_dict = _model_to_dict(instance)
+                    typed_instance = _dict_to_model(self.model, instance_dict)
+                    await _record_crud_operation(
+                        operation="get_by",
+                        model_name=self.model_name,
+                        started_at=started_at,
+                        session_factory=self._session_factory,
+                        success=True,
+                        result_count=1,
+                        attributes={"filter_count": len(filters)},
+                    )
+                    return typed_instance
 
-            return None
+                await _record_crud_operation(
+                    operation="get_by",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=0,
+                    attributes={"filter_count": len(filters)},
+                )
+                return None
+        except Exception as exc:
+            await _record_crud_operation(
+                operation="get_by",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+                attributes={"filter_count": len(filters)},
+            )
+            raise
 
     async def get_multi(
         self,
@@ -219,26 +304,46 @@ class CRUDBase(Generic[T]):
         Returns:
             模型实例列表
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            stmt = select(self.model)
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                stmt = select(self.model)
 
-            # 应用过滤条件
-            for key, value in filters.items():
-                if hasattr(self.model, key):
-                    if isinstance(value, list | tuple | set):
-                        stmt = stmt.where(getattr(self.model, key).in_(value))
-                    else:
-                        stmt = stmt.where(getattr(self.model, key) == value)
+                for key, value in filters.items():
+                    if hasattr(self.model, key):
+                        if isinstance(value, list | tuple | set):
+                            stmt = stmt.where(getattr(self.model, key).in_(value))
+                        else:
+                            stmt = stmt.where(getattr(self.model, key) == value)
 
-            # 应用分页
-            stmt = stmt.offset(skip).limit(limit)
+                stmt = stmt.offset(skip).limit(limit)
 
-            result = await session.execute(stmt)
-            instances = list(result.scalars().all())
+                result = await session.execute(stmt)
+                instances = list(result.scalars().all())
 
-            # 在会话内转换为字典，然后重建对象
-            instances_dicts = [_model_to_dict(inst) for inst in instances]
-            return [_dict_to_model(self.model, d) for d in instances_dicts]  # type: ignore
+                instances_dicts = [_model_to_dict(inst) for inst in instances]
+                typed_instances = [_dict_to_model(self.model, d) for d in instances_dicts]
+                await _record_crud_operation(
+                    operation="get_multi",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=len(typed_instances),
+                    attributes={"filter_count": len(filters), "limit": limit, "skip": skip},
+                )
+                return typed_instances  # type: ignore
+        except Exception as exc:
+            await _record_crud_operation(
+                operation="get_multi",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+                attributes={"filter_count": len(filters), "limit": limit, "skip": skip},
+            )
+            raise
 
     async def create(self, obj_in: dict[str, Any]) -> T:
         """创建新记录
@@ -249,15 +354,37 @@ class CRUDBase(Generic[T]):
         Returns:
             已创建的模型实例
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            instance = self.model(**obj_in)
-            session.add(instance)
-            await session.flush()
-            await session.refresh(instance)
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                instance = self.model(**obj_in)
+                session.add(instance)
+                await session.flush()
+                await session.refresh(instance)
 
-            # 在会话关闭前转换为字典
-            instance_dict = _model_to_dict(instance)
-            return _dict_to_model(self.model, instance_dict)
+                instance_dict = _model_to_dict(instance)
+                typed_instance = _dict_to_model(self.model, instance_dict)
+                await _record_crud_operation(
+                    operation="create",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=1,
+                    attributes={"field_count": len(obj_in)},
+                )
+                return typed_instance
+        except Exception as exc:
+            await _record_crud_operation(
+                operation="create",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+                attributes={"field_count": len(obj_in)},
+            )
+            raise
 
     async def update(self, id: int, obj_in: dict[str, Any]) -> T | None:
         """更新记录
@@ -269,24 +396,54 @@ class CRUDBase(Generic[T]):
         Returns:
             更新后的模型实例或 None
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            # 将实例重新加载到当前会话
-            stmt = select(self.model).where(self.model.id == id)
-            result = await session.execute(stmt)
-            db_instance = result.scalar_one_or_none()
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                stmt = select(self.model).where(self.model.id == id)
+                result = await session.execute(stmt)
+                db_instance = result.scalar_one_or_none()
 
-            if db_instance:
-                for key, value in obj_in.items():
-                    if hasattr(db_instance, key):
-                        setattr(db_instance, key, value)
-                await session.flush()
-                await session.refresh(db_instance)
+                if db_instance:
+                    for key, value in obj_in.items():
+                        if hasattr(db_instance, key):
+                            setattr(db_instance, key, value)
+                    await session.flush()
+                    await session.refresh(db_instance)
 
-                # 在会话关闭前转换为字典
-                instance_dict = _model_to_dict(db_instance)
-                return _dict_to_model(self.model, instance_dict)
+                    instance_dict = _model_to_dict(db_instance)
+                    typed_instance = _dict_to_model(self.model, instance_dict)
+                    await _record_crud_operation(
+                        operation="update",
+                        model_name=self.model_name,
+                        started_at=started_at,
+                        session_factory=self._session_factory,
+                        success=True,
+                        result_count=1,
+                        attributes={"field_count": len(obj_in)},
+                    )
+                    return typed_instance
 
-            return None
+                await _record_crud_operation(
+                    operation="update",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=0,
+                    attributes={"field_count": len(obj_in)},
+                )
+                return None
+        except Exception as exc:
+            await _record_crud_operation(
+                operation="update",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+                attributes={"field_count": len(obj_in)},
+            )
+            raise
 
     async def delete(self, id: int) -> bool:
         """删除记录
@@ -297,10 +454,31 @@ class CRUDBase(Generic[T]):
         Returns:
             是否删除成功
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            stmt = delete(self.model).where(self.model.id == id)
-            result = await session.execute(stmt)
-            return result.rowcount > 0  # type: ignore
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                stmt = delete(self.model).where(self.model.id == id)
+                result = await session.execute(stmt)
+                deleted = result.rowcount > 0  # type: ignore
+                await _record_crud_operation(
+                    operation="delete",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=int(bool(deleted)),
+                )
+                return deleted
+        except Exception as exc:
+            await _record_crud_operation(
+                operation="delete",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+            )
+            raise
 
     async def count(self, **filters: Any) -> int:
         """统计记录数
@@ -311,19 +489,41 @@ class CRUDBase(Generic[T]):
         Returns:
             记录数量
         """
-        async with _get_session_ctx(self._session_factory) as session:
-            stmt = select(func.count(self.model.id))
+        started_at = time.perf_counter()
+        try:
+            async with _get_session_ctx(self._session_factory) as session:
+                stmt = select(func.count(self.model.id))
 
-            # 应用过滤条件
-            for key, value in filters.items():
-                if hasattr(self.model, key):
-                    if isinstance(value, list | tuple | set):
-                        stmt = stmt.where(getattr(self.model, key).in_(value))
-                    else:
-                        stmt = stmt.where(getattr(self.model, key) == value)
+                for key, value in filters.items():
+                    if hasattr(self.model, key):
+                        if isinstance(value, list | tuple | set):
+                            stmt = stmt.where(getattr(self.model, key).in_(value))
+                        else:
+                            stmt = stmt.where(getattr(self.model, key) == value)
 
-            result = await session.execute(stmt)
-            return int(result.scalar() or 0)
+                result = await session.execute(stmt)
+                count_value = int(result.scalar() or 0)
+                await _record_crud_operation(
+                    operation="count",
+                    model_name=self.model_name,
+                    started_at=started_at,
+                    session_factory=self._session_factory,
+                    success=True,
+                    result_count=count_value,
+                    attributes={"filter_count": len(filters)},
+                )
+                return count_value
+        except Exception as exc:
+            await _record_crud_operation(
+                operation="count",
+                model_name=self.model_name,
+                started_at=started_at,
+                session_factory=self._session_factory,
+                success=False,
+                error=exc,
+                attributes={"filter_count": len(filters)},
+            )
+            raise
 
     async def exists(self, **filters: Any) -> bool:
         """检查记录是否存在

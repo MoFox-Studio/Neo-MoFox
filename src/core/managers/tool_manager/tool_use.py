@@ -8,6 +8,7 @@ import json
 from typing import Any, TYPE_CHECKING
 
 from src.kernel.logger import get_logger
+from src.kernel.telemetry import TelemetryEventRecord, get_telemetry_collector
 from src.core.components.registry import get_global_registry
 from src.core.components.utils import should_strip_auto_reason_argument
 
@@ -17,6 +18,47 @@ if TYPE_CHECKING:
     from src.core.models.message import Message
 
 logger = get_logger("tool_use")
+
+
+async def _record_tool_telemetry_event(
+    *,
+    signature: str,
+    tool_name: str,
+    execution_time: float,
+    cache_hit: bool,
+    status: str,
+    arg_count: int,
+    auto_reason_stripped: bool,
+    error: Exception | None = None,
+) -> None:
+    """记录工具调用摘要遥测。"""
+    collector = get_telemetry_collector()
+    if not collector.is_domain_enabled("tool"):
+        return
+
+    attributes: dict[str, Any] = {
+        "signature": signature,
+        "tool_name": tool_name,
+        "duration_ms": round(execution_time * 1000, 3),
+        "cache_hit": cache_hit,
+        "status": status,
+        "arg_count": arg_count,
+        "auto_reason_stripped": auto_reason_stripped,
+    }
+    if error is not None:
+        attributes["error_type"] = type(error).__name__
+
+    await collector.record(
+        TelemetryEventRecord(
+            domain="tool",
+            event_name="tool_invoked",
+            severity="info" if error is None and status == "success" else "error",
+            summary="tool invoked" if error is None else "tool invocation failed",
+            entity_id=signature,
+            attributes=attributes,
+            detail={"message": str(error)} if error is not None else None,
+        )
+    )
 
 
 class ToolUse:
@@ -84,6 +126,7 @@ class ToolUse:
             >>> True, "4"
         """
         start_time = time.time()
+        stripped_auto_reason = False
 
         # 从注册表获取 Tool 类
         registry = get_global_registry()
@@ -116,6 +159,15 @@ class ToolUse:
                     execution_time=execution_time,
                     cache_hit=True
                 )
+                await _record_tool_telemetry_event(
+                    signature=signature,
+                    tool_name=tool_instance.tool_name,
+                    execution_time=execution_time,
+                    cache_hit=True,
+                    status="success",
+                    arg_count=len(args_dict),
+                    auto_reason_stripped=False,
+                )
                 logger.debug(f"工具执行缓存命中: {tool_instance.tool_name}")
                 return True, cached_result
 
@@ -124,6 +176,7 @@ class ToolUse:
             # 仅剥离系统自动注入的 reason；组件原生声明 reason 时必须保留。
             if should_strip_auto_reason_argument(tool_instance.execute, kwargs):
                 kwargs.pop("reason", None)
+                stripped_auto_reason = True
 
             # 记录开始执行
             logger.debug(f"开始执行工具: {tool_instance.tool_name}, 参数: {kwargs}")
@@ -166,6 +219,17 @@ class ToolUse:
             status_emoji = "✅" if success else "❌"
             logger.info(f"{status_emoji} 工具执行完成: {tool_instance.tool_name}, 耗时: {execution_time:.2f}s")
 
+            await _record_tool_telemetry_event(
+                signature=signature,
+                tool_name=tool_instance.tool_name,
+                execution_time=execution_time,
+                cache_hit=False,
+                status="success" if success else "error",
+                arg_count=len(kwargs),
+                auto_reason_stripped=stripped_auto_reason,
+                error=None if success else RuntimeError(str(result)),
+            )
+
             return success, result
 
         except Exception as e:
@@ -181,6 +245,17 @@ class ToolUse:
                 error_message=str(e),
                 execution_time=execution_time,
                 cache_hit=False
+            )
+
+            await _record_tool_telemetry_event(
+                signature=signature,
+                tool_name=tool_instance.tool_name,
+                execution_time=execution_time,
+                cache_hit=False,
+                status="error",
+                arg_count=len(kwargs),
+                auto_reason_stripped=stripped_auto_reason,
+                error=e,
             )
 
             logger.error(f"工具执行失败 ({tool_instance.tool_name}): {e}")

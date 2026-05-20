@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.kernel.db.telemetry import record_db_lifecycle_event
 from src.kernel.logger import get_logger
 
 from .exceptions import DatabaseConnectionError, DatabaseTransactionError
@@ -118,6 +119,17 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
                 # 发生异常时回滚
                 if session.is_active:
                     await session.rollback()
+
+                await record_db_lifecycle_event(
+                    event_name="transaction_error",
+                    severity="error",
+                    summary="database transaction failed",
+                    attributes={
+                        "db_type": get_configured_db_type() or "unknown",
+                        "error_type": type(e).__name__,
+                    },
+                    detail={"message": str(e)},
+                )
                 
                 # 转换 SQLAlchemy 异常为内部异常
                 if isinstance(e, SQLAlchemyError):
@@ -126,10 +138,30 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
             finally:
                 await session.close()
     except (asyncio.TimeoutError, DatabaseConnectionError) as e:
+        await record_db_lifecycle_event(
+            event_name="connection_error",
+            severity="error",
+            summary="database connection failed",
+            attributes={
+                "db_type": get_configured_db_type() or "unknown",
+                "error_type": type(e).__name__,
+            },
+            detail={"message": str(e)},
+        )
         logger.error(f"数据库连接超时或失败: {e}")
         raise DatabaseConnectionError(f"无法连接到数据库: {e}") from e
     except Exception as e:
         if "timeout" in str(e).lower():
+             await record_db_lifecycle_event(
+                 event_name="connection_error",
+                 severity="error",
+                 summary="database operation timeout",
+                 attributes={
+                     "db_type": get_configured_db_type() or "unknown",
+                     "error_type": type(e).__name__,
+                 },
+                 detail={"message": str(e)},
+             )
              raise DatabaseConnectionError(f"数据库操作超时: {e}") from e
         raise
 

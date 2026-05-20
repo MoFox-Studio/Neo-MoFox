@@ -74,6 +74,177 @@ class LLMStatsCollector:
     def enabled(self) -> bool:
         return self._db is not None and self._db.enabled
 
+    @property
+    def window_hours(self) -> float:
+        """返回统计查询时间窗口（小时）。"""
+        if self._db is None:
+            return 5.0
+        return max(float(getattr(self._db._config, "window_hours", 5.0)), 0.0)
+
+    def _window_cutoff(self) -> float | None:
+        """返回窗口起始时间戳；0 或负数表示不限制。"""
+        if self.window_hours <= 0:
+            return None
+        return time.time() - self.window_hours * 3600
+
+    async def get_request_name_window_summary(
+        self,
+        *,
+        start_ts: float,
+        end_ts: float,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Return Top N request_name aggregates within an explicit time window."""
+
+        if not self.enabled:
+            return []
+
+        rows = await self._db.execute_read(
+            """
+            SELECT
+                timestamp,
+                model_name,
+                model_identifier,
+                api_provider,
+                request_name,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                cache_hit_tokens,
+                cache_miss_tokens,
+                cost,
+                latency,
+                success
+            FROM llm_requests
+            WHERE timestamp >= ? AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (float(start_ts), float(end_ts)),
+        )
+        if not rows:
+            return []
+
+        buckets: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            request_name = str(row.get("request_name") or "(unnamed)")
+            bucket = buckets.setdefault(
+                request_name,
+                {
+                    "request_name": request_name,
+                    "request_count": 0,
+                    "success_count": 0,
+                    "error_count": 0,
+                    "total_prompt_tokens": 0,
+                    "total_completion_tokens": 0,
+                    "total_tokens": 0,
+                    "total_cache_hit_tokens": 0,
+                    "total_cache_miss_tokens": 0,
+                    "total_cost": 0.0,
+                    "total_latency": 0.0,
+                    "first_request_at": None,
+                    "last_request_at": None,
+                    "model_identifiers": set(),
+                    "model_names": set(),
+                    "base_urls": set(),
+                },
+            )
+            timestamp = float(row.get("timestamp") or 0.0)
+            success = bool(row.get("success"))
+            bucket["request_count"] += 1
+            bucket["success_count"] += 1 if success else 0
+            bucket["error_count"] += 0 if success else 1
+            bucket["total_prompt_tokens"] += int(row.get("prompt_tokens") or 0)
+            bucket["total_completion_tokens"] += int(row.get("completion_tokens") or 0)
+            bucket["total_tokens"] += int(row.get("total_tokens") or 0)
+            bucket["total_cache_hit_tokens"] += int(row.get("cache_hit_tokens") or 0)
+            bucket["total_cache_miss_tokens"] += int(row.get("cache_miss_tokens") or 0)
+            bucket["total_cost"] += float(row.get("cost") or 0.0)
+            bucket["total_latency"] += float(row.get("latency") or 0.0)
+            bucket["first_request_at"] = (
+                timestamp
+                if bucket["first_request_at"] is None
+                else min(float(bucket["first_request_at"]), timestamp)
+            )
+            bucket["last_request_at"] = (
+                timestamp
+                if bucket["last_request_at"] is None
+                else max(float(bucket["last_request_at"]), timestamp)
+            )
+            for field_name, set_name in (
+                ("model_identifier", "model_identifiers"),
+                ("model_name", "model_names"),
+                ("api_provider", "base_urls"),
+            ):
+                value = row.get(field_name)
+                if value:
+                    bucket[set_name].add(str(value))
+
+        summaries: list[dict[str, Any]] = []
+        for bucket in buckets.values():
+            request_count = int(bucket["request_count"])
+            cache_total = (
+                int(bucket["total_cache_hit_tokens"])
+                + int(bucket["total_cache_miss_tokens"])
+            )
+            first_request_at = float(bucket["first_request_at"] or 0.0)
+            last_request_at = float(bucket["last_request_at"] or 0.0)
+            avg_interval = (
+                (last_request_at - first_request_at) / (request_count - 1)
+                if request_count > 1
+                else 0.0
+            )
+            model_identifiers = sorted(bucket["model_identifiers"])
+            summaries.append(
+                {
+                    "request_name": bucket["request_name"],
+                    "request_count": request_count,
+                    "average_request_interval_seconds": round(avg_interval, 4),
+                    "total_prompt_tokens": int(bucket["total_prompt_tokens"]),
+                    "total_completion_tokens": int(bucket["total_completion_tokens"]),
+                    "total_tokens": int(bucket["total_tokens"]),
+                    "average_prompt_tokens_per_request": round(
+                        int(bucket["total_prompt_tokens"]) / request_count,
+                        4,
+                    ),
+                    "average_completion_tokens_per_request": round(
+                        int(bucket["total_completion_tokens"]) / request_count,
+                        4,
+                    ),
+                    "average_tokens_per_request": round(
+                        int(bucket["total_tokens"]) / request_count,
+                        4,
+                    ),
+                    "average_latency": round(
+                        float(bucket["total_latency"]) / request_count,
+                        4,
+                    ),
+                    "cache_hit_rate": (
+                        int(bucket["total_cache_hit_tokens"]) / cache_total
+                        if cache_total > 0
+                        else 0.0
+                    ),
+                    "total_cache_hit_tokens": int(bucket["total_cache_hit_tokens"]),
+                    "total_cache_miss_tokens": int(bucket["total_cache_miss_tokens"]),
+                    "model_identifier": model_identifiers[0]
+                    if len(model_identifiers) == 1
+                    else "",
+                    "model_identifiers": model_identifiers,
+                    "model_names": sorted(bucket["model_names"]),
+                    "base_urls": sorted(bucket["base_urls"]),
+                    "success_rate": int(bucket["success_count"]) / request_count,
+                    "success_count": int(bucket["success_count"]),
+                    "error_count": int(bucket["error_count"]),
+                    "total_cost": round(float(bucket["total_cost"]), 6),
+                    "first_request_at": first_request_at,
+                    "last_request_at": last_request_at,
+                }
+            )
+
+        return sorted(
+            summaries,
+            key=lambda item: (-int(item["total_tokens"]), str(item["request_name"])),
+        )[: max(1, int(limit))]
+
     # ------------------------------------------------------------------
     # 写入
     # ------------------------------------------------------------------
@@ -126,6 +297,7 @@ class LLMStatsCollector:
         if not self.enabled:
             return self._empty_summary()
 
+        cutoff_ts = self._window_cutoff()
         sql = """
             SELECT
                 COUNT(*) as total_requests,
@@ -140,13 +312,18 @@ class LLMStatsCollector:
                 COALESCE(AVG(latency), 0.0) as avg_latency
             FROM llm_requests
         """
-        rows = await self._db.execute_read(sql)
+        if cutoff_ts is not None:
+            sql += " WHERE timestamp >= ?"
+            rows = await self._db.execute_read(sql, (cutoff_ts,))
+        else:
+            rows = await self._db.execute_read(sql)
         if not rows:
             return self._empty_summary()
         row = rows[0]
         total = row["total_requests"] or 0
         cache_total = (row["total_cache_hit_tokens"] or 0) + (row["total_cache_miss_tokens"] or 0)
         return {
+            "window_hours": self.window_hours,
             "total_requests": total,
             "success_count": row["success_count"] or 0,
             "error_count": row["error_count"] or 0,
@@ -174,6 +351,7 @@ class LLMStatsCollector:
         if not self.enabled:
             return []
 
+        cutoff_ts = self._window_cutoff()
         sql = """
             SELECT
                 model_name,
@@ -190,10 +368,16 @@ class LLMStatsCollector:
                 COALESCE(SUM(cost), 0.0) as total_cost,
                 COALESCE(AVG(latency), 0.0) as avg_latency
             FROM llm_requests
+        """
+        params: tuple[Any, ...] = ()
+        if cutoff_ts is not None:
+            sql += " WHERE timestamp >= ?"
+            params = (cutoff_ts,)
+        sql += """
             GROUP BY model_name, model_identifier, api_provider
             ORDER BY total_requests DESC
         """
-        rows = await self._db.execute_read(sql)
+        rows = await self._db.execute_read(sql, params)
         return [
             {
                 "model_name": r["model_name"],
@@ -225,6 +409,7 @@ class LLMStatsCollector:
         if not self.enabled:
             return []
 
+        cutoff_ts = self._window_cutoff()
         sql = """
             SELECT
                 request_name,
@@ -239,10 +424,16 @@ class LLMStatsCollector:
                 COALESCE(SUM(cost), 0.0) as total_cost,
                 COALESCE(AVG(latency), 0.0) as avg_latency
             FROM llm_requests
+        """
+        params: tuple[Any, ...] = ()
+        if cutoff_ts is not None:
+            sql += " WHERE timestamp >= ?"
+            params = (cutoff_ts,)
+        sql += """
             GROUP BY request_name
             ORDER BY total_requests DESC
         """
-        rows = await self._db.execute_read(sql)
+        rows = await self._db.execute_read(sql, params)
         return [
             {
                 "request_name": r["request_name"] or "(未命名)",
@@ -277,6 +468,7 @@ class LLMStatsCollector:
         if not self.enabled:
             return {"cache_hit_rate": 0.0, "total_cache_hit": 0, "total_cache_miss": 0}
 
+        cutoff_ts = self._window_cutoff()
         if stream_id:
             sql = """
                 SELECT
@@ -285,7 +477,11 @@ class LLMStatsCollector:
                 FROM llm_requests
                 WHERE stream_id = ?
             """
-            rows = await self._db.execute_read(sql, (stream_id,))
+            params: tuple[Any, ...] = (stream_id,)
+            if cutoff_ts is not None:
+                sql += " AND timestamp >= ?"
+                params = (stream_id, cutoff_ts)
+            rows = await self._db.execute_read(sql, params)
         else:
             sql = """
                 SELECT
@@ -293,7 +489,11 @@ class LLMStatsCollector:
                     COALESCE(SUM(cache_miss_tokens), 0) as miss
                 FROM llm_requests
             """
-            rows = await self._db.execute_read(sql)
+            if cutoff_ts is not None:
+                sql += " WHERE timestamp >= ?"
+                rows = await self._db.execute_read(sql, (cutoff_ts,))
+            else:
+                rows = await self._db.execute_read(sql)
 
         if not rows:
             return {"cache_hit_rate": 0.0, "total_cache_hit": 0, "total_cache_miss": 0}
@@ -320,6 +520,7 @@ class LLMStatsCollector:
         if not self.enabled:
             return []
 
+        cutoff_ts = self._window_cutoff()
         sql = """
             SELECT
                 stream_id,
@@ -331,10 +532,16 @@ class LLMStatsCollector:
                 COALESCE(SUM(cost), 0.0) as total_cost
             FROM llm_requests
             WHERE stream_id IS NOT NULL
+        """
+        params: tuple[Any, ...] = ()
+        if cutoff_ts is not None:
+            sql += " AND timestamp >= ?"
+            params = (cutoff_ts,)
+        sql += """
             GROUP BY stream_id
             ORDER BY total_requests DESC
         """
-        rows = await self._db.execute_read(sql)
+        rows = await self._db.execute_read(sql, params)
         result: list[dict[str, Any]] = []
         for r in rows:
             hit = r["total_cache_hit"] or 0
@@ -371,11 +578,14 @@ class LLMStatsCollector:
         if not self.enabled:
             return []
 
+        cutoff_ts = self._window_cutoff()
         sql = """
             SELECT * FROM llm_requests
-            ORDER BY timestamp DESC
-            LIMIT ? OFFSET ?
         """
+        if cutoff_ts is not None:
+            sql += " WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+            return await self._db.execute_read(sql, (cutoff_ts, limit, offset))
+        sql += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
         return await self._db.execute_read(sql, (limit, offset))
 
     # ------------------------------------------------------------------
@@ -459,6 +669,7 @@ class LLMStatsCollector:
     @staticmethod
     def _empty_summary() -> dict[str, Any]:
         return {
+            "window_hours": 5.0,
             "total_requests": 0,
             "success_count": 0,
             "error_count": 0,

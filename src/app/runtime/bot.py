@@ -11,7 +11,7 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from src.core.config import CORE_VERSION
@@ -53,7 +53,6 @@ class Bot:
 
     bot_name: str = "Neo-MoFox"
     bot_version: str = CORE_VERSION
-
     def __init__(
         self,
         config_path: str = "config/core.toml",
@@ -101,6 +100,7 @@ class Bot:
         self.load_order: list[str] = []
         self.manifests: dict[str, PluginManifest] = {}
         self.load_results: dict[str, bool] = {}
+        self._telemetry_log_unsubscribe: Any | None = None
 
         # 统计数据
         self._stats: dict[str, int | bool | dict] = {
@@ -162,7 +162,30 @@ class Bot:
                     f"Bot 初始化成功，加载了 {total} 个插件"
                 )
 
+            await self._record_telemetry_event(
+                domain="runtime",
+                event_name="initialized",
+                summary="bot initialized",
+                attributes={
+                    "loaded_plugins": loaded,
+                    "failed_plugins": failed,
+                    "version": self.bot_version,
+                },
+            )
+            await self._record_runtime_snapshot(event_name="initialize_complete")
+
         except Exception as e:
+            await self._record_telemetry_event(
+                domain="error",
+                event_name="initialization_failed",
+                severity="error",
+                summary="bot initialization failed",
+                attributes={
+                    "error_type": type(e).__name__,
+                    "phase": "initialize",
+                },
+                detail={"message": str(e)},
+            )
             self.ui.display_error(f"Initialization failed: {e}", e)
             raise BotInitializationError(str(e), "unknown") from e
 
@@ -287,6 +310,28 @@ class Bot:
         self.event_bus = get_event_bus()
         self.ui.update_phase_status("事件总线", "已初始化")
 
+        # Step 3.5: 通用遥测
+        from src.kernel.telemetry import TelemetryConfig, init_telemetry
+
+        await init_telemetry(
+            config=TelemetryConfig(
+                enabled=self.config.telemetry.enabled,
+                max_records=self.config.telemetry.max_records,
+                max_age_days=self.config.telemetry.max_age_days,
+                detail_enabled=self.config.telemetry.detail_enabled,
+                hash_salt=self.config.telemetry.hash_salt,
+                slow_query_threshold_ms=self.config.telemetry.slow_query_threshold_ms,
+                collect_error_events=self.config.telemetry.collect_error_events,
+                collect_watchdog_events=self.config.telemetry.collect_watchdog_events,
+                collect_db_metrics=self.config.telemetry.collect_db_metrics,
+                collect_plugin_events=self.config.telemetry.collect_plugin_events,
+                collect_tool_events=self.config.telemetry.collect_tool_events,
+                collect_runtime_snapshots=self.config.telemetry.collect_runtime_snapshots,
+            ),
+        )
+        self._install_telemetry_hooks()
+        self.ui.update_phase_status("遥测", "已初始化")
+
         # Step 4: Task Manager
         from src.kernel.concurrency import get_task_manager, get_watchdog
 
@@ -309,9 +354,7 @@ class Bot:
         self.ui.update_phase_status("调度器", "已初始化")
 
         # Step 6: WatchDog
-        from src.kernel.concurrency import WatchDog
-
-        self.watchdog = WatchDog()
+        self.watchdog = get_watchdog()
         self.ui.update_phase_status("看门狗", "已初始化")
 
         # Step 7: Database
@@ -376,9 +419,16 @@ class Bot:
                 db_path=self.config.llm_stats.db_path,
                 enabled=self.config.llm_stats.enabled,
                 max_records=self.config.llm_stats.max_records,
+                window_hours=self.config.llm_stats.window_hours,
             ),
         )
         self.ui.update_phase_status("LLM统计", "已初始化")
+
+        # Step 10.5: Cloud Telemetry Runtime
+        from src.app.cloud_telemetry import initialize_cloud_telemetry_runtime
+
+        await initialize_cloud_telemetry_runtime(self.config)
+        self.ui.update_phase_status("云端遥测", "已初始化")
 
     async def _preflight_llm_providers(self) -> None:
         assert self.config is not None
@@ -708,6 +758,17 @@ class Bot:
         # 启动调度器
         await self.scheduler.start()
         self._stats["scheduler_running"] = True
+
+        # 启动云端遥测客户端发送循环
+        try:
+            from src.app.cloud_telemetry import get_cloud_telemetry_client
+
+            cloud_client = get_cloud_telemetry_client()
+            if cloud_client is not None and cloud_client.enabled:
+                await cloud_client.start()
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"启动云端遥测发送循环失败: {e}")
         
         # 触发 ON_START 事件（所有初始化完成，系统即将进入运行状态）
         try:
@@ -738,6 +799,11 @@ class Bot:
 
         # 主循环
         try:
+            await self._record_telemetry_event(
+                domain="runtime",
+                event_name="run_started",
+                summary="bot run loop started",
+            )
             while self._running:
                 try:
                     # 读取并执行命令（内部使用短超时轮询）
@@ -752,9 +818,18 @@ class Bot:
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
+                    await self._record_telemetry_event(
+                        domain="error",
+                        event_name="run_loop_error",
+                        severity="error",
+                        summary="run loop error",
+                        attributes={"error_type": type(e).__name__},
+                        detail={"message": str(e)},
+                    )
                     self.logger.error(f"主循环错误: {e}", exc_info=e)
 
         finally:
+            await self._record_runtime_snapshot(event_name="run_stopped")
             command_parser.close()
 
             # 停止实时仪表盘
@@ -778,6 +853,125 @@ class Bot:
         }
 
         self.ui.update_dashboard_stats(stats)
+
+    def _install_telemetry_hooks(self) -> None:
+        """安装遥测日志订阅。"""
+        if self.event_bus is None or self._telemetry_log_unsubscribe is not None:
+            return
+
+        from src.kernel.event import EventDecision
+        from src.kernel.logger import LOG_OUTPUT_EVENT
+        from src.kernel.telemetry import (
+            TelemetryEventRecord,
+            anonymize_identifier,
+            get_telemetry_collector,
+        )
+
+        async def _on_log_output(
+            event_name: str,
+            params: dict[str, Any],
+        ) -> tuple[EventDecision, dict[str, Any]]:
+            collector = get_telemetry_collector()
+            level = str(params.get("level", "")).upper()
+            if level not in {"WARNING", "ERROR", "CRITICAL"}:
+                return (EventDecision.PASS, params)
+            if not collector.is_domain_enabled("error"):
+                return (EventDecision.PASS, params)
+
+            metadata = params.get("metadata")
+            safe_metadata = metadata if isinstance(metadata, dict) else {}
+            entity_source = (
+                safe_metadata.get("stream_id")
+                or safe_metadata.get("session_id")
+                or safe_metadata.get("user_id")
+            )
+            message = str(params.get("message", ""))
+            display = str(params.get("display", params.get("logger_name", "logger")))
+
+            await collector.record(
+                TelemetryEventRecord(
+                    domain="error",
+                    event_name="log_error" if level != "WARNING" else "log_warning",
+                    severity=level.lower(),
+                    summary=f"{level} from {display}",
+                    entity_id=anonymize_identifier(
+                        str(entity_source) if entity_source is not None else None,
+                        salt=collector.hash_salt,
+                    ),
+                    attributes={
+                        "logger_name": str(params.get("logger_name", "")),
+                        "display": display,
+                        "level": level,
+                        "message_hash": anonymize_identifier(message, salt=collector.hash_salt),
+                        "message_length": len(message),
+                        "metadata_keys": sorted(str(key) for key in safe_metadata.keys())[:20],
+                    },
+                    detail={
+                        "message": message,
+                        "metadata": safe_metadata,
+                    },
+                )
+            )
+            return (EventDecision.PASS, params)
+
+        self._telemetry_log_unsubscribe = self.event_bus.subscribe(
+            LOG_OUTPUT_EVENT,
+            _on_log_output,
+            priority=-100,
+        )
+
+    async def _record_telemetry_event(
+        self,
+        *,
+        domain: str,
+        event_name: str,
+        summary: str,
+        severity: str = "info",
+        attributes: dict[str, Any] | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """记录一条通用遥测事件。"""
+        from src.kernel.telemetry import TelemetryEventRecord, get_telemetry_collector
+
+        collector = get_telemetry_collector()
+        if not collector.is_domain_enabled(domain):
+            return
+
+        await collector.record(
+            TelemetryEventRecord(
+                domain=domain,
+                event_name=event_name,
+                summary=summary,
+                severity=severity,
+                attributes=attributes or {},
+                detail=detail,
+            )
+        )
+
+    async def _record_runtime_snapshot(self, *, event_name: str) -> None:
+        """记录运行时健康快照。"""
+        from src.core.transport.distribution.stream_loop_manager import (
+            get_stream_loop_manager,
+        )
+        from src.kernel.concurrency import get_watchdog
+
+        if self.task_manager is None:
+            return
+
+        await self._record_telemetry_event(
+            domain="runtime",
+            event_name=event_name,
+            summary="runtime snapshot",
+            attributes={
+                "bot_running": self._running,
+                "initialized": self._initialized,
+                "shutdown_requested": self._shutdown_requested,
+                "stats": dict(self._stats),
+                "task_manager": self.task_manager.get_stats(),
+                "watchdog": get_watchdog().get_stats(),
+                "stream_loop_manager": get_stream_loop_manager().get_stats(),
+            },
+        )
 
     async def reload_plugin(
         self, plugin_name: str | None = None
@@ -866,6 +1060,11 @@ class Bot:
             print("正在关闭 Neo-MoFox Bot...")
 
         try:
+            await self._record_telemetry_event(
+                domain="runtime",
+                event_name="shutdown_started",
+                summary="bot shutdown started",
+            )
             # 1. 停止接受新工作
             if self.logger:
                 self.logger.info("停止接受新任务...")
@@ -930,8 +1129,23 @@ class Bot:
             await close_all_vector_db_services()
 
             # 10.5 关闭 LLM 统计数据库
+            from src.app.cloud_telemetry import close_cloud_telemetry_runtime
+
+            await close_cloud_telemetry_runtime()
+
+            # 10.6 关闭 LLM 统计数据库
             from src.kernel.llm.stats import close_llm_stats_db
             await close_llm_stats_db()
+
+            await self._record_runtime_snapshot(event_name="shutdown_complete")
+
+            if callable(self._telemetry_log_unsubscribe):
+                self._telemetry_log_unsubscribe()
+                self._telemetry_log_unsubscribe = None
+
+            # 10.7 关闭通用遥测数据库
+            from src.kernel.telemetry import close_telemetry_db
+            await close_telemetry_db()
 
             # 11. 关闭日志系统（停止事件广播）
             from src.kernel.logger import shutdown_logger_system
@@ -941,6 +1155,14 @@ class Bot:
             self.ui.display_success("关闭完成")
 
         except Exception as e:
+            await self._record_telemetry_event(
+                domain="error",
+                event_name="shutdown_failed",
+                severity="error",
+                summary="bot shutdown failed",
+                attributes={"error_type": type(e).__name__},
+                detail={"message": str(e)},
+            )
             if self.logger:
                 self.logger.error(f"关闭过程中出错: {e}", exc_info=e)
             else:
@@ -958,11 +1180,25 @@ class Bot:
 
         except KeyboardInterrupt:
             # 用户中断
+            await self._record_telemetry_event(
+                domain="runtime",
+                event_name="keyboard_interrupt",
+                summary="bot interrupted by user",
+                severity="warning",
+            )
             if self.logger:
                 self.logger.info("用户中断")
             else:
                 print("\n[用户中断]")
         except Exception as e:
+            await self._record_telemetry_event(
+                domain="error",
+                event_name="fatal_error",
+                severity="error",
+                summary="bot fatal error",
+                attributes={"error_type": type(e).__name__},
+                detail={"message": str(e)},
+            )
             if self.logger:
                 self.logger.error(f"Bot 错误: {e}", exc_info=e)
             else:

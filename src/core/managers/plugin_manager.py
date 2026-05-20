@@ -13,12 +13,18 @@ import inspect
 import shutil
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ComponentState, ComponentType
 from src.kernel.logger import get_logger
+from src.kernel.telemetry import (
+    TelemetryEventRecord,
+    anonymize_identifier,
+    get_telemetry_collector,
+)
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -26,6 +32,58 @@ if TYPE_CHECKING:
 
 
 logger = get_logger("plugin_manager")
+
+
+async def _record_plugin_telemetry_event(
+    *,
+    plugin_name: str,
+    event_name: str,
+    summary: str,
+    severity: str = "info",
+    manifest: "PluginManifest | None" = None,
+    plugin_path: str | None = None,
+    duration_ms: float | None = None,
+    component_count: int | None = None,
+    has_config: bool | None = None,
+    stage: str | None = None,
+    error: Exception | None = None,
+) -> None:
+    """记录插件生命周期遥测事件。"""
+    collector = get_telemetry_collector()
+    if not collector.is_domain_enabled("plugin"):
+        return
+
+    source_kind = None
+    if plugin_path:
+        source_kind = "archive" if plugin_path.endswith((".zip", ".mfp")) else "folder"
+
+    attributes: dict[str, Any] = {}
+    if manifest is not None:
+        attributes["plugin_version"] = manifest.version
+    if source_kind is not None:
+        attributes["source_kind"] = source_kind
+    if duration_ms is not None:
+        attributes["duration_ms"] = round(duration_ms, 3)
+    if component_count is not None:
+        attributes["component_count"] = component_count
+    if has_config is not None:
+        attributes["has_config"] = has_config
+    if stage is not None:
+        attributes["stage"] = stage
+    if error is not None:
+        attributes["error_type"] = type(error).__name__
+
+    await collector.record(
+        TelemetryEventRecord(
+            domain="plugin",
+            event_name=event_name,
+            severity=severity,
+            summary=summary,
+            entity_id=anonymize_identifier(plugin_name, salt=collector.hash_salt),
+            attributes=attributes,
+            detail={"message": str(error)} if error is not None else None,
+        )
+    )
 
 
 class PluginManager:
@@ -60,10 +118,21 @@ class PluginManager:
     ) -> bool:
         """加载单个插件（manifest 已由 loader 宏观层校验并提供）。"""
         plugin_name = manifest.name
+        started_at = time.perf_counter()
 
         # 1. 检查是否已加载
         if plugin_name in self._loaded_plugins:
             logger.warning(f"插件 '{plugin_name}' 已经加载")
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_load_skipped",
+                summary="plugin load skipped",
+                severity="warning",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                stage="duplicate",
+            )
             return True
 
         # 2. 加载插件模块（导入会触发 @register_plugin 执行）
@@ -75,6 +144,17 @@ class PluginManager:
         if not plugin_module:
             error_msg = "插件模块加载失败"
             self._failed_plugins[plugin_name] = error_msg
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_load_failed",
+                summary="plugin load failed",
+                severity="error",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                stage="module_load",
+                error=RuntimeError(error_msg),
+            )
             return False
 
         # 3. 查找 @register_plugin 注册的插件类
@@ -85,6 +165,17 @@ class PluginManager:
             error_msg = "插件类未注册（未使用 @register_plugin 装饰器）"
             self._failed_plugins[plugin_name] = error_msg
             logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_load_failed",
+                summary="plugin load failed",
+                severity="error",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                stage="plugin_class_lookup",
+                error=RuntimeError(error_msg),
+            )
             return False
 
         # 4. 通过插件类属性 configs 加载配置
@@ -114,6 +205,17 @@ class PluginManager:
             error_msg = f"插件实例化失败: {e}"
             self._failed_plugins[plugin_name] = error_msg
             logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_load_failed",
+                summary="plugin load failed",
+                severity="error",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                stage="plugin_instantiation",
+                error=e,
+            )
             return False
 
         if not has_config:
@@ -155,6 +257,17 @@ class PluginManager:
             plugin_instance=plugin_instance,
         )
 
+        await _record_plugin_telemetry_event(
+            plugin_name=plugin_name,
+            event_name="plugin_loaded",
+            summary="plugin loaded",
+            manifest=manifest,
+            plugin_path=plugin_path,
+            duration_ms=(time.perf_counter() - started_at) * 1000,
+            component_count=len(plugin_instance.get_components()),
+            has_config=has_config,
+        )
+
         logger.info(f"✅ 插件加载成功: {plugin_name} v{manifest.version}")
         return True
 
@@ -188,8 +301,17 @@ class PluginManager:
         """
         if plugin_name not in self._loaded_plugins:
             logger.warning(f"插件 '{plugin_name}' 未加载")
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_unload_skipped",
+                summary="plugin unload skipped",
+                severity="warning",
+                duration_ms=0.0,
+                stage="not_loaded",
+            )
             return False
 
+        started_at = time.perf_counter()
         try:
             plugin = self._loaded_plugins[plugin_name]
 
@@ -264,10 +386,30 @@ class PluginManager:
             if plugin_name in self._plugin_paths:
                 del self._plugin_paths[plugin_name]
 
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_unloaded",
+                summary="plugin unloaded",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                component_count=len(plugin.get_components()),
+            )
+
             logger.info(f"✅ 插件卸载成功: {plugin_name}")
             return True
 
         except Exception as e:
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_unload_failed",
+                summary="plugin unload failed",
+                severity="error",
+                manifest=self._manifests.get(plugin_name),
+                plugin_path=self._plugin_paths.get(plugin_name),
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                error=e,
+            )
             logger.error(f"❌ 插件卸载失败: {plugin_name} - {e}")
             return False
 

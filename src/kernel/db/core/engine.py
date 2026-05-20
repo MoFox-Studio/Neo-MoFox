@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from src.kernel.logger import get_logger
+from src.kernel.db.telemetry import record_db_lifecycle_event
 
 from .exceptions import DatabaseInitializationError
 
@@ -147,6 +149,8 @@ async def get_engine() -> AsyncEngine:
         if _engine is not None:
             return _engine
 
+        started_at = time.perf_counter()
+
         try:
             if _engine_config is None:
                 raise DatabaseInitializationError(
@@ -174,12 +178,47 @@ async def get_engine() -> AsyncEngine:
                 elif db_type == "postgresql":
                     await _enable_postgresql_optimizations(_engine)
 
+            await record_db_lifecycle_event(
+                event_name="engine_initialized",
+                summary="database engine initialized",
+                attributes={
+                    "db_type": db_type or "unknown",
+                    "apply_optimizations": _engine_config.apply_optimizations,
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
+                },
+            )
             logger.info(f"{(db_type or 'UNKNOWN').upper()} 数据库引擎初始化成功")
             return _engine
 
-        except DatabaseInitializationError:
+        except DatabaseInitializationError as exc:
+            await record_db_lifecycle_event(
+                event_name="engine_init_failed",
+                severity="error",
+                summary="database engine initialization failed",
+                attributes={
+                    "db_type": (
+                        _engine_config.db_type if _engine_config is not None else "unknown"
+                    ) or "unknown",
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
+                    "error_type": type(exc).__name__,
+                },
+                detail={"message": str(exc)},
+            )
             raise
         except Exception as e:
+            await record_db_lifecycle_event(
+                event_name="engine_init_failed",
+                severity="error",
+                summary="database engine initialization failed",
+                attributes={
+                    "db_type": (
+                        _engine_config.db_type if _engine_config is not None else "unknown"
+                    ) or "unknown",
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
+                    "error_type": type(e).__name__,
+                },
+                detail={"message": str(e)},
+            )
             logger.error(f"数据库引擎初始化失败: {e}")
             raise DatabaseInitializationError(f"引擎初始化失败: {e}") from e
 

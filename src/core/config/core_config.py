@@ -272,8 +272,168 @@ class CoreConfig(ConfigBase):
             tag="performance",
             input_type="number",
         )
+        window_hours: float = Field(
+            default=5.0,
+            description="统计查询时间窗口（小时），仅聚合最近窗口内的 LLM 数据",
+            label="统计窗口（小时）",
+            tag="performance",
+            input_type="number",
+            step=0.5,
+            ge=0,
+        )
 
     llm_stats: LLMStatsSection = Field(default_factory=LLMStatsSection)
+
+    @config_section("telemetry")
+    class TelemetrySection(SectionBase):
+        """通用遥测配置节。"""
+
+        enabled: bool = Field(
+            default=False,
+            description="是否启用通用遥测收集",
+            label="启用遥测",
+            tag="debug",
+            input_type="switch",
+        )
+        max_records: int = Field(
+            default=100_000,
+            description="保留的最大遥测事件数，0 表示不限制",
+            label="最大事件数",
+            tag="performance",
+            input_type="number",
+            ge=0,
+        )
+        max_age_days: int = Field(
+            default=30,
+            description="遥测事件保留天数，0 表示不按时间清理",
+            label="保留天数",
+            tag="performance",
+            input_type="number",
+            ge=0,
+        )
+        detail_enabled: bool = Field(
+            default=False,
+            description="是否允许记录高敏感调试明细（如完整 traceback）",
+            label="记录调试明细",
+            tag="security",
+            input_type="switch",
+            hint="默认关闭，避免高敏感调试信息长期落盘",
+        )
+        hash_salt: str = Field(
+            default="",
+            description="脱敏标识计算时使用的可选盐值",
+            label="哈希盐",
+            tag="security",
+            input_type="password",
+            hint="留空也可用，设置后能降低跨实例碰撞风险",
+        )
+        slow_query_threshold_ms: float = Field(
+            default=500.0,
+            description="慢查询阈值（毫秒）",
+            label="慢查询阈值",
+            tag="performance",
+            input_type="number",
+            step=10.0,
+            ge=0,
+        )
+        collect_error_events: bool = Field(
+            default=True,
+            description="是否收集错误摘要事件",
+            label="收集错误事件",
+            tag="debug",
+            input_type="switch",
+        )
+        collect_watchdog_events: bool = Field(
+            default=True,
+            description="是否收集 WatchDog 和运行时健康事件",
+            label="收集 WatchDog 事件",
+            tag="debug",
+            input_type="switch",
+        )
+        collect_db_metrics: bool = Field(
+            default=True,
+            description="是否收集数据库聚合指标和慢查询事件",
+            label="收集数据库指标",
+            tag="performance",
+            input_type="switch",
+        )
+        collect_plugin_events: bool = Field(
+            default=True,
+            description="是否收集插件生命周期事件",
+            label="收集插件事件",
+            tag="plugin",
+            input_type="switch",
+        )
+        collect_tool_events: bool = Field(
+            default=True,
+            description="是否收集工具调用摘要事件",
+            label="收集工具事件",
+            tag="ai",
+            input_type="switch",
+        )
+        collect_runtime_snapshots: bool = Field(
+            default=True,
+            description="是否记录运行时快照事件",
+            label="记录运行时快照",
+            tag="debug",
+            input_type="switch",
+        )
+
+    telemetry: TelemetrySection = Field(default_factory=TelemetrySection)
+
+    @config_section("cloud_telemetry")
+    class CloudTelemetrySection(SectionBase):
+        """云端遥测客户端配置节。"""
+
+        client_enabled: bool = Field(
+            default=False,
+            description="是否启用云端遥测客户端发送能力",
+            label="启用云端客户端",
+            tag="network",
+            input_type="switch",
+        )
+        identity_storage_dir: str = Field(
+            default="data/cloud_telemetry/state",
+            description="云端遥测本地身份状态目录",
+            label="身份状态目录",
+            tag="file",
+            input_type="text",
+            placeholder="data/cloud_telemetry/state",
+        )
+        pending_queue_max_bytes: int = Field(
+            default=524288,
+            description="待发送窗口队列的最大总字节数",
+            label="队列最大字节数",
+            tag="performance",
+            input_type="number",
+            ge=1024,
+        )
+        pending_queue_max_windows: int = Field(
+            default=128,
+            description="待发送窗口队列的最大窗口数",
+            label="队列最大窗口数",
+            tag="performance",
+            input_type="number",
+            ge=1,
+        )
+        default_heartbeat_interval_seconds: float = Field(
+            default=300.0,
+            description="默认心跳发送间隔（秒）",
+            label="默认心跳间隔",
+            tag="timer",
+            input_type="number",
+            ge=1,
+        )
+        send_timeout_seconds: float = Field(
+            default=10.0,
+            description="云端遥测发送超时时间（秒）",
+            label="发送超时",
+            tag="network",
+            input_type="number",
+            ge=1,
+        )
+
+    cloud_telemetry: CloudTelemetrySection = Field(default_factory=CloudTelemetrySection)
 
     @config_section("personality")
     class PersonalitySection(SectionBase):
