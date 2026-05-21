@@ -154,6 +154,7 @@ class EchoService(BaseService):
 from __future__ import annotations
 
 from src.app.plugin_system.base import BaseCommand, BasePlugin, cmd_route, register_plugin
+from src.app.plugin_system.api.send_api import send_text
 
 from .config import EchoDemoConfig
 from .service import EchoService
@@ -175,6 +176,7 @@ class EchoCommand(BaseCommand):
         """检查命令是否已经正常工作。"""
         service = await self._get_service()
         result = await service.ping()
+        await send_text(result)
         return True, result
 
     @cmd_route("say")
@@ -182,6 +184,7 @@ class EchoCommand(BaseCommand):
         """回显一段文本。"""
         service = await self._get_service()
         result = await service.echo_text(text)
+        await send_text(result)
         return True, result
 
 
