@@ -21,6 +21,15 @@ def test_dependency_resolver_accepts_versioned_plugin_refs() -> None:
     assert resolver.resolve_load_order() == ["asr_adapter", "funasr_asr_provider"]
 
 
+def test_dependency_resolver_is_deterministic_for_independent_plugins() -> None:
+    resolver = PluginDependencyResolver()
+    resolver.add_plugin(_manifest("z_plugin", "1.0.0"))
+    resolver.add_plugin(_manifest("a_plugin", "1.0.0"))
+    resolver.add_plugin(_manifest("m_plugin", "1.0.0"))
+
+    assert resolver.resolve_load_order() == ["a_plugin", "m_plugin", "z_plugin"]
+
+
 def test_plugin_loader_prunes_incompatible_versioned_dependencies() -> None:
     loader = PluginLoader()
     loadable = loader._prune_unloadable_plugins(

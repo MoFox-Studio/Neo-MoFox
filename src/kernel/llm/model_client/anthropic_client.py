@@ -7,7 +7,10 @@ Anthropic 模型客户端实现。
 
 from __future__ import annotations
 
-import inspect
+# 这个模块把内部 payload 模型适配到 Anthropic 的 message 和 tool 格式。
+# timeout、schema 和请求观测等共享逻辑直接来自 ``model_client.shared``，
+# 这样当前文件可以更聚焦在 Anthropic 特有的转换规则和流处理上。
+
 import json
 import threading
 from collections.abc import Mapping
@@ -20,6 +23,13 @@ from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResu
 from ..roles import ROLE
 from ..token_counter import count_payload_tokens
 from .base import StreamEvent
+from .shared import (
+    build_httpx_timeout,
+    extract_model_transport_params,
+    inject_reason_parameter,
+    log_provider_request_body,
+    normalize_schema_for_grammar,
+)
 
 
 _ClientCacheKey = tuple[str, str | None, int, float | None, bool, bool]
@@ -33,140 +43,6 @@ def _get_attr(data: Any, name: str, default: object | None = None) -> Any:
     return getattr(data, name, default)
 
 
-def _normalize_schema_for_grammar(schema: object) -> None:
-    """就地归一化 JSON Schema，提升与 provider 的兼容性。"""
-    if isinstance(schema, list):
-        for item in schema:
-            _normalize_schema_for_grammar(item)
-        return
-
-    if not isinstance(schema, dict):
-        return
-
-    if schema.get("default") is None:
-        schema.pop("default", None)
-
-    if schema.get("type") == "array" and "items" not in schema:
-        schema["items"] = {"type": "string"}
-
-    if schema.get("type") == "object" and "properties" not in schema:
-        schema.setdefault("additionalProperties", {"type": "string"})
-
-    for key in (
-        "properties",
-        "items",
-        "additionalProperties",
-        "anyOf",
-        "allOf",
-        "oneOf",
-    ):
-        value = schema.get(key)
-        if isinstance(value, dict):
-            for child in value.values():
-                _normalize_schema_for_grammar(child)
-        elif isinstance(value, list):
-            for child in value:
-                _normalize_schema_for_grammar(child)
-
-
-def _build_httpx_timeout(timeout: float | None) -> object | None:
-    """根据总超时时间构造 httpx.Timeout 实例。"""
-    import httpx
-
-    if not isinstance(timeout, (int, float)):
-        return None
-
-    total = float(timeout)
-    if total <= 0:
-        return None
-
-    connect_timeout = min(total, 10.0)
-    pool_timeout = min(total, 5.0)
-    return httpx.Timeout(
-        timeout=total,
-        connect=connect_timeout,
-        read=total,
-        write=total,
-        pool=pool_timeout,
-    )
-
-
-def _callable_accepts_reason(callable_obj: object) -> bool:
-    """判断可调用对象是否显式接收 reason 参数。"""
-    if not callable(callable_obj):
-        return False
-
-    try:
-        sig = inspect.signature(callable_obj)
-    except (TypeError, ValueError):
-        return False
-
-    if "reason" in sig.parameters:
-        return True
-
-    return any(
-        param.kind == inspect.Parameter.VAR_KEYWORD
-        for param in sig.parameters.values()
-    )
-
-
-def _inject_reason_parameter(tool: LLMUsable, input_schema: dict[str, object]) -> dict[str, object]:
-    """在需要时为工具 schema 注入 reason 参数。"""
-    properties_obj = input_schema.get("properties")
-    properties: dict[str, object] = properties_obj if isinstance(properties_obj, dict) else {}
-    schema_has_reason = "reason" in properties
-    execute_has_reason = _callable_accepts_reason(getattr(tool, "execute", None))
-
-    if schema_has_reason or execute_has_reason:
-        input_schema["properties"] = properties
-        return input_schema
-
-    properties["reason"] = {
-        "type": "string",
-        "description": "说明你选择此动作/工具的原因",
-    }
-    input_schema["properties"] = properties
-
-    required_obj = input_schema.get("required")
-    required = [str(item) for item in required_obj] if isinstance(required_obj, list) else []
-    if "reason" not in required:
-        required.append("reason")
-    input_schema["required"] = required
-    return input_schema
-
-
-def _log_anthropic_request_body(
-    api_name: str,
-    params: dict[str, object],
-    *,
-    model_set: dict[str, object] | None = None,
-    payloads: list[LLMPayload] | None = None,
-    request_name: str | None = None,
-) -> None:
-    """将 Anthropic 请求体送入请求检视器。"""
-    metadata: dict[str, object] = {}
-    if isinstance(model_set, dict):
-        provider = model_set.get("base_url")
-        if provider is not None:
-            metadata["api_provider"] = str(provider)
-    if request_name:
-        metadata["request_name"] = request_name
-    if payloads:
-        try:
-            metadata["estimated_input_tokens"] = count_payload_tokens(
-                payloads,
-                model_identifier=str(params.get("model") or "cl100k_base"),
-            )
-        except Exception:
-            pass
-    try:
-        from src.kernel.llm.request_inspector import capture
-
-        capture(api_name, params, metadata)
-    except Exception:
-        pass
-
-
 def _to_anthropic_tool(tool: LLMUsable) -> _ProviderPayload:
     """将单个 LLMUsable 工具转换为 Anthropic tools 格式。"""
     schema = tool.to_schema()
@@ -178,8 +54,10 @@ def _to_anthropic_tool(tool: LLMUsable) -> _ProviderPayload:
     input_schema = function_schema.get("parameters", {})
     if isinstance(input_schema, dict):
         input_schema = dict(input_schema)
-        _normalize_schema_for_grammar(input_schema)
-        input_schema = _inject_reason_parameter(tool, input_schema)
+        # grammar 清理和 reason 注入统一集中处理，避免不同 provider 适配器
+        # 在工具 schema 行为上逐渐分叉。
+        normalize_schema_for_grammar(input_schema)
+        input_schema = inject_reason_parameter(tool, input_schema)
 
     return {
         "name": str(function_schema.get("name") or "tool"),
@@ -199,7 +77,7 @@ def _to_openai_compatible_tool(tool: LLMUsable) -> _ProviderPayload:
     parameters = function_schema.get("parameters", {})
     if isinstance(parameters, dict):
         parameters = dict(parameters)
-        _normalize_schema_for_grammar(parameters)
+        normalize_schema_for_grammar(parameters)
 
     return {
         "type": "function",
@@ -491,31 +369,30 @@ class AnthropicChatClient:
     def _extract_model_params(
         self, model_set: Mapping[str, object]
     ) -> tuple[str, str | None, float | None, bool, bool, dict[str, object]]:
-        """从 model_set 中解析公共连接参数。"""
-        api_key = str(model_set.get("api_key") or "")
-        if not api_key:
-            raise ValueError("model.api_key 不能为空")
-
-        base_url = model_set.get("base_url")
-        base_url = str(base_url) if base_url else None
-        timeout = model_set.get("timeout")
-
-        extra_params = model_set.get("extra_params")
-        if extra_params is None:
-            extra_params = {}
-        if not isinstance(extra_params, dict):
-            raise ValueError("model.extra_params 必须是 dict")
-
-        extra_params = dict(extra_params)
-        trust_env_raw = extra_params.pop("trust_env", None)
-        trust_env = bool(trust_env_raw) if trust_env_raw is not None else True
-        force_ipv4 = bool(extra_params.pop("force_ipv4", False))
-        extra_params.pop("context_reserve_ratio", None)
-        extra_params.pop("context_reserve_tokens", None)
-        extra_params.pop("force_sync_http", None)
-
-        timeout_float = float(timeout) if isinstance(timeout, (int, float)) else None
-        return api_key, base_url, timeout_float, trust_env, force_ipv4, extra_params
+        try:
+            (
+                api_key,
+                base_url,
+                timeout,
+                trust_env,
+                force_ipv4,
+                extra_params,
+            ) = extract_model_transport_params(model_set)
+        except ValueError as exc:
+            message = str(exc)
+            if message == "model.api_key cannot be empty":
+                raise ValueError("model.api_key 不能为空") from exc
+            if message == "model.extra_params must be a dict":
+                raise ValueError("model.extra_params 必须是 dict") from exc
+            raise
+        return (
+            api_key,
+            base_url,
+            timeout,
+            trust_env,
+            force_ipv4,
+            dict(extra_params),
+        )
 
     def _get_client(
         self,
@@ -550,7 +427,9 @@ class AnthropicChatClient:
 
         import httpx
 
-        timeout_config = _build_httpx_timeout(timeout)
+        # 统一复用共享 timeout builder，确保所有 provider 客户端应用同一套
+        # httpx timeout 策略。
+        timeout_config = build_httpx_timeout(timeout)
         transport = (
             httpx.AsyncHTTPTransport(local_address="0.0.0.0")
             if force_ipv4
@@ -627,12 +506,14 @@ class AnthropicChatClient:
 
         params.update(extra_params)
 
-        _log_anthropic_request_body(
+        # 请求检查和 token 估算统一走共享观测 seam，这里只负责上报原始请求体。
+        log_provider_request_body(
             "messages.create",
             params,
             model_set=model_set,
             payloads=payloads,
             request_name=request_name,
+            token_counter=count_payload_tokens,
         )
 
         if stream:

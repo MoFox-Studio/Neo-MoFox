@@ -383,7 +383,7 @@ class PluginLoader:
             logger.warning(f"插件目录不存在: {plugins_dir}")
             return discovered
 
-        for item in plugins_path.iterdir():
+        for item in sorted(plugins_path.iterdir(), key=lambda path: path.name.lower()):
             if item.is_dir() and not item.name.startswith(".") and not item.name.startswith("__"):
                 manifest_path = item / "manifest.json"
                 if manifest_path.exists():
@@ -648,17 +648,18 @@ class PluginDependencyResolver:
                     in_degree[plugin_name] += 1
 
         # Kahn 算法拓扑排序
-        queue = [name for name, degree in in_degree.items() if degree == 0]
+        queue = sorted(name for name, degree in in_degree.items() if degree == 0)
         load_order = []
 
         while queue:
             current = queue.pop(0)
             load_order.append(current)
 
-            for dependent in graph[current]:
+            for dependent in sorted(graph[current]):
                 in_degree[dependent] -= 1
                 if in_degree[dependent] == 0:
                     queue.append(dependent)
+            queue.sort()
 
         # 检查循环依赖
         if len(load_order) != len(self._plugins):

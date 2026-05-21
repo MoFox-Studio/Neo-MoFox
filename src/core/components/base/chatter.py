@@ -487,11 +487,21 @@ class BaseChatter(ABC):
             KeyError: 当 task 在模型配置中不存在时
         """
         from src.core.config import get_model_config
-        from src.kernel.llm import LLMRequest, LLMContextManager
+        from src.kernel.llm import LLMRequest, LLMContextManager, ReminderSourceSpec
 
         model_set = get_model_config().get_task(task)
+        reminder_sources = None
+        if with_reminder is not None:
+            reminder_sources = [
+                ReminderSourceSpec(
+                    bucket=str(with_reminder),
+                    wrap_with_system_tag=True,
+                )
+            ]
+
         context_manager = LLMContextManager(
-            context_compression_handler=default_chat_context_compression_handler
+            context_compression_handler=default_chat_context_compression_handler,
+            reminder_sources=reminder_sources,
         )
 
         _logger = get_logger("chatter")
@@ -509,9 +519,6 @@ class BaseChatter(ABC):
             meta_data={"stream_id": self.stream_id},
             context_manager=context_manager,
         )
-
-        if with_reminder is not None:
-            context_manager.reminder_bucket(str(with_reminder), wrap_with_system_tag=True)
 
         return request
 

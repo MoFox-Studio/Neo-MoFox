@@ -266,6 +266,38 @@ class TestPayloadsToOpenAIMessages:
         assert len(messages) == 1
         assert messages[0]["content"] == ""
 
+    def test_history_tool_call_ids_are_canonicalized_for_cache_stability(self):
+        from src.kernel.llm.model_client.openai_client import _payloads_to_openai_messages
+
+        payloads = [
+            LLMPayload(
+                ROLE.ASSISTANT,
+                [
+                    Text("I'll call a tool"),
+                    ToolCall(
+                        id="provider-random-call-id",
+                        name="calculator",
+                        args={"a": 1},
+                    ),
+                ],
+            ),
+            LLMPayload(
+                ROLE.TOOL_RESULT,
+                ToolResult(
+                    value="42",
+                    call_id="provider-random-call-id",
+                    name="calculator",
+                ),
+            ),
+        ]
+
+        messages, tools = _payloads_to_openai_messages(payloads)
+
+        assert tools == []
+        assert messages[0]["tool_calls"][0]["id"] == "call_0_0"
+        assert messages[1]["tool_call_id"] == "call_0_0"
+        assert messages[1]["tool_call_id"] != "provider-random-call-id"
+
 
 class TestSchemaNormalization:
     """测试 schema 归一化逻辑。"""

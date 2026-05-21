@@ -12,7 +12,7 @@
 """
 
 from .roles import ROLE
-from .context import LLMContextManager
+from .context import LLMContextManager, ReminderSourceSpec
 from .request import LLMRequest
 from .response import LLMResponse
 from .embedding_request import EmbeddingRequest
@@ -75,6 +75,7 @@ __all__ = [
 	"EmbeddingRequest",
 	"RerankRequest",
 	"LLMContextManager",
+	"ReminderSourceSpec",
 	"LLMResponse",
 	"EmbeddingResponse",
 	"RerankResponse",
