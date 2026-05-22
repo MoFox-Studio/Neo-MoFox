@@ -152,10 +152,9 @@ async def maybe_compress_payloads(
         return payloads
     try:
         logger.info(
-            "触发上下文压缩: total_tokens=%s, model_name=%s, request_name=%s",
-            total_tokens,
-            model.get("model_identifier"),
-            request.request_name,
+            f"触发上下文压缩: total_tokens={total_tokens}, "
+            f"model_name={model.get('model_identifier')}, "
+            f"request_name={request.request_name}",
         )
         summary_payloads = await context_compression_handler(
             request,
@@ -163,7 +162,7 @@ async def maybe_compress_payloads(
             model,
         )
     except Exception as exc:
-        logger.warning("上下文压缩失败，跳过压缩并继续原请求: %s", exc)
+        logger.warning(f"上下文压缩失败，跳过压缩并继续原请求: {exc}")
         return payloads
 
     if not summary_payloads:

@@ -251,9 +251,8 @@ async def execute_request(
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 logger.debug(
-                    "LLM request cancelled: model=%s, request=%s",
-                    model_identifier,
-                    request.request_name or "__default__",
+                    f"LLM request cancelled: model={model_identifier}, "
+                    f"request={request.request_name or '__default__'}",
                     exc_info=True,
                 )
                 raise
@@ -285,11 +284,9 @@ async def execute_request(
             next_step = session.next_after_error(classified_error)
             if next_step.model is None:
                 logger.error(
-                    "LLM retries exhausted: request=%s, retry_count=%s, last_error=%s: %s",
-                    request.request_name or "__default__",
-                    retry_count,
-                    type(classified_error).__name__,
-                    classified_error,
+                    f"LLM retries exhausted: request={request.request_name or '__default__'}, "
+                    f"retry_count={retry_count}, "
+                    f"last_error={type(classified_error).__name__}: {classified_error}",
                 )
             else:
                 next_model_identifier = next_step.model.get("model_identifier")
@@ -299,11 +296,9 @@ async def execute_request(
                     else "<unknown>"
                 )
                 logger.warning(
-                    "LLM request will retry: request=%s, retry_count=%s, next_model=%s, delay_seconds=%.2f",
-                    request.request_name or "__default__",
-                    retry_count,
-                    next_model_name,
-                    float(next_step.delay_seconds),
+                    f"LLM request will retry: request={request.request_name or '__default__'}, "
+                    f"retry_count={retry_count}, next_model={next_model_name}, "
+                    f"delay_seconds={float(next_step.delay_seconds):.2f}",
                 )
             step = next_step
 
@@ -333,26 +328,20 @@ def _log_request_error(
     ):
         status_hint = f", status_code={status_code}" if status_code is not None else ""
         logger.warning(
-            "LLM request temporarily failed: model=%s, request=%s, error_type=%s%s",
-            model_identifier,
-            request_name or "__default__",
-            error_type,
-            status_hint,
+            f"LLM request temporarily failed: model={model_identifier}, "
+            f"request={request_name or '__default__'}, "
+            f"error_type={error_type}{status_hint}",
         )
         logger.debug(
-            "LLM request temporarily failed (detail): model=%s, request=%s, reason=%s",
-            model_identifier,
-            request_name or "__default__",
-            error,
+            f"LLM request temporarily failed (detail): model={model_identifier}, "
+            f"request={request_name or '__default__'}, reason={error}",
             exc_info=True,
         )
         return
 
     logger.error(
-        "LLM request failed: model=%s, request=%s, error_type=%s, reason=%s",
-        model_identifier,
-        request_name or "__default__",
-        error_type,
-        error,
+        f"LLM request failed: model={model_identifier}, "
+        f"request={request_name or '__default__'}, "
+        f"error_type={error_type}, reason={error}",
         exc_info=True,
     )
