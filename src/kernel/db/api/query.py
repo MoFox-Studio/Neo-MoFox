@@ -12,16 +12,56 @@ import time
 from typing import Any, Generic, TypeVar, Self
 
 from sqlalchemy import and_, asc, desc, func, or_, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # 导入 CRUD 辅助函数以避免重复定义
-from src.kernel.db.api.crud import _dict_to_model, _get_session_ctx, _model_to_dict
+from src.kernel.db.api.crud import (
+    _dict_to_model,
+    _get_session_ctx,
+    _model_to_dict,
+    _normalize_cache_value,
+)
+from src.kernel.db.core.cache import (
+    LIST_RESULT_CACHE_LIMIT,
+    get_cache_namespace,
+    get_db_read_cache,
+)
 from src.kernel.db.telemetry import record_db_operation_event
 from src.kernel.logger import get_logger
 
 logger = get_logger("database.query", display="DB Query")
 
 T = TypeVar("T", bound=Any)
+
+
+def _build_compiled_query_cache_key(
+    session: AsyncSession,
+    stmt: Any,
+    *,
+    operation: str,
+    **parts: Any,
+) -> tuple[Any, ...]:
+    bind = session.get_bind()
+    dialect = bind.dialect if bind is not None else None
+    compiled = stmt.compile(
+        dialect=dialect,
+        compile_kwargs={"render_postcompile": True},
+    )
+    normalized_params = tuple(
+        sorted(
+            (str(key), _normalize_cache_value(value))
+            for key, value in compiled.params.items()
+        )
+    )
+    normalized_parts = tuple(
+        sorted((key, _normalize_cache_value(value)) for key, value in parts.items())
+    )
+    return (
+        operation,
+        str(compiled),
+        normalized_params,
+        normalized_parts,
+    )
 
 
 async def _record_query_operation(
@@ -66,6 +106,11 @@ class QueryBuilder(Generic[T]):
         self.model_name = model.__tablename__
         self._stmt = select(model)
         self._session_factory = session_factory
+        self._cache = get_db_read_cache()
+        self._cache_namespace = get_cache_namespace(
+            model,
+            session_factory=session_factory,
+        )
 
     def filter(self, **conditions: Any) -> Self:
         """添加过滤条件
@@ -301,6 +346,18 @@ class QueryBuilder(Generic[T]):
         started_at = time.perf_counter()
         try:
             async with _get_session_ctx(self._session_factory) as session:
+                cache_key = _build_compiled_query_cache_key(
+                    session,
+                    self._stmt,
+                    operation="all",
+                    as_dict=as_dict,
+                )
+                hit, cached = self._cache.get(self._cache_namespace, cache_key)
+                if hit:
+                    if as_dict:
+                        return cached or []
+                    return [_dict_to_model(self.model, row) for row in (cached or [])]
+
                 result = await session.execute(self._stmt)
                 instances = list(result.scalars().all())
                 instances_dicts = [_model_to_dict(inst) for inst in instances]
@@ -313,6 +370,8 @@ class QueryBuilder(Generic[T]):
                     success=True,
                     result_count=len(instances_dicts),
                 )
+                if len(instances_dicts) <= LIST_RESULT_CACHE_LIMIT:
+                    self._cache.set(self._cache_namespace, cache_key, instances_dicts)
 
                 if as_dict:
                     return instances_dicts
@@ -340,6 +399,20 @@ class QueryBuilder(Generic[T]):
         started_at = time.perf_counter()
         try:
             async with _get_session_ctx(self._session_factory) as session:
+                cache_key = _build_compiled_query_cache_key(
+                    session,
+                    self._stmt,
+                    operation="first",
+                    as_dict=as_dict,
+                )
+                hit, cached = self._cache.get(self._cache_namespace, cache_key)
+                if hit:
+                    if cached is None:
+                        return None
+                    if as_dict:
+                        return cached
+                    return _dict_to_model(self.model, cached)
+
                 result = await session.execute(self._stmt)
                 instance = result.scalars().first()
 
@@ -353,6 +426,7 @@ class QueryBuilder(Generic[T]):
                         success=True,
                         result_count=1,
                     )
+                    self._cache.set(self._cache_namespace, cache_key, instance_dict)
                     if as_dict:
                         return instance_dict
                     return _dict_to_model(self.model, instance_dict)
@@ -388,6 +462,15 @@ class QueryBuilder(Generic[T]):
 
         try:
             async with _get_session_ctx(self._session_factory) as session:
+                cache_key = _build_compiled_query_cache_key(
+                    session,
+                    count_stmt,
+                    operation="count",
+                )
+                hit, cached = self._cache.get(self._cache_namespace, cache_key)
+                if hit:
+                    return int(cached or 0)
+
                 result = await session.execute(count_stmt)
                 count_value = result.scalar() or 0
                 await _record_query_operation(
@@ -398,6 +481,7 @@ class QueryBuilder(Generic[T]):
                     success=True,
                     result_count=int(count_value),
                 )
+                self._cache.set(self._cache_namespace, cache_key, int(count_value))
                 return count_value
         except Exception as exc:
             await _record_query_operation(
@@ -441,10 +525,24 @@ class QueryBuilder(Generic[T]):
             paginated_stmt = self._stmt.offset(offset).limit(page_size)
 
             async with _get_session_ctx(self._session_factory) as session:
+                cache_key = _build_compiled_query_cache_key(
+                    session,
+                    paginated_stmt,
+                    operation="paginate",
+                    page=page,
+                    page_size=page_size,
+                )
+                hit, cached = self._cache.get(self._cache_namespace, cache_key)
+                if hit:
+                    items = [_dict_to_model(self.model, row) for row in (cached or [])]
+                    return items, total  # type: ignore[return-value]
+
                 result = await session.execute(paginated_stmt)
                 instances = list(result.scalars().all())
                 instances_dicts = [_model_to_dict(inst) for inst in instances]
                 items = [_dict_to_model(self.model, row) for row in instances_dicts]
+                if len(instances_dicts) <= LIST_RESULT_CACHE_LIMIT:
+                    self._cache.set(self._cache_namespace, cache_key, instances_dicts)
 
             await _record_query_operation(
                 operation="paginate",

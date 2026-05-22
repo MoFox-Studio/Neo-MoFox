@@ -19,6 +19,7 @@ from .types import ModelEntry
 @dataclass(frozen=True, slots=True)
 class RequestObservation:
     """一次 provider 调用尝试的标准化观测记录。"""
+
     model: ModelEntry
     model_identifier: str
     request_name: str
@@ -81,6 +82,7 @@ def make_stream_stats_recorder(
     model_index: int = 0,
 ) -> Callable[[dict[str, Any] | None, float], None]:
     """构造一个在流式请求结束后记录最终统计信息的回调。"""
+
     def recorder(final_usage: dict[str, Any] | None, final_latency: float) -> None:
         record_request_observation(
             RequestObservation(

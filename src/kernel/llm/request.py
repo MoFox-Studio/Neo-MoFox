@@ -184,8 +184,3 @@ def _record_llm_stats(
             error=error,
         )
     )
-
-
-def _calculate_request_cost(*, model: ModelEntry, usage: dict[str, Any]) -> float:
-    """为旧导入路径和测试保留的兼容包装函数。"""
-    return calculate_request_cost(model=model, usage=usage)

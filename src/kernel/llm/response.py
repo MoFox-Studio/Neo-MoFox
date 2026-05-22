@@ -21,8 +21,6 @@ from .payload import LLMPayload, ReasoningText, Text, ToolCall
 from .roles import ROLE
 from .stream_state import (
     LLMStreamReducer,
-    _ReasoningBlockAccumulator,
-    _ToolCallAccumulator,
     drain_stream,
 )
 from .tool_call_compat import parse_tool_call_compat_response

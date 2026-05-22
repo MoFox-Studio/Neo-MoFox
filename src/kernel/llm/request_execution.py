@@ -137,7 +137,9 @@ async def execute_request(
         model = validate_model_entry(step.model)
         model_identifier = model.get("model_identifier")
         if not isinstance(model_identifier, str) or not model_identifier:
-            raise LLMConfigurationError("model.model_identifier must be a non-empty string")
+            raise LLMConfigurationError(
+                "model.model_identifier must be a non-empty string"
+            )
 
         if step.delay_seconds and step.delay_seconds > 0:
             await asyncio.sleep(step.delay_seconds)

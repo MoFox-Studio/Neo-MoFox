@@ -14,6 +14,12 @@ from typing import Any, Generic, TypeVar
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from src.kernel.db.core.cache import (
+    LIST_RESULT_CACHE_LIMIT,
+    get_cache_namespace,
+    get_db_read_cache,
+    invalidate_model_cache,
+)
 from src.kernel.logger import get_logger
 
 from ..telemetry import record_db_operation_event
@@ -54,6 +60,24 @@ async def _get_session_ctx(
     else:
         async with get_db_session() as session:
             yield session
+
+
+def _normalize_cache_value(value: Any) -> Any:
+    """将动态参数归一化为稳定可哈希结构。"""
+    if isinstance(value, dict):
+        return tuple(sorted((str(k), _normalize_cache_value(v)) for k, v in value.items()))
+    if isinstance(value, list | tuple):
+        return tuple(_normalize_cache_value(item) for item in value)
+    if isinstance(value, set | frozenset):
+        normalized = [_normalize_cache_value(item) for item in value]
+        return tuple(sorted(normalized, key=repr))
+    return value
+
+
+def _build_crud_cache_key(operation: str, **parts: Any) -> tuple[Any, ...]:
+    return (operation,) + tuple(
+        sorted((key, _normalize_cache_value(value)) for key, value in parts.items())
+    )
 
 
 @lru_cache(maxsize=256)
@@ -182,6 +206,11 @@ class CRUDBase(Generic[T]):
         self.model = model
         self.model_name = model.__tablename__
         self._session_factory = session_factory
+        self._cache = get_db_read_cache()
+        self._cache_namespace = get_cache_namespace(
+            model,
+            session_factory=session_factory,
+        )
 
     async def get(self, id: int) -> T | None:
         """根据 ID 获取单条记录
@@ -193,6 +222,10 @@ class CRUDBase(Generic[T]):
             模型实例或 None
         """
         started_at = time.perf_counter()
+        cache_key = _build_crud_cache_key("get", id=id)
+        hit, cached = self._cache.get(self._cache_namespace, cache_key)
+        if hit:
+            return _dict_to_model(self.model, cached) if cached is not None else None
         try:
             async with _get_session_ctx(self._session_factory) as session:
                 stmt = select(self.model).where(self.model.id == id)
@@ -210,6 +243,7 @@ class CRUDBase(Generic[T]):
                         success=True,
                         result_count=1,
                     )
+                    self._cache.set(self._cache_namespace, cache_key, instance_dict)
                     return typed_instance
 
                 await _record_crud_operation(
@@ -242,6 +276,10 @@ class CRUDBase(Generic[T]):
             模型实例或 None
         """
         started_at = time.perf_counter()
+        cache_key = _build_crud_cache_key("get_by", filters=filters)
+        hit, cached = self._cache.get(self._cache_namespace, cache_key)
+        if hit:
+            return _dict_to_model(self.model, cached) if cached is not None else None
         try:
             async with _get_session_ctx(self._session_factory) as session:
                 stmt = select(self.model)
@@ -264,6 +302,7 @@ class CRUDBase(Generic[T]):
                         result_count=1,
                         attributes={"filter_count": len(filters)},
                     )
+                    self._cache.set(self._cache_namespace, cache_key, instance_dict)
                     return typed_instance
 
                 await _record_crud_operation(
@@ -305,6 +344,15 @@ class CRUDBase(Generic[T]):
             模型实例列表
         """
         started_at = time.perf_counter()
+        cache_key = _build_crud_cache_key(
+            "get_multi",
+            skip=skip,
+            limit=limit,
+            filters=filters,
+        )
+        hit, cached = self._cache.get(self._cache_namespace, cache_key)
+        if hit:
+            return [_dict_to_model(self.model, row) for row in (cached or [])]  # type: ignore[return-value]
         try:
             async with _get_session_ctx(self._session_factory) as session:
                 stmt = select(self.model)
@@ -332,6 +380,8 @@ class CRUDBase(Generic[T]):
                     result_count=len(typed_instances),
                     attributes={"filter_count": len(filters), "limit": limit, "skip": skip},
                 )
+                if len(instances_dicts) <= LIST_RESULT_CACHE_LIMIT:
+                    self._cache.set(self._cache_namespace, cache_key, instances_dicts)
                 return typed_instances  # type: ignore
         except Exception as exc:
             await _record_crud_operation(
@@ -356,6 +406,7 @@ class CRUDBase(Generic[T]):
         """
         started_at = time.perf_counter()
         try:
+            typed_instance: T | None = None
             async with _get_session_ctx(self._session_factory) as session:
                 instance = self.model(**obj_in)
                 session.add(instance)
@@ -373,7 +424,9 @@ class CRUDBase(Generic[T]):
                     result_count=1,
                     attributes={"field_count": len(obj_in)},
                 )
-                return typed_instance
+            invalidate_model_cache(self.model, session_factory=self._session_factory)
+            assert typed_instance is not None
+            return typed_instance
         except Exception as exc:
             await _record_crud_operation(
                 operation="create",
@@ -398,6 +451,7 @@ class CRUDBase(Generic[T]):
         """
         started_at = time.perf_counter()
         try:
+            typed_instance: T | None = None
             async with _get_session_ctx(self._session_factory) as session:
                 stmt = select(self.model).where(self.model.id == id)
                 result = await session.execute(stmt)
@@ -421,18 +475,18 @@ class CRUDBase(Generic[T]):
                         result_count=1,
                         attributes={"field_count": len(obj_in)},
                     )
-                    return typed_instance
-
-                await _record_crud_operation(
-                    operation="update",
-                    model_name=self.model_name,
-                    started_at=started_at,
-                    session_factory=self._session_factory,
-                    success=True,
-                    result_count=0,
-                    attributes={"field_count": len(obj_in)},
-                )
-                return None
+                else:
+                    await _record_crud_operation(
+                        operation="update",
+                        model_name=self.model_name,
+                        started_at=started_at,
+                        session_factory=self._session_factory,
+                        success=True,
+                        result_count=0,
+                        attributes={"field_count": len(obj_in)},
+                    )
+            invalidate_model_cache(self.model, session_factory=self._session_factory)
+            return typed_instance
         except Exception as exc:
             await _record_crud_operation(
                 operation="update",
@@ -456,6 +510,7 @@ class CRUDBase(Generic[T]):
         """
         started_at = time.perf_counter()
         try:
+            deleted = False
             async with _get_session_ctx(self._session_factory) as session:
                 stmt = delete(self.model).where(self.model.id == id)
                 result = await session.execute(stmt)
@@ -468,7 +523,8 @@ class CRUDBase(Generic[T]):
                     success=True,
                     result_count=int(bool(deleted)),
                 )
-                return deleted
+            invalidate_model_cache(self.model, session_factory=self._session_factory)
+            return deleted
         except Exception as exc:
             await _record_crud_operation(
                 operation="delete",
@@ -490,6 +546,10 @@ class CRUDBase(Generic[T]):
             记录数量
         """
         started_at = time.perf_counter()
+        cache_key = _build_crud_cache_key("count", filters=filters)
+        hit, cached = self._cache.get(self._cache_namespace, cache_key)
+        if hit:
+            return int(cached or 0)
         try:
             async with _get_session_ctx(self._session_factory) as session:
                 stmt = select(func.count(self.model.id))
@@ -512,6 +572,7 @@ class CRUDBase(Generic[T]):
                     result_count=count_value,
                     attributes={"filter_count": len(filters)},
                 )
+                self._cache.set(self._cache_namespace, cache_key, count_value)
                 return count_value
         except Exception as exc:
             await _record_crud_operation(
@@ -583,7 +644,8 @@ class CRUDBase(Generic[T]):
 
             # 在会话关闭前转换为字典
             instances_dicts = [_model_to_dict(inst) for inst in instances]
-            return [_dict_to_model(self.model, d) for d in instances_dicts]
+        invalidate_model_cache(self.model, session_factory=self._session_factory)
+        return [_dict_to_model(self.model, d) for d in instances_dicts]
 
     async def bulk_update(
         self,
@@ -608,4 +670,5 @@ class CRUDBase(Generic[T]):
                 result = await session.execute(stmt)
                 count += result.rowcount  # type: ignore
 
-            return count
+        invalidate_model_cache(self.model, session_factory=self._session_factory)
+        return count

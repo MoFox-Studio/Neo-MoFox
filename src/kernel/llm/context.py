@@ -122,18 +122,6 @@ class LLMContextManager:
         validate_payload_sequence(trimmed, allow_incomplete_tail=True)
         return trimmed
 
-    def _validate_payloads(
-        self,
-        payloads: list[LLMPayload],
-        *,
-        allow_incomplete_tail: bool,
-    ) -> None:
-        """为兼容旧调用路径保留的内部校验钩子。"""
-        validate_payload_sequence(
-            payloads,
-            allow_incomplete_tail=allow_incomplete_tail,
-        )
-
     def system(
         self,
         payloads: list[LLMPayload],
@@ -160,37 +148,6 @@ class LLMContextManager:
             position=position,
         )
 
-    def reminder_bucket(
-        self,
-        bucket: str,
-        *,
-        names: Sequence[str] | None = None,
-        wrap_with_system_tag: bool = False,
-    ) -> None:
-        """注册一个会注入到 user payload 的 reminder bucket。"""
-        normalized_bucket = str(bucket).strip()
-        if not normalized_bucket:
-            raise ValueError("bucket cannot be empty")
-
-        normalized_names: tuple[str, ...] | None = None
-        if names is not None:
-            normalized_list: list[str] = []
-            for name in names:
-                normalized_name = str(name).strip()
-                if not normalized_name:
-                    raise ValueError("names contains an empty name")
-                normalized_list.append(normalized_name)
-            normalized_names = tuple(normalized_list)
-
-        if self._reminder_sources is None:
-            self._reminder_sources = []
-        self._reminder_sources.append(
-            RegisteredReminderSource(
-                bucket=normalized_bucket,
-                names=normalized_names,
-                wrap_with_system_tag=wrap_with_system_tag,
-            )
-        )
 
     def _apply_reminders(self, payloads: list[LLMPayload]) -> list[LLMPayload]:
         """把解析后的 reminder 注入到首个和/或最后一个 user payload。"""
