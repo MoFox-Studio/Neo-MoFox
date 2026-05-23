@@ -182,6 +182,89 @@ async def test_flashback_injector_skips_other_templates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_memory_tool_usage_warning_handler_injects_once_per_stream() -> None:
+    from plugins.booku_memory.config import BookuMemoryConfig
+    from plugins.booku_memory.event_handler import MemoryToolUsageWarningHandler
+    from src.core.components.types import EventType
+    from src.core.prompt import PROMPT_BUILD_EVENT
+    from src.kernel.event import EventDecision
+
+    cfg = BookuMemoryConfig()
+    cfg.plugin.memory_tool_miss_warning_threshold = 2
+
+    class _DummyPlugin:
+        config = cfg
+
+    handler = MemoryToolUsageWarningHandler(plugin=cast(Any, _DummyPlugin()))
+
+    for _ in range(2):
+        decision, _ = await handler.execute(
+            EventType.AFTER_CHATTER_STEP,
+            {"stream_id": "stream-a", "step_scope": "actor_round", "used_tools": ["search_web"]},
+        )
+        assert decision is EventDecision.SUCCESS
+
+    def _build_params() -> dict[str, Any]:
+        return {
+            "name": "default_chatter_user_prompt",
+            "template": "{extra}",
+            "values": {"extra": "已有内容", "stream_id": "stream-a"},
+            "policies": {},
+            "strict": False,
+        }
+
+    decision, out = await handler.execute(PROMPT_BUILD_EVENT, _build_params())
+    assert decision is EventDecision.SUCCESS
+    assert "已有内容" in out["values"]["extra"]
+    assert "警告：检测到你连续多次没有使用记忆工具" in out["values"]["extra"]
+
+    decision, out = await handler.execute(PROMPT_BUILD_EVENT, _build_params())
+    assert decision is EventDecision.SUCCESS
+    assert out["values"]["extra"] == "已有内容"
+
+
+@pytest.mark.asyncio
+async def test_memory_tool_usage_warning_handler_resets_after_memory_tool_use() -> None:
+    from plugins.booku_memory.config import BookuMemoryConfig
+    from plugins.booku_memory.event_handler import MemoryToolUsageWarningHandler
+    from src.core.components.types import EventType
+    from src.core.prompt import PROMPT_BUILD_EVENT
+    from src.kernel.event import EventDecision
+
+    cfg = BookuMemoryConfig()
+    cfg.plugin.memory_tool_miss_warning_threshold = 2
+
+    class _DummyPlugin:
+        config = cfg
+
+    handler = MemoryToolUsageWarningHandler(plugin=cast(Any, _DummyPlugin()))
+
+    await handler.execute(
+        EventType.AFTER_CHATTER_STEP,
+        {"stream_id": "stream-a", "step_scope": "actor_round", "used_tools": ["search_web"]},
+    )
+    await handler.execute(
+        EventType.AFTER_CHATTER_STEP,
+        {"stream_id": "stream-a", "step_scope": "actor_round", "used_tools": ["memory_command"]},
+    )
+    await handler.execute(
+        EventType.AFTER_CHATTER_STEP,
+        {"stream_id": "stream-a", "step_scope": "actor_round", "used_tools": ["search_web"]},
+    )
+
+    params: dict[str, Any] = {
+        "name": "default_chatter_user_prompt",
+        "template": "{extra}",
+        "values": {"extra": "", "stream_id": "stream-a"},
+        "policies": {},
+        "strict": False,
+    }
+    decision, out = await handler.execute(PROMPT_BUILD_EVENT, params)
+    assert decision is EventDecision.SUCCESS
+    assert out["values"]["extra"] == ""
+
+
+@pytest.mark.asyncio
 async def test_flashback_injector_dedup_in_cooldown_window(tmp_path: Path) -> None:
     """同一条记忆在冷却期内不会重复闪回。"""
 

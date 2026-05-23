@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.components.base import BaseEventHandler
 from src.core.components.types import EventType
+from src.core.prompt import PROMPT_BUILD_EVENT
 from src.kernel.event import EventDecision
 
 from .config import BookuMemoryConfig
@@ -23,8 +24,73 @@ if TYPE_CHECKING:
 
 # 目标模板：仅对 default_chatter user prompt 闪回注入
 _FLASHBACK_TARGET_PROMPT = "default_chatter_user_prompt"
+_MEMORY_TOOL_NAME = "memory_command"
+_MEMORY_TOOL_WARNING = "警告：检测到你连续多次没有使用记忆工具，请保持对记忆的高频使用！"
 
 _SUPPORTED_SUFFIXES = {".txt", ".md", ".markdown", ".json", ".csv", ".log", ".docx"}
+
+
+def _get_usage_warning_state(plugin: Any) -> dict[str, dict[str, Any]]:
+    """获取 booku_memory 的按流使用告警状态表。"""
+
+    state = getattr(plugin, "_booku_memory_usage_warning_state", None)
+    if isinstance(state, dict):
+        return state
+
+    state = {}
+    setattr(plugin, "_booku_memory_usage_warning_state", state)
+    return state
+
+
+def _get_warning_threshold(plugin: Any) -> int:
+    """读取记忆工具缺失告警阈值。"""
+
+    config = getattr(plugin, "config", None)
+    if isinstance(config, BookuMemoryConfig):
+        return max(1, int(config.plugin.memory_tool_miss_warning_threshold))
+    return 6
+
+
+def _mark_memory_tool_usage(plugin: Any, *, stream_id: str, used_memory_tool: bool) -> None:
+    """按聊天流更新连续未使用记忆工具计数。"""
+
+    normalized_stream_id = str(stream_id or "").strip()
+    if not normalized_stream_id:
+        return
+
+    state = _get_usage_warning_state(plugin)
+    stream_state = state.setdefault(
+        normalized_stream_id,
+        {"miss_count": 0, "warning_pending": False},
+    )
+
+    if used_memory_tool:
+        stream_state["miss_count"] = 0
+        stream_state["warning_pending"] = False
+        return
+
+    miss_count = int(stream_state.get("miss_count", 0)) + 1
+    stream_state["miss_count"] = miss_count
+    if miss_count >= _get_warning_threshold(plugin):
+        stream_state["warning_pending"] = True
+
+
+def _pop_memory_tool_warning(plugin: Any, *, stream_id: str) -> str:
+    """读取并消费指定聊天流的记忆工具告警。"""
+
+    normalized_stream_id = str(stream_id or "").strip()
+    if not normalized_stream_id:
+        return ""
+
+    state = _get_usage_warning_state(plugin)
+    stream_state = state.get(normalized_stream_id)
+    if not isinstance(stream_state, dict):
+        return ""
+    if not bool(stream_state.get("warning_pending")):
+        return ""
+
+    stream_state["warning_pending"] = False
+    return _MEMORY_TOOL_WARNING
 
 
 def _service(plugin: Any) -> BookuKnowledgeService:
@@ -368,4 +434,59 @@ class MemoryFlashbackInjector(BaseEventHandler):
         params["values"] = values
 
         logger.info(f"已注入记忆闪回（bucket={bucket}, memory_id={picked_id}）")
+        return EventDecision.SUCCESS, params
+
+
+class MemoryToolUsageWarningHandler(BaseEventHandler):
+    """跟踪 actor 记忆工具使用情况，并按流注入一次性告警。"""
+
+    handler_name: str = "memory_tool_usage_warning_handler"
+    handler_description: str = "跟踪 actor 连续未使用 memory_command 的轮次，并向对应 prompt 注入告警"
+    weight: int = 12
+    intercept_message: bool = False
+    init_subscribe: list[EventType | str] = [PROMPT_BUILD_EVENT, EventType.AFTER_CHATTER_STEP]
+
+    async def execute(
+        self, event_name: str, params: dict[str, Any]
+    ) -> tuple[EventDecision, dict[str, Any]]:
+        """处理 actor 轮次统计与 prompt 注入。"""
+
+        if event_name == EventType.AFTER_CHATTER_STEP:
+            stream_id = str(params.get("stream_id") or "").strip()
+            step_scope = str(params.get("step_scope") or "").strip()
+            if step_scope != "actor_round":
+                return EventDecision.SUCCESS, params
+
+            used_tools = {
+                str(item).strip()
+                for item in params.get("used_tools", []) or []
+                if str(item).strip()
+            }
+            _mark_memory_tool_usage(
+                self.plugin,
+                stream_id=stream_id,
+                used_memory_tool=_MEMORY_TOOL_NAME in used_tools,
+            )
+            return EventDecision.SUCCESS, params
+
+        if params.get("name") != _FLASHBACK_TARGET_PROMPT:
+            return EventDecision.SUCCESS, params
+
+        values = params.get("values")
+        if not isinstance(values, dict):
+            return EventDecision.SUCCESS, params
+
+        stream_id = str(values.get("stream_id") or "").strip()
+        warning_text = _pop_memory_tool_warning(self.plugin, stream_id=stream_id)
+        if not warning_text:
+            return EventDecision.SUCCESS, params
+
+        existing_extra = str(values.get("extra") or "").strip()
+        values["extra"] = (
+            f"{existing_extra}\n\n{warning_text}"
+            if existing_extra
+            else warning_text
+        )
+        params["values"] = values
+        logger.info(f"已向 stream={stream_id[:8]} 注入记忆工具使用告警")
         return EventDecision.SUCCESS, params

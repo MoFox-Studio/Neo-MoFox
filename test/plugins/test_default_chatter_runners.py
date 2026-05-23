@@ -15,7 +15,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from plugins.default_chatter.plugin import DefaultChatter
-from plugins.default_chatter.runners import run_enhanced
+from plugins.default_chatter.runners import (
+    _collect_used_tool_names,
+    run_enhanced,
+)
 from src.app.plugin_system.api.llm_api import create_llm_request
 from src.core.components.base import Stop, Wait, WaitResumeEvent, Success
 from src.core.prompt.system_reminder import get_system_reminder_store, reset_system_reminder_store
@@ -110,6 +113,12 @@ class _FakeLogger:
         border_style: str | None = None,
     ) -> None:
         self.panels.append((message, title, border_style))
+
+
+def test_collect_used_tool_names_dedups_and_filters_empty_names() -> None:
+    calls = [SimpleNamespace(name="search_web"), SimpleNamespace(name="memory_command")]
+    assert _collect_used_tool_names(calls) == {"search_web", "memory_command"}
+    assert _collect_used_tool_names([SimpleNamespace(name="search_web"), SimpleNamespace(name="search_web"), SimpleNamespace(name="")]) == {"search_web"}
 
 
 class _FakeChatter:
@@ -869,6 +878,10 @@ async def test_run_enhanced_supports_action_then_timed_wait() -> None:
     first = await anext(gen)
     assert first.__class__.__name__ == "Wait"
     assert getattr(first, "time", None) == 6.0
+    assert getattr(first, "step_data", None) == {
+        "step_scope": "actor_round",
+        "used_tools": ["action-pass_and_wait", "action-send_text"],
+    }
     assert resp.send_count == 1
 
 

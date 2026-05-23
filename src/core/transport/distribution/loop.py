@@ -44,6 +44,53 @@ def _get_stream_step_timeout() -> float | None:
     return timeout if timeout > 0 else None
 
 
+def _extract_step_data(result: Wait | Success | Failure | Stop) -> dict[str, object] | None:
+    """从 chatter 结果对象中提取步骤元数据。"""
+
+    step_data = getattr(result, "step_data", None)
+    if isinstance(step_data, dict):
+        return step_data
+    return None
+
+
+async def _publish_after_chatter_step_notification(
+    *,
+    stream_id: str,
+    context: "StreamContext",
+    tick: ConversationTick,
+    chatter_name: str,
+    result: Wait | Success | Failure | Stop,
+    event_manager: object,
+) -> None:
+    """发布 chatter 单步完成后的通知事件，不影响主执行流。"""
+
+    step_data = _extract_step_data(result)
+    params: dict[str, object] = {
+        "stream_id": stream_id,
+        "context": context,
+        "tick": tick,
+        "chatter_name": chatter_name,
+        "result": result,
+        "result_type": type(result).__name__.lower(),
+        "step_data": step_data,
+    }
+    if step_data:
+        params.update(step_data)
+
+    try:
+        publish_event = getattr(event_manager, "publish_event", None)
+        if callable(publish_event):
+            from src.core.components.types import EventType
+
+            publish_result = publish_event(EventType.AFTER_CHATTER_STEP, params)
+            if asyncio.iscoroutine(publish_result):
+                await publish_result
+    except Exception as exc:
+        logger.warning(
+            f"[驱动器] stream={stream_id[:8]}, 发布 AFTER_CHATTER_STEP 通知失败: {exc}"
+        )
+
+
 async def _await_stream_step(
     awaitable: Awaitable[T],
     *,
@@ -336,6 +383,17 @@ async def run_chat_stream(
                             f"probability={result.direct_message_wake_probability:.2f})，销毁生成器"
                         )
                         manager._chatter_genes.pop(stream_id, None)
+
+                    get_chatter = getattr(chatter_manager, "get_chatter_by_stream", None)
+                    chatter = get_chatter(stream_id) if callable(get_chatter) else None
+                    await _publish_after_chatter_step_notification(
+                        stream_id=stream_id,
+                        context=context,
+                        tick=tick,
+                        chatter_name=str(getattr(chatter, "chatter_name", "") or ""),
+                        result=result,
+                        event_manager=event_manager,
+                    )
                         
                     manager._stats["total_process_cycles"] += 1
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, TypeGuard
 
@@ -24,6 +24,7 @@ _PLAIN_TEXT_RETRY_REMINDER = (
     "（系统提示：你刚才返回了纯文本而非工具调用。"
     "请务必通过工具调用来完成任务，不要直接输出文字回复。）"
 )
+_AFTER_CHATTER_STEP_SCOPE = "actor_round"
 
 
 class _ToolCallWorkflowPhase(str, Enum):
@@ -54,6 +55,7 @@ class _EnhancedWorkflowRuntime:
     cross_round_seen_signatures: set[str]
     unread_msgs_to_flush: list[Message]
     plain_text_retry_count: int = 0
+    used_tools_in_round: set[str] = field(default_factory=set)
 
     def has_tool_result_tail(self) -> bool:
         """当前上下文尾部是否为 TOOL_RESULT。"""
@@ -84,6 +86,27 @@ def _format_tool_args(args: Any) -> str:
             continue
         display_items.append(f"{key}: {value}")
     return ", ".join(display_items)
+
+
+def _collect_used_tool_names(calls: list[Any]) -> set[str]:
+    """提取当前 actor 响应里实际调用过的工具名。"""
+
+    return {
+        normalized_name
+        for call in calls
+        if (normalized_name := str(getattr(call, "name", "") or "").strip())
+    }
+
+
+def _consume_actor_round_step_data(rt: _EnhancedWorkflowRuntime) -> dict[str, Any]:
+    """在 actor 整轮结束时提取并重置轮次步骤数据。"""
+
+    used_tools = sorted(rt.used_tools_in_round)
+    rt.used_tools_in_round.clear()
+    return {
+        "step_scope": _AFTER_CHATTER_STEP_SCOPE,
+        "used_tools": used_tools,
+    }
 
 
 def _is_suspend_message(message: str | None, suspend_text: str) -> bool:
@@ -346,6 +369,7 @@ async def run_enhanced(
                 assert current_resume_event is not None
                 rt.cross_round_seen_signatures.clear()
                 rt.plain_text_retry_count = 0
+                rt.used_tools_in_round.clear()
                 rt.unreads = []
                 rt.unread_msgs_to_flush = []
                 reminder_text = (
@@ -387,6 +411,7 @@ async def run_enhanced(
             # 仅在采纳新未读消息时清空跨轮去重状态；FOLLOW_UP 阶段不应清空。
             rt.cross_round_seen_signatures.clear()
             rt.plain_text_retry_count = 0
+            rt.used_tools_in_round.clear()
             rt.unreads = unread_msgs
 
             unread_lines = "\n".join(
@@ -448,12 +473,15 @@ async def run_enhanced(
         if rt.phase == _ToolCallWorkflowPhase.TOOL_EXEC:
             llm_response = _require_response(rt.response)
             current_calls = llm_response.call_list or []
+            rt.used_tools_in_round.update(_collect_used_tool_names(current_calls))
 
             _print_actor_decision_panel(chat_stream, llm_response, logger)
 
             if not llm_response.call_list:
                 if _is_suspend_message(llm_response.message, suspend_text):
-                    resume_event = yield Wait()
+                    resume_event = yield Wait(
+                        step_data=_consume_actor_round_step_data(rt)
+                    )
                     _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="model returned suspend")
                     continue
                 if llm_response.message and llm_response.message.strip():
@@ -461,9 +489,11 @@ async def run_enhanced(
                         f"LLM 返回了纯文本而非 tool call: "
                         f"{llm_response.message[:100]}"
                     )
-                    yield Stop(0)
+                    yield Stop(0, step_data=_consume_actor_round_step_data(rt))
                     return
-                resume_event = yield Wait()
+                resume_event = yield Wait(
+                    step_data=_consume_actor_round_step_data(rt)
+                )
                 _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="no call_list")
                 continue
 
@@ -491,7 +521,10 @@ async def run_enhanced(
             if call_outcome.should_stop:
                 cooldown_seconds = call_outcome.stop_minutes * 60 if enable_cooldown else 0
                 logger.info(f"对话已结束，冷却 {call_outcome.stop_minutes} 分钟（{'已启用' if enable_cooldown else '已禁用，实际不冷却'}）")
-                yield Stop(cooldown_seconds)
+                yield Stop(
+                    cooldown_seconds,
+                    step_data=_consume_actor_round_step_data(rt),
+                )
                 return
 
             if call_outcome.has_pending_tool_results:
@@ -512,7 +545,9 @@ async def run_enhanced(
             # 工具链已闭合，可以进入等待或接受新 user。
             if action_only_round and not call_outcome.should_wait:
                 if enable_action_suspend:
-                    resume_event = yield Wait()
+                    resume_event = yield Wait(
+                        step_data=_consume_actor_round_step_data(rt)
+                    )
                     _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="action-only round suspended")
                     continue
                 _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.FOLLOW_UP, logger=logger, reason="action-only round continues follow-up")
@@ -525,7 +560,10 @@ async def run_enhanced(
                     logger=logger,
                 )
                 resume_event = yield Wait(
-                    time=getattr(call_outcome, "wait_seconds", None)
+                    time=getattr(call_outcome, "wait_seconds", None),
+                    step_data=_consume_actor_round_step_data(rt),
                 )
+            else:
+                _consume_actor_round_step_data(rt)
             _transition(rt=rt, to_phase=_ToolCallWorkflowPhase.WAIT_USER, logger=logger, reason="tool exec done")
             continue
