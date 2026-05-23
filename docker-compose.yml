@@ -17,6 +17,8 @@ services:
     environment:
       # 设置容器时区为上海
       - TZ=Asia/Shanghai
+      # 非交互部署时，设置该环境变量可自动确认启动协议
+      - MOFOX_ACCEPT_STARTUP_AGREEMENTS=1
     ports:
       - "8000:8000"
     # 启用交互模式，支持 Rich 等库的终端控制台输出

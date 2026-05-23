@@ -13,6 +13,7 @@ from src.app.runtime.user_agreements import (
     ensure_cloud_telemetry_consent,
     ensure_eula_accepted,
     ensure_startup_agreements,
+    _STARTUP_AGREEMENT_ENV_VAR,
 )
 from src.core.config import CoreConfig
 from src.kernel.telemetry.cloud import (
@@ -312,6 +313,56 @@ identity_storage_dir = "{(tmp_path / "cloud-state").as_posix()}"
         "config/core.toml",
         UILevel.MINIMAL,
         input_func=lambda _: next(answers),
+    )
+    assert result is True
+
+    with (config_dir / "core.toml").open("rb") as file:
+        raw_config = tomllib.load(file)
+    assert raw_config["cloud_telemetry"]["client_enabled"] is True
+    assert raw_config["telemetry"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_startup_agreements_accepts_via_environment_variable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """存在环境变量时应跳过交互并自动确认启动协议。"""
+
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    config_dir = project_root / "config"
+    config_dir.mkdir()
+    data_dir = tmp_path / "runtime-data"
+    data_dir.mkdir()
+
+    (project_root / "eula.md").write_text("# EULA\n\nversion=1", encoding="utf-8")
+    (project_root / "PRIVACY.md").write_text("# PRIVACY\n\ntelemetry", encoding="utf-8")
+    (config_dir / "core.toml").write_text(
+        f"""
+[bot]
+data_dir = "{data_dir.as_posix()}"
+
+[telemetry]
+enabled = false
+
+[cloud_telemetry]
+client_enabled = false
+identity_storage_dir = "{(tmp_path / "cloud-state").as_posix()}"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(project_root)
+    monkeypatch.setenv(_STARTUP_AGREEMENT_ENV_VAR, "1")
+
+    def should_not_be_called(_: str) -> str:
+        raise AssertionError("prompt should not be called")
+
+    result = await ensure_startup_agreements(
+        "config/core.toml",
+        UILevel.MINIMAL,
+        input_func=should_not_be_called,
     )
     assert result is True
 

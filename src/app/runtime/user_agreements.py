@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import time
 import tomllib
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from src.core.config import CoreConfig, init_core_config
 from src.kernel.config.core import _merge_with_model_defaults, _render_toml_with_signature
@@ -21,8 +22,28 @@ from .console_ui import ConsoleUIManager, UILevel
 
 InputFunc = Callable[[str], str]
 
+
+class AgreementUI(Protocol):
+    """启动协议确认使用的最小 UI 协议。"""
+
+    def section(self, title: str) -> None:
+        """展示分节标题。"""
+
+    def display_warning(self, message: str) -> None:
+        """展示警告信息。"""
+
+    def display_info(self, message: str, title: str = "Info") -> None:
+        """展示提示信息。"""
+
+    def display_success(self, message: str) -> None:
+        """展示成功信息。"""
+
+    def print(self, *args: Any, **kwargs: Any) -> None:
+        """输出原始文本内容。"""
+
 _STATE_FILE_NAME = "agreement_acceptance"
 _CLOUD_TELEMETRY_PRIVACY_KEY = "cloud_telemetry_privacy"
+_STARTUP_AGREEMENT_ENV_VAR = "MOFOX_ACCEPT_STARTUP_AGREEMENTS"
 
 
 def _project_root_from_config_path(config_path: str) -> Path:
@@ -59,14 +80,14 @@ def _load_document(path: Path) -> tuple[str, str]:
     return content, sha256(content.encode("utf-8")).hexdigest()
 
 
-def _print_document(ui: ConsoleUIManager, title: str, path: Path, content: str) -> None:
+def _print_document(ui: AgreementUI, title: str, path: Path, content: str) -> None:
     ui.section(title)
     ui.display_info(f"协议文件：{path}", title=title)
     ui.print(content)
 
 
 def _prompt_for_choice(
-    ui: ConsoleUIManager,
+    ui: AgreementUI,
     *,
     title: str,
     required_message: str,
@@ -101,6 +122,46 @@ def _prompt_for_choice(
         if choice in {"decline", "d", "no", "拒绝"}:
             return False
         ui.display_warning("无效输入，请输入 view、agree 或 decline。")
+
+
+def _has_startup_agreement_env_override() -> bool:
+    """检查是否通过环境变量启用了非交互协议确认。"""
+
+    return _STARTUP_AGREEMENT_ENV_VAR in os.environ
+
+
+async def _save_eula_acceptance(
+    store: JSONStore,
+    state: dict[str, Any],
+    eula_path: Path,
+    eula_hash: str,
+) -> None:
+    """保存 EULA 同意状态。"""
+
+    state["eula"] = {
+        "document_path": str(eula_path),
+        "document_sha256": eula_hash,
+        "accepted_at": time.time(),
+    }
+    await store.save(_STATE_FILE_NAME, state)
+
+
+async def _save_cloud_telemetry_privacy_decision(
+    store: JSONStore,
+    state: dict[str, Any],
+    privacy_path: Path,
+    privacy_hash: str,
+    decision: str,
+) -> None:
+    """保存云端遥测隐私协议确认结果。"""
+
+    state[_CLOUD_TELEMETRY_PRIVACY_KEY] = {
+        "document_path": str(privacy_path),
+        "document_sha256": privacy_hash,
+        "decision": decision,
+        "confirmed_at": time.time(),
+    }
+    await store.save(_STATE_FILE_NAME, state)
 
 
 async def _load_agreement_state_async(store: JSONStore) -> dict[str, Any]:
@@ -150,7 +211,7 @@ def _persist_cloud_telemetry_config(
 async def ensure_eula_accepted(
     config: CoreConfig,
     project_root: Path,
-    ui: ConsoleUIManager,
+    ui: AgreementUI,
     *,
     input_func: InputFunc = input,
 ) -> bool:
@@ -160,6 +221,14 @@ async def ensure_eula_accepted(
     eula_content, eula_hash = _load_document(eula_path)
     store = JSONStore(_resolve_agreement_state_dir(config, project_root))
     state = await _load_agreement_state_async(store)
+
+    if _has_startup_agreement_env_override():
+        await _save_eula_acceptance(store, state, eula_path, eula_hash)
+        ui.display_success(
+            f"检测到环境变量 {_STARTUP_AGREEMENT_ENV_VAR}，已自动确认 EULA。"
+        )
+        return True
+
     accepted = state.get("eula", {})
     if accepted.get("document_sha256") == eula_hash:
         return True
@@ -176,12 +245,7 @@ async def ensure_eula_accepted(
         ui.display_warning("你未同意 EULA，程序将退出。")
         return False
 
-    state["eula"] = {
-        "document_path": str(eula_path),
-        "document_sha256": eula_hash,
-        "accepted_at": time.time(),
-    }
-    await store.save(_STATE_FILE_NAME, state)
+    await _save_eula_acceptance(store, state, eula_path, eula_hash)
     ui.display_success("EULA 已确认。")
     return True
 
@@ -189,7 +253,7 @@ async def ensure_eula_accepted(
 async def ensure_cloud_telemetry_consent(
     config: CoreConfig,
     project_root: Path,
-    ui: ConsoleUIManager,
+    ui: AgreementUI,
     *,
     config_path: str | Path | None = None,
     input_func: InputFunc = input,
@@ -207,6 +271,34 @@ async def ensure_cloud_telemetry_consent(
     agreement_store = JSONStore(_resolve_agreement_state_dir(config, project_root))
     agreement_state = await _load_agreement_state_async(agreement_store)
     privacy_state = agreement_state.get(_CLOUD_TELEMETRY_PRIVACY_KEY, {})
+
+    if _has_startup_agreement_env_override():
+        if identity_state.consent_state != CONSENT_GRANTED:
+            await identity_store.set_consent(
+                CONSENT_GRANTED,
+                allow_ip_retention=False,
+            )
+        await _save_cloud_telemetry_privacy_decision(
+            agreement_store,
+            agreement_state,
+            privacy_path,
+            privacy_hash,
+            "agree",
+        )
+        _persist_cloud_telemetry_config(
+            config,
+            project_root,
+            config_path=config_path,
+            client_enabled=True,
+            local_telemetry_enabled=True,
+        )
+        ui.display_success(
+            (
+                f"检测到环境变量 {_STARTUP_AGREEMENT_ENV_VAR}，"
+                "已自动确认遥测隐私协议并启用遥测配置。"
+            )
+        )
+        return
 
     if privacy_state.get("document_sha256") == privacy_hash:
         decision = privacy_state.get("decision")
@@ -256,13 +348,13 @@ async def ensure_cloud_telemetry_consent(
             CONSENT_GRANTED,
             allow_ip_retention=False,
         )
-        agreement_state[_CLOUD_TELEMETRY_PRIVACY_KEY] = {
-            "document_path": str(privacy_path),
-            "document_sha256": privacy_hash,
-            "decision": "agree",
-            "confirmed_at": time.time(),
-        }
-        await agreement_store.save(_STATE_FILE_NAME, agreement_state)
+        await _save_cloud_telemetry_privacy_decision(
+            agreement_store,
+            agreement_state,
+            privacy_path,
+            privacy_hash,
+            "agree",
+        )
         _persist_cloud_telemetry_config(
             config,
             project_root,
@@ -277,13 +369,13 @@ async def ensure_cloud_telemetry_consent(
         CONSENT_REVOKED,
         allow_ip_retention=False,
     )
-    agreement_state[_CLOUD_TELEMETRY_PRIVACY_KEY] = {
-        "document_path": str(privacy_path),
-        "document_sha256": privacy_hash,
-        "decision": "decline",
-        "confirmed_at": time.time(),
-    }
-    await agreement_store.save(_STATE_FILE_NAME, agreement_state)
+    await _save_cloud_telemetry_privacy_decision(
+        agreement_store,
+        agreement_state,
+        privacy_path,
+        privacy_hash,
+        "decline",
+    )
     _persist_cloud_telemetry_config(
         config,
         project_root,

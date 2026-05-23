@@ -61,6 +61,8 @@ Neo-MoFox 是一个全新重构的 AI 聊天机器人框架，它的目标不仅
 3. 修改配置：打开 config/core.toml 和 config/model.toml 编辑相关设置及鉴权信息。
 4. 启动引擎：再次运行 uv run main.py 唤醒引擎。
 
+如果你使用 Docker 或其他无交互部署方式，可以在启动前设置环境变量 MOFOX_ACCEPT_STARTUP_AGREEMENTS。只要该环境变量存在，启动阶段会自动确认 EULA 与遥测隐私协议，并按同意状态落盘配置。
+
 > **💡 WebUI 安装提示**  
 > 如果您采用命令行部署，框架本体不包含可视化的后台。需要手动安装对应的 Web 控制面板：  
 > [MoFox-Core-Webui](https://github.com/MoFox-Studio/MoFox-Core-Webui)
