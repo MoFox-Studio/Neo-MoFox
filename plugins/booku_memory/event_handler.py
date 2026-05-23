@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 # 目标模板：仅对 default_chatter user prompt 闪回注入
 _FLASHBACK_TARGET_PROMPT = "default_chatter_user_prompt"
 _MEMORY_TOOL_NAME = "memory_command"
-_MEMORY_TOOL_WARNING = "警告：检测到你连续多次没有使用记忆工具，请保持对记忆的高频使用！"
+_MEMORY_TOOL_WARNING = f"- *警告：检测到你连续多次没有使用记忆工具({_MEMORY_TOOL_NAME})，请保持对记忆的高频使用！*"
 
 _SUPPORTED_SUFFIXES = {".txt", ".md", ".markdown", ".json", ".csv", ".log", ".docx"}
 
