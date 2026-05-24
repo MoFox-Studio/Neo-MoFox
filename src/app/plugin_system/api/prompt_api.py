@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from src.core.prompt import SystemReminderInsertType
+from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
 
 if TYPE_CHECKING:
     from src.core.prompt import PromptManager, PromptTemplate
@@ -162,6 +162,7 @@ def add_system_reminder(
     name: str,
     content: str,
     insert_type: str | SystemReminderInsertType = SystemReminderInsertType.FIXED,
+    consume: str | SystemReminderConsumeType = SystemReminderConsumeType.FOREVER,
 ) -> None:
     """添加（或覆盖）一条 system reminder。
 
@@ -186,6 +187,7 @@ def add_system_reminder(
         name=name,
         content=content,
         insert_type=insert_type,
+        consume=consume,
     )
 
 

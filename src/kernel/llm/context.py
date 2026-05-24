@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from src.core.prompt import SystemReminderInsertType
+from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
 
 from .context_budget import (
     AsyncContextCompressionHandler,
@@ -41,8 +41,10 @@ if TYPE_CHECKING:
 @dataclass(slots=True, frozen=True)
 class RegisteredReminder:
     """解析完成的 reminder 文本及其插入策略。"""
+    source_key: tuple[str, str, str]
     text: str
     insert_type: SystemReminderInsertType
+    consume_type: SystemReminderConsumeType
 
 
 @dataclass(slots=True)
@@ -70,7 +72,11 @@ class LLMContextManager:
     _reminder_sources: list[RegisteredReminderSource] | None = field(
         default=None, init=False, repr=False
     )
-    _injected_reminder_texts: set[str] | None = None
+    _consumed_once_reminder_keys: set[tuple[str, str, str]] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """把配置期的 reminder 源规范化成运行时记录。"""
@@ -160,7 +166,6 @@ class LLMContextManager:
 
         resolved_reminders, strip_texts_by_type = self._resolve_reminders()
         if not resolved_reminders:
-            self._injected_reminder_texts = set()
             return updated
 
         first_user_index = user_indices[0]
@@ -168,22 +173,28 @@ class LLMContextManager:
 
         new_parts: dict[int, list[Text]] = {}
         seen_targets: set[tuple[int, str]] = set()
+        consumed_now: set[tuple[str, str, str]] = set()
         for reminder in resolved_reminders:
+            if (
+                reminder.consume_type == SystemReminderConsumeType.ONCE
+                and reminder.source_key in self._consumed_once_reminder_keys
+            ):
+                continue
+
             target_index = (
                 first_user_index
                 if reminder.insert_type == SystemReminderInsertType.FIXED
                 else last_user_index
             )
             target_key = (target_index, reminder.text)
-            if target_key in seen_targets:
-                continue
-            seen_targets.add(target_key)
-            new_parts.setdefault(target_index, []).append(Text(reminder.text))
+            if target_key not in seen_targets:
+                seen_targets.add(target_key)
+                new_parts.setdefault(target_index, []).append(Text(reminder.text))
+
+            if reminder.consume_type == SystemReminderConsumeType.ONCE:
+                consumed_now.add(reminder.source_key)
 
         if not new_parts:
-            self._injected_reminder_texts = {
-                reminder.text for reminder in resolved_reminders
-            }
             return updated
 
         for user_index, prefix_parts in new_parts.items():
@@ -216,9 +227,7 @@ class LLMContextManager:
             rebuilt = list(prefix_parts) + content_parts
             updated[user_index] = LLMPayload(ROLE.USER, rebuilt)
 
-        self._injected_reminder_texts = {
-            reminder.text for reminder in resolved_reminders
-        }
+        self._consumed_once_reminder_keys.update(consumed_now)
         return updated
 
     def _resolve_reminders(
@@ -242,12 +251,15 @@ class LLMContextManager:
                 items = store.get_items(source.bucket, names=source.names)
                 current_items: list[RegisteredReminder] = []
                 for item in items:
-                    text = item.render()
+                    rendered_content = item.render()
+                    text = rendered_content
                     if source.wrap_with_system_tag:
                         text = f"<system_reminder>\n{text}\n</system_reminder>"
                     reminder = RegisteredReminder(
+                        source_key=(source.bucket, item.name, rendered_content),
                         text=text,
                         insert_type=item.insert_type,
+                        consume_type=item.consume_type,
                     )
                     current_items.append(reminder)
                     resolved.append(reminder)

@@ -6,7 +6,12 @@ from typing import Any, cast
 
 import pytest
 
-from src.core.prompt import SystemReminderInsertType, get_system_reminder_store, reset_system_reminder_store
+from src.core.prompt import (
+    SystemReminderConsumeType,
+    SystemReminderInsertType,
+    get_system_reminder_store,
+    reset_system_reminder_store,
+)
 from src.kernel.llm.context import LLMContextManager, ReminderSourceSpec
 from src.kernel.llm.payload import LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.request import LLMRequest
@@ -377,6 +382,78 @@ def test_context_manager_dynamic_bucket_keeps_historical_prefix_stable(reminder_
     assert cast(Text, payloads[2].content[0]).text == "[dynamic_a]\n动态前缀A"
     assert cast(Text, payloads[2].content[1]).text == "[dynamic_b]\n动态前缀B"
     assert cast(Text, payloads[2].content[2]).text == "第二条"
+
+def test_context_manager_dynamic_once_reminder_is_consumed_per_manager(reminder_store) -> None:
+    manager = make_manager("actor", wrap_with_system_tag=True)
+    payloads: list[LLMPayload] = []
+
+    reminder_store.set(
+        "actor",
+        "screen",
+        "only once",
+        insert_type=SystemReminderInsertType.DYNAMIC,
+        consume=SystemReminderConsumeType.ONCE,
+    )
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("first")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("reply")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("second")))
+
+    assert cast(Text, payloads[0].content[0]).text == "<system_reminder>\n[screen]\nonly once\n</system_reminder>"
+    assert cast(Text, payloads[0].content[1]).text == "first"
+    assert cast(Text, payloads[2].content[0]).text == "second"
+
+
+def test_context_manager_dynamic_once_reminder_isolated_between_managers(reminder_store) -> None:
+    manager_a = make_manager("actor", wrap_with_system_tag=True)
+    manager_b = make_manager("actor", wrap_with_system_tag=True)
+
+    reminder_store.set(
+        "actor",
+        "screen",
+        "one shot",
+        insert_type=SystemReminderInsertType.DYNAMIC,
+        consume=SystemReminderConsumeType.ONCE,
+    )
+
+    payloads_a = manager_a.add_payload([], LLMPayload(ROLE.USER, Text("A")))
+    payloads_a = manager_a.add_payload(payloads_a, LLMPayload(ROLE.ASSISTANT, Text("reply")))
+    payloads_a = manager_a.add_payload(payloads_a, LLMPayload(ROLE.USER, Text("again")))
+    payloads_b = manager_b.add_payload([], LLMPayload(ROLE.USER, Text("B")))
+
+    assert cast(Text, payloads_a[0].content[0]).text == "<system_reminder>\n[screen]\none shot\n</system_reminder>"
+    assert cast(Text, payloads_a[2].content[0]).text == "again"
+    assert cast(Text, payloads_b[0].content[0]).text == "<system_reminder>\n[screen]\none shot\n</system_reminder>"
+    assert cast(Text, payloads_b[0].content[1]).text == "B"
+
+
+def test_context_manager_dynamic_once_reminder_reappears_after_content_refresh(reminder_store) -> None:
+    manager = make_manager("actor", wrap_with_system_tag=True)
+    payloads: list[LLMPayload] = []
+
+    reminder_store.set(
+        "actor",
+        "screen",
+        "version 1",
+        insert_type=SystemReminderInsertType.DYNAMIC,
+        consume=SystemReminderConsumeType.ONCE,
+    )
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("one")))
+    reminder_store.set(
+        "actor",
+        "screen",
+        "version 2",
+        insert_type=SystemReminderInsertType.DYNAMIC,
+        consume=SystemReminderConsumeType.ONCE,
+    )
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("reply")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("two")))
+
+    assert cast(Text, payloads[0].content[0]).text == "<system_reminder>\n[screen]\nversion 1\n</system_reminder>"
+    assert cast(Text, payloads[2].content[0]).text == "<system_reminder>\n[screen]\nversion 2\n</system_reminder>"
+    assert cast(Text, payloads[2].content[1]).text == "two"
+
 
 def test_context_manager_defers_missing_tool_result_placeholder_at_tail() -> None:
     manager = LLMContextManager()

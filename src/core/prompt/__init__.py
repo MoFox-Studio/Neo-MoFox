@@ -41,6 +41,7 @@ from src.core.prompt.manager import (
 from src.core.prompt.system_reminder import (
     SystemReminderBucket,
     SystemReminderInsertType,
+    SystemReminderConsumeType,
     SystemReminderItem,
     SystemReminderStore,
     get_system_reminder_store,
@@ -68,6 +69,7 @@ __all__ = [
     # system reminder
     "SystemReminderBucket",
     "SystemReminderInsertType",
+    "SystemReminderConsumeType",
     "SystemReminderItem",
     "SystemReminderStore",
     "get_system_reminder_store",
