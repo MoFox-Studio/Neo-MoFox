@@ -30,7 +30,6 @@ from src.core.models.message import MessageType
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.loader import register_plugin
-from src.core.components.utils import parse_function_signature
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
 from src.core.models.message import Message

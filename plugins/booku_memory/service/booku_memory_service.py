@@ -2429,7 +2429,7 @@ class BookuMemoryService(BaseService):
     ) -> dict[str, Any]:
         """按条件检索记忆，返回仅含 id/title/metadata 的结果。"""
         repo = await self._get_repo()
-        config = self._get_config()
+        self._get_config()
 
         normalized_top_n = max(1, int(top_n))
         normalized_type = (memory_type or "").strip().lower() or None

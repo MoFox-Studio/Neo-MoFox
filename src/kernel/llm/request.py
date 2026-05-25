@@ -12,14 +12,11 @@ from typing import Any, Self
 from .context import LLMContextManager
 from .exceptions import LLMConfigurationError
 from .model_client import ModelClientRegistry
-from .observation import calculate_request_cost
 from .payload import LLMPayload
 from .policy import create_default_policy
 from .policy.base import Policy
 from .request_execution import (
     execute_request,
-    extract_tools as _extract_tools,
-    normalize_tool_result_payload as _normalize_tool_result_payload,
 )
 from .types import ModelEntry, ModelSet, RequestType
 
