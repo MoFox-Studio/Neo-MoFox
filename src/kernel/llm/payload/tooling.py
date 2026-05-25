@@ -203,12 +203,12 @@ class ToolRegistry:
 
     def get_all(self) -> list[type[LLMUsable]]:
         """获取所有注册的工具类"""
-        return list(self._tools.values())
+        return [self._tools[name] for name in sorted(self._tools)]
     
     def list_all(self) -> list[dict[str, Any]]:
         """获取所有已注册工具的 schema 列表。"""
-        return [tool.to_schema() for tool in self._tools.values()]
+        return [self._tools[name].to_schema() for name in sorted(self._tools)]
 
     def get_all_names(self) -> list[str]:
         """获取所有已注册工具的名称。"""
-        return list(self._tools.keys())
+        return sorted(self._tools)

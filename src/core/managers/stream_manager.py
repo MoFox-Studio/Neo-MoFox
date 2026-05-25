@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from async_lru import alru_cache
 from sqlalchemy import update as sa_update
 
-from src.kernel.db import CRUDBase, QueryBuilder, get_db_session
+from src.kernel.db import CRUDBase, QueryBuilder, get_db_session, invalidate_model_cache
 from src.kernel.logger import get_logger
 from src.core.config import get_core_config
 
@@ -745,6 +745,7 @@ class StreamManager:
             result = await session.execute(stmt)
             await session.commit()
             count = result.rowcount  # type: ignore[union-attr]
+        invalidate_model_cache(self._ChatStreams)
 
         logger.debug(f"批量清空上下文，类型={chat_type or '全部'}，影响 {count} 条记录")
         return count

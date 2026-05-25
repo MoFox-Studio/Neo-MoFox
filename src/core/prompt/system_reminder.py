@@ -49,8 +49,16 @@ class SystemReminderInsertType(str, Enum):
     DYNAMIC = "dynamic"
 
 
+class SystemReminderConsumeType(str, Enum):
+    """system reminder 对单个消费者的可见生命周期。"""
+
+    FOREVER = "forever"
+    ONCE = "once"
+
+
 BucketLike: TypeAlias = str | SystemReminderBucket
 InsertTypeLike: TypeAlias = str | SystemReminderInsertType
+ConsumeTypeLike: TypeAlias = str | SystemReminderConsumeType
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +68,7 @@ class SystemReminderItem:
     name: str
     content: str
     insert_type: SystemReminderInsertType
+    consume_type: SystemReminderConsumeType = SystemReminderConsumeType.FOREVER
 
     def render(self) -> str:
         """渲染为注入 LLM 前使用的文本块。"""
@@ -104,6 +113,36 @@ def _normalize_insert_type(insert_type: InsertTypeLike) -> SystemReminderInsertT
         raise ValueError("insert_type 只能是 fixed 或 dynamic") from exc
 
 
+def _normalize_consume_type(consume: ConsumeTypeLike) -> SystemReminderConsumeType:
+    """规范化 consume 参数。"""
+
+    if isinstance(consume, SystemReminderConsumeType):
+        return consume
+
+    if not isinstance(consume, str) or not consume.strip():
+        raise ValueError("consume 不能为空")
+
+    normalized = consume.strip().lower()
+    try:
+        return SystemReminderConsumeType(normalized)
+    except ValueError as exc:
+        raise ValueError("consume 只能是 forever 或 once") from exc
+
+
+def _validate_insert_and_consume(
+    *,
+    insert_type: SystemReminderInsertType,
+    consume_type: SystemReminderConsumeType,
+) -> None:
+    """校验插入策略与消费模式的组合是否合法。"""
+
+    if (
+        consume_type == SystemReminderConsumeType.ONCE
+        and insert_type != SystemReminderInsertType.DYNAMIC
+    ):
+        raise ValueError("consume=once 只能与 insert_type=dynamic 组合使用")
+
+
 class SystemReminderStore:
     """system reminder存储类，提供线程安全的接口来设置和获取reminder。
 
@@ -123,6 +162,7 @@ class SystemReminderStore:
         name: str,
         content: str,
         insert_type: InsertTypeLike = SystemReminderInsertType.FIXED,
+        consume: ConsumeTypeLike = SystemReminderConsumeType.FOREVER,
     ) -> None:
         """设置一个reminder。
 
@@ -131,6 +171,7 @@ class SystemReminderStore:
             name: reminder的名称，在 bucket 内唯一。
             content: reminder的内容文本。
             insert_type: reminder 的插入位置类型。
+            consume: reminder 的消费模式。
         """
 
         bucket_key = _normalize_bucket(bucket)
@@ -138,12 +179,18 @@ class SystemReminderStore:
         _validate_non_empty(content, "content")
         normalized_name = name.strip()
         normalized_insert_type = _normalize_insert_type(insert_type)
+        normalized_consume_type = _normalize_consume_type(consume)
+        _validate_insert_and_consume(
+            insert_type=normalized_insert_type,
+            consume_type=normalized_consume_type,
+        )
 
         with self._lock:
             self._data.setdefault(bucket_key, {})[normalized_name] = SystemReminderItem(
                 name=normalized_name,
                 content=content,
                 insert_type=normalized_insert_type,
+                consume_type=normalized_consume_type,
             )
 
     def get_items(
@@ -158,18 +205,16 @@ class SystemReminderStore:
         with self._lock:
             bucket_map = dict(self._data.get(bucket_key, {}))
 
-        selected_items: list[SystemReminderItem]
         if names is None:
-            selected_items = list(bucket_map.values())
-        else:
-            selected_items = []
-            for n in names:
-                if not isinstance(n, str) or not n.strip():
-                    raise ValueError("names 中包含空 name")
-                key = n.strip()
-                if key in bucket_map:
-                    selected_items.append(bucket_map[key])
+            return list(bucket_map.values())
 
+        selected_items: list[SystemReminderItem] = []
+        for name in names:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("names 不能为空或包含空字符串")
+            normalized_name = name.strip()
+            if normalized_name in bucket_map:
+                selected_items.append(bucket_map[normalized_name])
         return selected_items
 
     def get(self, bucket: BucketLike, names: Sequence[str] | None = None) -> str:
@@ -187,15 +232,7 @@ class SystemReminderStore:
         if not selected_items:
             return ""
 
-        # 输出保持可预测：
-        # - names 为 None：按该 bucket 内的插入顺序拼接
-        # - names 非 None：按 names 的给定顺序拼接
-        blocks: list[str] = []
-        for item in selected_items:
-            # 组合格式尽量简洁；调用方如需额外包装，可自行处理。
-            blocks.append(item.render())
-
-        return "\n\n".join(blocks)
+        return "\n\n".join(item.render() for item in selected_items)
 
     def clear_bucket(self, bucket: BucketLike) -> None:
         """清空指定 bucket 下的所有 reminder。"""
@@ -258,6 +295,7 @@ def reset_system_reminder_store() -> None:
 __all__ = [
     "SystemReminderBucket",
     "SystemReminderInsertType",
+    "SystemReminderConsumeType",
     "SystemReminderItem",
     "SystemReminderStore",
     "get_system_reminder_store",

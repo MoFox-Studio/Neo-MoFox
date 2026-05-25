@@ -1,7 +1,7 @@
 {
     "name": "default_chatter",
     "display_name": "默认聊天器",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "默认聊天组件，提供基础的消息处理和回复功能",
     "author": "MoFox Team",
     "dependencies": {
@@ -9,6 +9,11 @@
         "components": []
     },
     "include": [
+        {
+            "component_type": "service",
+            "component_name": "chat_core",
+            "dependencies": []
+        },
         {
             "component_type": "chatter",
             "component_name": "default_chatter",
@@ -31,5 +36,5 @@
         }
     ],
     "entry_point": "plugin.py",
-    "min_core_version": "1.0.0"
+    "min_core_version": "1.2.0-alpha"
 }

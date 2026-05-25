@@ -13,6 +13,7 @@ from src.core.components.base.tool import BaseTool
 from src.core.components.types import ChatType
 from src.core.models.message import Message
 from src.core.prompt.system_reminder import (
+    SystemReminderConsumeType,
     SystemReminderInsertType,
     get_system_reminder_store,
     reset_system_reminder_store,
@@ -153,6 +154,35 @@ class TestBaseChatter:
         assert request.payloads[1].role == ROLE.USER
         assert cast(Text, request.payloads[1].content[0]).text == "<system_reminder>\n[goal]\n先给结论\n</system_reminder>"
         assert cast(Text, request.payloads[1].content[1]).text == "hello"
+
+        reset_system_reminder_store()
+
+    def test_create_request_registers_dynamic_once_system_reminder(self, mock_plugin):
+        """测试 dynamic once reminder 在单个 request 中只出现一次。"""
+        chatter = ConcreteChatter("stream_123", mock_plugin)
+
+        reset_system_reminder_store()
+        store = get_system_reminder_store()
+        store.set(
+            "actor",
+            "goal",
+            "only once",
+            insert_type=SystemReminderInsertType.DYNAMIC,
+            consume=SystemReminderConsumeType.ONCE,
+        )
+
+        with patch("src.core.config.get_model_config") as mock_model_config:
+            mock_model_config.return_value.get_task.return_value = []
+
+            request = chatter.create_request("actor", with_reminder="actor")
+
+        request.add_payload(LLMPayload(ROLE.USER, Text("hello")))
+        request.add_payload(LLMPayload(ROLE.ASSISTANT, Text("reply")))
+        request.add_payload(LLMPayload(ROLE.USER, Text("again")))
+
+        assert cast(Text, request.payloads[0].content[0]).text == "<system_reminder>\n[goal]\nonly once\n</system_reminder>"
+        assert cast(Text, request.payloads[0].content[1]).text == "hello"
+        assert cast(Text, request.payloads[2].content[0]).text == "again"
 
         reset_system_reminder_store()
 

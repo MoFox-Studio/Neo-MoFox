@@ -13,7 +13,6 @@ from mofox_wire.types import UserRole
 
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.utils.base64_helper import base64_encode_bytes
-from src.kernel.concurrency import get_task_manager
 
 from ....config import NapcatAdapterConfig
 from ...event_models import ACCEPT_FORMAT, QQ_FACE, RealMessageType

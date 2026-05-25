@@ -5,11 +5,19 @@ from __future__ import annotations
 from src.core.components import BasePlugin, register_plugin
 from src.kernel.logger import get_logger
 
-from .agent import BookuMemoryCommandTool
+from .agent import BookuMemoryCommandTool, BookuTemporaryMemoTool
 from .config import BookuMemoryConfig
-from .event_handler import MemoryFlashbackInjector, BookuMemoryStartupIngestHandler
+from .event_handler import (
+    BookuMemoryStartupIngestHandler,
+    MemoryFlashbackInjector,
+    MemoryToolUsageWarningHandler,
+)
 from .router import BookuMemoryAdminRouter
-from .service import BookuMemoryService, BookuKnowledgeService, sync_booku_memory_actor_reminder
+from .service import (
+    BookuKnowledgeService,
+    BookuMemoryService,
+    sync_booku_memory_actor_reminder,
+)
 
 logger = get_logger("booku_memory_plugin")
 
@@ -31,10 +39,12 @@ class BookuMemoryAgentPlugin(BasePlugin):
 
         return [
             BookuMemoryCommandTool,
+            BookuTemporaryMemoTool,
             BookuMemoryService,
             BookuKnowledgeService,
             BookuMemoryAdminRouter,
             MemoryFlashbackInjector,
+            MemoryToolUsageWarningHandler,
             BookuMemoryStartupIngestHandler,
         ]
 
@@ -50,6 +60,7 @@ class BookuMemoryAgentPlugin(BasePlugin):
 
         store = get_system_reminder_store()
         store.delete("actor", "booku_memory")
+        store.delete("actor", "临时备忘录")
         store.delete("actor", "活跃记忆速览")
         store.delete("actor", "专业知识引导语")
 

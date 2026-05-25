@@ -13,6 +13,7 @@ from src.kernel.db import (
     QueryBuilder,
     configure_engine,
     get_engine,
+    reset_db_cache,
 )
 
 
@@ -34,6 +35,14 @@ def _configure_kernel_db_for_tests(tmp_path_factory: pytest.TempPathFactory) -> 
         db_type="sqlite",
         apply_optimizations=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_kernel_db_cache_between_tests() -> None:
+    """隔离全局读缓存，避免测试之间互相污染。"""
+    reset_db_cache()
+    yield
+    reset_db_cache()
 
 # 创建测试用的 Base 和模型
 TestBase = declarative_base()
@@ -1728,6 +1737,246 @@ async def test_aggregate_query_max_min():
         max_age2 = await agg2.max("age")
         assert max_age2 == 35
 
+    finally:
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync_conn: TestBase.metadata.drop_all(sync_conn))
+
+
+def _install_select_counter(engine):
+    """为测试安装 SELECT 计数器。"""
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from unittest.mock import patch
+
+    counter = {"selects": 0}
+
+    original_execute = AsyncSession.execute
+
+    async def _wrapped_execute(self, statement, *args, **kwargs):
+        sql = str(statement).lstrip().upper()
+        if sql.startswith("SELECT"):
+            counter["selects"] += 1
+        return await original_execute(self, statement, *args, **kwargs)
+
+    patcher = patch.object(AsyncSession, "execute", _wrapped_execute)
+    patcher.start()
+    return counter, patcher
+
+
+@pytest.mark.asyncio
+async def test_crud_read_cache_hit_and_update_invalidation():
+    """测试 CRUD 读缓存命中与更新后的强失效。"""
+    from src.kernel.db import get_db_cache_stats, reset_db_cache
+
+    engine = await get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda sync_conn: TestBase.metadata.create_all(sync_conn))
+
+    try:
+        reset_db_cache()
+        crud = CRUDBase(TestUser)
+        created = await crud.create({"name": "CacheUser", "age": 24, "is_active": True})
+
+        counter, patcher = _install_select_counter(engine)
+        try:
+            first = await crud.get(created.id)
+            second = await crud.get(created.id)
+            assert first is not None and second is not None
+            assert counter["selects"] == 1
+
+            first.name = "Mutated"
+            third = await crud.get(created.id)
+            assert third is not None
+            assert third.name == "CacheUser"
+
+            stats = get_db_cache_stats()
+            assert int(stats["hits"]) >= 2
+
+            before_update = counter["selects"]
+            await crud.update(created.id, {"name": "Updated"})
+            after_update = counter["selects"]
+            refreshed = await crud.get(created.id)
+            assert refreshed is not None
+            assert refreshed.name == "Updated"
+            assert counter["selects"] == after_update + 1
+            assert after_update >= before_update
+        finally:
+            patcher.stop()
+    finally:
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync_conn: TestBase.metadata.drop_all(sync_conn))
+
+
+@pytest.mark.asyncio
+async def test_querybuilder_cache_hits_and_iterators_bypass_cache():
+    """测试 QueryBuilder 的缓存命中与 iter 接口不缓存。"""
+    from src.kernel.db import reset_db_cache
+
+    engine = await get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda sync_conn: TestBase.metadata.create_all(sync_conn))
+
+    try:
+        reset_db_cache()
+        crud = CRUDBase(TestUser)
+        await crud.bulk_create(
+            [
+                {"name": "Alpha", "age": 21, "is_active": True},
+                {"name": "Beta", "age": 25, "is_active": True},
+                {"name": "Gamma", "age": 29, "is_active": False},
+            ]
+        )
+
+        counter, patcher = _install_select_counter(engine)
+        try:
+            users1 = await QueryBuilder(TestUser).filter(is_active=True).order_by("age").all()
+            users2 = await QueryBuilder(TestUser).filter(is_active=True).order_by("age").all()
+            assert len(users1) == 2
+            assert len(users2) == 2
+            assert counter["selects"] == 1
+
+            before_first = counter["selects"]
+            first1 = await QueryBuilder(TestUser).filter(name="Alpha").first()
+            first2 = await QueryBuilder(TestUser).filter(name="Alpha").first()
+            assert first1 is not None and first2 is not None
+            assert counter["selects"] == before_first + 1
+
+            before_count = counter["selects"]
+            count1 = await QueryBuilder(TestUser).filter(is_active=True).count()
+            count2 = await QueryBuilder(TestUser).filter(is_active=True).count()
+            assert count1 == 2 and count2 == 2
+            assert counter["selects"] == before_count + 1
+
+            before_paginate = counter["selects"]
+            page1, total1 = await QueryBuilder(TestUser).order_by("id").paginate(page=1, page_size=2)
+            after_paginate = counter["selects"]
+            page2, total2 = await QueryBuilder(TestUser).order_by("id").paginate(page=1, page_size=2)
+            assert total1 == total2 == 3
+            assert len(page1) == len(page2) == 2
+            assert after_paginate - before_paginate == 2
+            assert counter["selects"] == after_paginate
+
+            before_iter = counter["selects"]
+            batches1 = [batch async for batch in QueryBuilder(TestUser).order_by("id").iter_batches(batch_size=2)]
+            after_iter_once = counter["selects"]
+            batches2 = [batch async for batch in QueryBuilder(TestUser).order_by("id").iter_batches(batch_size=2)]
+            assert len(batches1) == len(batches2) == 2
+            assert after_iter_once > before_iter
+            assert counter["selects"] > after_iter_once
+        finally:
+            patcher.stop()
+    finally:
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync_conn: TestBase.metadata.drop_all(sync_conn))
+
+
+@pytest.mark.asyncio
+async def test_large_result_sets_are_not_cached():
+    """测试超大结果集不会进入缓存。"""
+    from src.kernel.db import reset_db_cache
+
+    engine = await get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda sync_conn: TestBase.metadata.create_all(sync_conn))
+
+    try:
+        reset_db_cache()
+        crud = CRUDBase(TestUser)
+        await crud.bulk_create(
+            [
+                {"name": f"User{i}", "age": 20 + (i % 30), "is_active": True}
+                for i in range(300)
+            ]
+        )
+
+        counter, patcher = _install_select_counter(engine)
+        try:
+            first_batch = await crud.get_multi(limit=300)
+            second_batch = await crud.get_multi(limit=300)
+            assert len(first_batch) == 300
+            assert len(second_batch) == 300
+            assert counter["selects"] == 2
+
+            before_all = counter["selects"]
+            rows1 = await QueryBuilder(TestUser).order_by("id").all()
+            rows2 = await QueryBuilder(TestUser).order_by("id").all()
+            assert len(rows1) == len(rows2) == 300
+            assert counter["selects"] == before_all + 2
+        finally:
+            patcher.stop()
+    finally:
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync_conn: TestBase.metadata.drop_all(sync_conn))
+
+
+@pytest.mark.asyncio
+async def test_cache_namespace_isolated_between_main_db_and_plugin_db(tmp_path):
+    """测试主库与插件独立库不会串缓存。"""
+    from src.app.plugin_system.api.storage_api import PluginDatabase
+    from src.kernel.db import reset_db_cache
+
+    engine = await get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda sync_conn: TestBase.metadata.create_all(sync_conn))
+
+    plugin_db = PluginDatabase(str(tmp_path / "plugin-cache.db"), [TestUser])
+
+    try:
+        reset_db_cache()
+        await plugin_db.initialize()
+
+        main_crud = CRUDBase(TestUser)
+        plugin_crud = plugin_db.crud(TestUser)
+
+        main_user = await main_crud.create({"name": "MainUser", "age": 31, "is_active": True})
+        plugin_user = await plugin_crud.create({"name": "PluginUser", "age": 31, "is_active": True})
+
+        cached_main = await main_crud.get(main_user.id)
+        cached_plugin = await plugin_crud.get(plugin_user.id)
+
+        assert cached_main is not None and cached_plugin is not None
+        assert cached_main.name == "MainUser"
+        assert cached_plugin.name == "PluginUser"
+    finally:
+        await plugin_db.close()
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync_conn: TestBase.metadata.drop_all(sync_conn))
+
+
+@pytest.mark.asyncio
+async def test_invalidate_model_cache_after_raw_session_write():
+    """测试原始 session 写入后可通过 helper 强制失效缓存。"""
+    from sqlalchemy import update as sa_update
+    from src.kernel.db import get_db_session, invalidate_model_cache, reset_db_cache
+
+    engine = await get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda sync_conn: TestBase.metadata.create_all(sync_conn))
+
+    try:
+        reset_db_cache()
+        crud = CRUDBase(TestUser)
+        created = await crud.create({"name": "RawBefore", "age": 22, "is_active": True})
+
+        counter, patcher = _install_select_counter(engine)
+        try:
+            cached = await crud.get(created.id)
+            assert cached is not None
+            assert counter["selects"] == 1
+
+            async with get_db_session() as session:
+                await session.execute(
+                    sa_update(TestUser)
+                    .where(TestUser.id == created.id)
+                    .values(name="RawAfter")
+                )
+
+            invalidate_model_cache(TestUser)
+            refreshed = await crud.get(created.id)
+            assert refreshed is not None
+            assert refreshed.name == "RawAfter"
+            assert counter["selects"] >= 2
+        finally:
+            patcher.stop()
     finally:
         async with engine.begin() as conn:
             await conn.run_sync(lambda sync_conn: TestBase.metadata.drop_all(sync_conn))

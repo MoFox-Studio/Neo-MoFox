@@ -18,6 +18,11 @@ from src.kernel.db.core.exceptions import (
     DatabaseQueryError,
     DatabaseTransactionError,
 )
+from src.kernel.db.core.cache import (
+    get_db_cache_stats,
+    invalidate_model_cache,
+    reset_db_cache,
+)
 from src.kernel.db.core.session import (
     get_db_session,
     get_session_factory,
@@ -37,6 +42,9 @@ __all__ = [
     "close_engine",
     "get_engine_info",
     "reset_engine_state",
+    "invalidate_model_cache",
+    "reset_db_cache",
+    "get_db_cache_stats",
     # 会话
     "get_session_factory",
     "get_db_session",

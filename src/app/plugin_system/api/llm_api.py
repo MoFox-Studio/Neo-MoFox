@@ -15,6 +15,7 @@ from src.kernel.llm import (
     LLMRequest,
     LLMUsable,
     ModelSet,
+    ReminderSourceSpec,
     RerankRequest,
     ToolRegistry,
     get_llm_stats_collector,
@@ -63,14 +64,27 @@ def create_llm_request(
     Returns:
         LLMRequest 实例
     """
+    if context_manager is not None and with_reminder is not None:
+        raise ValueError(
+            "with_reminder 不能与自定义 context_manager 同时使用；"
+            "请在构造 context_manager 时直接配置 ReminderSourceSpec"
+        )
+
+    if context_manager is None and with_reminder is not None:
+        context_manager = LLMContextManager(
+            reminder_sources=[
+                ReminderSourceSpec(
+                    bucket=str(with_reminder),
+                    wrap_with_system_tag=True,
+                )
+            ]
+        )
+
     request = LLMRequest(
         model_set=model_set,
         request_name=request_name,
         context_manager=context_manager,
     )
-
-    if with_reminder is not None and request.context_manager is not None:
-        request.context_manager.reminder_bucket(str(with_reminder), wrap_with_system_tag=True)
 
     return request
 

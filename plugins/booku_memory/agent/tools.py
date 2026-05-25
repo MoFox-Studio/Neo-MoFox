@@ -396,4 +396,51 @@ class BookuMemoryCommandTool(BaseTool):
         raise ValueError(f"不支持的命令: {operation}，可先执行 help 查看支持的命令与参数说明")
 
 
-__all__ = ["BookuMemoryCommandTool"]
+class BookuTemporaryMemoTool(BaseTool):
+    """短期临时备忘录工具。"""
+
+    tool_name: str = "temporary_memo"
+    tool_description: str = (
+        "记录短期关键便签的临时备忘录工具。"
+        "主要用来保存短期关键信息，并会自动过期。"
+        "由于你看不到跨聊天流的消息，所以通常用于记录当前聊天流的关键信息，这在跨聊天流保持重要信息连续性时非常有用。"
+        "例如当你在群里发表了某些观点，或者某人说了一些信息，你就应当使用这个工具记录下来，这会在你在其他聊天流里（例如私聊）保持连贯性起到非常重要的作用。"
+        "要记录的信息包括：xx喜欢什么不喜欢什么，xx想要做什么，爱称昵称，xx的偏好爱好，xx做过什么，xx希望做什么不希望做什么，等等。"
+    )
+
+    async def execute(
+        self,
+        content: Annotated[
+            str,
+            "要记录的短期关键内容。注意这不是长期记忆，只用于临时便签提醒。",
+        ],
+        expire_hours: Annotated[
+            float,
+            "相对过期时间，单位小时，默认 2.0。到期后会自动失效。",
+        ] = 2.0,
+    ) -> tuple[bool, str | dict]:
+        """写入或刷新一条短期临时备忘录。"""
+
+        service = _service(self.plugin)
+        try:
+            result = await service.create_temporary_memo(
+                content=content,
+                expire_hours=expire_hours,
+                stream_id=self.get_current_stream_id(),
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"temporary_memo 执行失败: {error}", exc_info=True)
+            return True, {
+                "action": "create_temporary_memo",
+                "ok": False,
+                "error": str(error),
+            }
+
+        return True, {
+            "action": "create_temporary_memo",
+            "ok": True,
+            "result": result,
+        }
+
+
+__all__ = ["BookuMemoryCommandTool", "BookuTemporaryMemoTool"]

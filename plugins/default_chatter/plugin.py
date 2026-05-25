@@ -30,7 +30,6 @@ from src.core.models.message import MessageType
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.loader import register_plugin
-from src.core.components.utils import parse_function_signature
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
 from src.core.models.message import Message
@@ -43,13 +42,18 @@ from .config import DefaultChatterConfig
 from .decision_agent import decide_should_respond
 from .multimodal import build_multimodal_content, extract_images_from_messages
 from .prompt_builder import DefaultChatterPromptBuilder
-from .runners import run_enhanced
+from .service import DefaultChatterService
 from .sub_agent_collaboration import (
     FIXED_SUB_AGENT_SYSTEM_PROMPT,
     get_active_sub_agent_name,
     get_sub_agent_collaboration_manager,
 )
-from .type_defs import LLMConversationState, LLMResponseLike, SubAgentDecision
+from .type_defs import (
+    DefaultChatterSessionOptions,
+    LLMConversationState,
+    LLMResponseLike,
+    SubAgentDecision,
+)
 
 logger = get_logger("default_chatter")
 
@@ -721,23 +725,9 @@ class DefaultChatter(BaseChatter):
             plugin_config.plugin.enable_programmatic_controller
         )
 
-    def _apply_stop_wake_config(self, result: Stop) -> Stop:
-        """将 default_chatter 的 stop 唤醒配置写入 Stop 结果。"""
-        plugin_config = getattr(self.plugin, "config", None)
-        if not isinstance(plugin_config, DefaultChatterConfig):
-            return result
-
-        probability = max(
-            0.0,
-            min(1.0, float(plugin_config.plugin.stop_direct_message_wake_probability)),
-        )
-        return Stop(
-            time=result.time,
-            direct_message_wake_enabled=bool(
-                plugin_config.plugin.enable_stop_direct_message_wake
-            ),
-            direct_message_wake_probability=probability,
-        )
+    def _build_session_options(self) -> DefaultChatterSessionOptions:
+        """构造DefaultChatterSessionOptions，供会话使用。"""
+        return DefaultChatterService._build_default_options(self.plugin)
 
     def _is_action_suspend_enabled(self) -> bool:
         """读取纯 Action 回合的 SUSPEND 开关。"""
@@ -929,48 +919,14 @@ class DefaultChatter(BaseChatter):
         Yields:
             Wait | Success | Failure | Stop: 执行结果
         """
-        from src.core.managers.stream_manager import get_stream_manager
-
-        stream_manager = get_stream_manager()
-        chat_stream = await stream_manager.activate_stream(self.stream_id)
-        if chat_stream is None:
-            logger.error(f"无法激活聊天流: {self.stream_id}")
-            yield Failure("无法激活聊天流")
-            return
-
-        runner = self._execute_enhanced(chat_stream)
-        resume_event: WaitResumeEvent | None = None
-
-        while True:
-            try:
-                result = await runner.asend(resume_event)
-            except StopAsyncIteration:
-                return
-            resume_event = yield result
-
-    async def _execute_enhanced(
-        self, chat_stream: ChatStream
-    ) -> AsyncGenerator[Wait | Success | Failure | Stop, WaitResumeEvent | None]:
-        """执行 DefaultChatter 对话流程。"""
-        plugin_config = getattr(self.plugin, "config", None)
-        if isinstance(plugin_config, DefaultChatterConfig):
-            enable_cooldown = plugin_config.plugin.enable_cooldown
-            native_multimodal = plugin_config.plugin.native_multimodal
-        else:
-            enable_cooldown = False
-            native_multimodal = False
-
-        runner = run_enhanced(
+        service = DefaultChatterService(self.plugin)
+        session = service.create_default_session(
+            stream_id=self.stream_id,
+            plugin=self.plugin,
             chatter=self,
-            chat_stream=chat_stream,
-            logger=logger,
-            pass_call_name=_PASS_AND_WAIT,
-            stop_call_name=_STOP_CONVERSATION,
-            suspend_text=_SUSPEND_TEXT,
-            enable_action_suspend=self._is_action_suspend_enabled(),
-            enable_cooldown=enable_cooldown,
-            native_multimodal=native_multimodal,
+            options=self._build_session_options(),
         )
+        runner = session.execute()
         resume_event: WaitResumeEvent | None = None
 
         while True:
@@ -978,8 +934,6 @@ class DefaultChatter(BaseChatter):
                 result = await runner.asend(resume_event)
             except StopAsyncIteration:
                 return
-            if isinstance(result, Stop):
-                result = self._apply_stop_wake_config(result)
             resume_event = yield result
 
     async def run_tool_call(
@@ -1283,6 +1237,7 @@ class DefaultChatterPlugin(BasePlugin):
         """
         return [
             DefaultChatter,
+            DefaultChatterService,
             SendTextAction,
             PassAndWaitAction,
             StopConversationAction,

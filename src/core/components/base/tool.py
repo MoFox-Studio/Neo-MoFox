@@ -13,6 +13,7 @@ from src.kernel.llm.payload.tooling import LLMUsable, LLMUsableExecution
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
+    from src.core.models.message import Message
 
 class BaseTool(ABC, LLMUsable):
     """工具组件基类。
@@ -62,6 +63,27 @@ class BaseTool(ABC, LLMUsable):
             plugin: 所属插件实例
         """
         self.plugin = plugin
+        self.stream_id: str = ""
+        self.trigger_message: "Message | None" = None
+
+    def _bind_runtime_context(
+        self,
+        *,
+        stream_id: str | None = None,
+        message: "Message | None" = None,
+    ) -> None:
+        """绑定运行时上下文信息。"""
+
+        self.stream_id = str(stream_id or "").strip()
+        self.trigger_message = message
+
+    def get_current_stream_id(self) -> str:
+        """获取当前工具调用绑定的流 ID。"""
+
+        message_stream_id = str(getattr(self.trigger_message, "stream_id", "") or "").strip()
+        if message_stream_id:
+            return message_stream_id
+        return str(self.stream_id or "").strip()
 
     @classmethod
     def get_signature(cls) -> str | None:

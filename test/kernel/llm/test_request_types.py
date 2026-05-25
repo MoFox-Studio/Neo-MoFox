@@ -12,6 +12,7 @@ from src.app.plugin_system.api.llm_api import (
     create_rerank_request,
 )
 from src.core.prompt.system_reminder import (
+    SystemReminderConsumeType,
     SystemReminderInsertType,
     get_system_reminder_store,
     reset_system_reminder_store,
@@ -109,6 +110,33 @@ def test_create_llm_request_registers_dynamic_system_reminder(model_set: ModelSe
     assert cast(Text, request.payloads[0].content[0]).text == "你好"
     assert cast(Text, request.payloads[2].content[0]).text == "<system_reminder>\n[goal]\n跟随最后一条\n</system_reminder>"
     assert cast(Text, request.payloads[2].content[1]).text == "再问一次"
+
+    reset_system_reminder_store()
+
+
+def test_create_llm_request_registers_dynamic_once_system_reminder(model_set: ModelSet) -> None:
+    reset_system_reminder_store()
+    store = get_system_reminder_store()
+    store.set(
+        "actor",
+        "goal",
+        "only once",
+        insert_type=SystemReminderInsertType.DYNAMIC,
+        consume=SystemReminderConsumeType.ONCE,
+    )
+
+    request = create_llm_request(
+        model_set=model_set,
+        request_name="chat_test",
+        with_reminder="actor",
+    )
+    request.add_payload(LLMPayload(ROLE.USER, Text("hello")))
+    request.add_payload(LLMPayload(ROLE.ASSISTANT, Text("reply")))
+    request.add_payload(LLMPayload(ROLE.USER, Text("again")))
+
+    assert cast(Text, request.payloads[0].content[0]).text == "<system_reminder>\n[goal]\nonly once\n</system_reminder>"
+    assert cast(Text, request.payloads[0].content[1]).text == "hello"
+    assert cast(Text, request.payloads[2].content[0]).text == "again"
 
     reset_system_reminder_store()
 

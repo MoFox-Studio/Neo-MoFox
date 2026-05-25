@@ -1,6 +1,10 @@
 """Booku Memory Service 导出。"""
 
-from .metadata_repository import BookuMemoryMetadataRepository, BookuMemoryRecord
+from .metadata_repository import (
+    BookuMemoryMetadataRepository,
+    BookuMemoryRecord,
+    BookuTemporaryMemo,
+)
 from .result_deduplicator import ResultDeduplicator
 from .booku_memory_service import (
     BookuMemoryService,
@@ -16,6 +20,7 @@ from .booku_knowledge_service import (
 __all__ = [
     "BookuMemoryMetadataRepository",
     "BookuMemoryRecord",
+    "BookuTemporaryMemo",
     "ResultDeduplicator",
     "BookuMemoryService",
     "BookuKnowledgeService",

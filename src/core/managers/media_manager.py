@@ -32,6 +32,7 @@ from src.core.prompt import PromptTemplate, get_prompt_manager
 from src.core.config import get_core_config
 from src.core.utils.base64_helper import base64_decode_to_bytes
 from src.kernel.scheduler import get_unified_scheduler, TriggerType
+from src.kernel.db import QueryBuilder, invalidate_model_cache
 from src.kernel.db.core.session import get_db_session
 from src.core.models.sql_alchemy import Images, ImageDescriptions
 from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
@@ -414,6 +415,7 @@ class MediaManager:
             vlm_processed: 是否已经过 VLM 处理
         """
         try:
+            changed = False
             async with get_db_session() as session:
                 # 查找现有记录（使用 image_id 作为唯一标识）
                 # 这里使用 scalars().first() 来避免数据库中存在多条重复记录导致的 MultipleResultsFound 错误
@@ -433,6 +435,7 @@ class MediaManager:
                         existing.description = description
                     if vlm_processed:
                         existing.vlm_processed = True
+                    changed = True
                     logger.debug(f"更新媒体记录: {media_hash[:8]}... count={existing.count}")
                 else:
                     # 创建新记录
@@ -446,9 +449,12 @@ class MediaManager:
                         count=1
                     )
                     session.add(new_image)
+                    changed = True
                     logger.debug(f"创建新媒体记录: {media_hash[:8]}...")
 
                 await session.commit()
+            if changed:
+                invalidate_model_cache(Images)
 
         except Exception as e:
             logger.error(f"保存媒体信息失败: {e}", exc_info=True)
@@ -463,29 +469,24 @@ class MediaManager:
             媒体信息字典，不存在返回 None
         """
         try:
-            async with get_db_session() as session:
-                # 如果存在多条重复记录，取最新一条返回
-                stmt = (
-                    select(Images)
-                    .where(Images.image_id == media_hash)
-                    .order_by(Images.timestamp.desc())
-                    .limit(1)
-                )
-                result = await session.execute(stmt)
-                media = result.scalars().first()
-
-                if media:
-                    return {
-                        "id": media.id,
-                        "image_id": media.image_id,
-                        "path": media.path,
-                        "type": media.type,
-                        "description": media.description,
-                        "count": media.count,
-                        "timestamp": media.timestamp,
-                        "vlm_processed": media.vlm_processed
-                    }
-                return None
+            media = await (
+                QueryBuilder(Images)
+                .filter(image_id=media_hash)
+                .order_by("-timestamp")
+                .first()
+            )
+            if media is not None:
+                return {
+                    "id": media.id,
+                    "image_id": media.image_id,
+                    "path": media.path,
+                    "type": media.type,
+                    "description": media.description,
+                    "count": media.count,
+                    "timestamp": media.timestamp,
+                    "vlm_processed": media.vlm_processed,
+                }
+            return None
 
         except Exception as e:
             logger.error(f"查询媒体信息失败: {e}", exc_info=True)
@@ -614,16 +615,13 @@ class MediaManager:
             缓存的描述，不存在返回 None
         """
         try:
-            async with get_db_session() as session:
-                stmt = select(ImageDescriptions).where(
-                    ImageDescriptions.image_description_hash == media_hash,
-                    ImageDescriptions.type == media_type
-                )
-                result = await session.execute(stmt)
-                # 使用 scalars().first() 避免 MultipleResultsFound 错误
-                desc = result.scalars().first()
-
-                return desc.description if desc else None
+            desc = await (
+                QueryBuilder(ImageDescriptions)
+                .filter(image_description_hash=media_hash, type=media_type)
+                .order_by("-timestamp")
+                .first()
+            )
+            return desc.description if desc else None
 
         except Exception as e:
             logger.debug(f"查询缓存失败: {e}")
@@ -643,6 +641,7 @@ class MediaManager:
             description: 描述文本
         """
         try:
+            created = False
             async with get_db_session() as session:
                 # 检查是否已存在（避免重复记录导致 MultipleResultsFound）
                 stmt = (
@@ -667,8 +666,11 @@ class MediaManager:
                         timestamp=time.time()
                     )
                     session.add(new_desc)
+                    created = True
                     await session.commit()
                     logger.debug(f"保存描述缓存: {media_hash[:8]}...")
+            if created:
+                invalidate_model_cache(ImageDescriptions)
 
         except Exception as e:
             logger.error(f"保存描述缓存失败: {e}", exc_info=True)

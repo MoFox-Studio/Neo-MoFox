@@ -10,6 +10,7 @@ from typing import Any
 
 from src.core.components.base.chatter import BaseChatter, WaitResumeEvent
 from src.core.models.message import Message
+from src.core.models.stream import ChatStream
 from src.core.prompt import (
     SystemReminderBucket,
     SystemReminderInsertType,
@@ -141,14 +142,8 @@ def _close_tool_result_tail(response: Any) -> None:
     response.add_payload(LLMPayload(ROLE.ASSISTANT, Text(_SUSPEND_TEXT)))
 
 
-def _has_tool_result_tail(response: Any) -> bool:
-    """判断上下文尾部是否仍是未闭合的 TOOL_RESULT。"""
-    payloads = getattr(response, "payloads", None)
-    return bool(payloads and payloads[-1].role == ROLE.TOOL_RESULT)
-
-
 def _build_synthetic_trigger_message(
-    chat_stream: Any,
+    chat_stream: ChatStream,
     question: str,
 ) -> Message:
     """在流里没有现成消息时，构造最小可执行的触发消息。"""
@@ -156,18 +151,16 @@ def _build_synthetic_trigger_message(
         message_id=f"sub-agent-{int(time.time() * 1000)}",
         content=question,
         processed_plain_text=question,
-        platform=str(getattr(chat_stream, "platform", "") or ""),
-        chat_type=str(getattr(chat_stream, "chat_type", "") or "private"),
-        stream_id=str(getattr(chat_stream, "stream_id", "") or ""),
+        platform=chat_stream.platform,
+        chat_type=chat_stream.chat_type,
+        stream_id=chat_stream.stream_id,
         sender_name="sub_agent",
     )
 
 
-def _pick_trigger_message(chat_stream: Any, question: str) -> Message | None:
+def _pick_trigger_message(chat_stream: ChatStream, question: str) -> Message | None:
     """为子代理工具调用选择一个可复用的触发消息。"""
-    context = getattr(chat_stream, "context", None)
-    if context is None:
-        return _build_synthetic_trigger_message(chat_stream, question)
+    context = chat_stream.context
     if context.current_message is not None:
         return context.current_message
     if context.unread_messages:
@@ -408,12 +401,6 @@ class SubAgentCollaborationManager:
         normalized_question = question.strip()
         if not normalized_question:
             return False
-
-        # 子代理可能在上一轮连续工具 follow-up 中途被打断。
-        # 若当前上下文尾部仍是 TOOL_RESULT，必须先补一个 assistant 承接，
-        # 否则下一条 USER 会触发 strict 链路校验失败。
-        if _has_tool_result_tail(session.state):
-            _close_tool_result_tail(session.state)
 
         if visible:
             session.append_activity("user", normalized_question)

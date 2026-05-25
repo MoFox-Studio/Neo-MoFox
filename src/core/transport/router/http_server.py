@@ -70,6 +70,8 @@ class HTTPServer:
         self.server: uvicorn.Server | None = None
         self._running: bool = False
         self._server_task: asyncio.Task | None = None
+        self._state_lock = asyncio.Lock()
+        self._startup_timeout = 5.0
 
     async def start(self) -> None:
         """启动服务器。
@@ -82,24 +84,30 @@ class HTTPServer:
         Examples:
             >>> await server.start()
         """
-        if self._running:
-            raise RuntimeError("服务器已经在运行中")
+        async with self._state_lock:
+            if self._running:
+                raise RuntimeError("服务器已经在运行中")
 
-        # 配置 Uvicorn
-        config = uvicorn.Config(
-            app=self.app,
-            host=self.host,
-            port=self.port,
-            log_level="error",
-        )
+            # 配置 Uvicorn
+            config = uvicorn.Config(
+                app=self.app,
+                host=self.host,
+                port=self.port,
+                log_level="error",
+            )
 
-        self.server = uvicorn.Server(config)
-        self._running = True
+            self.server = uvicorn.Server(config)
+            self._server_task = (
+                get_task_manager().create_task(self.server.serve(), daemon=True).task
+            )
 
-        # 在后台运行服务器
-        self._server_task = (
-            get_task_manager().create_task(self.server.serve(), daemon=True).task
-        )
+            try:
+                await self._wait_until_started()
+            except BaseException:
+                await self._cleanup_failed_start()
+                raise
+
+            self._running = True
 
         logger.info(f"HTTP 服务器已启动: http://{self.host}:{self.port}")
 
@@ -111,28 +119,35 @@ class HTTPServer:
         Examples:
             >>> await server.stop()
         """
-        if not self._running:
-            logger.warning("服务器未运行")
-            return
+        async with self._state_lock:
+            if self.server is None and self._server_task is None:
+                logger.warning("服务器未运行")
+                return
 
-        self._running = False
+            self._running = False
 
-        if self.server:
-            self.server.should_exit = True
+            if self.server is not None:
+                self.server.should_exit = True
 
-        if self._server_task:
-            try:
-                await asyncio.wait_for(self._server_task, timeout=5.0)
-            except asyncio.CancelledError:
-                logger.warning("服务器停止等待被取消，已忽略")
-                self._server_task.cancel()
-            except asyncio.TimeoutError:
-                logger.warning("服务器停止超时，强制取消")
-                self._server_task.cancel()
+            if self._server_task is not None:
                 try:
-                    await self._server_task
+                    await asyncio.wait_for(self._server_task, timeout=self._startup_timeout)
                 except asyncio.CancelledError:
-                    pass
+                    logger.warning("服务器停止等待被取消，已忽略")
+                    self._server_task.cancel()
+                except asyncio.TimeoutError:
+                    logger.warning("服务器停止超时，强制取消")
+                    if self.server is not None:
+                        self.server.force_exit = True
+                    self._server_task.cancel()
+                    try:
+                        await self._server_task
+                    except asyncio.CancelledError:
+                        pass
+                finally:
+                    self._reset_state()
+            else:
+                self._reset_state()
 
         logger.info("HTTP 服务器已停止")
 
@@ -170,6 +185,54 @@ class HTTPServer:
             >>> schema = server.get_openapi_schema()
         """
         return self.app.openapi()
+
+    async def _wait_until_started(self) -> None:
+        """等待 Uvicorn 完成 startup，避免启动/停止竞态。"""
+        if self.server is None or self._server_task is None:
+            raise RuntimeError("HTTP 服务器尚未创建")
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._startup_timeout
+
+        while True:
+            if getattr(self.server, "started", False):
+                return
+
+            if self._server_task.done():
+                await self._consume_server_task_result()
+                raise RuntimeError("HTTP 服务器在启动完成前提前退出")
+
+            if loop.time() >= deadline:
+                raise TimeoutError("HTTP 服务器启动超时")
+
+            await asyncio.sleep(0.01)
+
+    async def _cleanup_failed_start(self) -> None:
+        """清理启动失败时残留的服务状态。"""
+        if self.server is not None:
+            self.server.should_exit = True
+
+        if self._server_task is not None and not self._server_task.done():
+            self._server_task.cancel()
+            try:
+                await self._server_task
+            except asyncio.CancelledError:
+                pass
+
+        self._reset_state()
+
+    async def _consume_server_task_result(self) -> None:
+        """消费后台任务结果，保留原始异常栈。"""
+        if self._server_task is None:
+            return
+
+        await self._server_task
+
+    def _reset_state(self) -> None:
+        """重置运行时状态。"""
+        self.server = None
+        self._server_task = None
+        self._running = False
 
 
 # 全局服务器实例

@@ -146,24 +146,20 @@ async def get_media_info(media_hash: str) -> dict[str, Any] | None:
     if info is not None:
         return info
     from src.core.models.sql_alchemy import Images
-    from src.kernel.db.core.session import get_db_session
-    from sqlalchemy import select
+    from src.kernel.db import QueryBuilder
 
-    async with get_db_session() as session:
-        stmt = select(Images).where(Images.image_id == media_hash)
-        result = await session.execute(stmt)
-        media = result.scalar_one_or_none()
-        if media:
-            return {
-                "id": media.id,
-                "image_id": media.image_id,
-                "path": media.path,
-                "type": media.type,
-                "description": media.description,
-                "count": media.count,
-                "timestamp": media.timestamp,
-                "vlm_processed": media.vlm_processed,
-            }
+    media = await QueryBuilder(Images).filter(image_id=media_hash).first()
+    if media:
+        return {
+            "id": media.id,
+            "image_id": media.image_id,
+            "path": media.path,
+            "type": media.type,
+            "description": media.description,
+            "count": media.count,
+            "timestamp": media.timestamp,
+            "vlm_processed": media.vlm_processed,
+        }
     return None
 
 

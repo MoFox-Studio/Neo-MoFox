@@ -30,6 +30,15 @@ class BookuMemoryConfig(BaseConfig):
             tag="ai",
             hint="开启后会在 AI 系统提示中添加记忆相关引导"
         )
+        memory_tool_miss_warning_threshold: int = Field(
+            default=6,
+            description="actor 连续多少轮未调用 memory_command 后，向当前聊天流注入一次记忆工具使用警告",
+            label="记忆工具缺失告警阈值",
+            ge=1,
+            le=20,
+            tag="ai",
+            hint="达到阈值后仅对对应 stream 注入一次告警，直到再次调用记忆工具才重置"
+        )
 
     @config_section("storage", title="存储配置", tag="database")
     class StorageSection(SectionBase):

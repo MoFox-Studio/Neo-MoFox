@@ -8,7 +8,11 @@ import pytest
 
 from src.core.components.base.tool import BaseTool
 from src.core.models.message import Message
-from src.core.utils.llm_tool_call import run_llm_usable_executions, run_tool_call
+from src.core.utils.llm_tool_call import (
+    create_llm_usable_execution,
+    run_llm_usable_executions,
+    run_tool_call,
+)
 from src.kernel.llm import LLMUsableExecution, ToolCall, ToolRegistry
 
 
@@ -134,3 +138,31 @@ async def test_run_tool_call_runs_concurrently_and_appends_in_call_order() -> No
         "slow",
         "fast",
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_llm_usable_execution_binds_stream_context_for_tools() -> None:
+    captured: dict[str, Any] = {}
+
+    class ContextAwareTool(BaseTool):
+        tool_name = "context-aware"
+        tool_description = "context-aware"
+
+        async def execute(self) -> tuple[bool, str]:
+            captured["stream_id"] = self.get_current_stream_id()
+            captured["message_stream_id"] = getattr(self.trigger_message, "stream_id", "")
+            return True, "ok"
+
+    execution = await create_llm_usable_execution(
+        ContextAwareTool,
+        plugin=MagicMock(),
+        stream_id="fallback-stream",
+        message=Message(message_id="m1", stream_id="message-stream"),
+    )
+    await run_llm_usable_executions([execution])
+
+    assert execution.result == (True, "ok")
+    assert captured == {
+        "stream_id": "message-stream",
+        "message_stream_id": "message-stream",
+    }

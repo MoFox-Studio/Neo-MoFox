@@ -2,7 +2,7 @@
     "name": "booku_memory",
     "display_name": "Booku 记忆",
     "version": "1.0.0",
-    "description": "命令驱动的 Booku 记忆系统插件，提供 memory_command 单工具接口",
+    "description": "命令驱动的 Booku 记忆系统插件，提供长期记忆工具 memory_command 和短期便签工具 temporary_memo。",
     "author": "MoFox Team",
     "dependencies": {
         "plugins": [],
@@ -12,6 +12,11 @@
         {
             "component_type": "tool",
             "component_name": "memory_command",
+            "dependencies": []
+        },
+        {
+            "component_type": "tool",
+            "component_name": "temporary_memo",
             "dependencies": []
         },
         {
@@ -31,5 +36,5 @@
         }
     ],
     "entry_point": "plugin.py",
-    "min_core_version": "1.0.0"
+    "min_core_version": "1.2.0-alpha.3"
 }

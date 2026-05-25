@@ -13,7 +13,6 @@ from src.core.utils.base64_helper import (
     base64_decode_to_bytes,
     base64_encode_bytes,
 )
-from src.kernel.concurrency import get_task_manager
 
 if TYPE_CHECKING:
     from ...plugin import NapcatAdapter

@@ -39,9 +39,11 @@ class Wait:
     Attributes:
         time: 等待时间（秒），如果为 None 则表示无限等待直到有新消息；
             如果为数字，则表示到期后由框架主动恢复生成器，不依赖新消息
+        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
     """
 
     time: float | int | None = None
+    step_data: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -62,10 +64,12 @@ class Success:
     Attributes:
         message: 成功消息
         data: 可选的附加数据
+        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
     """
 
     message: str
     data: dict[str, Any] | None = None
+    step_data: dict[str, Any] | None = None
 
 
 @dataclass
@@ -77,10 +81,12 @@ class Failure:
     Attributes:
         error: 错误消息
         exception: 可选的异常对象
+        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
     """
 
     error: str
     exception: Exception | None = None
+    step_data: dict[str, Any] | None = None
 
 @dataclass
 class Stop:
@@ -90,11 +96,13 @@ class Stop:
 
     Attributes:
         time: 停止时间（秒）
+        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
     """
 
     time: float | int
     direct_message_wake_enabled: bool = False
     direct_message_wake_probability: float = 0.0
+    step_data: dict[str, Any] | None = None
 
 # 类型别名
 ChatterResult = Wait | Success | Failure | Stop
@@ -487,11 +495,21 @@ class BaseChatter(ABC):
             KeyError: 当 task 在模型配置中不存在时
         """
         from src.core.config import get_model_config
-        from src.kernel.llm import LLMRequest, LLMContextManager
+        from src.kernel.llm import LLMRequest, LLMContextManager, ReminderSourceSpec
 
         model_set = get_model_config().get_task(task)
+        reminder_sources = None
+        if with_reminder is not None:
+            reminder_sources = [
+                ReminderSourceSpec(
+                    bucket=str(with_reminder),
+                    wrap_with_system_tag=True,
+                )
+            ]
+
         context_manager = LLMContextManager(
-            context_compression_handler=default_chat_context_compression_handler
+            context_compression_handler=default_chat_context_compression_handler,
+            reminder_sources=reminder_sources,
         )
 
         _logger = get_logger("chatter")
@@ -509,9 +527,6 @@ class BaseChatter(ABC):
             meta_data={"stream_id": self.stream_id},
             context_manager=context_manager,
         )
-
-        if with_reminder is not None:
-            context_manager.reminder_bucket(str(with_reminder), wrap_with_system_tag=True)
 
         return request
 

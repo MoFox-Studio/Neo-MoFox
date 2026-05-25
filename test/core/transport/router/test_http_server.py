@@ -42,9 +42,6 @@ class TestHTTPServer:
         await server.start()
         assert server.is_running()
 
-        # 等待服务器完全启动
-        await asyncio.sleep(0.5)
-
         # 验证服务器可以响应
         async with AsyncClient(base_url=server.get_base_url()) as client:
             # 默认会返回 404，但说明服务器在运行
@@ -70,7 +67,6 @@ class TestHTTPServer:
 
         # 启动服务器
         await server.start()
-        await asyncio.sleep(0.5)
 
         # 测试子应用端点
         async with AsyncClient(base_url=server.get_base_url()) as client:
@@ -92,7 +88,6 @@ class TestHTTPServer:
             return {"status": "ok"}
 
         await server.start()
-        await asyncio.sleep(0.5)
 
         # 测试端点
         async with AsyncClient(base_url=server.get_base_url()) as client:
@@ -111,7 +106,6 @@ class TestHTTPServer:
     async def test_multiple_start_error(self, server):
         """测试重复启动服务器会抛出错误。"""
         await server.start()
-        await asyncio.sleep(0.5)
 
         with pytest.raises(RuntimeError, match="服务器已经在运行中"):
             await server.start()
@@ -164,7 +158,6 @@ async def test_concurrent_requests():
         return {"message": "slow"}
 
     await server.start()
-    await asyncio.sleep(0.5)
 
     # 发送多个并发请求
     async with AsyncClient(base_url=server.get_base_url()) as client:
@@ -177,3 +170,15 @@ async def test_concurrent_requests():
             assert response.json() == {"message": "slow"}
 
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_immediate_stop_after_start():
+    """测试启动完成后可立即停止，避免 Windows 下启动/关闭竞态。"""
+    server = HTTPServer(host="127.0.0.1", port=8891)
+
+    await server.start()
+    assert server.is_running()
+
+    await server.stop()
+    assert not server.is_running()

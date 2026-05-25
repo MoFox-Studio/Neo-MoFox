@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,7 +17,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src.app.plugin_system.api.storage_api import PluginDatabase
 
-from .models import BookuMemoryRecordModel, BookuMemoryTagModel
+from .models import (
+    BookuMemoryRecordModel,
+    BookuMemoryTagModel,
+    BookuTemporaryMemoModel,
+)
 
 
 @dataclass(slots=True)
@@ -57,6 +62,18 @@ class BookuMemoryRecord:
     opposing_tags: list[str]
 
 
+@dataclass(slots=True)
+class BookuTemporaryMemo:
+    """临时备忘录记录。"""
+
+    memo_id: str
+    stream_id: str
+    content: str
+    expires_at: float
+    created_at: float
+    updated_at: float
+
+
 class BookuMemoryMetadataRepository:
     """Booku Memory 的 SQLAlchemy + PluginDatabase 元数据仓储。"""
 
@@ -69,7 +86,10 @@ class BookuMemoryMetadataRepository:
         Args:
             db_path: SQLite 数据库文件路径。
         """
-        self._db = PluginDatabase(db_path, [BookuMemoryRecordModel, BookuMemoryTagModel])
+        self._db = PluginDatabase(
+            db_path,
+            [BookuMemoryRecordModel, BookuMemoryTagModel, BookuTemporaryMemoModel],
+        )
 
     async def initialize(self) -> None:
         """初始化数据库（建表）。"""
@@ -146,6 +166,19 @@ class BookuMemoryMetadataRepository:
         )
 
     @staticmethod
+    def _to_temporary_memo(row: BookuTemporaryMemoModel) -> BookuTemporaryMemo:
+        """将 ORM 实例转换为临时备忘录 dataclass。"""
+
+        return BookuTemporaryMemo(
+            memo_id=str(row.memo_id),
+            stream_id=str(getattr(row, "stream_id", "") or ""),
+            content=str(row.content or ""),
+            expires_at=float(row.expires_at),
+            created_at=float(row.created_at),
+            updated_at=float(row.updated_at),
+        )
+
+    @staticmethod
     def _parse_json_list(raw_value: Any) -> list[str]:
         """将 JSON 列文本解析为字符串列表，失败时返回空列表。"""
         if isinstance(raw_value, list):
@@ -188,7 +221,7 @@ class BookuMemoryMetadataRepository:
 
     async def _ensure_schema_columns(self) -> None:
         """为历史数据库补齐新版本所需列。"""
-        required_columns: dict[str, str] = {
+        memory_required_columns: dict[str, str] = {
             "memory_type": "TEXT NOT NULL DEFAULT 'knowledge'",
             "status": "TEXT NOT NULL DEFAULT 'active'",
             "person_id": "TEXT",
@@ -204,17 +237,31 @@ class BookuMemoryMetadataRepository:
             "disposition_status": "TEXT NOT NULL DEFAULT ''",
             "procedure_type": "TEXT NOT NULL DEFAULT ''",
         }
+        memo_required_columns: dict[str, str] = {
+            "stream_id": "TEXT NOT NULL DEFAULT ''",
+        }
 
         async with self._db.session() as s:
             pragma_rows = (
                 await s.execute(text("PRAGMA table_info(booku_memory_records)"))
             ).fetchall()
             existing = {str(row[1]) for row in pragma_rows}
-            for name, ddl in required_columns.items():
+            for name, ddl in memory_required_columns.items():
                 if name in existing:
                     continue
                 await s.execute(
                     text(f"ALTER TABLE booku_memory_records ADD COLUMN {name} {ddl}")
+                )
+
+            memo_pragma_rows = (
+                await s.execute(text("PRAGMA table_info(booku_temporary_memos)"))
+            ).fetchall()
+            memo_existing = {str(row[1]) for row in memo_pragma_rows}
+            for name, ddl in memo_required_columns.items():
+                if name in memo_existing:
+                    continue
+                await s.execute(
+                    text(f"ALTER TABLE booku_temporary_memos ADD COLUMN {name} {ddl}")
                 )
 
     async def _migrate_legacy_bucket_values(self) -> None:
@@ -1038,6 +1085,99 @@ class BookuMemoryMetadataRepository:
         ids = [row.memory_id for row in rows]
         tags = await self.get_records_map(ids)
         return [tags[row.memory_id] for row in rows if row.memory_id in tags]
+
+    async def cleanup_expired_temporary_memos(
+        self,
+        *,
+        now: float | None = None,
+    ) -> int:
+        """删除已过期的临时备忘录。"""
+
+        cutoff = float(now if now is not None else time.time())
+        async with self._db.session() as s:
+            result = await s.execute(
+                delete(BookuTemporaryMemoModel).where(
+                    BookuTemporaryMemoModel.expires_at <= cutoff
+                )
+            )
+        return int(result.rowcount or 0)
+
+    async def list_active_temporary_memos(
+        self,
+        *,
+        now: float | None = None,
+    ) -> list[BookuTemporaryMemo]:
+        """列出所有未过期的临时备忘录。"""
+
+        cutoff = float(now if now is not None else time.time())
+        async with self._db.session() as s:
+            rows = (
+                await s.execute(
+                    select(BookuTemporaryMemoModel)
+                    .where(BookuTemporaryMemoModel.expires_at > cutoff)
+                    .order_by(
+                        BookuTemporaryMemoModel.updated_at.desc(),
+                        BookuTemporaryMemoModel.created_at.desc(),
+                    )
+                )
+            ).scalars().all()
+        return [self._to_temporary_memo(row) for row in rows]
+
+    async def upsert_temporary_memo(
+        self,
+        *,
+        content: str,
+        stream_id: str | None = None,
+        expires_at: float,
+        now: float | None = None,
+    ) -> tuple[BookuTemporaryMemo, bool]:
+        """写入或刷新临时备忘录。
+
+        若存在相同内容且未过期的备忘录，则只刷新过期时间与更新时间。
+
+        Returns:
+            ``(memo, created)``，created=True 表示新建，False 表示刷新已有记录。
+        """
+
+        current_time = float(now if now is not None else time.time())
+        normalized_content = str(content).strip()
+        normalized_stream_id = str(stream_id or "").strip()
+        if not normalized_content:
+            raise ValueError("content 不能为空")
+
+        await self.cleanup_expired_temporary_memos(now=current_time)
+
+        async with self._db.session() as s:
+            existing = (
+                await s.execute(
+                    select(BookuTemporaryMemoModel)
+                    .where(
+                        BookuTemporaryMemoModel.stream_id == normalized_stream_id,
+                        BookuTemporaryMemoModel.content == normalized_content,
+                        BookuTemporaryMemoModel.expires_at > current_time,
+                    )
+                    .order_by(BookuTemporaryMemoModel.updated_at.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
+            if existing is not None:
+                existing.expires_at = float(expires_at)
+                existing.updated_at = current_time
+                await s.flush()
+                return self._to_temporary_memo(existing), False
+
+            memo = BookuTemporaryMemoModel(
+                memo_id=f"memo-{uuid.uuid4().hex}",
+                stream_id=normalized_stream_id,
+                content=normalized_content,
+                expires_at=float(expires_at),
+                created_at=current_time,
+                updated_at=current_time,
+            )
+            s.add(memo)
+            await s.flush()
+            return self._to_temporary_memo(memo), True
 
     async def list_memory_ids_by_folder(
         self,

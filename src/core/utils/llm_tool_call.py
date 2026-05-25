@@ -142,6 +142,14 @@ async def create_llm_usable_execution(
 
     if issubclass(usable_cls, BaseTool):
         instance = usable_cls(plugin=plugin)
+        instance._bind_runtime_context(
+            stream_id=(
+                str(getattr(message, "stream_id", "") or "").strip()
+                if message is not None
+                else str(stream_id or "").strip()
+            ),
+            message=message,
+        )
     elif issubclass(usable_cls, BaseAction):
         chat_stream = await _get_action_chat_stream(stream_id=stream_id, message=message)
         instance = usable_cls(chat_stream=chat_stream, plugin=plugin)
@@ -344,4 +352,3 @@ async def run_tool_call(
         )
 
     return [(True, item.exec_success) for item in prepared]
-

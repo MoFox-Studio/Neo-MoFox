@@ -113,7 +113,7 @@ async def test_cloud_telemetry_runtime_with_core_config_stays_client_only(
         )
     )
 
-    foundation = await initialize_cloud_telemetry_runtime(config)
+    await initialize_cloud_telemetry_runtime(config)
     client = get_cloud_telemetry_client()
 
     assert client is not None

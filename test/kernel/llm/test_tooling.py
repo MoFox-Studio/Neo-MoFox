@@ -290,6 +290,22 @@ class TestToolRegistry:
         assert "get_time" in names
         assert "get_weather" in names
 
+    def test_registry_exposes_tools_in_stable_name_order(self) -> None:
+        """Tool exposure order should be deterministic regardless of registration order."""
+        registry = ToolRegistry()
+        registry.register(WeatherTool)
+        registry.register(GetTimeTool)
+
+        assert registry.get_all_names() == ["get_time", "get_weather"]
+        assert [
+            (
+                schema["function"]["name"]
+                if "function" in schema
+                else schema["name"]
+            )
+            for schema in registry.list_all()
+        ] == ["get_time", "get_weather"]
+
     def test_register_tool_without_name_fails(self) -> None:
         """Test that registering tool without name raises error."""
         registry = ToolRegistry()
