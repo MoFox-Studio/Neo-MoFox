@@ -183,9 +183,9 @@ async def test_inject_usables_hides_deferred_mcp_and_exposes_management_tools(
 
     assert getattr(payload, "role") == ROLE.TOOL
     assert "tool-lookup" in tool_names
-    assert "create_agent" in tool_names
-    assert "get_agent" in tool_names
-    assert "kill_agent" in tool_names
+    assert "agent-create_agent" in tool_names
+    assert "agent-get_agent" in tool_names
+    assert "agent-kill_agent" in tool_names
     assert "tool-mcp-demo-lookup" not in tool_names
 
 
@@ -320,6 +320,9 @@ async def test_sub_agent_manager_get_agent_runs_one_round(
 
     fake_stream = SimpleNamespace(
         stream_id="stream-1",
+        stream_name="test",
+        platform="qq",
+        chat_type="group",
         context=SimpleNamespace(
             current_message=None,
             unread_messages=[],
@@ -420,6 +423,9 @@ async def test_sub_agent_question_allows_user_after_tool_result(
 
     fake_stream = SimpleNamespace(
         stream_id="stream-1",
+        stream_name="test",
+        platform="qq",
+        chat_type="group",
         context=SimpleNamespace(
             current_message=None,
             unread_messages=[],

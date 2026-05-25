@@ -1,10 +1,12 @@
-"""Default Chatter 私有类型定义。"""
+"""Default Chatter private type definitions."""
 
 from __future__ import annotations
 
 from collections.abc import Generator
-from typing import Protocol, TypedDict, TypeAlias
+from dataclasses import dataclass, field
+from typing import Any, Protocol, TypedDict, TypeAlias
 
+from src.core.components.base import Failure, Stop, Success, Wait, WaitResumeEvent
 from src.core.models.message import Message
 from src.core.models.stream import ChatStream
 from src.kernel.llm import LLMPayload, LLMRequest, ToolCall, ToolRegistry
@@ -12,14 +14,14 @@ from src.kernel.logger import Logger
 
 
 class SubAgentDecision(TypedDict):
-    """子代理是否响应的判定结果。"""
+    """Sub-agent 返回的决策结果。"""
 
     reason: str
     should_respond: bool
 
 
 class LLMResponseLike(Protocol):
-    """具备响应阶段行为的最小结构类型。"""
+    """LLM 响应的最小协议，支持继续发送和添加 payload。"""
 
     payloads: list[LLMPayload]
     message: str | None
@@ -32,7 +34,7 @@ class LLMResponseLike(Protocol):
         *,
         stream: bool = True,
     ) -> "LLMResponseLike":
-        """继续基于当前上下文发起请求。"""
+        """使用当前对话状态继续请求。"""
         ...
 
     def add_payload(
@@ -40,21 +42,19 @@ class LLMResponseLike(Protocol):
         payload: LLMPayload,
         position: object = None,
     ) -> object:
-        """向上下文追加 payload。"""
+        """将 payload 添加到对话状态中。"""
         ...
 
     def __await__(self) -> Generator[object, None, str]:
-        """支持 await 收集完整响应。"""
+        """允许等待完整的响应。"""
         ...
 
 
 LLMConversationState: TypeAlias = LLMRequest | LLMResponseLike
 
 
-class DefaultChatterRuntime(Protocol):
-    """default_chatter 运行流程依赖的最小 chatter 能力集合。"""
-
-    stream_id: str
+class SupportsRequestCreation(Protocol):
+    """提供创建 LLM 请求的能力，允许会话核心在需要时构建请求对象。"""
 
     def create_request(
         self,
@@ -62,34 +62,17 @@ class DefaultChatterRuntime(Protocol):
         request_name: str = "",
         with_reminder: str | None = None,
     ) -> LLMRequest:
-        """创建 LLM 请求。"""
+        """创建一个 LLM 请求。"""
         ...
 
+
+class PromptAdapter(Protocol):
+    """Prompt 相关的钩子，用于会话核心。"""
+
     async def _build_system_prompt(self, chat_stream: ChatStream) -> str:
-        """构建系统提示词。"""
         ...
 
     def _build_enhanced_history_text(self, chat_stream: ChatStream) -> str:
-        """构建历史文本。"""
-        ...
-
-    async def inject_usables(self, request: LLMRequest) -> ToolRegistry:
-        """向请求注入可用工具。"""
-        ...
-
-    async def fetch_unreads(
-        self,
-        time_format: str = "%H:%M",
-    ) -> tuple[str, list[Message]]:
-        """读取当前未读消息。"""
-        ...
-
-    def format_message_line(
-        self,
-        msg: Message,
-        time_format: str = "%H:%M",
-    ) -> str:
-        """格式化单条消息。"""
         ...
 
     async def _build_user_prompt(
@@ -99,20 +82,26 @@ class DefaultChatterRuntime(Protocol):
         unread_lines: str,
         extra: str = "",
     ) -> str:
-        """构建增强模式用户提示词。"""
         ...
 
     def _build_negative_behaviors_extra(self) -> str:
-        """构建附加负面行为约束。"""
         ...
 
-    async def sub_agent(
+
+class UnreadAdapter(Protocol):
+    """未读消息相关的钩子，用于会话核心处理未读消息的获取、格式化和状态更新。"""
+
+    async def fetch_unreads(
         self,
-        unreads_text: str,
-        unread_msgs: list[Message],
-        chat_stream: ChatStream,
-    ) -> SubAgentDecision:
-        """执行子代理判定。"""
+        time_format: str = "%H:%M",
+    ) -> tuple[str, list[Message]]:
+        ...
+
+    def format_message_line(
+        self,
+        msg: Message,
+        time_format: str = "%H:%M",
+    ) -> str:
         ...
 
     def _upsert_pending_unread_payload(
@@ -123,12 +112,21 @@ class DefaultChatterRuntime(Protocol):
         native_multimodal: bool = False,
         logger_override: Logger | None = None,
     ) -> None:
-        """将未读消息写入待发送上下文。"""
         ...
 
     async def flush_unreads(self, unread_messages: list[Message]) -> int:
-        """清空已处理未读消息。"""
         ...
+
+
+class UsableAdapter(Protocol):
+    """Tool registry 注入钩子，用于会话核心。"""
+
+    async def inject_usables(self, request: LLMRequest) -> ToolRegistry:
+        ...
+
+
+class ToolExecutionAdapter(Protocol):
+    """工具调用执行钩子，用于会话核心处理工具调用的执行逻辑。"""
 
     async def run_tool_call(
         self,
@@ -137,28 +135,73 @@ class DefaultChatterRuntime(Protocol):
         usable_map: ToolRegistry,
         trigger_msg: Message | None,
     ) -> list[tuple[bool, bool]]:
-        """执行一次响应中的一批普通工具调用。
-
-        Args:
-            calls: 待执行的 tool call 列表，按 LLM 输出顺序排列。
-            response: 当前响应对象；执行结果会按 ``calls`` 顺序写回。
-            usable_map: 可调用组件注册表。
-            trigger_msg: 触发本轮对话的消息。
-
-        Returns:
-            list[tuple[bool, bool]]: 与 ``calls`` 顺序一致的
-            ``(是否已写回 TOOL_RESULT, execute 是否成功)`` 列表。
-        """
         ...
 
-class SupportsRequestCreation(Protocol):
-    """支持创建 LLM 请求的最小能力集合。"""
 
-    def create_request(
+class SubAgentAdapter(Protocol):
+    """Sub-agent gate 钩子，用于会话核心处理子代理的决策逻辑。"""
+
+    async def sub_agent(
         self,
-        task: str = "actor",
-        request_name: str = "",
-        with_reminder: str | None = None,
-    ) -> LLMRequest:
-        """创建 LLM 请求。"""
+        unreads_text: str,
+        unread_msgs: list[Message],
+        chat_stream: ChatStream,
+    ) -> SubAgentDecision:
         ...
+
+
+class LoggerAdapter(Protocol):
+    """日志适配器，提供日志记录和面板展示的能力，供会话核心使用。"""
+
+    def info(self, *args: Any, **kwargs: Any) -> None:
+        ...
+
+    def warning(self, *args: Any, **kwargs: Any) -> None:
+        ...
+
+    def error(self, *args: Any, **kwargs: Any) -> None:
+        ...
+
+    def debug(self, *args: Any, **kwargs: Any) -> None:
+        ...
+
+    def print_panel(
+        self,
+        message: str,
+        title: str | None = None,
+        border_style: str | None = None,
+    ) -> None:
+        ...
+
+
+@dataclass(slots=True)
+class DefaultChatterSessionAdapters:
+    """可重用聊天核心公开的显式接口。"""
+
+    request_adapter: SupportsRequestCreation
+    prompt_adapter: PromptAdapter
+    unread_adapter: UnreadAdapter
+    usable_adapter: UsableAdapter
+    tool_execution_adapter: ToolExecutionAdapter
+    sub_agent_adapter: SubAgentAdapter
+    logger_adapter: LoggerAdapter
+
+@dataclass(slots=True)
+class DefaultChatterSessionOptions:
+    """可重用聊天核心公开的配置选项。"""
+
+    actor_task_name: str = "actor"
+    sub_actor_task_name: str = "actor"
+    enable_cooldown: bool = False
+    enable_action_suspend: bool = True
+    enable_programmatic_controller: bool = True
+    enable_sub_agent_collaboration: bool = False
+    enable_stop_direct_message_wake: bool = False
+    stop_direct_message_wake_probability: float = 0.0
+    native_multimodal: bool = False
+    theme_guide: dict[str, str] = field(default_factory=dict)
+    negative_behavior_reinforcement: bool = True
+
+
+DefaultChatterResult: TypeAlias = Wait | Success | Failure | Stop
+DefaultChatterResumeEvent: TypeAlias = WaitResumeEvent | None

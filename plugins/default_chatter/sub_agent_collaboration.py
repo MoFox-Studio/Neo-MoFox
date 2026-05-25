@@ -10,6 +10,7 @@ from typing import Any
 
 from src.core.components.base.chatter import BaseChatter, WaitResumeEvent
 from src.core.models.message import Message
+from src.core.models.stream import ChatStream
 from src.core.prompt import (
     SystemReminderBucket,
     SystemReminderInsertType,
@@ -142,7 +143,7 @@ def _close_tool_result_tail(response: Any) -> None:
 
 
 def _build_synthetic_trigger_message(
-    chat_stream: Any,
+    chat_stream: ChatStream,
     question: str,
 ) -> Message:
     """在流里没有现成消息时，构造最小可执行的触发消息。"""
@@ -150,18 +151,16 @@ def _build_synthetic_trigger_message(
         message_id=f"sub-agent-{int(time.time() * 1000)}",
         content=question,
         processed_plain_text=question,
-        platform=str(getattr(chat_stream, "platform", "") or ""),
-        chat_type=str(getattr(chat_stream, "chat_type", "") or "private"),
-        stream_id=str(getattr(chat_stream, "stream_id", "") or ""),
+        platform=chat_stream.platform,
+        chat_type=chat_stream.chat_type,
+        stream_id=chat_stream.stream_id,
         sender_name="sub_agent",
     )
 
 
-def _pick_trigger_message(chat_stream: Any, question: str) -> Message | None:
+def _pick_trigger_message(chat_stream: ChatStream, question: str) -> Message | None:
     """为子代理工具调用选择一个可复用的触发消息。"""
-    context = getattr(chat_stream, "context", None)
-    if context is None:
-        return _build_synthetic_trigger_message(chat_stream, question)
+    context = chat_stream.context
     if context.current_message is not None:
         return context.current_message
     if context.unread_messages:
