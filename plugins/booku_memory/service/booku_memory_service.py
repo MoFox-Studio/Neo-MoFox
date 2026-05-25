@@ -6,6 +6,7 @@ import json
 import math
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -17,12 +18,13 @@ from src.app.plugin_system.api.llm_api import (
     get_model_set_by_task,
 )
 from src.core.components import BaseService
+from src.core.managers.stream_manager import get_stream_manager
 from src.kernel.logger import get_logger
 from src.kernel.vector_db import get_vector_db_service
 
 from ..config import BookuMemoryConfig
 from ..manual import BOOKU_MEMORY_COMMAND_MANUAL
-from .metadata_repository import BookuMemoryMetadataRepository
+from .metadata_repository import BookuMemoryMetadataRepository, BookuTemporaryMemo
 from .result_deduplicator import ResultDeduplicator
 
 logger = get_logger("booku_memory_service")
@@ -34,6 +36,7 @@ _TARGET_REMINDER_BUCKET = "actor"
 _TARGET_REMINDER_NAME = "booku_memory"
 _TARGET_ACTIVE_REMINDER_NAME = "活跃记忆速览"
 _ACTIVE_REMINDER_LIMIT = 10
+_TARGET_TEMPORARY_MEMO_REMINDER_NAME = "临时备忘录"
 
 
 def _format_active_memory_block(
@@ -60,6 +63,135 @@ def _format_active_memory_block(
     )
 
 
+def _format_remaining_hours(expires_at: float, *, now: float | None = None) -> str:
+    """将剩余有效时长格式化为可读文本。"""
+
+    current_time = float(now if now is not None else time.time())
+    remaining_seconds = max(0.0, float(expires_at) - current_time)
+    remaining_minutes = max(1, math.ceil(remaining_seconds / 60.0))
+    if remaining_minutes < 60:
+        return f"约 {remaining_minutes} 分钟后过期"
+
+    hours = remaining_minutes / 60.0
+    if hours.is_integer():
+        return f"约 {int(hours)} 小时后过期"
+    return f"约 {hours:.1f} 小时后过期"
+
+
+def _format_temporary_memo_block(
+    memos: list[BookuTemporaryMemo],
+    *,
+    now: float | None = None,
+) -> str:
+    """将临时备忘录格式化为动态一次性 reminder。"""
+
+    if not memos:
+        return ""
+
+    lines = [
+        "以下是短期关键便签，不是长期记忆，只用于临时提醒，会自动过期。",
+    ]
+    for index, memo in enumerate(memos, start=1):
+        content = str(memo.content or "").strip()
+        if not content:
+            continue
+        expires_text = _format_remaining_hours(memo.expires_at, now=now)
+        lines.append(f"{index}. {content}（{expires_text}）")
+
+    if len(lines) == 1:
+        return ""
+
+    return "## 临时备忘录\n" + "\n".join(lines)
+
+
+def _format_temporary_memo_block_by_stream(
+    memos: list[BookuTemporaryMemo],
+    stream_descriptors: dict[str, tuple[str, str]],
+    *,
+    now: float | None = None,
+) -> str:
+    """Format active temporary memos into a stream-aware reminder block."""
+
+    if not memos:
+        return ""
+
+    lines = [
+        "以下是短期关键便签，不是长期记忆，只用于临时提醒，会自动过期。",
+    ]
+    grouped_memos: OrderedDict[str, list[BookuTemporaryMemo]] = OrderedDict()
+    for memo in memos:
+        grouped_memos.setdefault(str(memo.stream_id or "").strip(), []).append(memo)
+
+    for stream_id, stream_memos in grouped_memos.items():
+        if stream_id:
+            chat_type_label, stream_name = stream_descriptors.get(
+                stream_id,
+                ("未知类型", stream_id),
+            )
+            lines.append(
+                f"在聊天流{stream_id}（{chat_type_label}，聊天流名{stream_name}）中的备忘条目："
+            )
+        else:
+            lines.append("未关联聊天流的备忘条目：")
+
+        for memo in stream_memos:
+            content = str(memo.content or "").strip()
+            if not content:
+                continue
+            expires_text = _format_remaining_hours(memo.expires_at, now=now)
+            lines.append(f"- {content}（{expires_text}）")
+
+    if len(lines) == 1:
+        return ""
+
+    return "## 临时备忘录\n" + "\n".join(lines)
+
+
+def _format_chat_type_label(chat_type: str | None) -> str:
+    normalized = str(chat_type or "").strip().lower()
+    if normalized == "group":
+        return "群聊"
+    if normalized == "private":
+        return "私聊"
+    if normalized == "discuss":
+        return "讨论组"
+    return normalized or "未知类型"
+
+
+async def _load_temporary_memo_stream_descriptors(
+    memos: list[BookuTemporaryMemo],
+) -> dict[str, tuple[str, str]]:
+    stream_ids = list(
+        dict.fromkeys(
+            str(memo.stream_id or "").strip()
+            for memo in memos
+            if str(memo.stream_id or "").strip()
+        )
+    )
+    if not stream_ids:
+        return {}
+
+    manager = get_stream_manager()
+    descriptors: dict[str, tuple[str, str]] = {}
+    for stream_id in stream_ids:
+        chat_stream = getattr(manager, "_streams", {}).get(stream_id)
+        if chat_stream is None:
+            try:
+                chat_stream = await manager.activate_stream(stream_id)
+            except Exception:  # noqa: BLE001
+                chat_stream = None
+
+        if chat_stream is None:
+            descriptors[stream_id] = ("未知类型", stream_id)
+            continue
+
+        descriptors[stream_id] = (
+            _format_chat_type_label(getattr(chat_stream, "chat_type", "")),
+            str(getattr(chat_stream, "stream_name", "") or stream_id),
+        )
+    return descriptors
+
+
 async def build_booku_memory_actor_reminder(plugin: Any) -> str:
     """构建需要同步到 actor bucket 的 reminder 文本。"""
 
@@ -73,7 +205,11 @@ async def build_booku_memory_actor_reminder(plugin: Any) -> str:
 async def sync_booku_memory_actor_reminder(plugin: Any) -> str:
     """将当前 booku_memory 提示同步到 actor bucket 的 system reminder。"""
 
-    from src.core.prompt import SystemReminderInsertType, get_system_reminder_store
+    from src.core.prompt import (
+        SystemReminderConsumeType,
+        SystemReminderInsertType,
+        get_system_reminder_store,
+    )
 
     store = get_system_reminder_store()
     reminder_content = await build_booku_memory_actor_reminder(plugin)
@@ -81,6 +217,7 @@ async def sync_booku_memory_actor_reminder(plugin: Any) -> str:
     if not reminder_content:
         store.delete(_TARGET_REMINDER_BUCKET, _TARGET_REMINDER_NAME)
         store.delete(_TARGET_REMINDER_BUCKET, _TARGET_ACTIVE_REMINDER_NAME)
+        store.delete(_TARGET_REMINDER_BUCKET, _TARGET_TEMPORARY_MEMO_REMINDER_NAME)
         logger.debug("booku_memory actor reminder 已清理")
         return ""
 
@@ -96,6 +233,7 @@ async def sync_booku_memory_actor_reminder(plugin: Any) -> str:
         if isinstance(config, BookuMemoryConfig):
             repo = BookuMemoryMetadataRepository(db_path=config.storage.metadata_db_path)
             await repo.initialize()
+            await repo.cleanup_expired_temporary_memos()
             active_records = await repo.list_recent_active_records(limit=_ACTIVE_REMINDER_LIMIT)
             active_content = _format_active_memory_block(
                 active_records,
@@ -110,6 +248,23 @@ async def sync_booku_memory_actor_reminder(plugin: Any) -> str:
                 )
             else:
                 store.delete(_TARGET_REMINDER_BUCKET, _TARGET_ACTIVE_REMINDER_NAME)
+
+            active_memos = await repo.list_active_temporary_memos()
+            stream_descriptors = await _load_temporary_memo_stream_descriptors(active_memos)
+            memo_content = _format_temporary_memo_block_by_stream(
+                active_memos,
+                stream_descriptors,
+            )
+            if memo_content:
+                store.set(
+                    _TARGET_REMINDER_BUCKET,
+                    name=_TARGET_TEMPORARY_MEMO_REMINDER_NAME,
+                    content=memo_content,
+                    insert_type=SystemReminderInsertType.DYNAMIC,
+                    consume=SystemReminderConsumeType.ONCE,
+                )
+            else:
+                store.delete(_TARGET_REMINDER_BUCKET, _TARGET_TEMPORARY_MEMO_REMINDER_NAME)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"同步活跃记忆动态提示失败：{exc}")
     finally:
@@ -1883,6 +2038,55 @@ class BookuMemoryService(BaseService):
             "mode": result.get("mode", "created"),
             "total": 1,
             "items": [result.get("item", {})],
+        }
+
+    async def create_temporary_memo(
+        self,
+        *,
+        content: str,
+        expire_hours: float = 2.0,
+        stream_id: str | None = None,
+    ) -> dict[str, Any]:
+        """创建或刷新短期临时备忘录。"""
+
+        normalized_content = str(content or "").strip()
+        if not normalized_content:
+            raise ValueError("content 不能为空")
+
+        try:
+            normalized_expire_hours = float(expire_hours)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("expire_hours 必须是正数小时数") from exc
+
+        if normalized_expire_hours <= 0:
+            raise ValueError("expire_hours 必须大于 0")
+
+        now = time.time()
+        expires_at = now + normalized_expire_hours * 3600.0
+        normalized_stream_id = str(stream_id or "").strip()
+        repo = await self._get_repo()
+        memo, created = await repo.upsert_temporary_memo(
+            content=normalized_content,
+            stream_id=normalized_stream_id,
+            expires_at=expires_at,
+            now=now,
+        )
+        active_memos = await repo.list_active_temporary_memos(now=now)
+        await _sync_booku_memory_actor_reminder(self.plugin)
+        return {
+            "action": "create_temporary_memo",
+            "mode": "created" if created else "refreshed",
+            "memo_id": memo.memo_id,
+            "expires_at": memo.expires_at,
+            "active_memo_count": len(active_memos),
+            "item": {
+                "memo_id": memo.memo_id,
+                "stream_id": memo.stream_id,
+                "content": memo.content,
+                "expires_at": memo.expires_at,
+                "created_at": memo.created_at,
+                "updated_at": memo.updated_at,
+            },
         }
 
     async def get_status(self, folder_id: str | None = None) -> dict[str, Any]:

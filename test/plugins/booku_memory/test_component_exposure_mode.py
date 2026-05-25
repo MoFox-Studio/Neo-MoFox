@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
-from plugins.booku_memory.agent import BookuMemoryCommandTool
+from plugins.booku_memory.agent import BookuMemoryCommandTool, BookuTemporaryMemoTool
 from plugins.booku_memory.config import BookuMemoryConfig
 from plugins.booku_memory.event_handler import (
     BookuMemoryStartupIngestHandler,
     MemoryFlashbackInjector,
+    MemoryToolUsageWarningHandler,
 )
 from plugins.booku_memory.plugin import BookuMemoryAgentPlugin
+from plugins.booku_memory.router import BookuMemoryAdminRouter
 from plugins.booku_memory.service import BookuKnowledgeService, BookuMemoryService
 
 
 def _expected_components() -> list[type]:
-    """返回命令模式下期望组件列表。"""
+    """返回命令模式下期望暴露的组件列表。"""
 
     return [
         BookuMemoryCommandTool,
+        BookuTemporaryMemoTool,
         BookuMemoryService,
         BookuKnowledgeService,
+        BookuMemoryAdminRouter,
         MemoryFlashbackInjector,
+        MemoryToolUsageWarningHandler,
         BookuMemoryStartupIngestHandler,
     ]
 

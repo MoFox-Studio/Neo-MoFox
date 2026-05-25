@@ -70,4 +70,28 @@ class BookuMemoryTagModel(Base):
     )
 
 
-__all__ = ["Base", "BookuMemoryRecordModel", "BookuMemoryTagModel"]
+class BookuTemporaryMemoModel(Base):
+    """临时备忘录表，对应 booku_temporary_memos。"""
+
+    __tablename__ = "booku_temporary_memos"
+
+    memo_id: Mapped[str] = mapped_column(Text, primary_key=True, comment="备忘录唯一 ID")
+    stream_id: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="关联聊天流 ID")
+    content: Mapped[str] = mapped_column(Text, nullable=False, comment="备忘录内容")
+    expires_at: Mapped[float] = mapped_column(Float, nullable=False, comment="过期时间戳")
+    created_at: Mapped[float] = mapped_column(Float, nullable=False, comment="创建时间戳")
+    updated_at: Mapped[float] = mapped_column(Float, nullable=False, comment="最后更新时间戳")
+
+    __table_args__ = (
+        Index("idx_booku_temporary_memos_stream_id", "stream_id"),
+        Index("idx_booku_temporary_memos_expires_at", "expires_at"),
+        Index("idx_booku_temporary_memos_updated_at", "updated_at"),
+    )
+
+
+__all__ = [
+    "Base",
+    "BookuMemoryRecordModel",
+    "BookuMemoryTagModel",
+    "BookuTemporaryMemoModel",
+]
