@@ -52,8 +52,8 @@ class ModelEntry(TypedDict, total=True):
 |---|---|---|
 | client_type | str | 提供商类型，如 "openai"、"anthropic" |
 | model_identifier | str | 模型标识，如 "gpt-4" |
-| pi_key | str | API 密钥 |
-| ase_url | str | API 基础 URL |
+| api_key | str | API 密钥 |
+| base_url | str | API 基础 URL |
 | max_retry | int | 最大重试次数 |
 | 	imeout | loat | 请求超时（秒） |
 | retry_interval | loat | 重试间隔（秒） |
@@ -61,7 +61,7 @@ class ModelEntry(TypedDict, total=True):
 | max_tokens | int | 最大输出 token 数 |
 | max_context | int | 模型上下文窗口大小 |
 | price_in / price_out | loat | 输入/输出价格（用于成本计算） |
-| 	ool_call_compat | ool | 是否启用工具调用兼容模式 |
+| tool_call_compat | tool | 是否启用工具调用兼容模式 |
 | extra_params | dict | 额外参数透传 |
 
 ---
