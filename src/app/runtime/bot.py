@@ -129,12 +129,15 @@ class Bot:
             await self._optimize_async_network_runtime()
 
             # 单一总体进度条贯穿全部初始化阶段
-            with self.ui.startup_progress(total_steps=15):
+            with self.ui.startup_progress(total_steps=16):
                 # Phase 1: Kernel 初始化
                 await self._initialize_kernel()
 
                 # Phase 2: Core 组件初始化
                 await self._initialize_core()
+
+                # Phase 2.5: 插件市场同步
+                await self._sync_plugin_market()
 
                 # Phase 3: 插件发现
                 await self._discover_plugins()
@@ -624,6 +627,30 @@ class Bot:
         # 显示插件加载计划
         self.ui.display_plugin_plan(self.load_order, self.manifests)
         self.ui.update_phase_status("发现插件", f"已发现 {len(self.load_order)} 个插件")
+
+    async def _sync_plugin_market(self) -> None:
+        """在插件发现前同步插件市场订阅。"""
+
+        assert self.config is not None
+
+        self.ui.update_phase_status("插件市场同步", "检查中...")
+
+        try:
+            from .plugin_market_sync import PluginMarketSyncService
+
+            service = PluginMarketSyncService(
+                config=self.config,
+                plugins_dir=self.plugins_dir,
+            )
+            report = await service.sync()
+            self.ui.update_phase_status("插件市场同步", report.summary())
+            if self.logger and report.errors:
+                for error in report.errors:
+                    self.logger.warning(f"插件市场同步警告: {error}")
+        except Exception as exc:
+            self.ui.update_phase_status("插件市场同步", "失败，已跳过")
+            if self.logger:
+                self.logger.warning(f"插件市场同步失败，已跳过: {exc}")
 
     async def _install_plugin_deps(self) -> None:
         """Phase 3.5：批量安装所有插件声明的 Python 包依赖。
