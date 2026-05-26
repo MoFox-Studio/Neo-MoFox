@@ -8,7 +8,7 @@ from typing import Literal
 
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
 
-CORE_VERSION = "1.2.0-beta"
+CORE_VERSION = "1.2.0-beta.1"
 
 class CoreConfig(ConfigBase):
     """Core 层配置类
@@ -935,6 +935,90 @@ class CoreConfig(ConfigBase):
         )
 
     plugin_deps: PluginDepsSection = Field(default_factory=PluginDepsSection)
+
+    @config_section("plugin_market")
+    class PluginMarketSection(SectionBase):
+        """插件市场接入配置节。"""
+
+        enabled: bool = Field(
+            default=True,
+            description="是否启用框架内插件市场同步能力",
+            label="启用插件市场",
+            tag="plugin",
+            input_type="switch",
+            hint="关闭后完全跳过插件市场同步流程",
+        )
+        base_url: str = Field(
+            default="https://39.96.71.162",
+            description="插件市场基础地址",
+            label="市场地址",
+            tag="network",
+            input_type="text",
+            placeholder="https://39.96.71.162",
+        )
+        user_id: str = Field(
+            default="",
+            description="插件市场用户 ID，用于拉取订阅列表",
+            label="市场用户 ID",
+            tag="user",
+            input_type="text",
+            placeholder="your-market-user-id",
+        )
+        access_token: str = Field(
+            default="",
+            description="插件市场访问令牌，对应插件市场中的单活跃 token",
+            label="市场访问令牌",
+            tag="security",
+            input_type="password",
+            placeholder="mfox_xxx",
+        )
+        auto_update_mfp: bool = Field(
+            default=True,
+            description="是否自动更新已安装的 .mfp 市场插件",
+            label="自动更新 mfp",
+            tag="plugin",
+            input_type="switch",
+        )
+        auto_install_subscribed_missing: bool = Field(
+            default=True,
+            description="是否自动安装订阅列表中本地缺失的插件",
+            label="自动安装订阅缺失插件",
+            tag="plugin",
+            input_type="switch",
+        )
+        strict_subscribed_list_mode: bool = Field(
+            default=False,
+            description="是否严格按订阅列表清理本地市场插件（仅影响已收录且为 .mfp 的插件）",
+            label="严格订阅列表模式",
+            tag="plugin",
+            input_type="switch",
+            hint="不会删除无市场记录插件，也不会删除非 .mfp 插件",
+        )
+        auto_resolve_plugin_dependencies: bool = Field(
+            default=True,
+            description="是否自动解析并补齐市场插件声明的依赖插件",
+            label="自动解析插件依赖",
+            tag="plugin",
+            input_type="switch",
+        )
+        timeout: float = Field(
+            default=20.0,
+            description="插件市场请求超时时间（秒）",
+            label="请求超时",
+            tag="network",
+            input_type="number",
+            step=1.0,
+            ge=1,
+        )
+        use_advanced_trust_env: bool = Field(
+            default=True,
+            description="是否复用 advanced.trust_env 作为插件市场 HTTP 客户端的 trust_env 设置",
+            label="复用系统代理设置",
+            tag="network",
+            input_type="switch",
+        )
+
+    plugin_market: PluginMarketSection = Field(default_factory=PluginMarketSection)
 
 # 全局配置实例（延迟初始化）
 _global_config: CoreConfig | None = None
