@@ -237,3 +237,53 @@ def test_get_chatter_by_stream_delegates(monkeypatch: pytest.MonkeyPatch) -> Non
     result = chat_api.get_chatter_by_stream("stream_1")
 
     assert result is not None
+
+
+def test_bind_chatter_for_stream_requires_stream_id() -> None:
+    """stream_id 为空时应抛出 ValueError。"""
+    with pytest.raises(ValueError, match="stream_id 不能为空"):
+        chat_api.bind_chatter_for_stream("", cast(BaseChatter, object()))
+
+
+def test_bind_chatter_for_stream_requires_chatter() -> None:
+    """chatter 为空时应抛出 ValueError。"""
+    with pytest.raises(ValueError, match="chatter 不能为空"):
+        chat_api.bind_chatter_for_stream("stream_1", cast(BaseChatter, None))
+
+
+def test_bind_chatter_for_stream_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """bind_chatter_for_stream 应委托给 ChatterManager。"""
+    captured: dict[str, object] = {}
+    chatter = cast(BaseChatter, object())
+
+    class _FakeManager:
+        def bind_chatter_for_stream(self, stream_id: str, chatter_obj: object) -> None:
+            captured["stream_id"] = stream_id
+            captured["chatter"] = chatter_obj
+
+    monkeypatch.setattr(chat_api, "_get_chatter_manager", lambda: _FakeManager())
+
+    chat_api.bind_chatter_for_stream("stream_1", chatter)
+
+    assert captured["stream_id"] == "stream_1"
+    assert captured["chatter"] is chatter
+
+
+def test_restore_stream_to_default_requires_stream_id() -> None:
+    """stream_id 为空时应抛出 ValueError。"""
+    with pytest.raises(ValueError, match="stream_id 不能为空"):
+        chat_api.restore_stream_to_default("")
+
+
+def test_restore_stream_to_default_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """restore_stream_to_default 应委托给 ChatterManager。"""
+
+    class _FakeManager:
+        def restore_stream_to_default(self, stream_id: str) -> bool:
+            return stream_id == "stream_1"
+
+    monkeypatch.setattr(chat_api, "_get_chatter_manager", lambda: _FakeManager())
+
+    result = chat_api.restore_stream_to_default("stream_1")
+
+    assert result is True
