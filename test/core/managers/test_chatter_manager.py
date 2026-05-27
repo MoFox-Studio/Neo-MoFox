@@ -184,6 +184,26 @@ class TestChatterManagerActiveChatterManagement:
         
         assert "stream_123" in manager._active_chatters
         assert manager._active_chatters["stream_123"] == mock_chatter
+
+    def test_bind_chatter_for_stream(self) -> None:
+        """显式绑定应覆盖当前 stream 的活跃 chatter。"""
+        manager = ChatterManager()
+        mock_chatter = MagicMock(spec=TestChatter)
+
+        manager.bind_chatter_for_stream("stream_bind", mock_chatter)
+
+        assert manager.get_chatter_by_stream("stream_bind") == mock_chatter
+
+    def test_restore_stream_to_default(self) -> None:
+        """恢复默认选择应移除显式绑定。"""
+        manager = ChatterManager()
+        mock_chatter = MagicMock(spec=TestChatter)
+        manager.bind_chatter_for_stream("stream_bind", mock_chatter)
+
+        restored = manager.restore_stream_to_default("stream_bind")
+
+        assert restored is True
+        assert manager.get_chatter_by_stream("stream_bind") is None
     
     def test_unregister_active_chatter_exists(self) -> None:
         """测试注销已存在的活跃 Chatter。"""
