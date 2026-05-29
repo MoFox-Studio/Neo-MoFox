@@ -62,6 +62,13 @@ def _require_response(response: LLMConversationState) -> LLMResponseLike:
     raise TypeError("当前会话状态不是一个 LLM 响应")
 
 
+def _should_disable_stream_for_tool_call_compat(response: LLMConversationState) -> bool:
+    model_set = getattr(response, "model_set", None)
+    if not isinstance(model_set, list):
+        return False
+    return any(bool(model.get("tool_call_compat", False)) for model in model_set)
+
+
 def _format_tool_args(args: Any) -> str:
     if not isinstance(args, dict):
         return ""
@@ -507,8 +514,22 @@ class DefaultChatterSession:
                 DefaultChatterSessionPhase.FOLLOW_UP,
             ):
                 try:
-                    state.response = await state.response.send(stream=False)
-                    await state.response
+                    stream_observer = self.adapters.stream_event_observer
+                    use_stream = bool(self.options.enable_llm_stream)
+                    if use_stream and _should_disable_stream_for_tool_call_compat(state.response):
+                        use_stream = False
+                        self.logger.warning(
+                            "LLM stream observer disabled because tool_call_compat is enabled."
+                        )
+
+                    state.response = await state.response.send(stream=use_stream)
+                    if use_stream and stream_observer is not None:
+                        await state.response.stream_events_with_callback(stream_observer)
+                        finalize = getattr(stream_observer, "finalize", None)
+                        if callable(finalize):
+                            await finalize()
+                    else:
+                        await state.response
                     if state.phase == DefaultChatterSessionPhase.MODEL_TURN:
                         if state.unread_msgs_to_flush:
                             await self.adapters.unread_adapter.flush_unreads(state.unread_msgs_to_flush)

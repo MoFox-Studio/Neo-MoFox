@@ -67,6 +67,10 @@ class _FakeResponse:
 
         return _done().__await__()
 
+    async def stream_events_with_callback(self, on_event: Any) -> str:
+        await on_event(SimpleNamespace(text_delta="hello"))
+        return self.message
+
 
 class _FakeToolRegistry:
     def get_all(self) -> list[Any]:
@@ -675,6 +679,72 @@ async def test_session_execute_with_stream_proactively_resumes_after_timed_wait(
     second = await gen.asend(WaitResumeEvent(source="timer", wait_time=5.0))
     assert isinstance(second, Stop)
     assert response.send_count == 2
+
+
+@pytest.mark.asyncio
+async def test_session_execute_with_stream_uses_stream_observer_when_enabled() -> None:
+    response = _FakeResponse(payload_roles=[ROLE.USER], message="")
+    send_stream_args: list[bool] = []
+    observed_events: list[Any] = []
+    finalize_calls: list[str] = []
+
+    async def _send(*, stream: bool = False) -> _FakeResponse:
+        send_stream_args.append(stream)
+        response.send_count += 1
+        response.call_list = [SimpleNamespace(name="action-send_text", args={}, id="1")]
+        return response
+
+    class _Observer:
+        async def __call__(self, event: Any) -> None:
+            observed_events.append(event)
+
+        async def finalize(self) -> None:
+            finalize_calls.append("done")
+
+    response.send = _send  # type: ignore[method-assign]
+    runtime = _FakeRuntimeAllowUser(response)
+    session = _build_session(
+        runtime,
+        options=DefaultChatterSessionOptions(enable_llm_stream=True),
+    )
+    session.adapters.stream_event_observer = _Observer()
+
+    first = await anext(session.execute_with_stream(_make_chat_stream(), apply_stop_wake_config=False))
+
+    assert isinstance(first, Wait)
+    assert send_stream_args == [True]
+    assert len(observed_events) == 1
+    assert finalize_calls == ["done"]
+
+
+@pytest.mark.asyncio
+async def test_session_execute_with_stream_disables_stream_for_tool_call_compat() -> None:
+    response = _FakeResponse(
+        payload_roles=[ROLE.USER],
+        message="",
+        model_set=[{"tool_call_compat": True}],
+    )
+    send_stream_args: list[bool] = []
+
+    async def _send(*, stream: bool = False) -> _FakeResponse:
+        send_stream_args.append(stream)
+        response.send_count += 1
+        response.call_list = [SimpleNamespace(name="action-send_text", args={}, id="1")]
+        return response
+
+    response.send = _send  # type: ignore[method-assign]
+    runtime = _FakeRuntimeAllowUser(response)
+    session = _build_session(
+        runtime,
+        options=DefaultChatterSessionOptions(enable_llm_stream=True),
+    )
+    session.adapters.stream_event_observer = AsyncMock()
+
+    first = await anext(session.execute_with_stream(_make_chat_stream(), apply_stop_wake_config=False))
+
+    assert isinstance(first, Wait)
+    assert send_stream_args == [False]
+    session.adapters.stream_event_observer.assert_not_awaited()
 
 
 @pytest.mark.asyncio

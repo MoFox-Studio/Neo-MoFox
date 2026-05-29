@@ -5,8 +5,9 @@ from typing import Any
 
 import pytest
 
-from plugins.voice_chatter.config import SherpaOnnxVoiceChatterConfig
-from plugins.voice_chatter.plugin import SherpaOnnxVoiceChatter
+from plugins.voxcpm_tts_provider.config import VoxCPMTTSProviderConfig
+from plugins.voice_chatter.config import VoiceChatterConfig
+from plugins.voice_chatter.plugin import VoiceChatter
 from src.core.components.base import Failure, Wait
 
 
@@ -16,6 +17,7 @@ class _FakeSession:
         self.stop_call_name = ""
         self.suspend_text = ""
         self.calls: list[tuple[Any, bool]] = []
+        self.adapters = SimpleNamespace(stream_event_observer=None)
 
     async def execute_with_stream(
         self,
@@ -64,13 +66,13 @@ class _FakeStreamManager:
 async def test_voice_chatter_execute_uses_default_chatter_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = SherpaOnnxVoiceChatterConfig()
+    config = VoiceChatterConfig()
     config.plugin.tick_interval = 0.25
     config.plugin.allow_message_buffer = False
     config.plugin.enable_action_suspend = False
 
     plugin = SimpleNamespace(config=config)
-    chatter = SherpaOnnxVoiceChatter(stream_id="stream-1", plugin=plugin)
+    chatter = VoiceChatter(stream_id="stream-1", plugin=plugin)
 
     chat_stream = SimpleNamespace(
         stream_id="stream-1",
@@ -104,20 +106,107 @@ async def test_voice_chatter_execute_uses_default_chatter_service(
     assert getattr(options, "enable_cooldown") is False
     assert getattr(options, "enable_stop_direct_message_wake") is False
     assert getattr(options, "enable_action_suspend") is False
+    assert getattr(options, "enable_llm_stream") is False
     assert session.pass_call_name == "action-pass_and_wait"
     assert session.stop_call_name == "__voice_chatter_stop_disabled__"
     assert session.suspend_text == "（语音回合已挂起，等待用户继续说话。）"
     assert session.calls == [(chat_stream, False)]
     assert chat_stream.context.tick_interval_override == 0.25
     assert chat_stream.context.allow_message_buffer is False
+    assert session.adapters.stream_event_observer is None
+
+
+@pytest.mark.asyncio
+async def test_voice_chatter_execute_enables_streaming_observer_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = VoiceChatterConfig()
+    config.low_latency_streaming.enabled = True
+    config.tts.endpoint = "logging"
+
+    plugin = SimpleNamespace(config=config)
+    chatter = VoiceChatter(stream_id="stream-1", plugin=plugin)
+
+    chat_stream = SimpleNamespace(
+        stream_id="stream-1",
+        platform="test",
+        chat_type="private",
+        context=SimpleNamespace(
+            tick_interval_override=None,
+            allow_message_buffer=None,
+        ),
+    )
+    session = _FakeSession()
+    service = _FakeService(session)
+
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: _FakeStreamManager(chat_stream),
+    )
+    monkeypatch.setattr(
+        "plugins.voice_chatter.plugin.get_service",
+        lambda signature: service if signature == "default_chatter:service:chat_core" else None,
+    )
+
+    first = await anext(chatter.execute())
+
+    assert isinstance(first, Wait)
+    create_call = service.create_default_session_calls[0]
+    options = create_call["options"]
+    assert getattr(options, "enable_llm_stream") is True
+    assert session.adapters.stream_event_observer is not None
+
+
+@pytest.mark.asyncio
+async def test_voice_chatter_execute_disables_streaming_when_observer_init_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = VoiceChatterConfig()
+    config.low_latency_streaming.enabled = True
+    plugin = SimpleNamespace(config=config)
+    chatter = VoiceChatter(stream_id="stream-1", plugin=plugin)
+
+    chat_stream = SimpleNamespace(
+        stream_id="stream-1",
+        platform="test",
+        chat_type="private",
+        context=SimpleNamespace(
+            tick_interval_override=None,
+            allow_message_buffer=None,
+        ),
+    )
+    session = _FakeSession()
+    service = _FakeService(session)
+
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: _FakeStreamManager(chat_stream),
+    )
+    monkeypatch.setattr(
+        "plugins.voice_chatter.plugin.get_service",
+        lambda signature: service if signature == "default_chatter:service:chat_core" else None,
+    )
+    monkeypatch.setattr(
+        VoiceChatter,
+        "_build_stream_observer",
+        lambda self, _chat_stream: None,
+    )
+
+    first = await anext(chatter.execute())
+
+    assert isinstance(first, Wait)
+    create_call = service.create_default_session_calls[0]
+    options = create_call["options"]
+    assert getattr(options, "enable_llm_stream") is False
+    assert session.adapters.stream_event_observer is None
 
 
 @pytest.mark.asyncio
 async def test_voice_chatter_execute_fails_when_chat_core_service_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    plugin = SimpleNamespace(config=SherpaOnnxVoiceChatterConfig())
-    chatter = SherpaOnnxVoiceChatter(stream_id="stream-1", plugin=plugin)
+    plugin = SimpleNamespace(config=VoiceChatterConfig())
+    chatter = VoiceChatter(stream_id="stream-1", plugin=plugin)
     chat_stream = SimpleNamespace(
         stream_id="stream-1",
         context=SimpleNamespace(
@@ -139,10 +228,10 @@ async def test_voice_chatter_execute_fails_when_chat_core_service_is_missing(
 
 
 def test_voice_chatter_handle_plain_text_response_retries_then_waits() -> None:
-    config = SherpaOnnxVoiceChatterConfig()
+    config = VoiceChatterConfig()
     config.plugin.plain_text_retry_limit = 1
     plugin = SimpleNamespace(config=config)
-    chatter = SherpaOnnxVoiceChatter(stream_id="stream-1", plugin=plugin)
+    chatter = VoiceChatter(stream_id="stream-1", plugin=plugin)
 
     first = chatter.handle_plain_text_response(
         message="hello",
@@ -166,3 +255,50 @@ def test_voice_chatter_handle_plain_text_response_retries_then_waits() -> None:
         "action": "wait",
         "reminder_text": "",
     }
+
+
+def test_voice_chatter_builds_provider_voice_guide_from_explicit_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = VoiceChatterConfig()
+    config.tts.provider = "voxcpm"
+    plugin = SimpleNamespace(config=config)
+    chatter = VoiceChatter(stream_id="stream-1", plugin=plugin)
+
+    provider_config = VoxCPMTTSProviderConfig()
+    provider_config.prompt.inject_into_voice_chatter = True
+    provider_config.prompt.voice_chatter_guide = "Use [laughing] when appropriate."
+    provider_plugin = SimpleNamespace(config=provider_config)
+
+    monkeypatch.setattr(
+        "plugins.voice_chatter.plugin.get_all_plugins",
+        lambda: {"voxcpm_tts_provider": provider_plugin},
+    )
+
+    guide = chatter._build_tts_provider_voice_guide()
+
+    assert "Use [laughing]" in guide
+
+
+def test_voice_chatter_builds_provider_voice_guide_from_default_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = VoiceChatterConfig()
+    config.tts.provider = ""
+    plugin = SimpleNamespace(config=config)
+    chatter = VoiceChatter(stream_id="stream-1", plugin=plugin)
+
+    provider_config = VoxCPMTTSProviderConfig()
+    provider_config.plugin.register_as_default = True
+    provider_config.prompt.inject_into_voice_chatter = True
+    provider_config.prompt.voice_chatter_guide = "Default provider guide."
+    provider_plugin = SimpleNamespace(config=provider_config)
+
+    monkeypatch.setattr(
+        "plugins.voice_chatter.plugin.get_all_plugins",
+        lambda: {"voxcpm_tts_provider": provider_plugin},
+    )
+
+    guide = chatter._build_tts_provider_voice_guide()
+
+    assert guide == "Default provider guide."

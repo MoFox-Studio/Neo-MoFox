@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Awaitable, Generator
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypedDict, TypeAlias
+from typing import Any, Callable, Literal, Protocol, TypedDict, TypeAlias
 
 from src.core.components.base import Failure, Stop, Success, Wait, WaitResumeEvent
 from src.core.models.message import Message
 from src.core.models.stream import ChatStream
-from src.kernel.llm import LLMPayload, LLMRequest, ToolCall, ToolRegistry
+from src.kernel.llm import LLMPayload, LLMRequest, StreamEvent, ToolCall, ToolRegistry
 from src.kernel.logger import Logger
 
 
@@ -35,6 +35,12 @@ class LLMResponseLike(Protocol):
         stream: bool = True,
     ) -> "LLMResponseLike":
         """使用当前对话状态继续请求。"""
+        ...
+
+    async def stream_events_with_callback(
+        self,
+        on_event: Callable[[StreamEvent], Awaitable[None]],
+    ) -> str:
         ...
 
     def add_payload(
@@ -206,6 +212,7 @@ class DefaultChatterSessionAdapters:
     sub_agent_adapter: SubAgentAdapter
     logger_adapter: LoggerAdapter
     plain_text_adapter: PlainTextResponseAdapter | None = None
+    stream_event_observer: Callable[..., Awaitable[None]] | None = None
 
 @dataclass(slots=True)
 class DefaultChatterSessionOptions:
@@ -222,6 +229,7 @@ class DefaultChatterSessionOptions:
     native_multimodal: bool = False
     theme_guide: dict[str, str] = field(default_factory=dict)
     negative_behavior_reinforcement: bool = True
+    enable_llm_stream: bool = False
 
 
 DefaultChatterResult: TypeAlias = Wait | Success | Failure | Stop

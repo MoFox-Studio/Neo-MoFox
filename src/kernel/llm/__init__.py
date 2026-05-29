@@ -15,6 +15,7 @@ from .roles import ROLE
 from .context import LLMContextManager, ReminderSourceSpec
 from .request import LLMRequest
 from .response import LLMResponse
+from .model_client import StreamEvent
 from .embedding_request import EmbeddingRequest
 from .embedding_response import EmbeddingResponse
 from .rerank_request import RerankRequest
@@ -77,6 +78,7 @@ __all__ = [
 	"LLMContextManager",
 	"ReminderSourceSpec",
 	"LLMResponse",
+	"StreamEvent",
 	"EmbeddingResponse",
 	"RerankResponse",
 	"RerankItem",
