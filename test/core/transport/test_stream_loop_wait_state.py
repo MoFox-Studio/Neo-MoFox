@@ -7,7 +7,7 @@ from typing import cast
 from src.core.models.message import Message
 from src.core.models.stream import StreamContext
 from src.core.transport.distribution.stream_loop_manager import StreamLoopManager
-from src.core.components.base.chatter import Wait, Stop
+from src.core.components.base.chatter import Wait, Stop, WaitResumeEvent
 
 
 def test_wait_state_check_requires_new_message_after_stop() -> None:
@@ -195,15 +195,27 @@ def test_wait_state_check_wait_for_messages_only() -> None:
     assert manager._wait_state_check(stream_id, context_non_empty) is True
 
 
-def test_wait_state_check_wait_for_time_only() -> None:
+def test_wait_state_check_wait_for_time_or_new_message() -> None:
     """Wait(seconds) 语义：仅时间到达即可恢复。"""
     manager = StreamLoopManager()
     stream_id = "stream-wait-time"
 
     manager._wait_states[stream_id] = (Wait(time=4102444800.0), 0.0, 0)  # 2100-01-01
 
-    context_any = StreamContext(stream_id=stream_id)
-    assert manager._wait_state_check(stream_id, context_any) is False
+    context_with_unread = StreamContext(stream_id=stream_id)
+    context_with_unread.unread_messages = cast(list, ["m1"])
+    assert manager._wait_state_check(stream_id, context_with_unread) is True
+    assert manager.take_wait_resume_event(stream_id) == WaitResumeEvent(
+        source="message",
+        wait_time=4102444800.0,
+        unread_count=1,
+    )
 
     manager._wait_states[stream_id] = (Wait(time=0.0), time.time(), 0)
+    context_any = StreamContext(stream_id=stream_id)
     assert manager._wait_state_check(stream_id, context_any) is True
+    assert manager.take_wait_resume_event(stream_id) == WaitResumeEvent(
+        source="timer",
+        wait_time=0.0,
+        unread_count=0,
+    )

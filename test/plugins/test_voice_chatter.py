@@ -7,7 +7,9 @@ import pytest
 
 from plugins.voxcpm_tts_provider.config import VoxCPMTTSProviderConfig
 from plugins.voice_chatter.config import VoiceChatterConfig
-from plugins.voice_chatter.plugin import VoiceChatter
+from plugins.voice_chatter.markers import parse_speech_segments
+from plugins.voice_chatter.plugin import SayAction, VoiceChatter
+from plugins.voice_chatter.tts import TTSArtifact
 from src.core.components.base import Failure, Wait
 
 
@@ -60,6 +62,15 @@ class _FakeStreamManager:
     async def activate_stream(self, stream_id: str) -> Any | None:
         _ = stream_id
         return self.chat_stream
+
+
+class _FakeEmitBackend:
+    def __init__(self) -> None:
+        self.emitted: list[tuple[str, Any]] = []
+
+    async def emit(self, artifact: Any, chat_stream: Any) -> bool:
+        self.emitted.append((artifact.text, chat_stream))
+        return True
 
 
 @pytest.mark.asyncio
@@ -302,3 +313,88 @@ def test_voice_chatter_builds_provider_voice_guide_from_default_provider(
     guide = chatter._build_tts_provider_voice_guide()
 
     assert guide == "Default provider guide."
+
+
+def test_parse_speech_segments_preserves_provider_tags() -> None:
+    segments = parse_speech_segments(
+        "[laughing]你好。 [Question-ah]真的好久不见。",
+        default_emotion="calm",
+    )
+
+    assert [segment.text for segment in segments] == [
+        "[laughing]你好。",
+        "[Question-ah]真的好久不见。",
+    ]
+    assert [segment.emotion for segment in segments] == ["calm", "calm"]
+    assert [segment.wait_before for segment in segments] == [0.0, 0.0]
+
+
+def test_parse_speech_segments_attaches_tag_only_sentence_to_previous_text() -> None:
+    segments = parse_speech_segments("这是一句话！[laughing]")
+
+    assert [segment.text for segment in segments] == ["这是一句话！[laughing]"]
+
+
+def test_parse_speech_segments_attaches_leading_tag_only_sentence_to_next_text() -> None:
+    segments = parse_speech_segments("[laughing]\n这是一句话！")
+
+    assert [segment.text for segment in segments] == ["[laughing]这是一句话！"]
+
+
+def test_parse_speech_segments_filters_special_symbols_but_keeps_tags() -> None:
+    segments = parse_speech_segments(r"Hello_ \world![laughing]")
+
+    assert [segment.text for segment in segments] == ["Hello world![laughing]"]
+
+
+def test_parse_speech_segments_merges_symbol_prefixed_sentence_into_previous() -> None:
+    segments = parse_speech_segments("Hello?!Really?!")
+
+    assert [segment.text for segment in segments] == ["Hello?!Really?!"]
+
+
+@pytest.mark.asyncio
+async def test_say_action_passes_emotion_and_provider_to_tts(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = VoiceChatterConfig()
+    plugin = SimpleNamespace(config=config)
+    chat_stream = SimpleNamespace(stream_id="stream-1")
+    action = SayAction(chat_stream=chat_stream, plugin=plugin)
+    backend = _FakeEmitBackend()
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "plugins.voice_chatter.plugin.build_tts_backend",
+        lambda _config, _logger: backend,
+    )
+
+    async def _fake_synthesize_segments(**kwargs: Any) -> list[TTSArtifact]:
+        captured.update(kwargs)
+        return [
+            TTSArtifact(text=segment.text, audio=b"wav", emotion=segment.emotion)
+            for segment in kwargs["segments"]
+        ]
+
+    monkeypatch.setattr(
+        "plugins.voice_chatter.plugin.synthesize_segments",
+        _fake_synthesize_segments,
+    )
+
+    ok, detail = await action.execute(
+        "[laughing]你好。 [Question-ah]稍等一下。",
+        emotion="happy",
+        provider="voxcpm",
+    )
+
+    assert ok is True
+    assert "2/2" in detail
+    assert captured["provider"] == "voxcpm"
+    assert [segment.emotion for segment in captured["segments"]] == ["happy", "happy"]
+    assert [segment.wait_before for segment in captured["segments"]] == [0.0, 0.0]
+    assert [segment.text for segment in captured["segments"]] == [
+        "[laughing]你好。",
+        "[Question-ah]稍等一下。",
+    ]
+    assert [text for text, _stream in backend.emitted] == [
+        "[laughing]你好。",
+        "[Question-ah]稍等一下。",
+    ]

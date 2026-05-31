@@ -552,13 +552,21 @@ class StreamLoopManager:
                 )
             else:
                 # Wait(seconds): 到达时间阈值后恢复
-                if now < yielded_at + float(wait_time):
-                    return False
-                self._pending_wait_resume_events[stream_id] = WaitResumeEvent(
-                    source="timer",
-                    wait_time=wait_time,
-                    unread_count=max(0, unread_count_now - unread_count_at_yield),
-                )
+                unread_delta = max(0, unread_count_now - unread_count_at_yield)
+                if unread_count_now > unread_count_at_yield:
+                    self._pending_wait_resume_events[stream_id] = WaitResumeEvent(
+                        source="message",
+                        wait_time=wait_time,
+                        unread_count=unread_delta,
+                    )
+                else:
+                    if now < yielded_at + float(wait_time):
+                        return False
+                    self._pending_wait_resume_events[stream_id] = WaitResumeEvent(
+                        source="timer",
+                        wait_time=wait_time,
+                        unread_count=unread_delta,
+                    )
 
         elif isinstance(last_yield, Stop):
             # Stop(seconds): 冷却结束且出现新未读消息时恢复
