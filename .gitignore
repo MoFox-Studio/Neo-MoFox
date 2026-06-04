@@ -96,12 +96,13 @@ data/*
 config/*
 plugins/*
 skill/*
+typings/
 
 .agents/
 skills-lock.json
 
 !plugins/default_chatter/
-!plugins/napcat_adapter/
+!plugins/onebot_adapter/
 !plugins/booku_memory/
 !plugins/emoji_sender/
 !plugins/perm_plugin/

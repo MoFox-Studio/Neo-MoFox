@@ -54,6 +54,13 @@ def _wav_base64() -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def test_voxcpm_provider_config_exposes_prompt_injection_section() -> None:
+    config = VoxCPMTTSProviderConfig()
+
+    assert config.prompt.inject_into_voice_chatter is True
+    assert config.prompt.voice_chatter_guide == ""
+
+
 @pytest.mark.asyncio
 async def test_voxcpm_provider_translates_voice_design_request() -> None:
     fake = _FakeModel()

@@ -14,15 +14,15 @@ from ...event_models import ACCEPT_FORMAT, QQ_FACE, NoticeType, RealMessageType
 from ..utils import get_group_info, get_member_info, get_message_detail, get_self_info, get_stranger_info
 
 if TYPE_CHECKING:
-    from ....plugin import NapcatAdapter
+    from ....plugin import OneBotAdapter
 
-logger = get_logger("napcat_adapter")
+logger = get_logger("onebot_adapter")
 
 
 class NoticeHandler:
-    """处理 Napcat 通知事件（戳一戳、表情回复、禁言、文件上传等）"""
+    """处理 OneBot 通知事件（戳一戳、表情回复、禁言、文件上传等）"""
 
-    def __init__(self, adapter: "NapcatAdapter"):
+    def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
         # 戳一戳防抖时间戳
         self.last_poke_time: float = 0.0
@@ -368,7 +368,7 @@ class NoticeHandler:
         # 触发事件
         from src.app.plugin_system.api import event_api
 
-        from ...event_types import NapcatEvent
+        from ...event_types import OneBotEvent
 
         target_message = await get_message_detail(raw.get("message_id", ""))
         if not target_message:
@@ -391,7 +391,7 @@ class NoticeHandler:
 
         # 触发表情回复事件
         await event_api.publish_event(
-            NapcatEvent.ON_RECEIVED.EMOJI_LIEK,
+            OneBotEvent.ON_RECEIVED.EMOJI_LIEK,
             {
                 "message_id": raw.get("message_id", ""), 
                 "emoji_id": like_emoji_id, 

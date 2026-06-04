@@ -42,7 +42,7 @@ async def test_on_all_plugins_loaded_schedules_background_start(monkeypatch):
 
     class DummyRegistry:
         def get_by_type(self, _component_type):
-            return {"napcat:adapter:napcat_adapter": DummyAdapter}
+            return {"onebot:adapter:onebot_adapter": DummyAdapter}
 
     class DummyTaskManager:
         def __init__(self) -> None:
@@ -69,4 +69,4 @@ async def test_on_all_plugins_loaded_schedules_background_start(monkeypatch):
 
     await task_manager.tasks[0]
 
-    start_adapter.assert_awaited_once_with("napcat:adapter:napcat_adapter")
+    start_adapter.assert_awaited_once_with("onebot:adapter:onebot_adapter")

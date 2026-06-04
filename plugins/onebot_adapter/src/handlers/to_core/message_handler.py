@@ -1,4 +1,4 @@
-"""消息处理器 - 将 Napcat OneBot 消息转换为 MessageEnvelope"""
+"""消息处理器 - 将 OneBot 消息转换为 MessageEnvelope"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from mofox_wire.types import UserRole
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.utils.base64_helper import base64_encode_bytes
 
-from ....config import NapcatAdapterConfig
+from ....config import OneBotAdapterConfig
 from ...event_models import ACCEPT_FORMAT, QQ_FACE, RealMessageType
 from ..utils import (
     get_forward_message,
@@ -27,15 +27,15 @@ from ..utils import (
 )
 
 if TYPE_CHECKING:
-    from ....plugin import NapcatAdapter
+    from ....plugin import OneBotAdapter
 
-logger = get_logger("napcat_adapter")
+logger = get_logger("onebot_adapter")
 
 
 class MessageHandler:
-    """处理来自 Napcat 的消息事件"""
+    """处理来自 OneBot 的消息事件"""
 
-    def __init__(self, adapter: "NapcatAdapter"):
+    def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
         self._video_downloader = None
 
@@ -45,7 +45,7 @@ class MessageHandler:
         if not self.adapter.plugin or not self.adapter.plugin.config:
             return default_timeout
 
-        config = cast(NapcatAdapterConfig, self.adapter.plugin.config)
+        config = cast(OneBotAdapterConfig, self.adapter.plugin.config)
         return max(1.0, float(config.features.video_download_timeout))
     
     def _init_video_downloader(self) -> None:
@@ -54,7 +54,7 @@ class MessageHandler:
         if not self.adapter.plugin or not self.adapter.plugin.config:
             return
 
-        config = cast(NapcatAdapterConfig, self.adapter.plugin.config)
+        config = cast(OneBotAdapterConfig, self.adapter.plugin.config)
 
         # 如果启用了视频处理，根据配置初始化视频下载器
         if config.features.enable_video_processing:
@@ -77,7 +77,7 @@ class MessageHandler:
             MessageEnvelope (dict) or None
 
         Note:
-            黑白名单过滤已移动到 NapcatAdapter.from_platform_message 顶层执行，
+            黑白名单过滤已移动到 OneBotAdapter.from_platform_message 顶层执行，
             确保所有类型的事件（消息、通知等）都能被统一过滤。
         """
 
@@ -166,7 +166,7 @@ class MessageHandler:
         """
         seg_type = segment.get("type")
 
-        self.adapter.plugin.config = cast(NapcatAdapterConfig, self.adapter.plugin.config) if self.adapter.plugin and self.adapter.plugin.config else None
+        self.adapter.plugin.config = cast(OneBotAdapterConfig, self.adapter.plugin.config) if self.adapter.plugin and self.adapter.plugin.config else None
         
         match seg_type:
             case RealMessageType.text:
@@ -782,7 +782,7 @@ class MessageHandler:
             file_size_str = summary.replace("大小：", "").strip() # 移除前缀和空格
 
             # QQ API有时返回的大小不标准，这里我们只提取它给的字符串
-            # 实际大小已经由Napcat在发送时记录，这里主要是为了保持格式一致
+            # 实际大小已经由 OneBot 在发送时记录，这里主要是为了保持格式一致
 
             if file_name and file_size_str:
                 return {"file": file_name, "file_size": file_size_str, "file_id": None} # file_id在回声中不可用

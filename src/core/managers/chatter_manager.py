@@ -106,6 +106,17 @@ class ChatterManager:
         self._active_chatters[stream_id] = chatter
         logger.debug(f"注册活跃 Chatter: stream_id={stream_id}, chatter={chatter.chatter_name}")
 
+    def bind_chatter_for_stream(self, stream_id: str, chatter: BaseChatter) -> None:
+        """显式绑定 chatter 到指定 stream。"""
+        self._active_chatters[stream_id] = chatter
+        logger.info(
+            f"显式绑定 Chatter: stream_id={stream_id}, chatter={chatter.chatter_name}"
+        )
+
+    def restore_stream_to_default(self, stream_id: str) -> bool:
+        """移除 stream 的显式 chatter 绑定。"""
+        return self.unregister_active_chatter(stream_id)
+
     def unregister_active_chatter(self, stream_id: str) -> bool:
         """注销活跃的 Chatter 实例。
 

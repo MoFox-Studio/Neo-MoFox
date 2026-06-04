@@ -1,8 +1,8 @@
 """
-Napcat 适配器（基于 MoFox-Bus 完全重写版）
+OneBot 适配器（基于 MoFox-Bus 完全重写版）
 
 核心流程：
-1. Napcat WebSocket 连接 → 接收 OneBot 格式消息
+1. OneBot WebSocket 连接 → 接收 OneBot 格式消息
 2. from_platform_message: OneBot dict → MessageEnvelope
 3. CoreSink → 推送到 MoFox-Bot 核心
 4. 核心回复 → _send_platform_message: MessageEnvelope → OneBot API 调用
@@ -22,17 +22,17 @@ from src.app.plugin_system.api.log_api import get_logger
 from src.core.components.base import BaseAdapter, BasePlugin
 from src.core.components.loader import register_plugin
 
-from .config import NapcatAdapterConfig
+from .config import OneBotAdapterConfig
 from .src.handlers import utils as handler_utils
 from .src.handlers.to_core.message_handler import MessageHandler
 from .src.handlers.to_core.meta_event_handler import MetaEventHandler
 from .src.handlers.to_core.notice_handler import NoticeHandler
 from .src.handlers.to_napcat.send_handler import SendHandler
 
-logger = get_logger("napcat_adapter")
+logger = get_logger("onebot_adapter")
 
 
-def _validate_bot_identity(config: NapcatAdapterConfig) -> None:
+def _validate_bot_identity(config: OneBotAdapterConfig) -> None:
     """校验 Bot 身份配置。"""
 
     qq_id = str(config.bot.qq_id).strip()
@@ -47,26 +47,26 @@ def _validate_bot_identity(config: NapcatAdapterConfig) -> None:
         raise ValueError("配置项 bot.qq_nickname 无效：必须为非空昵称")
 
 
-class NapcatAdapter(BaseAdapter):
-    """Napcat 适配器 - 完全基于 mofox-wire 架构"""
+class OneBotAdapter(BaseAdapter):
+    """OneBot 适配器 - 完全基于 mofox-wire 架构"""
 
-    adapter_name = "napcat_adapter"
+    adapter_name = "onebot_adapter"
     adapter_version = "2.0.0"
     adapter_author = "MoFox Team"
-    adapter_description = "基于 MoFox-Bus 的 Napcat/OneBot 11 适配器"
+    adapter_description = "基于 MoFox-Bus 的 OneBot 11 适配器"
     platform = "qq"
 
     run_in_subprocess = False
 
-    def __init__(self, core_sink: CoreSink, plugin: NapcatAdapterPlugin | None = None, **kwargs):
-        """初始化 Napcat 适配器"""
+    def __init__(self, core_sink: CoreSink, plugin: OneBotAdapterPlugin | None = None, **kwargs):
+        """初始化 OneBot 适配器"""
         # 从插件配置读取 WebSocket URL
         if plugin and plugin.config:
-            config = cast(NapcatAdapterConfig, plugin.config)
-            host = config.napcat_server.host
-            port = config.napcat_server.port
-            access_token = config.napcat_server.access_token
-            mode_str = config.napcat_server.mode
+            config = cast(OneBotAdapterConfig, plugin.config)
+            host = config.onebot_server.host
+            port = config.onebot_server.port
+            access_token = config.onebot_server.access_token
+            mode_str = config.onebot_server.mode
             ws_mode = "client" if mode_str == "direct" else "server"
 
             ws_url = f"ws://{host}:{port}"
@@ -99,7 +99,7 @@ class NapcatAdapter(BaseAdapter):
 
         # WebSocket 连接（用于发送 API 请求）
         # 注意：_ws 继承自 BaseAdapter，是 WebSocketLike 协议类型
-        self._napcat_ws = None  # 可选的额外连接引用
+        self._onebot_ws = None  # 可选的额外连接引用
 
         # 注册 utils 内部使用的适配器实例，便于工具方法自动获取 WS
         handler_utils.register_adapter(self)
@@ -119,7 +119,7 @@ class NapcatAdapter(BaseAdapter):
         if not self.plugin or not self.plugin.config:
             return True
 
-        config = cast(NapcatAdapterConfig, self.plugin.config)
+        config = cast(OneBotAdapterConfig, self.plugin.config)
         features_config = config.features
         post_type = raw.get("post_type")
 
@@ -182,22 +182,22 @@ class NapcatAdapter(BaseAdapter):
 
     async def on_adapter_loaded(self) -> None:
         """适配器加载时的初始化"""
-        logger.info("Napcat 适配器正在启动...")
+        logger.info("OneBot 适配器正在启动...")
 
         if not self.plugin or not self.plugin.config:
-            raise RuntimeError("Napcat 适配器启动失败：缺少插件配置")
+            raise RuntimeError("OneBot 适配器启动失败：缺少插件配置")
 
-        config = cast(NapcatAdapterConfig, self.plugin.config)
+        config = cast(OneBotAdapterConfig, self.plugin.config)
         _validate_bot_identity(config)
 
         # 设置处理器配置（将整个 plugin 对象传递给处理器）
         # 注意：handlers 现在会直接访问 plugin.config 而不是接收 dict
         # 这里不再需要调用 set_plugin_config，因为处理器会通过 adapter.plugin 访问
-        logger.info("Napcat 适配器已加载")
+        logger.info("OneBot 适配器已加载")
 
     async def on_adapter_unloaded(self) -> None:
         """适配器卸载时的清理"""
-        logger.info("Napcat 适配器正在关闭...")
+        logger.info("OneBot 适配器正在关闭...")
 
         self.meta_event_handler.stop_heartbeat_monitor()
 
@@ -207,11 +207,11 @@ class NapcatAdapter(BaseAdapter):
                 future.cancel()
         self._response_pool.clear()
 
-        logger.info("Napcat 适配器已关闭")
+        logger.info("OneBot 适配器已关闭")
 
     async def from_platform_message(self, raw: dict[str, Any]) -> MessageEnvelope | None:  # type: ignore[override]
         """
-        将 Napcat/OneBot 原始消息转换为 MessageEnvelope
+        将 OneBot 原始消息转换为 MessageEnvelope
 
         这是核心转换方法，处理：
         - message 事件 → 消息
@@ -253,27 +253,27 @@ class NapcatAdapter(BaseAdapter):
             else:
                 return None
         except ValueError as ve:
-            logger.warning(f"处理 Napcat 事件时数据无效: {ve}")
+            logger.warning(f"处理 OneBot 事件时数据无效: {ve}")
             return None
         except Exception as e:
-            logger.error(f"处理 Napcat 事件失败: {e}, 原始数据: {raw}")
+            logger.error(f"处理 OneBot 事件失败: {e}, 原始数据: {raw}")
             return None
 
     async def _send_platform_message(self, envelope: MessageEnvelope) -> None:  # type: ignore[override]
         """
-        将 MessageEnvelope 转换并发送到 Napcat
+        将 MessageEnvelope 转换并发送到 OneBot
 
         这里不直接通过 WebSocket 发送 envelope，
-        而是调用 Napcat API（send_group_msg, send_private_msg 等）
+        而是调用 OneBot API（send_group_msg, send_private_msg 等）
         """
         try:
             await self.send_handler.handle_message(envelope)
         except Exception as e:
-            logger.error(f"发送 Napcat 消息失败: {e}")
+            logger.error(f"发送 OneBot 消息失败: {e}")
 
-    async def send_napcat_api(self, action: str, params: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
+    async def send_onebot_api(self, action: str, params: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
         """
-        发送 Napcat API 请求并等待响应
+        发送 OneBot API 请求并等待响应
 
         Args:
             action: API 动作名称（如 send_group_msg）
@@ -294,7 +294,7 @@ class NapcatAdapter(BaseAdapter):
         self._response_pool[echo] = future
 
         # 构造请求
-        # Napcat expects JSON text frames; orjson.dumps returns bytes so decode to str
+        # OneBot expects JSON text frames; orjson.dumps returns bytes so decode to str
         request = orjson.dumps(
             {
                 "action": action,
@@ -340,22 +340,22 @@ class NapcatAdapter(BaseAdapter):
         if not self.plugin or not self.plugin.config:
             return {}
 
-        config = cast(NapcatAdapterConfig, self.plugin.config)
+        config = cast(OneBotAdapterConfig, self.plugin.config)
         return {
             "bot_id": config.bot.qq_id,
             "bot_name": config.bot.qq_nickname,
             "platform": self.platform,
         }
-    
-@register_plugin
-class NapcatAdapterPlugin(BasePlugin):
-    """Napcat 适配器插件"""
 
-    plugin_name = "napcat_adapter"
+@register_plugin
+class OneBotAdapterPlugin(BasePlugin):
+    """OneBot 适配器插件"""
+
+    plugin_name = "onebot_adapter"
     plugin_version = "2.0.0"
     plugin_author = "MoFox Team"
-    plugin_description = "Napcat/OneBot 11 适配器（基于 Neo-MoFox 重写）"
-    configs = [NapcatAdapterConfig]
+    plugin_description = "OneBot 11 适配器（基于 Neo-MoFox 重写）"
+    configs = [OneBotAdapterConfig]
 
 
     def get_components(self) -> list[type]:
@@ -364,4 +364,4 @@ class NapcatAdapterPlugin(BasePlugin):
         Returns:
             list[type]: 插件内所有组件类的列表
         """
-        return [NapcatAdapter]
+        return [OneBotAdapter]

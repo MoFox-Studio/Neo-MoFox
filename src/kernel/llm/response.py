@@ -296,6 +296,42 @@ class LLMResponse:
             raise result.error
         return self.message or ""
 
+    async def stream_events_with_callback(
+        self,
+        on_event: Callable[[StreamEvent], Awaitable[None]],
+    ) -> str:
+        """以事件粒度消费流式响应，每个 ``StreamEvent`` 都会交给回调。
+
+        与 ``stream_with_callback`` 的区别是回调接收完整的 ``StreamEvent``，
+        包含 ``tool_call_id`` / ``tool_name`` / ``tool_args_delta`` 等字段，
+        而不仅仅是文本增量。
+        """
+        if self._consumed:
+            raise LLMResponseConsumedError("Response has already been consumed.")
+        self._consumed = True
+
+        if self._stream is None:
+            self._maybe_apply_tool_call_compat()
+            self._maybe_append_response_to_context()
+            return self.message or ""
+
+        reducer = LLMStreamReducer()
+        stream_error: Exception | None = None
+
+        try:
+            async for event in self._stream:
+                reducer.apply(event)
+                await on_event(event)
+        except Exception as exc:
+            stream_error = exc
+
+        self._apply_stream_result(reducer.finalize(stream_error))
+
+        if stream_error is not None:
+            raise stream_error
+
+        return self.message or ""
+
     async def stream_with_buffer(self, buffer_size: int = 10) -> AsyncIterator[str]:
         if self._consumed:
             raise LLMResponseConsumedError("Response has already been consumed.")

@@ -1,4 +1,4 @@
-"""发送处理器 - 将 MessageEnvelope 转换并发送到 Napcat"""
+"""发送处理器 - 将 MessageEnvelope 转换并发送到 OneBot"""
 
 from __future__ import annotations
 
@@ -12,21 +12,21 @@ from src.app.plugin_system.api.log_api import get_logger
 from ...event_models import CommandType
 from ..utils import convert_image_to_gif, get_image_format
 
-logger = get_logger("napcat_adapter")
+logger = get_logger("onebot_adapter")
 
 if TYPE_CHECKING:
-    from ....plugin import NapcatAdapter
+    from ....plugin import OneBotAdapter
 
 
 class SendHandler:
-    """负责向 Napcat 发送消息"""
+    """负责向 OneBot 发送消息"""
 
-    def __init__(self, adapter: "NapcatAdapter"):
+    def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
 
     async def handle_message(self, envelope: MessageEnvelope) -> None:
         """
-        处理来自核心的消息，将其转换为 Napcat 可接受的格式并发送
+        处理来自核心的消息，将其转换为 OneBot 可接受的格式并发送
         """
         logger.debug("接收到来自MoFox-Bot的消息，处理中")
 
@@ -102,10 +102,10 @@ class SendHandler:
             logger.error("无法识别的消息类型")
             return
         logger.debug(
-            f"准备发送到napcat的消息体: action='{action}', {id_name}='{target_id}', "
+            f"准备发送到 onebot 的消息体: action='{action}', {id_name}='{target_id}', "
             f"message={str(processed_message)[:500]}"
         )
-        response = await self.send_message_to_napcat(
+        response = await self.send_message_to_onebot(
             action or "",
             {
                 id_name or "target_id": target_id,
@@ -115,7 +115,7 @@ class SendHandler:
         if response.get("status") == "ok":
             logger.info("消息发送成功")
         else:
-            logger.warning(f"消息发送失败，napcat返回：{response!s}")
+            logger.warning(f"消息发送失败，onebot返回：{response!s}")
 
     async def send_command(self, envelope: MessageEnvelope) -> None:
         """
@@ -161,18 +161,18 @@ class SendHandler:
             logger.error("命令或参数缺失")
             return None
 
-        logger.debug(f"准备向 Napcat 发送命令: command='{command}', args_dict='{args_dict}'")
-        response = await self.send_message_to_napcat(command, args_dict)
-        logger.debug(f"收到 Napcat 的命令响应: {response}")
+        logger.debug(f"准备向 OneBot 发送命令: command='{command}', args_dict='{args_dict}'")
+        response = await self.send_message_to_onebot(command, args_dict)
+        logger.debug(f"收到 OneBot 的命令响应: {response}")
 
         if response.get("status") == "ok":
             logger.info(f"命令 {command_name} 执行成功")
         else:
-            logger.warning(f"命令 {command_name} 执行失败，napcat返回：{response!s}")
+            logger.warning(f"命令 {command_name} 执行失败，onebot返回：{response!s}")
 
     async def handle_adapter_command(self, envelope: MessageEnvelope) -> None:
         """
-        处理适配器命令类 - 用于直接向Napcat发送命令并返回结果
+        处理适配器命令类 - 用于直接向 OneBot 发送命令并返回结果
         """
         logger.info("处理适配器命令中")
         segment: SegPayload = envelope.get("message_segment", {})  # type: ignore[assignment]
@@ -192,9 +192,9 @@ class SendHandler:
 
             # 执行命令
             if action == "get_cookies":
-                response = await self.send_message_to_napcat(action, params, timeout=40.0)
+                response = await self.send_message_to_onebot(action, params, timeout=40.0)
             else:
-                response = await self.send_message_to_napcat(action, params, timeout=timeout)
+                response = await self.send_message_to_onebot(action, params, timeout=timeout)
 
             # 构建adapter_response消息信封发回核心
             if request_id and self.adapter.core_sink:
@@ -221,7 +221,7 @@ class SendHandler:
             if response.get("status") == "ok":
                 logger.info(f"适配器命令 {action} 执行成功")
             else:
-                logger.warning(f"适配器命令 {action} 执行失败，napcat返回：{response!s}")
+                logger.warning(f"适配器命令 {action} 执行失败，onebot返回：{response!s}")
             logger.debug(f"适配器命令 {action} 的完整响应: {response}")
 
         except Exception as e:
@@ -335,7 +335,7 @@ class SendHandler:
             return reply_seg
 
         try:
-            msg_info_response = await self.send_message_to_napcat("get_msg", {"message_id": message_id})
+            msg_info_response = await self.send_message_to_onebot("get_msg", {"message_id": message_id})
             logger.debug(f"获取消息 {message_id} 的详情响应: {msg_info_response}")
 
             replied_user_id = None
@@ -382,7 +382,7 @@ class SendHandler:
             encoded_image: 图片数据。可以是：
                 - 原始 base64 字符串（不含前缀，自动补 base64://）
                 - 已含 base64:// 前缀的字符串（直接透传，不重复添加前缀）
-                - HTTP/HTTPS URL（直接透传，napcat 会自行拉取）
+                - HTTP/HTTPS URL（直接透传，onebot 会自行拉取）
         """
         if encoded_image.startswith(("base64://", "http://", "https://")):
             file_value = encoded_image
@@ -582,7 +582,7 @@ class SendHandler:
     def handle_ai_voice_send_command(self, args: dict[str, Any], group_info: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
         """
         处理AI语音发送命令的逻辑。
-        并返回 NapCat 兼容的 (action, params) 元组。
+        并返回 OneBot 兼容的 (action, params) 元组。
         """
         if not group_info or not group_info.get("group_id"):
             raise ValueError("AI语音发送命令必须在群聊上下文中使用")
@@ -605,10 +605,10 @@ class SendHandler:
             },
         )
 
-    async def send_message_to_napcat(self, action: str, params: dict, timeout: float = 20.0) -> dict:
-        """通过 adapter API 发送到 napcat"""
+    async def send_message_to_onebot(self, action: str, params: dict, timeout: float = 20.0) -> dict:
+        """通过 adapter API 发送到 onebot"""
         try:
-            response = await self.adapter.send_napcat_api(action, params, timeout=timeout)
+            response = await self.adapter.send_onebot_api(action, params, timeout=timeout)
             return response or {"status": "error", "message": "no response"}
         except Exception as e:
             logger.error(f"发送消息失败: {e}")

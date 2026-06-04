@@ -11,15 +11,15 @@ from src.kernel.concurrency import TaskInfo, get_task_manager
 from ...event_models import MetaEventType
 
 if TYPE_CHECKING:
-    from ....plugin import NapcatAdapter
+    from ....plugin import OneBotAdapter
 
-logger = get_logger("napcat_adapter")
+logger = get_logger("onebot_adapter")
 
 
 class MetaEventHandler:
-    """处理 Napcat 元事件（心跳、生命周期）"""
+    """处理 OneBot 元事件（心跳、生命周期）"""
 
-    def __init__(self, adapter: "NapcatAdapter"):
+    def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
         self.plugin_config: dict[str, Any] | None = None
         self.last_heart_beat = 0.0
@@ -45,7 +45,7 @@ class MetaEventHandler:
         try:
             get_task_manager().cancel_task(heartbeat_task.task_id)
         except Exception:
-            logger.debug("取消 Napcat 心跳监控任务失败", exc_info=True)
+            logger.debug("取消 OneBot 心跳监控任务失败", exc_info=True)
 
     async def handle_meta_event(self, raw: dict[str, Any]):
         event_type = raw.get("meta_event_type")
@@ -68,13 +68,13 @@ class MetaEventHandler:
                     tm = get_task_manager()
                     self._heartbeat_task = tm.create_task(
                         self.check_heartbeat(self_id),
-                        name="napcat_adapter_heartbeat_check",
+                        name="onebot_adapter_heartbeat_check",
                         daemon=True,
                     )
                 self.last_heart_beat = time.time()
             else:
                 self_id = raw.get("self_id")
-                logger.warning(f"Bot {self_id} Napcat 端异常！")
+                logger.warning(f"Bot {self_id} OneBot 端异常！")
                 await self._reconnect_after_heartbeat_failure(
                     self_id,
                     "心跳状态异常",
@@ -91,10 +91,10 @@ class MetaEventHandler:
 
         self._reconnecting = True
         try:
-            logger.error(f"Bot {bot_id} 检测到 Napcat 连接异常，开始重连：{reason}")
+            logger.error(f"Bot {bot_id} 检测到 OneBot 连接异常，开始重连：{reason}")
             await self.adapter.reconnect()
         except Exception as e:
-            logger.error(f"Bot {bot_id} Napcat 自动重连失败: {e}")
+            logger.error(f"Bot {bot_id} OneBot 自动重连失败: {e}")
         finally:
             self._reconnecting = False
 

@@ -15,9 +15,9 @@ from src.core.utils.base64_helper import (
 )
 
 if TYPE_CHECKING:
-    from ...plugin import NapcatAdapter
+    from ...plugin import OneBotAdapter
 
-logger = get_logger("napcat_adapter")
+logger = get_logger("onebot_adapter")
 
 # 简单的缓存实现，通过 kernel.storage 实现磁盘持久化存储
 _CACHE_LOADED = False
@@ -37,14 +37,14 @@ STRANGER_INFO_TTL = 300
 SELF_INFO_TTL = 300
 CACHE_IO_TIMEOUT_SECONDS = 5.0
 
-_adapter_ref: weakref.ReferenceType["NapcatAdapter"] | None = None
+_adapter_ref: weakref.ReferenceType["OneBotAdapter"] | None = None
 
 
-def register_adapter(adapter: "NapcatAdapter") -> None:
-    """注册 NapcatAdapter 实例，以便 utils 模块可以获取 WebSocket"""
+def register_adapter(adapter: "OneBotAdapter") -> None:
+    """注册 OneBotAdapter 实例，以便 utils 模块可以获取 WebSocket"""
     global _adapter_ref
     _adapter_ref = weakref.ref(adapter)
-    logger.debug("Napcat adapter registered in utils for websocket access")
+    logger.debug("OneBot adapter registered in utils for websocket access")
 
 
 async def _ensure_cache_loaded() -> None:
@@ -59,12 +59,12 @@ async def _ensure_cache_loaded() -> None:
 
     try:
         async with asyncio.timeout(CACHE_IO_TIMEOUT_SECONDS):
-            data = await json_store.load("napcat_cache")
+            data = await json_store.load("onebot_cache")
     except TimeoutError as e:
-        logger.debug(f"Load napcat cache timed out: {e}")
+        logger.debug(f"Load onebot cache timed out: {e}")
         data = None
     except Exception as e:
-        logger.debug(f"Failed to load napcat cache: {e}")
+        logger.debug(f"Failed to load onebot cache: {e}")
         data = None
 
     if _CACHE_LOADED:
@@ -85,11 +85,11 @@ async def _save_cache_to_disk() -> None:
 
     try:
         async with asyncio.timeout(CACHE_IO_TIMEOUT_SECONDS):
-            await json_store.save("napcat_cache", _CACHE)
+            await json_store.save("onebot_cache", _CACHE)
     except TimeoutError as e:
-        logger.debug(f"Write napcat cache timed out: {e}")
+        logger.debug(f"Write onebot cache timed out: {e}")
     except Exception as e:
-        logger.debug(f"Write napcat cache failed: {e}")
+        logger.debug(f"Write onebot cache failed: {e}")
 
 
 async def _get_cached(section: str, key: str, ttl: int) -> Any | None:
@@ -117,16 +117,16 @@ async def _set_cached(section: str, key: str, data: Any) -> None:
     try:
         await _save_cache_to_disk()
     except Exception:
-        logger.debug("Write napcat cache failed")
+        logger.debug("Write onebot cache failed")
 
 
-def _get_adapter(adapter: "NapcatAdapter | None" = None) -> "NapcatAdapter":
+def _get_adapter(adapter: "OneBotAdapter | None" = None) -> "OneBotAdapter":
     target = adapter
     if target is None and _adapter_ref:
         target = _adapter_ref()
     if target is None:
         raise RuntimeError(
-            "NapcatAdapter 未注册，请确保已调用 utils.register_adapter 注册"
+            "OneBotAdapter 未注册，请确保已调用 utils.register_adapter 注册"
         )
     return target
 
@@ -134,7 +134,7 @@ def _get_adapter(adapter: "NapcatAdapter | None" = None) -> "NapcatAdapter":
 async def _call_adapter_api(
     action: str,
     params: dict[str, Any],
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
     timeout: float = 30.0,
 ) -> dict[str, Any] | None:
     """统一通过 adapter 发送和接收 API 调用"""
@@ -147,7 +147,7 @@ async def _call_adapter_api(
         return None
 
     try:
-        return await target.send_napcat_api(action, params, timeout=timeout)
+        return await target.send_onebot_api(action, params, timeout=timeout)
     except Exception as e:
         logger.error(f"{action} 调用失败: {e}")
         return None
@@ -156,7 +156,7 @@ async def _call_adapter_api(
 async def get_respose(
     action: str,
     params: dict[str, Any],
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
     timeout: float = 30.0,
 ):
     return await _call_adapter_api(action, params, adapter=adapter, timeout=timeout)
@@ -166,7 +166,7 @@ async def get_group_info(
     *,
     use_cache: bool = True,
     force_refresh: bool = False,
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
     """
     获取群组基本信息
@@ -196,7 +196,7 @@ async def get_group_detail_info(
     *,
     use_cache: bool = True,
     force_refresh: bool = False,
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
     """
     获取群组详细信息
@@ -227,7 +227,7 @@ async def get_member_info(
     *,
     use_cache: bool = True,
     force_refresh: bool = False,
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
     """
     获取群组成员信息
@@ -309,7 +309,7 @@ async def get_self_info(
     *,
     use_cache: bool = True,
     force_refresh: bool = False,
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
     """
     获取机器人信息
@@ -345,7 +345,7 @@ async def get_stranger_info(
     *,
     use_cache: bool = True,
     force_refresh: bool = False,
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
     """
     获取陌生人信息
@@ -369,7 +369,7 @@ async def get_stranger_info(
 async def get_message_detail(
     message_id: str | int,
     *,
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
     """
     获取消息详情，仅作为参考
@@ -388,7 +388,7 @@ async def get_record_detail(
     file: str,
     file_id: str | None = None,
     *,
-    adapter: "NapcatAdapter | None" = None,
+    adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
     """
     获取语音信息详情
@@ -404,7 +404,7 @@ async def get_record_detail(
 
 
 async def get_forward_message(
-    raw_message: dict, *, adapter: "NapcatAdapter | None" = None
+    raw_message: dict, *, adapter: "OneBotAdapter | None" = None
 ) -> dict[str, Any] | None:
     forward_message_data: dict = raw_message.get("data", {})
     if not forward_message_data:

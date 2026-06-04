@@ -135,6 +135,35 @@ def unregister_active_chatter(stream_id: str) -> bool:
     return _get_chatter_manager().unregister_active_chatter(stream_id)
 
 
+def bind_chatter_for_stream(stream_id: str, chatter: "BaseChatter") -> None:
+    """显式绑定 chatter 到指定 stream。
+
+    Args:
+        stream_id: 聊天流 ID
+        chatter: Chatter 实例
+
+    Returns:
+        None
+    """
+    _validate_non_empty(stream_id, "stream_id")
+    if chatter is None:
+        raise ValueError("chatter 不能为空")
+    _get_chatter_manager().bind_chatter_for_stream(stream_id, chatter)
+
+
+def restore_stream_to_default(stream_id: str) -> bool:
+    """移除 stream 的显式 chatter 绑定。
+
+    Args:
+        stream_id: 聊天流 ID
+
+    Returns:
+        是否成功注销/移除绑定
+    """
+    _validate_non_empty(stream_id, "stream_id")
+    return _get_chatter_manager().restore_stream_to_default(stream_id)
+
+
 def get_chatter_by_stream(stream_id: str) -> "BaseChatter | None":
     """获取指定聊天流的活跃 Chatter 实例。
 
@@ -179,6 +208,8 @@ __all__ = [
     "get_active_chatters",
     "register_active_chatter",
     "unregister_active_chatter",
+    "bind_chatter_for_stream",
+    "restore_stream_to_default",
     "get_chatter_by_stream",
     "get_or_create_chatter_for_stream",
 ]

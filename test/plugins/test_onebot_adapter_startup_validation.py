@@ -1,4 +1,4 @@
-"""测试 napcat_adapter 启动时的身份配置校验。"""
+"""测试 onebot_adapter 启动时的身份配置校验。"""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import pytest
 import src.kernel.storage as kernel_storage
 from src.kernel.concurrency import get_task_manager
 
-from plugins.napcat_adapter.config import NapcatAdapterConfig
-from plugins.napcat_adapter.plugin import NapcatAdapter, NapcatAdapterPlugin, _validate_bot_identity
-from plugins.napcat_adapter.src.handlers import utils as napcat_utils
+from plugins.onebot_adapter.config import OneBotAdapterConfig
+from plugins.onebot_adapter.plugin import OneBotAdapter, OneBotAdapterPlugin, _validate_bot_identity
+from plugins.onebot_adapter.src.handlers import utils as onebot_utils
 
 
 class _FakeCoreSink:
@@ -46,16 +46,16 @@ class _HangingWebSocket:
         await asyncio.sleep(1)
 
 
-class TestNapcatAdapterStartupValidation:
+class TestOneBotAdapterStartupValidation:
     """测试 Napcat 适配器启动校验。"""
 
     def test_validate_bot_identity_accepts_valid_values(self) -> None:
         """有效配置应通过校验。"""
-        config = NapcatAdapterConfig.from_dict(
+        config = OneBotAdapterConfig.from_dict(
             {
                 "plugin": {"enabled": True, "config_version": "2.0.0"},
                 "bot": {"qq_id": "123456789", "qq_nickname": "MoFoxBot"},
-                "napcat_server": {
+                "onebot_server": {
                     "mode": "reverse",
                     "host": "localhost",
                     "port": 8095,
@@ -84,11 +84,11 @@ class TestNapcatAdapterStartupValidation:
 
     def test_validate_bot_identity_rejects_empty_qq_id(self) -> None:
         """空 qq_id 应被拒绝。"""
-        config = NapcatAdapterConfig.from_dict(
+        config = OneBotAdapterConfig.from_dict(
             {
                 "plugin": {"enabled": True, "config_version": "2.0.0"},
                 "bot": {"qq_id": "", "qq_nickname": "MoFoxBot"},
-                "napcat_server": {
+                "onebot_server": {
                     "mode": "reverse",
                     "host": "localhost",
                     "port": 8095,
@@ -118,11 +118,11 @@ class TestNapcatAdapterStartupValidation:
 
     def test_validate_bot_identity_rejects_non_digit_qq_id(self) -> None:
         """非数字 qq_id 应被拒绝。"""
-        config = NapcatAdapterConfig.from_dict(
+        config = OneBotAdapterConfig.from_dict(
             {
                 "plugin": {"enabled": True, "config_version": "2.0.0"},
                 "bot": {"qq_id": "abc123", "qq_nickname": "MoFoxBot"},
-                "napcat_server": {
+                "onebot_server": {
                     "mode": "reverse",
                     "host": "localhost",
                     "port": 8095,
@@ -152,11 +152,11 @@ class TestNapcatAdapterStartupValidation:
 
     def test_validate_bot_identity_rejects_empty_nickname(self) -> None:
         """空 qq_nickname 应被拒绝。"""
-        config = NapcatAdapterConfig.from_dict(
+        config = OneBotAdapterConfig.from_dict(
             {
                 "plugin": {"enabled": True, "config_version": "2.0.0"},
                 "bot": {"qq_id": "123456789", "qq_nickname": "   "},
-                "napcat_server": {
+                "onebot_server": {
                     "mode": "reverse",
                     "host": "localhost",
                     "port": 8095,
@@ -187,12 +187,12 @@ class TestNapcatAdapterStartupValidation:
 
 @pytest.mark.asyncio
 async def test_get_bot_info_returns_standard_bot_name_field() -> None:
-    """NapcatAdapter 应按统一契约返回 bot_name。"""
-    config = NapcatAdapterConfig.from_dict(
+    """OneBotAdapter 应按统一契约返回 bot_name。"""
+    config = OneBotAdapterConfig.from_dict(
         {
             "plugin": {"enabled": True, "config_version": "2.0.0"},
             "bot": {"qq_id": "123456789", "qq_nickname": "MoFoxBot"},
-            "napcat_server": {
+            "onebot_server": {
                 "mode": "reverse",
                 "host": "localhost",
                 "port": 8095,
@@ -216,8 +216,8 @@ async def test_get_bot_info_returns_standard_bot_name_field() -> None:
             },
         }
     )
-    plugin = NapcatAdapterPlugin(config=config)
-    adapter = NapcatAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
+    plugin = OneBotAdapterPlugin(config=config)
+    adapter = OneBotAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
 
     bot_info = await adapter.get_bot_info()
 
@@ -229,14 +229,14 @@ async def test_get_bot_info_returns_standard_bot_name_field() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_napcat_api_times_out_when_websocket_send_blocks() -> None:
-    """send_napcat_api 应对 WebSocket 发送阻塞施加总超时。"""
+async def test_send_onebot_api_times_out_when_websocket_send_blocks() -> None:
+    """send_onebot_api 应对 WebSocket 发送阻塞施加总超时。"""
 
-    config = NapcatAdapterConfig.from_dict(
+    config = OneBotAdapterConfig.from_dict(
         {
             "plugin": {"enabled": True, "config_version": "2.0.0"},
             "bot": {"qq_id": "123456789", "qq_nickname": "MoFoxBot"},
-            "napcat_server": {
+            "onebot_server": {
                 "mode": "reverse",
                 "host": "localhost",
                 "port": 8095,
@@ -260,12 +260,12 @@ async def test_send_napcat_api_times_out_when_websocket_send_blocks() -> None:
             },
         }
     )
-    plugin = NapcatAdapterPlugin(config=config)
-    adapter = NapcatAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
+    plugin = OneBotAdapterPlugin(config=config)
+    adapter = OneBotAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
     adapter._ws = cast(Any, _HangingWebSocket())
 
     with pytest.raises(asyncio.TimeoutError):
-        await adapter.send_napcat_api("send_group_msg", {"group_id": 1}, timeout=0.01)
+        await adapter.send_onebot_api("send_group_msg", {"group_id": 1}, timeout=0.01)
 
     assert adapter._response_pool == {}
 
@@ -274,11 +274,11 @@ async def test_send_napcat_api_times_out_when_websocket_send_blocks() -> None:
 async def test_handle_video_message_times_out_on_blocked_local_file_read(monkeypatch, tmp_path) -> None:
     """本地视频读取阻塞时应返回超时占位文本。"""
 
-    config = NapcatAdapterConfig.from_dict(
+    config = OneBotAdapterConfig.from_dict(
         {
             "plugin": {"enabled": True, "config_version": "2.0.0"},
             "bot": {"qq_id": "123456789", "qq_nickname": "MoFoxBot"},
-            "napcat_server": {
+            "onebot_server": {
                 "mode": "reverse",
                 "host": "localhost",
                 "port": 8095,
@@ -302,8 +302,8 @@ async def test_handle_video_message_times_out_on_blocked_local_file_read(monkeyp
             },
         }
     )
-    plugin = NapcatAdapterPlugin(config=config)
-    adapter = NapcatAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
+    plugin = OneBotAdapterPlugin(config=config)
+    adapter = OneBotAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
     video_file = tmp_path / "video.mp4"
     video_file.write_bytes(b"test")
 
@@ -314,7 +314,7 @@ async def test_handle_video_message_times_out_on_blocked_local_file_read(monkeyp
         return b"late"
 
     monkeypatch.setattr(
-        "plugins.napcat_adapter.src.handlers.to_core.message_handler.asyncio.to_thread",
+        "plugins.onebot_adapter.src.handlers.to_core.message_handler.asyncio.to_thread",
         _blocked_to_thread,
     )
 
@@ -326,44 +326,44 @@ async def test_handle_video_message_times_out_on_blocked_local_file_read(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_napcat_cache_load_timeout_does_not_block(monkeypatch) -> None:
+async def test_onebot_cache_load_timeout_does_not_block(monkeypatch) -> None:
     """慢缓存读取应在超时后快速降级。"""
 
     original_cache = {
-        section: values.copy() for section, values in napcat_utils._CACHE.items()
+        section: values.copy() for section, values in onebot_utils._CACHE.items()
     }
-    original_loaded = napcat_utils._CACHE_LOADED
+    original_loaded = onebot_utils._CACHE_LOADED
 
     async def _slow_load(_name: str) -> dict[str, Any] | None:
         await asyncio.sleep(0.05)
         return {"group_info": {"1": {"data": {"group_id": 1}, "ts": 1.0}}}
 
-    monkeypatch.setattr(napcat_utils, "CACHE_IO_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(onebot_utils, "CACHE_IO_TIMEOUT_SECONDS", 0.01)
     monkeypatch.setattr(kernel_storage.json_store, "load", _slow_load)
-    napcat_utils._CACHE_LOADED = False
-    for section in napcat_utils._CACHE.values():
+    onebot_utils._CACHE_LOADED = False
+    for section in onebot_utils._CACHE.values():
         section.clear()
 
     try:
-        await napcat_utils._ensure_cache_loaded()
-        assert napcat_utils._CACHE_LOADED is True
-        assert napcat_utils._CACHE["group_info"] == {}
+        await onebot_utils._ensure_cache_loaded()
+        assert onebot_utils._CACHE_LOADED is True
+        assert onebot_utils._CACHE["group_info"] == {}
     finally:
-        napcat_utils._CACHE_LOADED = original_loaded
+        onebot_utils._CACHE_LOADED = original_loaded
         for section_name, values in original_cache.items():
-            napcat_utils._CACHE[section_name].clear()
-            napcat_utils._CACHE[section_name].update(values)
+            onebot_utils._CACHE[section_name].clear()
+            onebot_utils._CACHE[section_name].update(values)
 
 
 @pytest.mark.asyncio
 async def test_meta_event_handler_reconnects_when_heartbeat_times_out(monkeypatch) -> None:
     """心跳超时时应触发适配器自动重连。"""
 
-    config = NapcatAdapterConfig.from_dict(
+    config = OneBotAdapterConfig.from_dict(
         {
             "plugin": {"enabled": True, "config_version": "2.0.0"},
             "bot": {"qq_id": "123456789", "qq_nickname": "MoFoxBot"},
-            "napcat_server": {
+            "onebot_server": {
                 "mode": "reverse",
                 "host": "localhost",
                 "port": 8095,
@@ -387,8 +387,8 @@ async def test_meta_event_handler_reconnects_when_heartbeat_times_out(monkeypatc
             },
         }
     )
-    plugin = NapcatAdapterPlugin(config=config)
-    adapter = NapcatAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
+    plugin = OneBotAdapterPlugin(config=config)
+    adapter = OneBotAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
     adapter.reconnect = AsyncMock()
 
     handler = adapter.meta_event_handler
@@ -396,7 +396,7 @@ async def test_meta_event_handler_reconnects_when_heartbeat_times_out(monkeypatc
     handler.interval = 0.01
 
     monkeypatch.setattr(
-        "plugins.napcat_adapter.src.handlers.to_core.meta_event_handler.time.time",
+        "plugins.onebot_adapter.src.handlers.to_core.meta_event_handler.time.time",
         lambda: 0.03,
     )
 
@@ -410,11 +410,11 @@ async def test_meta_event_handler_reconnects_when_heartbeat_times_out(monkeypatc
 async def test_on_adapter_unloaded_stops_stale_heartbeat_monitor() -> None:
     """适配器卸载时应停止残留的心跳监控任务。"""
 
-    config = NapcatAdapterConfig.from_dict(
+    config = OneBotAdapterConfig.from_dict(
         {
             "plugin": {"enabled": True, "config_version": "2.0.0"},
             "bot": {"qq_id": "123456789", "qq_nickname": "MoFoxBot"},
-            "napcat_server": {
+            "onebot_server": {
                 "mode": "reverse",
                 "host": "localhost",
                 "port": 8095,
@@ -438,8 +438,8 @@ async def test_on_adapter_unloaded_stops_stale_heartbeat_monitor() -> None:
             },
         }
     )
-    plugin = NapcatAdapterPlugin(config=config)
-    adapter = NapcatAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
+    plugin = OneBotAdapterPlugin(config=config)
+    adapter = OneBotAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
 
     handler = adapter.meta_event_handler
     handler.last_heart_beat = 1.0
@@ -447,7 +447,7 @@ async def test_on_adapter_unloaded_stops_stale_heartbeat_monitor() -> None:
 
     heartbeat_task = get_task_manager().create_task(
         asyncio.sleep(60),
-        name="test_napcat_adapter_heartbeat_check",
+        name="test_onebot_adapter_heartbeat_check",
         daemon=True,
     )
     handler._heartbeat_task = heartbeat_task

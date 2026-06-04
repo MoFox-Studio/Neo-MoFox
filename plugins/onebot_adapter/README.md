@@ -1,4 +1,4 @@
-# NEW_napcat_adapter
+# NEW_onebot_adapter
 
 基于 mofox-wire v2.x 的 Napcat 适配器（使用 BaseAdapter 架构）
 
@@ -7,7 +7,7 @@
 本插件采用 **BaseAdapter 继承模式** 重写，完全抛弃旧版 maim_message 库，改用 mofox-wire 的 TypedDict 数据结构。
 
 ### 核心组件
-- **NapcatAdapter**: 继承自 `mofox_wire.AdapterBase`，负责 OneBot 11 协议与 MessageEnvelope 的双向转换
+- **OneBotAdapter**: 继承自 `mofox_wire.AdapterBase`，负责 OneBot 11 协议与 MessageEnvelope 的双向转换
 - **WebSocketAdapterOptions**: 自动管理 WebSocket 连接，提供 incoming_parser 和 outgoing_encoder
 - **CoreMessageSink**: 通过 `InProcessCoreSink` 将消息递送到核心系统
 - **Handlers**: 独立的消息处理器，分为 to_core（接收）和 to_napcat（发送）两个方向
@@ -15,7 +15,7 @@
 ## 📁 项目结构
 
 ```
-NEW_napcat_adapter/
+NEW_onebot_adapter/
 ├── plugin.py                      # ✅ 主插件文件（BaseAdapter实现）
 ├── _manifest.json                 # 插件清单
 │
@@ -50,7 +50,7 @@ NEW_napcat_adapter/
 
 ### 使用方式
 
-1. **配置文件**: 在 `config/plugins/NEW_napcat_adapter.toml` 中配置 WebSocket URL 和其他参数
+1. **配置文件**: 在 `config/plugins/NEW_onebot_adapter.toml` 中配置 WebSocket URL 和其他参数
 2. **启动插件**: 插件自动在系统启动时加载
 3. **WebSocket连接**: 自动连接到 Napcat OneBot 11 服务器
 
@@ -129,16 +129,16 @@ ban_user_id = ["333333333", "444444444"]
 
 #### 🔧 配置文件位置
 
-- **示例配置**: `src/plugins/built_in/napcat_adapter/config.example.toml`
-- **实际配置**: `config/plugins/NEW_napcat_adapter.toml`
+- **示例配置**: `src/plugins/built_in/onebot_adapter/config.example.toml`
+- **实际配置**: `config/plugins/NEW_onebot_adapter.toml`
 
 #### 📊 日志信息
 
 被过滤的消息会在调试日志中记录：
 ```
-[DEBUG] napcat_adapter: 群聊 123456789 在黑名单中，消息被过滤
-[DEBUG] napcat_adapter: 私聊用户 111111111 在黑名单中，消息被过滤
-[DEBUG] napcat_adapter: 用户 333333333 在全局封禁列表中，消息被过滤
+[DEBUG] onebot_adapter: 群聊 123456789 在黑名单中，消息被过滤
+[DEBUG] onebot_adapter: 私聊用户 111111111 在黑名单中，消息被过滤
+[DEBUG] onebot_adapter: 用户 333333333 在全局封禁列表中，消息被过滤
 ```
 
 ## 🔑 核心数据结构
@@ -183,7 +183,7 @@ envelope: MessageEnvelope = {
 ### BaseAdapter 核心方法
 
 ```python
-class NapcatAdapter(BaseAdapter):
+class OneBotAdapter(BaseAdapter):
     async def from_platform_message(self, message: dict[str, Any]) -> MessageEnvelope | None:
         """将 OneBot 11 事件转换为 MessageEnvelope"""
         # 路由到对应的 Handler
@@ -356,7 +356,7 @@ envelope: MessageEnvelope = {
 **接收方向** (to_core):
 ```python
 class MessageHandler:
-    def __init__(self, adapter: "NapcatAdapter"):
+    def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
     
     async def handle_raw_message(self, data: dict[str, Any]) -> MessageEnvelope:
@@ -369,20 +369,20 @@ class MessageHandler:
 **发送方向** (to_napcat):
 ```python
 class SendHandler:
-    def __init__(self, adapter: "NapcatAdapter"):
+    def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
     
     async def handle_message(self, envelope: MessageEnvelope) -> dict[str, Any]:
         # 1. 从 envelope 提取 message_segment
         # 2. 递归转换 SegPayload → OneBot 格式
-        # 3. 调用 adapter.send_napcat_api() 发送
+        # 3. 调用 adapter.send_onebot_api() 发送
 ```
 
 ### 3. API 调用模式（响应池）
 
 ```python
-# 在 NapcatAdapter 中
-async def send_napcat_api(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+# 在 OneBotAdapter 中
+async def send_onebot_api(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
     # 1. 生成唯一 echo
     echo = f"{action}_{uuid.uuid4()}"
     
@@ -446,7 +446,7 @@ async def from_platform_message(self, message: dict[str, Any]) -> MessageEnvelop
 
 - **mofox-wire 文档**: 查看 `mofox_wire/types.py` 了解 TypedDict 定义
 - **BaseAdapter 示例**: 参考 `docs/mofox_wire_demo_adapter.py`
-- **旧版实现**: `src/plugins/built_in/napcat_adapter_plugin/` (仅参考逻辑)
+- **旧版实现**: `src/plugins/built_in/onebot_adapter_plugin/` (仅参考逻辑)
 - **OneBot 11 协议**: [OneBot 11 标准](https://github.com/botuniverse/onebot-11)
 
 ## ⚠️ 重要注意事项

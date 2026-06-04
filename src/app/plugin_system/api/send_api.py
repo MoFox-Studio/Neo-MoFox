@@ -226,7 +226,7 @@ async def send_custom(
         try:
             message_type_enum = MessageType(message_type)
         except ValueError:
-            # 未知类型（如 "music"）：通过 extra_media 机制传递，使 napcat adapter 等可
+            # 未知类型（如 "music"）：通过 extra_media 机制传递，使 onebot adapter 等可
             # 直接处理自定义消息段类型，而不会被降级为文本消息
             return await _send_message(
                 content="",

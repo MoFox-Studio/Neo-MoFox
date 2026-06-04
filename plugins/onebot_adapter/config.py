@@ -1,4 +1,4 @@
-"""Napcat Adapter 配置定义"""
+"""OneBot Adapter 配置定义"""
 from __future__ import annotations
 
 from typing import ClassVar
@@ -6,11 +6,11 @@ from typing import ClassVar
 from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
 
 
-class NapcatAdapterConfig(BaseConfig):
-    """Napcat 适配器配置"""
+class OneBotAdapterConfig(BaseConfig):
+    """OneBot 适配器配置"""
 
     config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "Napcat/OneBot 11 适配器配置"
+    config_description: ClassVar[str] = "OneBot 11 适配器配置"
 
     @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):
@@ -18,7 +18,7 @@ class NapcatAdapterConfig(BaseConfig):
 
         enabled: bool = Field(
             default=True,
-            description="是否启用 Napcat 适配器",
+            description="是否启用 OneBot 适配器",
             label="启用适配器",
             tag="plugin"
         )
@@ -47,9 +47,9 @@ class NapcatAdapterConfig(BaseConfig):
             tag="user"
         )
 
-    @config_section("napcat_server", title="Napcat 服务器", tag="network")
-    class NapcatServerSection(SectionBase):
-        """Napcat WebSocket 服务器配置"""
+    @config_section("onebot_server", title="OneBot 服务器", tag="network")
+    class OneBotServerSection(SectionBase):
+        """OneBot WebSocket 服务器配置"""
 
         mode: str = Field(
             default="reverse",
@@ -62,14 +62,14 @@ class NapcatAdapterConfig(BaseConfig):
         )
         host: str = Field(
             default="localhost",
-            description="Napcat WebSocket 服务地址",
+            description="OneBot WebSocket 服务地址",
             label="服务地址",
             placeholder="localhost",
             tag="network"
         )
         port: int = Field(
             default=8095,
-            description="Napcat WebSocket 服务端口",
+            description="OneBot WebSocket 服务端口",
             label="服务端口",
             ge=1,
             le=65535,
@@ -77,7 +77,7 @@ class NapcatAdapterConfig(BaseConfig):
         )
         access_token: str = Field(
             default="",
-            description="Napcat API 访问令牌（可选）",
+            description="OneBot API 访问令牌（可选）",
             label="访问令牌",
             input_type="password",
             placeholder="可选，留空表示不鉴权",
@@ -212,5 +212,5 @@ class NapcatAdapterConfig(BaseConfig):
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     bot: BotSection = Field(default_factory=BotSection)
-    napcat_server: NapcatServerSection = Field(default_factory=NapcatServerSection)
+    onebot_server: OneBotServerSection = Field(default_factory=OneBotServerSection)
     features: FeaturesSection = Field(default_factory=FeaturesSection)
