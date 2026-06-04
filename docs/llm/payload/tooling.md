@@ -1,4 +1,4 @@
-# Tooling 模块
+﻿# Tooling 模块
 
 ## 概述
 
@@ -524,43 +524,6 @@ await run_tool_call(
     stream_id=stream_id,
 )
 ```
-
----
-
-
----
-
-## LLMUsableExecutionStatus（执行状态枚举）
-
-```python
-class LLMUsableExecutionStatus(str, Enum):
-    SUCCESS = "success"
-    FAILED = "failed"
-```
-
-表示 `LLMUsableExecution` 的执行结果状态。
-
----
-
-## LLMUsableExecution（工具执行结果）
-
-```python
-@dataclass(frozen=True, slots=True)
-class LLMUsableExecution:
-    status: LLMUsableExecutionStatus
-    call: "ToolCall"
-    result: Any = None
-```
-
-封装单次工具调用的完整执行结果。
-
-**属性：**
-
-| 属性 | 类型 | 说明 |
-|---|---|---|
-| `status` | `LLMUsableExecutionStatus` | 执行状态（成功/失败） |
-| `call` | `ToolCall` | 对应的工具调用信息 |
-| `result` | `Any` | 执行返回结果 |
 
 ---
 

@@ -1,4 +1,4 @@
-# Response 模块
+﻿# Response 模块
 
 ## 概述
 
@@ -6,26 +6,34 @@
 - **await 模式**：收集完整响应后返回
 - **async for 模式**：流式处理响应数据
 
-此外，它还支持自动工具调用解析和响应自动追加到对话历史。
+此外，它还支持：
+- 推理内容（reasoning）的结构化解析（如 DeepSeek-R1、OpenAI o1 的思考链）
+- 自动工具调用解析与 `tool_call_compat` 兼容模式
+- 响应自动追加到对话历史（通过 `LLMContextManager`）
 
 ## 类定义
 
 ```python
 @dataclass(slots=True)
 class LLMResponse:
-    """LLMResponse：既可 await（收集全量）也可 async for（流式吐出）。"""
-    
+    """对缓冲式 provider 结果或实时流结果的统一包装。"""
+
     _stream: AsyncIterator[StreamEvent] | None          # 流式迭代器
     _upper: "LLMRequest | LLMResponse"                  # 上级请求/响应
     _auto_append_response: bool                         # 是否自动追加到对话
-    
+
     payloads: list[LLMPayload]                          # 当前对话的所有 payload
-    model_set: ModelSet                                 # 模型配置
-    
+    model_set: "ModelSet"                               # 模型配置
+    context_manager: LLMContextManager | None = None    # 上下文管理器
+
     message: str | None = None                          # 完整的文本响应
-    call_list: list[ToolCall] = field(default_factory=list)  # 工具调用列表
-    
+    reasoning_content: str | None = None                # 推理过程纯文本
+    reasoning_parts: list[ReasoningText] | None = None  # 推理过程结构化片段
+    call_list: list[ToolCall] | None = None             # 工具调用列表（可空）
+    tool_call_compat: bool = False                      # 工具调用兼容模式
+
     _consumed: bool = False                             # 是否已被消费
+    _appended_to_context: bool = False                  # 是否已追加到上下文
 ```
 
 ## 核心属性
@@ -34,48 +42,75 @@ class LLMResponse:
 
 **类型：** `str | None`
 
-**描述：** 模型的文本响应。
-- 非流式模式：调用 `await` 后填充
-- 流式模式：完成迭代后填充
+模型的文本响应。流式/非流式完成后填充。
+
+### reasoning_content / reasoning_parts
+
+**类型：** `str | None` / `list[ReasoningText] | None`
+
+模型的推理/思考过程：
+- `reasoning_content`：纯文本形式的推理链
+- `reasoning_parts`：带签名的结构化推理片段（如 Anthropic 的 thinking blocks）
+
+仅在支持 reasoning 的模型（如 DeepSeek-R1、OpenAI o1/o3、Anthropic Claude）上有效。
 
 ### call_list
 
-**类型：** `list[ToolCall]`
+**类型：** `list[ToolCall] | None`
 
-**描述：** 模型请求的工具调用列表。
-- 如果响应不包含工具调用，则为空列表
-- 非流式模式：调用 `await` 后填充
-- 流式模式：完成迭代后填充
+模型请求的工具调用列表。可能为 `None`（消费前）或空列表（无工具调用）。
 
-### payloads
+### tool_call_compat
 
-**类型：** `list[LLMPayload]`
+**类型：** `bool`
 
-**描述：** 当前对话的所有 payload（包括系统提示、历史消息等）。
+当模型不支持原生 function calling 时，启用兼容模式从纯文本中解析工具调用（XML/JSON 格式）。
+
+### context_manager
+
+**类型：** `LLMContextManager | None`
+
+从上游 `LLMRequest` 自动继承的上下文管理器。用于在自动追加响应时保持裁剪/校验行为一致。
 
 ## 使用方式
 
 ### 方式 1：非流式（await）
 
 ```python
-request = LLMRequest(model_set=models)
-request.add_payload(LLMPayload(ROLE.USER, Text("What is AI?")))
-
 response = await request.send(stream=False)
 message = await response
 print(message)
-```
 
-**特点：**
-- 等待完整响应
-- 一旦调用 `await`，响应被消费
-- 不能再次调用 `await` 或 `async for`
+# 检查推理内容
+if response.reasoning_content:
+    print(f"思考过程: {response.reasoning_content}")
+
+# 检查工具调用
+if response.call_list:
+    for call in response.call_list:
+        print(f"工具: {call.name}({call.args})")
+```
 
 ### 方式 2：流式（async for）
 
 ```python
-request = LLMRequest(model_set=models)
-request.add_payload(LLMPayload(ROLE.USER, Text("Write a story")))
+response = await request.send(stream=True)
+async for chunk in response:
+    print(chunk, end="", flush=True)
+
+# 消费完成后可访问完整信息
+print(f"推理: {response.reasoning_content}")
+print(f"工具调用: {response.call_list}")
+```
+
+### 方式 3：链式继续对话
+
+```python
+# 利用 to_payload() 将响应转为 payload 继续对话
+response = await request.send()
+payload = response.to_payload()
+# payload 包含 assistant 的文本、reasoning、tool_calls
+```
 
 response = await request.send(stream=True)
 async for chunk in response:
@@ -500,8 +535,8 @@ async for chunk in response:
 ## 相关文档
 
 - [Request 模块](./request.md) - 发送请求
-- [Context 模块](./context.md) - 上下文管理
 - [Roles 模块](./roles.md) - 消息角色
 - [Payload 模块](./payload/README.md) - 消息负载
 - [Exceptions 模块](./exceptions.md) - 异常处理
 - [Monitor 模块](./monitor.md) - 指标收集
+

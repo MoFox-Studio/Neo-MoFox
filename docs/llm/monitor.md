@@ -1,8 +1,10 @@
-# Monitor 模块
+﻿# Monitor 模块
 
 ## 概述
 
-`monitor.py` 提供了 LLM 请求的指标收集、监控和分析功能。它能够追踪每次请求的性能数据（延迟、token 使用量、成本等），并生成聚合统计用于性能分析和优化。
+`monitor.py` 提供了 LLM 请求的内存级指标收集、监控和分析功能。它能够追踪每次请求的性能数据（延迟、token 使用量、成本等），并生成聚合统计用于性能分析和优化。
+
+> **注意：** 框架还提供了独立的持久化统计模块 `stats/`（`LLMStatsCollector`），基于 SQLite 存储请求记录，支持按模型/请求名/缓存命中率等维度进行历史查询。详见 [LLM 主文档](./README.md) 的"指标收集"章节。
 
 ## 核心类
 
@@ -12,7 +14,7 @@
 @dataclass
 class RequestMetrics:
     """单次请求的指标数据。"""
-    
+
     model_name: str                    # 模型名称
     request_name: str                  # 请求名称
     latency: float                     # 延迟（秒）
@@ -22,7 +24,7 @@ class RequestMetrics:
     success: bool = True               # 是否成功
     error: str | None = None           # 错误信息
     error_type: str | None = None      # 错误类型
-    timestamp: datetime = ...           # 请求时间戳
+    timestamp: datetime = ...          # 请求时间戳
     stream: bool = False               # 是否使用流式
     retry_count: int = 0               # 重试次数
     model_index: int = 0               # 模型索引
