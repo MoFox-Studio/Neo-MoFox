@@ -63,6 +63,6 @@ omit = [
 ]
 
 [[tool.uv.index]]
-name = "tuna"
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+name = "huawei"
+url = "https://repo.huaweicloud.com/repository/pypi/simple"
 default = true
