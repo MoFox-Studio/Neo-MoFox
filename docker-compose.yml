@@ -2,8 +2,8 @@ services:
   mofox:
     # 默认拉取 main 分支的构建镜像
     # 如果需要 dev 分支，请修改为 ikun11451/neo-mofox-dev:latest
-    image: ikun11451/neo-mofox-dev:latest
-    # build: .
+    # image: ikun11451/neo-mofox-dev:latest
+    build: .
     container_name: mofox-bot
     restart: unless-stopped
     entrypoint: ["sh", "-c", "if [ ! -d 'plugins/webui_backend' ]; then git clone -b webui-dist https://github.com/MoFox-Studio/MoFox-Core-Webui.git plugins/webui_backend; fi; exec uv run main.py"]
@@ -14,6 +14,10 @@ services:
       - ./logs:/app/logs
       # 建议也将插件目录映射，方便动态开发
       - ./plugins:/app/plugins
+      # 映射协议文件，方便更新后无需重建镜像
+      - ./eula.md:/app/eula.md
+      - ./PRIVACY.md:/app/PRIVACY.md
+      - ./LICENSE:/app/LICENSE
     environment:
       # 设置容器时区为上海
       - TZ=Asia/Shanghai
