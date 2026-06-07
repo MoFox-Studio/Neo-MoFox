@@ -2,151 +2,106 @@
 
 ## 概述
 
-`request.py` 定义了 `LLMRequest` 类，是与 LLM 交互的核心类。它负责：
+`request.py` 定义了 `LLMRequest` 类，是与 LLM 交互的核心门面类。它负责：
 - 构建消息 payload 列表
+- 通过 `LLMContextManager` 管理上下文结构
 - 管理模型客户端和选择
 - 应用负载均衡和重试策略
 - 收集请求指标
 - 执行实际的 LLM API 调用
 
-## 类定义
+另外，`embedding_request.py` 和 `rerank_request.py` 分别提供了 `EmbeddingRequest` 和 `RerankRequest` 两种专用请求类型。
+
+## LLMRequest 类定义
 
 ```python
 from dataclasses import dataclass, field
+from typing import Any, Self
 
 @dataclass(slots=True)
 class LLMRequest:
-    """LLMRequest：构建 payload 并执行请求。"""
-    
+    """一次逻辑 LLM 交互的可变请求构建器与发送器。"""
+
     model_set: ModelSet                                  # 模型配置列表
     request_name: str = ""                              # 请求名称（用于日志和策略）
-    
+    meta_data: dict[str, Any] = field(default_factory=dict)  # 附加元数据
+
     payloads: list[LLMPayload] = field(default_factory=list)  # 消息 payload 列表
     policy: Policy | None = None                        # 负载均衡/重试策略
     clients: ModelClientRegistry | None = None          # 模型客户端注册表
-    context_manager: LLMContextManager | None = None    # 上下文管理器（可重载）
+    context_manager: LLMContextManager | None = None    # 上下文管理器
     enable_metrics: bool = True                         # 是否启用指标收集
+    request_type: RequestType = RequestType.COMPLETIONS # 请求类型
 ```
 
-## 核心属性
+### ModelEntry 完整字段
 
-### model_set
+模型配置使用 `ModelEntry` TypedDict，所有字段均为**必需**：
 
-**类型：** `list[dict]`
-
-**描述：** 模型配置列表，每个元素是一个完整的模型配置字典。
-
-**必需配置项：**
-```python
-{
-    "client_type": "openai",           # 提供商类型
-    "model_identifier": "gpt-4",       # 模型标识
-    "api_key": "sk-...",              # API 密钥
-}
-```
-
-**常见可选配置项：**
-```python
-{
-    "base_url": "https://api.openai.com/v1",  # API 基础 URL
-    "max_retry": 3,                    # 最大重试次数
-    "retry_interval": 1.0,             # 重试间隔（秒）
-    "timeout": 30.0,                   # 请求超时（秒）
-    "temperature": 0.7,                # 采样温度
-    "max_tokens": 2000,                # 最大输出 token 数
-}
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `api_provider` | `str` | API 提供商名称（如 `"openai"`） |
+| `base_url` | `str` | API 基础 URL |
+| `model_identifier` | `str` | 模型标识符（如 `"gpt-4"`） |
+| `api_key` | `str` | API 密钥 |
+| `client_type` | `str` | 客户端类型（如 `"openai"`） |
+| `max_retry` | `int` | 最大重试次数 |
+| `timeout` | `float` | 请求超时（秒） |
+| `retry_interval` | `float` | 重试间隔（秒） |
+| `price_in` | `float` | 输入价格（$/1K tokens） |
+| `cache_hit_price_in` | `float` | 缓存命中输入价格 |
+| `price_out` | `float` | 输出价格（$/1K tokens） |
+| `temperature` | `float` | 采样温度 |
+| `max_tokens` | `int` | 最大输出 token 数 |
+| `max_context` | `int` | 最大上下文窗口（0 表示不限制） |
+| `tool_call_compat` | `bool` | 是否启用工具调用兼容模式 |
+| `extra_params` | `dict[str, Any]` | 额外参数（可含 `context_reserve_ratio`、`context_reserve_tokens`） |
 
 **使用示例：**
+
 ```python
-# 单模型
 model_set = [
     {
-        "client_type": "openai",
+        "api_provider": "openai",
+        "base_url": "https://api.openai.com/v1",
         "model_identifier": "gpt-4",
         "api_key": "sk-...",
-        "base_url": "https://api.openai.com/v1",
+        "client_type": "openai",
         "max_retry": 3,
+        "timeout": 30.0,
         "retry_interval": 1.0,
-    }
-]
-
-# 多模型（用于故障转移和负载均衡）
-model_set = [
-    {
-        "client_type": "openai",
-        "model_identifier": "gpt-4",
-        "api_key": "key1",
-        "max_retry": 2,
-    },
-    {
-        "client_type": "openai",
-        "model_identifier": "gpt-3.5-turbo",
-        "api_key": "key2",
-        "max_retry": 3,
+        "price_in": 0.03,
+        "cache_hit_price_in": 0.015,
+        "price_out": 0.06,
+        "temperature": 0.7,
+        "max_tokens": 4096,
+        "max_context": 8192,
+        "tool_call_compat": False,
+        "extra_params": {},
     }
 ]
 ```
 
-### payloads
+### request_type
 
-**类型：** `list[LLMPayload]`
+**类型：** `RequestType`
 
-**描述：** 包含所有消息的列表。每个元素是一个 `LLMPayload` 对象。
+**可选值：**
+- `RequestType.COMPLETIONS` — 对话补全（默认）
+- `RequestType.EMBEDDINGS` — 向量嵌入
+- `RequestType.RERANK` — 重排序
 
-### request_name
+### meta_data
 
-**类型：** `str`
+**类型：** `dict[str, Any]`
 
-**描述：** 请求的名称，用于日志和策略跟踪。同一名称的请求将使用相同的负载均衡状态。
-
-### policy
-
-**类型：** `Policy | None`
-
-**描述：** 负载均衡和重试策略。默认为 `RoundRobinPolicy()`。
-
-### clients
-
-**类型：** `ModelClientRegistry | None`
-
-**描述：** 模型客户端注册表。默认创建内置的 `OpenAIChatClient`。
-
-### context_manager
-
-**类型：** `LLMContextManager | None`
-
-**描述：** 负责 payloads 的上下文管理（QA 组裁剪、压缩等）。可传入自定义子类实例覆盖默认逻辑。
-
-### enable_metrics
-
-**类型：** `bool`
-
-**描述：** 是否启用指标收集。禁用可提高性能。
+**描述：** 附加到请求的任意元数据，会随观测记录一起持久化。
 
 ## 核心方法
 
-### __init__
-
-初始化 LLMRequest。
-
-```python
-# 基础初始化
-request = LLMRequest(model_set=models)
-
-# 完整初始化
-request = LLMRequest(
-    model_set=models,
-    request_name="my_request",
-    policy=RoundRobinPolicy(),
-    enable_metrics=True,
-    context_manager=LLMContextManager()
-)
-```
-
 ### add_payload
 
-添加消息 payload。
+添加消息 payload。现在通过 `LLMContextManager` 处理追加逻辑：
 
 ```python
 def add_payload(self, payload: LLMPayload, position=None) -> Self:
@@ -154,11 +109,16 @@ def add_payload(self, payload: LLMPayload, position=None) -> Self:
     Args:
         payload: 要添加的 payload
         position: 插入位置（默认追加到末尾）
-    
+
     Returns:
         self（便于链式调用）
     """
 ```
+
+**关键行为：**
+- 如果设置了 `context_manager`，委托给 `context_manager.add_payload()` 处理
+- 否则，同 role 的连续 payload 会自动合并内容（相邻 USER 消息合并等）
+- 支持 `position` 参数精确控制插入位置
 
 **使用示例：**
 ```python
@@ -171,26 +131,6 @@ request \
 
 # 指定位置
 request.add_payload(LLMPayload(ROLE.SYSTEM, Text("...")), position=0)
-
-# 追加多个
-request.add_payload(LLMPayload(ROLE.USER, Text("Question 1")))
-request.add_payload(LLMPayload(ROLE.USER, Text("Question 2")))
-```
-
-### 自定义上下文管理
-
-```python
-from src.kernel.llm import LLMContextManager
-
-class MyContextManager(LLMContextManager):
-    def maybe_trim(self, payloads: list[LLMPayload]) -> list[LLMPayload]:
-        # 自定义策略
-        return super().maybe_trim(payloads)
-
-request = LLMRequest(
-    model_set=models,
-    context_manager=MyContextManager()
-)
 ```
 
 ### send
@@ -199,155 +139,96 @@ request = LLMRequest(
 
 ```python
 async def send(
-    self, 
-    auto_append_response: bool = True, 
-    *, 
-    stream: bool = True
+    self,
+    auto_append_response: bool = True,
+    *,
+    stream: bool = True,
 ) -> LLMResponse:
     """
     Args:
         auto_append_response: 是否自动将响应添加到 payloads
-        stream: 是否使用流式传输
-    
+        stream: 是否使用流式传输（默认 True）
+
     Returns:
         LLMResponse 对象
-    
+
     Raises:
         LLMError 及其子类
     """
 ```
 
+**内部执行流程：**
+1. 校验 `model_set`（`_validate_model_set` → `_validate_model_entry`）
+2. 委托给 `execute_request()` 执行完整生命周期
+3. 策略驱动的模型选择与重试
+4. 上下文预处理（压缩/裁剪）
+5. Provider 调用（通过 `model_client`）
+6. 响应归一化（含 `tool_call_compat` 解析）
+7. 观测记录分发
+
+---
+
+## EmbeddingRequest
+
+```python
+@dataclass(slots=True)
+class EmbeddingRequest:
+    """EmbeddingRequest：构建输入并执行向量请求。"""
+
+    model_set: ModelSet
+    request_name: str = ""
+    inputs: list[str] = field(default_factory=list)
+    policy: Policy | None = None
+    clients: ModelClientRegistry | None = None
+    enable_metrics: bool = True
+    request_type: RequestType = RequestType.EMBEDDINGS
+```
+
 **使用示例：**
 ```python
-# 非流式，自动追加响应
-response = await request.send(stream=False)
-message = await response
-print(message)
+from src.kernel.llm import EmbeddingRequest
 
-# 流式，自动追加响应
-response = await request.send(stream=True, auto_append_response=True)
-async for chunk in response:
-    print(chunk, end="", flush=True)
-
-# 流式，不追加响应
-response = await request.send(stream=True, auto_append_response=False)
-async for chunk in response:
-    pass
+req = EmbeddingRequest(model_set=embedding_models, request_name="doc_embed")
+req.add_input("Hello world").add_input("Another text")
+response = await req.send()
+# response.embeddings: list[list[float]]
+# response.model: str  — 实际使用的模型名
+# response.usage: dict | None  — token 用量
 ```
 
 ---
 
-## 内部实现细节
-
-### 请求执行流程
-
-1. **验证 model_set**
-   ```python
-   model_set = _validate_model_set(self.model_set)
-   ```
-   确保 model_set 是有效的列表。
-
-2. **规范化 payload**
-   ```python
-   payloads = [_normalize_tool_result_payload(p) for p in self.payloads]
-   ```
-   确保 TOOL_RESULT payload 的格式正确。
-
-3. **创建策略会话**
-   ```python
-   session = self.policy.new_session(model_set=model_set, request_name=self.request_name)
-   ```
-   根据策略获取初始模型选择。
-
-4. **轮询尝试**
-   ```python
-   step = session.first()
-   while step.model is not None:
-       try:
-           # 调用模型
-       except Exception as e:
-           # 分类异常
-           # 获取下一步
-           step = session.next_after_error(e)
-   ```
-
-5. **收集指标**
-   ```python
-   collector.record_request(RequestMetrics(...))
-   ```
-
-### 负载规范化
-
-#### _normalize_tool_result_payload
+## RerankRequest
 
 ```python
-def _normalize_tool_result_payload(payload: LLMPayload) -> LLMPayload:
-    """规范化 TOOL_RESULT payload。
-    
-    确保 ToolResult 的 call_id 被保留，其他内容转换为 Text。
-    """
+@dataclass(slots=True)
+class RerankRequest:
+    """RerankRequest：构建排序输入并执行请求。"""
+
+    model_set: ModelSet
+    request_name: str = ""
+    query: str = ""
+    documents: list[Any] = field(default_factory=list)
+    top_n: int | None = None
+    policy: Policy | None = None
+    clients: ModelClientRegistry | None = None
+    enable_metrics: bool = True
+    request_type: RequestType = RequestType.RERANK
 ```
 
-作用：确保各种提供商都能正确理解 TOOL_RESULT 消息。
-
-#### _extract_tools
-
+**使用示例：**
 ```python
-def _extract_tools(payloads: list[LLMPayload]) -> list[Tool]:
-    """从 payload 列表中提取所有 Tool 对象。"""
+from src.kernel.llm import RerankRequest
+
+req = RerankRequest(model_set=rerank_models, request_name="doc_rerank")
+req.set_query("What is AI?")
+req.add_document("AI is artificial intelligence...")
+req.add_document("Machine learning is a subset of AI...")
+response = await req.send()
+# response.results: list[RerankItem]
+for item in response.results:
+    print(f"score={item.relevance_score:.4f}, doc={item.document}")
 ```
-
-作用：收集所有工具声明，以便传递给模型客户端。
-
----
-
-## 使用模式
-
-### 模式 1：简单的单轮对话
-
-```python
-models = [{
-    "client_type": "openai",
-    "model_identifier": "gpt-4",
-    "api_key": "sk-...",
-}]
-
-request = LLMRequest(model_set=models)
-request.add_payload(LLMPayload(ROLE.SYSTEM, Text("You are helpful.")))
-request.add_payload(LLMPayload(ROLE.USER, Text("What is AI?")))
-
-response = await request.send(stream=False)
-print(await response)
-```
-
-### 模式 2：多轮对话
-
-```python
-request = LLMRequest(model_set=models, request_name="chat")
-
-# 第一轮
-request.add_payload(LLMPayload(ROLE.SYSTEM, Text("You are helpful.")))
-request.add_payload(LLMPayload(ROLE.USER, Text("What is AI?")))
-r1 = await request.send(auto_append_response=True, stream=False)
-print(await r1)
-
-# 第二轮（自动追加了第一轮的响应）
-request.add_payload(LLMPayload(ROLE.USER, Text("Tell me more.")))
-r2 = await request.send(auto_append_response=True, stream=False)
-print(await r2)
-```
-
-### 模式 3：工具调用
-
-```python
-request = LLMRequest(model_set=models)
-request.add_payload(LLMPayload(ROLE.SYSTEM, Text("You have access to tools.")))
-request.add_payload(LLMPayload(ROLE.TOOL, Tool(CalculatorTool)))
-request.add_payload(LLMPayload(ROLE.USER, Text("What is 2 + 2?")))
-
-# 获取工具调用
-response = await request.send()
-for call in response.call_list:
     result = await execute_tool(call.name, call.args)
     request.add_payload(LLMPayload(ROLE.TOOL_RESULT, ToolResult(result, call_id=call.id)))
 

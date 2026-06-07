@@ -4,13 +4,16 @@
 
 `policy/` 子模块实现了负载均衡和重试策略。它决定了在多个模型之间如何轮流尝试、何时重试、如何处理错误等。
 
+默认策略为 `LoadBalancedPolicy`，可通过 `set_default_policy_factory` 注入自定义默认策略。
+
 ## 模块结构
 
 ```
 policy/
-├── base.py           # 策略接口定义
-├── round_robin.py    # 轮询策略实现
-└── __init__.py       # 公开 API
+├── base.py             # 策略接口定义（ModelStep / PolicySession / Policy）
+├── round_robin.py      # 轮询策略实现
+├── load_balanced.py    # 负载均衡策略实现（默认）
+└── __init__.py          # 公开 API + 默认策略工厂
 ```
 
 ## 核心接口
@@ -21,17 +24,15 @@ policy/
 @dataclass(frozen=True, slots=True)
 class ModelStep:
     """下一步执行计划。
-    
+
     - model=None 表示策略耗尽，应停止重试并把最后一次异常抛给上层。
     - delay_seconds 由 policy 决定（例如 retry_interval）。
     """
-    
+
     model: dict[str, Any] | None       # 下一个要尝试的模型配置
     delay_seconds: float = 0.0          # 延迟时间（秒）
     meta: dict[str, Any] | None = None # 元数据（模型索引、重试次数等）
 ```
-
-表示策略决定的下一步行动。
 
 ---
 
@@ -42,13 +43,15 @@ class PolicySession(Protocol):
     def first(self) -> ModelStep:
         """获取初始的模型步骤。"""
         ...
-    
+
     def next_after_error(self, error: BaseException) -> ModelStep:
         """基于错误获取下一步。"""
         ...
-```
 
-表示单次请求的策略会话。
+    def record_success(self, *, latency: float = 0.0, tokens: int = 0) -> None:
+        """记录一次成功的调用（供负载均衡统计使用）。"""
+        ...
+```
 
 ---
 
@@ -61,43 +64,54 @@ class Policy(Protocol):
         ...
 ```
 
-定义了所有策略必须实现的接口。
-
 ---
 
-## RoundRobinPolicy（轮询策略）
+## 内置策略
 
-```python
-class RoundRobinPolicy(Policy):
-    """简单轮询：在 `model_set`（list[dict]）上循环选择。"""
-```
+### RoundRobinPolicy（轮询策略）
 
-默认的负载均衡策略，按轮询方式在模型间切换。
+简单轮询：在 `model_set` 上循环选择模型。
 
-### 工作原理
-
+**工作原理：**
 1. **初始选择**：从当前轮询位置开始
 2. **重试**：在当前模型上重试 `max_retry` 次
 3. **切换**：重试耗尽后切换到下一个模型
 4. **终止**：所有模型都耗尽时停止
 
-### 使用示例
+### LoadBalancedPolicy（负载均衡策略，默认）
+
+基于成功延迟与 token 消耗动态选择最优模型。
+
+**特点：**
+- 追踪每个模型的近期延迟和吞吐量
+- 优先选择延迟低、成功率高的模型
+- 支持 `record_success` 回调更新统计
+
+**使用示例：**
+```python
+from src.kernel.llm.policy import LoadBalancedPolicy, RoundRobinPolicy, create_policy
+
+# 使用命名策略
+request.policy = create_policy("load_balanced")
+request.policy = create_policy("round_robin")
+
+# 直接实例化
+request.policy = LoadBalancedPolicy()
+```
+
+---
+
+## 自定义默认策略
 
 ```python
-from src.kernel.llm import LLMRequest, RoundRobinPolicy
+from src.kernel.llm.policy import set_default_policy_factory
 
-models = [
-    {
-        "client_type": "openai",
-        "model_identifier": "gpt-4",
-        "api_key": "key1",
-        "max_retry": 2,           # 该模型重试 2 次
-        "retry_interval": 1.0,    # 重试间隔 1 秒
-    },
-    {
-        "client_type": "openai",
-        "model_identifier": "gpt-3.5-turbo",
-        "api_key": "key2",
+# 在应用启动时注入自定义默认策略工厂
+set_default_policy_factory(lambda: MyCustomPolicy())
+
+# 恢复内建默认
+set_default_policy_factory(None)
+```
         "max_retry": 3,           # 该模型重试 3 次
         "retry_interval": 0.5,    # 重试间隔 0.5 秒
     }

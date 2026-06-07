@@ -10,6 +10,7 @@
 BaseException
 └── RuntimeError
     └── LLMError（所有 LLM 异常的基类）
+        ├── LLMContextError
         ├── LLMConfigurationError
         ├── LLMResponseConsumedError
         ├── LLMRateLimitError
@@ -29,6 +30,32 @@ class LLMError(RuntimeError):
 ```
 
 所有 LLM 相关异常的基类。用于捕获任何 LLM 相关错误。
+
+---
+
+### LLMContextError
+```python
+class LLMContextError(LLMError):
+    """上下文结构错误。
+
+    用于在严格模式下，当上下文 messages 不满足协议约束时直接抛出，
+    以避免"自动修复"掩盖上游链路问题。
+    """
+```
+
+当对话结构不合法时抛出。例如：
+- 对话以 `assistant` 开头（而不是 `user`）
+- `assistant` 前不是 `user` 或 `tool_result`
+- 缺少必需的 `tool_result` 配对
+
+**使用示例：**
+```python
+try:
+    request.add_payload(some_payload)
+    response = await request.send()
+except LLMContextError as e:
+    print(f"上下文结构错误: {e}")
+```
 
 **使用示例：**
 ```python
@@ -261,11 +288,22 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
 将来自第三方 SDK（如 OpenAI SDK）的异常转换为标准化的 LLM 异常，便于统一处理。
 
 **支持的转换：**
+
+**OpenAI SDK：**
 - OpenAI `RateLimitError` → `LLMRateLimitError`
 - OpenAI `APITimeoutError` → `LLMTimeoutError`
 - OpenAI `AuthenticationError` → `LLMAuthenticationError`
 - OpenAI `BadRequestError` → 可能转换为 `LLMTokenLimitError` 或 `LLMContentFilterError`
 - OpenAI `APIError` → `LLMAPIError`
+
+**Anthropic SDK：**
+- Anthropic `RateLimitError` → `LLMRateLimitError`
+- Anthropic `APITimeoutError` → `LLMTimeoutError`
+- Anthropic `AuthenticationError` → `LLMAuthenticationError`
+- Anthropic `BadRequestError` → 可能转换为 `LLMTokenLimitError` 或 `LLMContentFilterError`
+- Anthropic `APIStatusError` / `APIError` → `LLMAPIError`
+
+**通用回退：** 基于错误消息关键词匹配（rate limit / timeout / authentication / token limit / content filter）。
 
 **使用示例：**
 ```python

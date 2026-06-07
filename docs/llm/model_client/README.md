@@ -2,16 +2,18 @@
 
 ## 概述
 
-`model_client/` 子模块实现了与各个 LLM 提供商的交互。它定义了统一的客户端接口，并提供了 OpenAI 的具体实现。框架设计允许轻松扩展支持其他提供商。
+`model_client/` 子模块实现了与各个 LLM 提供商的交互。它定义了统一的客户端接口（Chat、Embedding、Rerank），并提供了 OpenAI 和 Anthropic 的具体实现。框架设计允许轻松扩展支持其他提供商。
 
 ## 模块结构
 
 ```
 model_client/
-├── base.py           # 客户端接口协议
-├── openai_client.py  # OpenAI 实现
-├── registry.py       # 客户端注册表
-└── __init__.py       # 公开 API
+├── base.py              # 客户端接口协议（ChatModelClient / EmbeddingModelClient / RerankModelClient）
+├── openai_client.py     # OpenAI 实现
+├── anthropic_client.py  # Anthropic 实现
+├── registry.py          # 客户端注册表（ModelClientRegistry）
+├── shared.py            # 共享工具
+└── __init__.py          # 公开 API
 ```
 
 ## StreamEvent（流事件）
@@ -20,32 +22,24 @@ model_client/
 @dataclass(frozen=True, slots=True)
 class StreamEvent:
     """provider-agnostic 的流事件。"""
-    
-    text_delta: str | None = None      # 文本增量
-    tool_call_id: str | None = None    # 工具调用 ID
-    tool_name: str | None = None       # 工具名称
-    tool_args_delta: str | None = None # 工具参数增量
+
+    text_delta: str | None = None               # 文本增量
+    tool_call_id: str | None = None             # 工具调用 ID
+    tool_name: str | None = None                # 工具名称
+    tool_args_delta: str | None = None          # 工具参数增量（JSON 片段）
+    reasoning_block_type: str | None = None     # reasoning block 类型
+    reasoning_delta: str | None = None          # reasoning 文本增量
+    reasoning_signature_delta: str | None = None # reasoning 签名增量
+    usage: dict[str, Any] | None = None         # token 用量信息
 ```
 
-表示流式响应中的单个事件。这是提供商无关的统一格式。
-
-**使用示例：**
-```python
-# 文本事件
-event1 = StreamEvent(text_delta="Hello, ")
-event2 = StreamEvent(text_delta="world!")
-
-# 工具调用事件
-event3 = StreamEvent(
-    tool_call_id="call_123",
-    tool_name="search",
-    tool_args_delta='{"query": "'
-)
-```
+表示流式响应中的单个事件。这是提供商无关的统一格式，支持文本、工具调用、推理内容和用量信息。
 
 ---
 
-## ChatModelClient 协议
+## 客户端协议
+
+### ChatModelClient
 
 ```python
 class ChatModelClient(Protocol):
@@ -54,29 +48,54 @@ class ChatModelClient(Protocol):
         *,
         model_name: str,
         payloads: list[LLMPayload],
-        tools: list[Tool],
+        tools: list[LLMUsable],
         request_name: str,
         model_set: Any,
         stream: bool,
     ) -> tuple[str | None, list[dict[str, Any]] | None, AsyncIterator[StreamEvent] | None]:
-        """发起一次聊天请求。
-        
-        返回三元组：
-        - message: 非流时的完整文本；流式则为 None
-        - tool_calls: 非流时解析出的工具调用列表；流式则为 None
-        - stream_iter: 流式迭代器；非流则为 None
-        """
+        """发起一次聊天请求。"""
 ```
 
-定义了所有模型客户端必须实现的接口。
+### EmbeddingModelClient
 
-**参数：**
-- `model_name`: 模型标识符（如 "gpt-4"）
-- `payloads`: 消息列表
-- `tools`: 可用工具列表
-- `request_name`: 请求名称
-- `model_set`: 模型配置
-- `stream`: 是否使用流式
+```python
+class EmbeddingModelClient(Protocol):
+    async def create_embedding(
+        self,
+        *,
+        model_name: str,
+        inputs: list[str],
+        request_name: str,
+        model_set: Any,
+    ) -> list[list[float]]:
+        """发起一次 embedding 请求，返回向量列表。"""
+```
+
+### RerankModelClient
+
+```python
+class RerankModelClient(Protocol):
+    async def create_rerank(
+        self,
+        *,
+        model_name: str,
+        query: str,
+        documents: list[Any],
+        top_n: int | None,
+        request_name: str,
+        model_set: Any,
+    ) -> list[dict[str, Any]]:
+        """发起一次 rerank 请求，返回排序结果。"""
+```
+
+---
+
+## 已内置的客户端
+
+| 客户端 | 协议 | 说明 |
+|--------|------|------|
+| `OpenAIChatClient` | Chat / Embedding / Rerank | 完整实现三种协议 |
+| `AnthropicChatClient` | Chat | 支持 reasoning blocks 和扩展思考 |
 
 **返回值：**
 - `message`: 非流式时的完整响应文本；流式时为 None
