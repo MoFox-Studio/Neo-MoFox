@@ -143,6 +143,49 @@ async def test_sync_installs_subscriptions_and_dependency_plugins(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_sync_updates_installed_market_mfp_even_when_not_subscribed(tmp_path: Path) -> None:
+    """本地已安装的市场 .mfp 即使未订阅，也应在启用自动更新时升级。"""
+
+    _write_local_mfp(tmp_path / "main_plugin-1.0.0.mfp", "main_plugin", "1.0.0")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/machine/authors/mock-author/subscriptions":
+            return httpx.Response(200, json={"author_id": "mock-author", "items": [], "total": 0})
+        if request.url.path == "/api/v1/plugins/main_plugin":
+            return httpx.Response(200, json={"plugin_id": "main_plugin", "status": "published"})
+        if request.url.path == "/api/v1/plugins/main_plugin/dependencies":
+            return httpx.Response(200, json={"plugin_id": "main_plugin", "items": []})
+        if request.url.path == "/api/v1/plugins/main_plugin/install":
+            return httpx.Response(
+                200,
+                json={
+                    "plugin": {"plugin_id": "main_plugin"},
+                    "version": {
+                        "version": "1.2.0",
+                        "asset_name": "main_plugin-1.2.0.mfp",
+                        "asset_download_url": "https://market.example/downloads/main_plugin-1.2.0.mfp",
+                    },
+                },
+            )
+        if request.url.path == "/downloads/main_plugin-1.2.0.mfp":
+            return httpx.Response(200, content=_build_mfp_bytes("main_plugin", "1.2.0"))
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    service = PluginMarketSyncService(
+        config=_make_config(),
+        plugins_dir=str(tmp_path),
+        transport=httpx.MockTransport(handler),
+    )
+
+    report = await service.sync()
+
+    assert report.installed == 0
+    assert report.updated == 1
+    assert not (tmp_path / "main_plugin-1.0.0.mfp").exists()
+    assert (tmp_path / "main_plugin-1.2.0.mfp").exists()
+
+
+@pytest.mark.asyncio
 async def test_strict_mode_only_removes_market_published_mfp_plugins(tmp_path: Path) -> None:
     """严格模式只删除已收录于市场的未订阅 mfp，不删除本地目录插件或无市场记录插件。"""
 

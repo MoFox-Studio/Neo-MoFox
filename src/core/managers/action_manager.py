@@ -389,12 +389,12 @@ class ActionManager:
         type_mismatched: list[tuple[str, str]] = []
 
         for signature, action_cls in all_actions.items():
-            if action_cls.associated_types:
-                if not chat_context.check_types(action_cls.associated_types):
-                    types_str = ", ".join(action_cls.associated_types)
-                    reason = f"适配器不支持（需要: {types_str}）"
-                    type_mismatched.append((signature, reason))
-                    logger.debug(f"[移除动作] {signature}：{reason}")
+            required_types = action_cls.validate_associated_types()
+            if not chat_context.check_types(required_types):
+                types_str = ", ".join(required_types)
+                reason = f"适配器不支持（需要: {types_str}）"
+                type_mismatched.append((signature, reason))
+                logger.debug(f"[移除动作] {signature}：{reason}")
 
         return type_mismatched
 

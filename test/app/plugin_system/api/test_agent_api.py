@@ -32,7 +32,7 @@ class MockAgent(BaseAgent):
     chatter_allow = ["demo_chatter"]
     chat_type = ChatType.PRIVATE
     associated_platforms = ["test_platform"]
-    associated_types = []
+    associated_types = ["text"]
     dependencies = []
     usables = [MockPrivateTool]
 
@@ -87,6 +87,7 @@ def test_get_agents_for_chat_filters_by_chat_type(
     class GroupAgent(BaseAgent):
         agent_name = "group_agent"
         chat_type = ChatType.GROUP
+        associated_types = ["text"]
 
         async def execute(self):
             return True, "ok"
@@ -94,6 +95,7 @@ def test_get_agents_for_chat_filters_by_chat_type(
     class PrivateAgent(BaseAgent):
         agent_name = "private_agent"
         chat_type = ChatType.PRIVATE
+        associated_types = ["text"]
 
         async def execute(self):
             return True, "ok"
@@ -122,6 +124,7 @@ def test_get_agents_for_chat_filters_by_chatter_allow(
         agent_name = "allowed_agent"
         chatter_allow = ["my_chatter"]
         chat_type = ChatType.ALL
+        associated_types = ["text"]
 
         async def execute(self):
             return True, "ok"
@@ -130,6 +133,7 @@ def test_get_agents_for_chat_filters_by_chatter_allow(
         agent_name = "not_allowed_agent"
         chatter_allow = ["other_chatter"]
         chat_type = ChatType.ALL
+        associated_types = ["text"]
 
         async def execute(self):
             return True, "ok"
@@ -158,6 +162,7 @@ def test_get_agents_for_chat_filters_by_platform(
         agent_name = "platform_agent"
         associated_platforms = ["test_platform"]
         chat_type = ChatType.ALL
+        associated_types = ["text"]
 
         async def execute(self):
             return True, "ok"
@@ -166,6 +171,7 @@ def test_get_agents_for_chat_filters_by_platform(
         agent_name = "other_agent"
         associated_platforms = ["other_platform"]
         chat_type = ChatType.ALL
+        associated_types = ["text"]
 
         async def execute(self):
             return True, "ok"
@@ -304,6 +310,7 @@ async def test_execute_agent_calls_execute(monkeypatch: pytest.MonkeyPatch) -> N
 
     class TestAgent(BaseAgent):
         agent_name = "test_agent"
+        associated_types = ["text"]
 
         async def execute(self, **kwargs):
             nonlocal executed_kwargs
@@ -337,6 +344,7 @@ async def test_execute_agent_keeps_declared_reason(
 
     class ReasonAgent(BaseAgent):
         agent_name = "reason_agent"
+        associated_types = ["text"]
 
         async def execute(self, task: str, reason: str) -> tuple[bool, str]:
             return True, f"{task}:{reason}"
@@ -453,6 +461,7 @@ async def test_execute_agent_usable_calls_execute_local_usable(
 
     class TestAgent(BaseAgent):
         agent_name = "test_agent"
+        associated_types = ["text"]
 
         async def execute(self):
             return True, "ok"

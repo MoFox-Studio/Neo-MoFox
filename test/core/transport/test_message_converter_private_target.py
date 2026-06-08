@@ -65,3 +65,37 @@ async def test_message_to_envelope_private_target_prefers_stream_person(monkeypa
     assert user_info.get("user_nickname") == "NeoBot"
     fake_stream_manager.get_stream_info.assert_awaited_once_with("stream-private-1")
     helper.person_crud.get_by.assert_awaited_once_with(person_id="hash_person_888")
+
+
+@pytest.mark.asyncio
+async def test_envelope_to_message_merges_standalone_format_info() -> None:
+    """独立声明的 format_info 应合并进 Message.extra。"""
+
+    converter = MessageConverter()
+
+    envelope = {
+        "direction": "incoming",
+        "message_info": {
+            "message_id": "m3",
+            "platform": "qq",
+            "user_info": {
+                "platform": "qq",
+                "user_id": "u1",
+                "user_nickname": "Alice",
+            },
+            "format_info": {
+                "content_format": ["text"],
+                "accept_format": ["text", "emoji", "voice"],
+            },
+        },
+        "message_segment": [{"type": "text", "data": "hello"}],
+    }
+
+    message = await converter.envelope_to_message(envelope)
+
+    assert message.extra["format_info"]["content_format"] == ["text"]
+    assert message.extra["format_info"]["accept_format"] == [
+        "text",
+        "emoji",
+        "voice",
+    ]

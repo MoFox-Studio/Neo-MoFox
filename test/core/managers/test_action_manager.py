@@ -30,6 +30,7 @@ class TestAction(BaseAction):
     signature = "test_plugin:action:test_action"
     description = "Test action"
     supported_chat_types = [ChatType.ALL]
+    associated_types = ["text"]
     
     async def execute(self, **kwargs: Any) -> dict[str, Any]:
         """执行 Action。"""

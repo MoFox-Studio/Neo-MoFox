@@ -32,6 +32,33 @@ logger = get_logger("message_converter")
 _MAX_NESTING_DEPTH: int = 5
 
 
+def _merge_message_extra_with_format_info(
+    message_info: MessageInfoPayload,
+    envelope: MessageEnvelope | None = None,
+) -> dict[str, Any]:
+    """合并 extra 与独立声明的 format_info。
+
+    兼容不同适配器/MessageBuilder 的写法：
+    - `message_info["extra"]["format_info"]`
+    - `message_info["format_info"]`
+    - `envelope["format_info"]`
+    """
+
+    raw_extra = message_info.get("extra") or {}
+    extra_data = dict(raw_extra) if isinstance(raw_extra, dict) else {}
+
+    format_info = message_info.get("format_info")
+    if not isinstance(format_info, dict) and envelope is not None:
+        envelope_format_info = envelope.get("format_info")
+        if isinstance(envelope_format_info, dict):
+            format_info = envelope_format_info
+
+    if isinstance(format_info, dict) and "format_info" not in extra_data:
+        extra_data["format_info"] = format_info
+
+    return extra_data
+
+
 # ──────────────────────────────────────────────
 #  段解析返回结构
 # ──────────────────────────────────────────────
@@ -158,7 +185,7 @@ class MessageConverter:
 
         # 提取 extra 元数据
         # any 附加字段允许上层扩展，直接透传到 Message 对象
-        extra_data = message_info.get("extra") or {}
+        extra_data = _merge_message_extra_with_format_info(message_info, envelope)
         
         return Message(
             message_id=message_info.get("message_id", ""),

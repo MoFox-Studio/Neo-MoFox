@@ -909,6 +909,11 @@ class PluginManager:
                 logger.warning(f"组件 '{signature}' 已经注册，跳过")
                 continue
 
+            if component_type == ComponentType.ACTION:
+                component_cls.validate_associated_types()
+            elif component_type == ComponentType.AGENT:
+                component_cls.validate_associated_types()
+
             try:
                 # 注册到全局注册表
                 registry.register(component_cls, signature, dependencies)

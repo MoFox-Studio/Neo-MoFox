@@ -303,12 +303,10 @@ class BaseChatter(ABC):
                     logger.debug(f"[移除组件] {signature}：{reason}")
                     continue
 
-            if (
-                (issubclass(usable_cls, BaseAction) or issubclass(usable_cls, BaseAgent))
-                and usable_cls.associated_types
-            ):
-                if not chat_context.check_types(usable_cls.associated_types):
-                    types_str = ", ".join(usable_cls.associated_types)
+            if issubclass(usable_cls, BaseAction):
+                required_types = usable_cls.validate_associated_types()
+                if not chat_context.check_types(required_types):
+                    types_str = ", ".join(required_types)
                     reason = f"适配器不支持（需要: {types_str}）"
                     removals.append((signature, reason))
                     logger.debug(f"[移除组件] {signature}：{reason}")

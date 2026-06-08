@@ -76,6 +76,9 @@ class StreamContext:
             message: 消息对象
         """
         self.unread_messages.append(message)
+        # 当前上下文默认跟随最新一条入站未读消息，
+        # 供 Action/Chatter 做能力判断和回复目标回溯。
+        self.current_message = message
 
     def add_history_message(self, message: "Message") -> None:
         """添加历史消息。
@@ -116,16 +119,32 @@ class StreamContext:
             >>> context.check_types(["text", "image"])
             True
         """
-        if not self.current_message:
+        current_message = self.current_message
+        if current_message is None:
+            if self.unread_messages:
+                current_message = self.unread_messages[-1]
+            elif self.history_messages:
+                current_message = self.history_messages[-1]
+            elif self.message_cache:
+                current_message = self.message_cache[-1]
+
+        if not current_message:
             return False
 
         if not types:
             # 如果没有指定类型要求，默认为支持
             return True
 
-        # 从 extra 字段中获取 format_info
-        format_info = self.current_message.extra.get("format_info", {})
-        accept_format = format_info.get("accept_format", [])
+        # 从 extra 字段中获取 format_info。
+        # 兼容历史消息：未声明 format_info/accept_format 时，保持“不过滤”行为；
+        # 一旦显式声明 accept_format，即按声明严格校验。
+        format_info = current_message.extra.get("format_info")
+        if not isinstance(format_info, dict):
+            return True
+
+        accept_format = format_info.get("accept_format")
+        if accept_format is None:
+            return True
 
         # 确保 accept_format 是列表类型
         if isinstance(accept_format, str):
@@ -135,9 +154,9 @@ class StreamContext:
                 list(accept_format) if hasattr(accept_format, "__iter__") else []
             )
 
-        # 如果没有 accept_format，默认支持所有类型
+        # 显式声明为空列表时，表示当前上下文不支持任何外发类型。
         if not accept_format:
-            return True
+            return False
 
         # 检查所有请求的类型是否都被支持
         for requested_type in types:

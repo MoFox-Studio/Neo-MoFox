@@ -23,6 +23,9 @@ from rich.markup import escape
 from src.core.components.types import EventType
 from src.core.models.message import Message, MessageType
 from src.core.transport.message_receive.converter import MessageConverter
+from src.core.transport.message_receive.converter import (
+    _merge_message_extra_with_format_info,
+)
 from src.core.transport.message_receive.utils import (
     extract_stream_id,
     infer_chat_type,
@@ -259,7 +262,7 @@ class MessageReceiver:
         # processed 非空 → 构建简化 Message 并触发 ON_MESSAGE_RECEIVED
         msg_info = envelope.get("message_info", {})
         user_info = msg_info.get("user_info") or {}
-        extra_data = msg_info.get("extra") or {}
+        extra_data = _merge_message_extra_with_format_info(msg_info, envelope)
 
         simple_message = Message(
             message_id=msg_info.get("message_id", ""),

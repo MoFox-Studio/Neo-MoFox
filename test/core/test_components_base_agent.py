@@ -49,7 +49,7 @@ class ConcreteAgent(BaseAgent):
     chatter_allow = []
     chat_type = ChatType.ALL
     associated_platforms = []
-    associated_types = []
+    associated_types = ["text"]
     dependencies = []
     usables = [PrivateTool]
 
@@ -289,6 +289,7 @@ class TestBaseAgent:
         class PrivateAction(BaseAction):
             action_name = "private_action"
             action_description = "private action"
+            associated_types = ["text"]
 
             async def execute(self, content: str) -> tuple[bool, str]:
                 return True, f"action:{content}"
@@ -310,3 +311,35 @@ class TestBaseAgent:
 
         assert success is True
         assert result == "action:hello"
+
+    def test_validate_associated_types_requires_non_empty_list(self):
+        """Agent 的 associated_types 为空时应抛出异常。"""
+
+        class InvalidAgent(BaseAgent):
+            agent_name = "invalid_agent"
+            agent_description = "invalid"
+            associated_types = []
+
+            async def execute(self, task: str) -> tuple[bool, str]:
+                return True, task
+
+        with pytest.raises(ValueError, match="associated_types 必须是非空 list\\[str\\]"):
+            InvalidAgent.validate_associated_types()
+
+    def test_get_local_usables_rejects_invalid_local_action(self):
+        """Agent 私有 Action 未声明 associated_types 时应抛出异常。"""
+        from src.core.components.base.action import BaseAction
+
+        class InvalidPrivateAction(BaseAction):
+            action_name = "invalid_private_action"
+            action_description = "invalid private action"
+            associated_types = []
+
+            async def execute(self, content: str) -> tuple[bool, str]:
+                return True, content
+
+        class InvalidUsableAgent(ConcreteAgent):
+            usables = [InvalidPrivateAction]
+
+        with pytest.raises(ValueError, match="associated_types 必须是非空 list\\[str\\]"):
+            InvalidUsableAgent.get_local_usables()

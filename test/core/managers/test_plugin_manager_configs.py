@@ -190,6 +190,7 @@ async def test_register_components_supports_agent_type() -> None:
     class _TestAgent(BaseAgent):
         agent_name = "planner"
         agent_description = "planner agent"
+        associated_types = ["text"]
 
         async def execute(self, task: str) -> tuple[bool, str]:
             return True, task

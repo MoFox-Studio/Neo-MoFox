@@ -10,7 +10,10 @@ from typing import Annotated, Any, TYPE_CHECKING
 from uuid import uuid4
 
 from src.core.components.types import ChatType
-from src.core.components.utils import parse_function_signature
+from src.core.components.utils import (
+    parse_function_signature,
+    validate_associated_types,
+)
 from src.kernel.llm import LLMUsable, LLMUsableExecution
 from src.core.models.message import Message, MessageType
 
@@ -91,6 +94,16 @@ class BaseAction(ABC, LLMUsable):
         if hasattr(cls, "_plugin_") and cls._plugin_ and cls.action_name:
             return f"{cls._plugin_}:action:{cls.action_name}"
         return None
+
+    @classmethod
+    def validate_associated_types(cls) -> list[str]:
+        """校验动作组件声明的 associated_types。"""
+
+        return validate_associated_types(
+            cls,
+            component_kind="Action",
+            component_name_attr="action_name",
+        )
     
     @abstractmethod
     async def execute(

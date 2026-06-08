@@ -11,7 +11,10 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Any, TYPE_CHECKING, cast
 
 from src.core.components.types import ChatType
-from src.core.components.utils import parse_function_signature
+from src.core.components.utils import (
+    parse_function_signature,
+    validate_associated_types,
+)
 from src.kernel.llm import (
     LLMContextManager,
     LLMUsable,
@@ -108,6 +111,16 @@ class BaseAgent(ABC, LLMUsable):
             return f"{cls._plugin_}:agent:{cls.agent_name}"
         return None
 
+    @classmethod
+    def validate_associated_types(cls) -> list[str]:
+        """校验 Agent 组件声明的 associated_types。"""
+
+        return validate_associated_types(
+            cls,
+            component_kind="Agent",
+            component_name_attr="agent_name",
+        )
+
     @abstractmethod
     async def execute(
         self, *args: Any, **kwargs: Any
@@ -150,6 +163,7 @@ class BaseAgent(ABC, LLMUsable):
             list[type[LLMUsable]]: Agent 私有组件类列表
         """
         from src.core.components.registry import get_global_registry
+        from src.core.components.base.action import BaseAction
 
         resolved_usables: list[type[LLMUsable]] = []
         registry = get_global_registry()
@@ -170,9 +184,13 @@ class BaseAgent(ABC, LLMUsable):
                         f"不是 LLMUsable 子类，跳过该 usable"
                     )
                     continue
+                if issubclass(component_cls, (BaseAction, BaseAgent)):
+                    component_cls.validate_associated_types()
                 resolved_usables.append(component_cls)  # type: ignore
             else:
                 # 直接传入的类
+                if issubclass(usable_ref, (BaseAction, BaseAgent)):
+                    usable_ref.validate_associated_types()
                 resolved_usables.append(usable_ref)
 
         return resolved_usables

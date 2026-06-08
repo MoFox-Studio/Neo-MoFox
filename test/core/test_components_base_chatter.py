@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.components.base.chatter import BaseChatter, ChatterResult, Failure, Success, Wait
+from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
 from src.core.components.types import ChatType
@@ -325,6 +326,40 @@ class TestBaseChatter:
         assert RejectedTool not in result
 
     @pytest.mark.asyncio
+    async def test_modify_llm_usables_filters_unsupported_action_types(self):
+        """当前流不支持的 Action 类型应被剔除。"""
+
+        class EmojiAction(BaseAction):
+            action_name = "emoji_action"
+            action_description = "emoji"
+            associated_types = ["emoji"]
+
+            async def execute(self, content: str) -> tuple[bool, str]:
+                return True, content
+
+        chatter_plugin = MagicMock()
+        chatter = ConcreteChatter("stream_123", chatter_plugin)
+
+        current_message = MagicMock()
+        current_message.extra = {
+            "format_info": {
+                "accept_format": ["text"],
+            }
+        }
+
+        mock_stream = MagicMock()
+        mock_stream.stream_id = "stream_123"
+        mock_stream.context = MagicMock()
+        mock_stream.context.current_message = current_message
+
+        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm:
+            mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
+
+            result = await chatter.modify_llm_usables([EmojiAction])
+
+        assert EmojiAction not in result
+
+    @pytest.mark.asyncio
     async def test_exec_llm_usable_uses_owner_plugin_instance(self):
         """测试执行跨插件 Tool 时向管理器传入所属插件实例。"""
 
@@ -376,6 +411,7 @@ class TestBaseChatter:
             agent_name = "local_agent"
             agent_description = "local agent"
             _signature_ = "plugin_b:agent:local_agent"
+            associated_types = ["text"]
 
             async def execute(self, query: str) -> tuple[bool, str]:
                 return True, f"agent:{query}"

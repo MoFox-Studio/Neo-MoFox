@@ -41,6 +41,7 @@ class TestStreamContext:
 
         assert len(context.unread_messages) == 1
         assert context.unread_messages[0] == mock_message
+        assert context.current_message == mock_message
 
     def test_add_multiple_unread_messages(self):
         """测试添加多个未读消息。"""
@@ -108,8 +109,8 @@ class TestStreamContext:
         context.current_message = mock_message
 
         result = context.check_types(["text", "image"])
-        # 空 accept_format 默认支持所有类型
-        assert result is True
+        # 显式空 accept_format 表示不支持任何外发类型
+        assert result is False
 
     def test_check_types_with_string_accept_format(self):
         """测试字符串类型的 accept_format。"""
@@ -164,6 +165,18 @@ class TestStreamContext:
         result = context.check_types(["text", "image"])
         # 没有 format_info 时默认支持所有类型
         assert result is True
+
+    def test_check_types_falls_back_to_latest_unread_message(self):
+        """current_message 为空时应回退到最后一条未读消息。"""
+        context = StreamContext(stream_id="test")
+        context.current_message = None
+
+        mock_message = MagicMock()
+        mock_message.extra = {"format_info": {"accept_format": ["text", "emoji"]}}
+        context.unread_messages.append(mock_message)
+
+        assert context.check_types(["text"]) is True
+        assert context.check_types(["voice"]) is False
 
     def test_message_cache_initialization(self):
         """测试消息缓存初始化。"""

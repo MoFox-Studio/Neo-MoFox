@@ -17,7 +17,7 @@ class ConcreteAction(BaseAction):
     chatter_allow = []
     chat_type = ChatType.ALL
     associated_platforms = []
-    associated_types = []
+    associated_types = ["text"]
 
     async def execute(self, message: str) -> tuple[bool, str]:
         """执行测试动作。"""
@@ -347,3 +347,21 @@ class TestActionAttributes:
         assert action.associated_platforms == ["telegram", "discord"]
         assert action.associated_types == ["text", "image"]
         assert action.dependencies == ["other_plugin:tool:helper"]
+
+
+class TestActionAssociatedTypesValidation:
+    """测试 associated_types 的强校验。"""
+
+    def test_validate_associated_types_requires_non_empty_list(self):
+        """associated_types 为空时应抛出异常。"""
+
+        class InvalidAction(BaseAction):
+            action_name = "invalid_action"
+            action_description = "invalid"
+            associated_types = []
+
+            async def execute(self, data: str) -> tuple[bool, str]:
+                return True, data
+
+        with pytest.raises(ValueError, match="associated_types 必须是非空 list\\[str\\]"):
+            InvalidAction.validate_associated_types()
