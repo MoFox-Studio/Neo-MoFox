@@ -63,7 +63,7 @@ class APIProviderSection(SectionBase):
         description="客户端类型（openai/gemini/bedrock等）",
     )
     max_retry: int = Field(
-        default=3,
+        default=2,
         description="最大重试次数",
     )
     timeout: int = Field(
@@ -148,7 +148,7 @@ class ModelInfoSection(SectionBase):
         description="是否强制使用流式输出模式",
     )
     max_context: int = Field(
-        default=32768,
+        default=131072,
         description="模型最大输入上下文 token 数",
     )
     tool_call_compat: bool = Field(
@@ -215,25 +215,25 @@ class ModelTasksSection(SectionBase):
 
     # ========== 核心对话任务 ==========
     utils: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=["siliconflow-deepseek-ai/DeepSeek-V3.2"]),
-        description="在 MoFox 的一些组件中使用的模型，例如表情包模块，取名模块，关系模块，是 MoFox 必须的模型",
+        default_factory=lambda: TaskConfigSection(model_list=["deepSeek-v4-flash"]),
+        description="工具模型配置",
     )
     utils_small: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=["qwen3-8b"]),
-        description="在 MoFox 的一些组件中使用的小模型，消耗量较大，建议使用速度较快的小模型",
+        default_factory=lambda: TaskConfigSection(model_list=["qwen3.5-4b"]),
+        description="轻量工具模型配置",
     )
     actor: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=["siliconflow-deepseek-ai/DeepSeek-V3.2"]),
+        default_factory=lambda: TaskConfigSection(model_list=["deepSeek-v4-flash"]),
         description="动作器模型配置",
     )
     sub_actor: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=["siliconflow-deepseek-ai/DeepSeek-V3.2"]),
+        default_factory=lambda: TaskConfigSection(model_list=["qwen3.5-4b"]),
         description="副动作器模型配置",
     )
 
     # ========== 多模态任务 ==========
     vlm: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=["qwen2.5-vl-72b"]),
+        default_factory=lambda: TaskConfigSection(model_list=["qwen3.6-35b-a3b"]),
         description="图像识别模型",
     )
     voice: TaskConfigSection = Field(
@@ -241,11 +241,11 @@ class ModelTasksSection(SectionBase):
         description="语音识别模型",
     )
     video: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=["qwen2.5-vl-72b"]),
+        default_factory=lambda: TaskConfigSection(model_list=["qwen3.6-35b-a3b"]),
         description="视频分析模型配置",
     )
     tool_use: TaskConfigSection = Field(
-        default_factory=lambda: TaskConfigSection(model_list=["qwen3-8b"]),
+        default_factory=lambda: TaskConfigSection(model_list=["deepSeek-v4-flash"]),
         description="工具调用模型，需要使用支持工具调用的模型",
     )
     embedding: TaskConfigSection = Field(
@@ -295,7 +295,7 @@ class ModelConfig(ConfigBase):
                 base_url="https://api.siliconflow.cn/v1",
                 api_key="your-siliconflow-api-key-here",
                 client_type="openai",
-                max_retry=3,
+                max_retry=2,
                 timeout=30,
                 retry_interval=10,
             ),
@@ -307,26 +307,27 @@ class ModelConfig(ConfigBase):
     models: list[ModelInfoSection] = Field(
         default_factory=lambda: [
             ModelInfoSection(
-                name="siliconflow-deepseek-ai/DeepSeek-V3.2",
-                model_identifier="deepseek-ai/DeepSeek-V3.2",
+                name="deepSeek-v4-flash",
+                model_identifier="deepseek-ai/DeepSeek-V4-Flash",
                 api_provider="SiliconFlow",
-                price_in=2.0,
-                price_out=8.0,
+                price_in=1.0,
+                price_out=2.0,
+                cache_hit_price_in=0.020,
             ),
             ModelInfoSection(
-                name="qwen3-8b",
-                model_identifier="Qwen/Qwen3-8B",
+                name="qwen3.5-4b",
+                model_identifier="Qwen/Qwen3.5-4B",
                 api_provider="SiliconFlow",
                 price_in=0.0,
                 price_out=0.0,
                 extra_params={"enable_thinking": False},
             ),
             ModelInfoSection(
-                name="qwen2.5-vl-72b",
-                model_identifier="Qwen/Qwen2.5-VL-72B-Instruct",
+                name="qwen3.6-35b-a3b",
+                model_identifier="Qwen/Qwen3.6-35B-A3B",
                 api_provider="SiliconFlow",
-                price_in=4.13,
-                price_out=4.13,
+                price_in=0.4,
+                price_out=1.6,
             ),
             ModelInfoSection(
                 name="sensevoice-small",
