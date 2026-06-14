@@ -468,7 +468,13 @@ def _has_usage_field(usage_obj: Any, field_name: str) -> bool:
 
 
 def _extract_usage_from_obj(usage_obj: Any) -> dict[str, Any]:
-    """从 OpenAI usage 对象中提取统计信息。"""
+    """从 OpenAI usage 对象中提取统计信息。
+
+    提取 prompt_tokens、completion_tokens、total_tokens 以及缓存和
+    reasoning 相关的细分字段。OpenAI 的 completion_tokens 默认已包含
+    reasoning_tokens，因此设置 ``completion_includes_reasoning=True`` 标记
+    以避免下游重复计算。
+    """
     if usage_obj is None:
         return {}
 
@@ -508,6 +514,20 @@ def _extract_usage_from_obj(usage_obj: Any) -> dict[str, Any]:
         and result["prompt_tokens"] >= result["cache_hit_tokens"]
     ):
         result["cache_miss_tokens"] = result["prompt_tokens"] - result["cache_hit_tokens"]
+
+    # ── reasoning_tokens 提取 ──
+    # OpenAI 的 completion_tokens_details.reasoning_tokens 表示模型推理消耗的
+    # output token 数。completion_tokens 已包含 reasoning_tokens，因此设置
+    # completion_includes_reasoning=True 以避免下游重复计算成本。
+    completion_details = _get_usage_field(usage_obj, "completion_tokens_details", None)
+    if completion_details is None:
+        completion_details = _get_usage_field(usage_obj, "output_tokens_details", None)
+    if completion_details is not None:
+        reasoning_tokens = _get_usage_field(completion_details, "reasoning_tokens", 0) or 0
+        if reasoning_tokens:
+            result["reasoning_tokens"] = reasoning_tokens
+            result["completion_includes_reasoning"] = True
+
     return result
 
 

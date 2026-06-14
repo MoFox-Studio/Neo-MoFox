@@ -7,9 +7,10 @@ Chatter 是 Bot 的智能核心，定义对话逻辑和流程。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import asyncio
 from datetime import datetime
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Literal, cast
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Literal, cast
 
 from src.core.components.types import ChatType
 from src.core.components.base.action import BaseAction
@@ -560,6 +561,7 @@ class BaseChatter(ABC):
         response: Any,
         usable_map: "ToolRegistry",
         trigger_msg: "Message | None",
+        task_observer: Callable[[asyncio.Task[None]], None] | None = None,
     ) -> list[tuple[bool, bool]]:
         """执行一次响应中的普通 tool calls 并写回 TOOL_RESULT。
 
@@ -588,6 +590,7 @@ class BaseChatter(ABC):
             stream_id=self.stream_id,
             resolve_component_plugin=self._resolve_component_plugin,
             display_name=self.chatter_name,
+            task_observer=task_observer,
         )
 
     @staticmethod

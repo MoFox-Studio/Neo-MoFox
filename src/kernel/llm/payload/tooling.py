@@ -13,7 +13,7 @@ import asyncio
 import inspect
 import json
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Callable, Literal, Protocol, runtime_checkable
 
 from .content import Content
 
@@ -54,12 +54,13 @@ class LLMUsableExecution:
         self._last_non_empty_yield: Any = None
         self._aiter: Any | None = None
         self._task: asyncio.Task[None] | None = None
+        self._task_observers: list[Callable[[asyncio.Task[None]], None]] = []
 
         if hasattr(execution, "__aiter__") and hasattr(execution, "__anext__"):
             self._aiter = execution.__aiter__()
-            self._task = asyncio.create_task(self._advance_iterator())
+            self._set_task(asyncio.create_task(self._advance_iterator()))
         elif inspect.isawaitable(execution):
-            self._task = asyncio.create_task(self._await_result(execution))
+            self._set_task(asyncio.create_task(self._await_result(execution)))
         else:
             self.result = execution
             self._status = "_DONE"
@@ -68,6 +69,26 @@ class LLMUsableExecution:
     def task(self) -> asyncio.Task[None] | None:
         """返回当前后台推进任务；没有正在运行的任务时返回 None。"""
         return self._task
+
+    def _set_task(self, task: asyncio.Task[None] | None) -> None:
+        """更新当前推进任务，并通知观察者。"""
+        self._task = task
+        if task is None:
+            return
+        for observer in list(self._task_observers):
+            try:
+                observer(task)
+            except Exception:
+                continue
+
+    def add_task_observer(
+        self,
+        observer: Callable[[asyncio.Task[None]], None],
+    ) -> None:
+        """注册任务创建观察者，用于外部追踪执行期间生成的 task。"""
+        self._task_observers.append(observer)
+        if self._task is not None:
+            observer(self._task)
 
     async def _await_result(self, execution: Any) -> None:
         """等待 coroutine 完成，并记录返回值或异常。"""
@@ -104,7 +125,7 @@ class LLMUsableExecution:
         if self._status != "_READY" or self._aiter is None:
             return
         self._status = "_WORKING"
-        self._task = asyncio.create_task(self._advance_iterator())
+        self._set_task(asyncio.create_task(self._advance_iterator()))
 
     async def wait_done(self) -> Any:
         """持续推进直到完成，并返回最终结果。

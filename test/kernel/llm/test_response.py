@@ -71,6 +71,14 @@ async def mock_mixed_stream() -> AsyncIterator[StreamEvent]:
     yield StreamEvent(text_delta=" with that")
 
 
+async def mock_reasoning_stream() -> AsyncIterator[StreamEvent]:
+    """Mock streaming response with incremental reasoning."""
+    yield StreamEvent(reasoning_delta="先")
+    yield StreamEvent(text_delta="答")
+    yield StreamEvent(reasoning_delta="想")
+    yield StreamEvent(text_delta="案")
+
+
 # ============================================================================
 # LLMResponse Tests
 # ============================================================================
@@ -248,6 +256,29 @@ class TestLLMResponseAsyncIteration:
         assert chunks == ["Hello", " there", "!", " How", " can", " I", " help", "?"]
         assert response._consumed is True
         assert response.message == "Hello there! How can I help?"
+
+    @pytest.mark.asyncio
+    async def test_async_iter_updates_reasoning_content_incrementally(
+        self, mock_model_set: list[dict[str, Any]], sample_payloads: list[LLMPayload]
+    ) -> None:
+        """Test async iteration exposes reasoning snapshots before stream end."""
+        response = LLMResponse(
+            _stream=mock_reasoning_stream(),
+            _upper=LLMRequest(mock_model_set, "test"),
+            _auto_append_response=False,
+            payloads=sample_payloads,
+            model_set=mock_model_set,
+            message=None,
+            call_list=[],
+        )
+
+        snapshots: list[str | None] = []
+        async for _ in response:
+            snapshots.append(response.reasoning_content)
+
+        assert snapshots == ["先", "先", "先想", "先想"]
+        assert response.message == "答案"
+        assert response.reasoning_content == "先想"
 
     @pytest.mark.asyncio
     async def test_async_iter_without_stream(

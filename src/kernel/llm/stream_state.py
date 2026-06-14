@@ -58,7 +58,7 @@ class LLMStreamReducer:
 
     def finalize(self, error: Exception | None = None) -> StreamReductionResult:
         """把当前 reducer 状态冻结成最终响应快照。"""
-        reasoning_parts = self._reasoning_acc.finalize()
+        reasoning_parts = self._reasoning_acc.snapshot()
         reasoning_content = "".join(self._full_reasoning) or None
         if reasoning_parts and reasoning_content is None:
             reasoning_content = (
@@ -172,6 +172,22 @@ class _ReasoningBlockAccumulator:
         """刷出当前 block，并返回所有收集到的 reasoning 片段。"""
         self._flush_current()
         return list(self._blocks)
+
+    def snapshot(self) -> list[ReasoningText]:
+        """返回当前 reasoning 片段快照，不消费内部状态。"""
+        blocks = list(self._blocks)
+        if self._current_type == "thinking" and (
+            self._current_text or self._current_signature
+        ):
+            blocks.append(
+                ReasoningText(
+                    "".join(self._current_text),
+                    signature=self._current_signature,
+                )
+            )
+        elif self._current_type == "redacted_thinking" and self._current_signature:
+            blocks.append(ReasoningText("", redacted_data=self._current_signature))
+        return blocks
 
     def _flush_current(self) -> None:
         """如果当前 reasoning block 含有有效数据，则把它落到结果中。"""

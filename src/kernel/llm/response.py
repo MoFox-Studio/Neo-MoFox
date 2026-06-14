@@ -95,32 +95,41 @@ class LLMResponse:
     def __await__(self):
         return self._collect_full_response().__await__()
 
-    async def __aiter__(self):
-        """以严格单次消费的方式产出流式文本增量。"""
+    async def stream_events(self) -> AsyncIterator[StreamEvent]:
+        """以严格单次消费的方式产出原始流事件，并实时更新响应状态。"""
         if self._consumed:
             raise LLMResponseConsumedError("Response has already been consumed.")
         self._consumed = True
 
         if self._stream is None:
             self._maybe_apply_tool_call_compat()
-            content = self.message or ""
-            if content:
-                yield content
+            if self.message:
+                yield StreamEvent(text_delta=self.message)
             return
 
         reducer = LLMStreamReducer()
         stream_error: Exception | None = None
         try:
             async for event in self._stream:
-                text_delta = reducer.apply(event)
-                if text_delta:
-                    yield text_delta
+                reducer.apply(event)
+                snapshot = reducer.finalize()
+                self.message = snapshot.message or None
+                self.reasoning_parts = snapshot.reasoning_parts or []
+                self.reasoning_content = snapshot.reasoning_content
+                self.call_list = snapshot.call_list
+                yield event
         except Exception as exc:
             stream_error = exc
 
         self._apply_stream_result(reducer.finalize(stream_error))
         if stream_error is not None:
             raise stream_error
+
+    async def __aiter__(self):
+        """以严格单次消费的方式产出流式文本增量。"""
+        async for event in self.stream_events():
+            if event.text_delta:
+                yield event.text_delta
 
     async def _collect_full_response(self) -> str:
         """以严格单次消费的方式收集完整响应文本。"""

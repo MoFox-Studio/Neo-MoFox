@@ -29,6 +29,7 @@ class LLMRequestRecord:
     cache_hit_tokens: int = 0
     cache_miss_tokens: int = 0
     cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
     cost: float = 0.0
     latency: float = 0.0
     success: bool = True
@@ -51,6 +52,7 @@ class LLMRequestRecord:
             "cache_hit_tokens": self.cache_hit_tokens,
             "cache_miss_tokens": self.cache_miss_tokens,
             "cache_write_tokens": self.cache_write_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
             "cost": self.cost,
             "latency": self.latency,
             "success": self.success,

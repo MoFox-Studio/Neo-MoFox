@@ -247,7 +247,7 @@ async def test_create_non_stream_returns_text_tool_calls_and_reasoning(monkeypat
     client = AnthropicChatClient()
     monkeypatch.setattr(client, "_get_client", lambda **_: fake_client)
 
-    message, tool_calls, stream_iter, reasoning = await client.create(
+    message, tool_calls, stream_iter, reasoning, usage = await client.create(
         model_name="claude-sonnet-4-6",
         payloads=[LLMPayload(ROLE.USER, Text("hello")), LLMPayload(ROLE.TOOL, MockTool)],
         tools=[],
@@ -418,7 +418,7 @@ async def test_create_stream_emits_text_reasoning_and_tool_deltas(monkeypatch: p
     client = AnthropicChatClient()
     monkeypatch.setattr(client, "_get_client", lambda **_: fake_client)
 
-    message, tool_calls, stream_iter, reasoning = await client.create(
+    message, tool_calls, stream_iter, reasoning, usage = await client.create(
         model_name="claude-sonnet-4-6",
         payloads=[LLMPayload(ROLE.USER, Text("hello"))],
         tools=[],

@@ -164,6 +164,36 @@ def _extract_anthropic_reasoning_parts(message: object) -> list[ReasoningText]:
     return reasoning_parts
 
 
+def _extract_anthropic_usage(usage_obj: object) -> dict[str, Any]:
+    """从 Anthropic usage 对象中提取标准化统计信息。
+
+    Anthropic 的 usage 字段包含：
+    - input_tokens / output_tokens：基础 token 计数
+    - cache_creation_input_tokens / cache_read_input_tokens：缓存相关
+
+    Anthropic 的 output_tokens 已包含 reasoning tokens，因此设置
+    ``completion_includes_reasoning=True`` 以避免下游重复计算成本。
+    """
+    if usage_obj is None:
+        return {}
+
+    prompt_tokens = _get_attr(usage_obj, "input_tokens", 0) or 0
+    completion_tokens = _get_attr(usage_obj, "output_tokens", 0) or 0
+    cache_write_tokens = _get_attr(usage_obj, "cache_creation_input_tokens", 0) or 0
+    cache_hit_tokens = _get_attr(usage_obj, "cache_read_input_tokens", 0) or 0
+
+    result: dict[str, Any] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "cache_hit_tokens": cache_hit_tokens,
+        "cache_miss_tokens": max(prompt_tokens - cache_hit_tokens, 0),
+        "cache_write_tokens": cache_write_tokens,
+        "completion_includes_reasoning": True,
+    }
+    return result
+
+
 def _payloads_to_anthropic_messages(
     payloads: list[LLMPayload],
     *,
@@ -525,31 +555,62 @@ class AnthropicChatClient:
         *,
         client: Any,
         params: dict[str, object],
-    ) -> tuple[str | None, list[dict[str, Any]] | None, None, list[ReasoningText] | None]:
+    ) -> tuple[str | None, list[dict[str, Any]] | None, None, list[ReasoningText] | None, dict[str, Any] | None]:
         """执行非流式 Anthropic 请求。"""
         response = await client.messages.create(**params)
         message_text, tool_calls, reasoning_content = _parse_anthropic_message(response)
         reasoning_parts = _extract_anthropic_reasoning_parts(response)
         if not reasoning_parts and reasoning_content:
             reasoning_parts = [ReasoningText(reasoning_content)]
-        return message_text, tool_calls, None, reasoning_parts or None
+        usage = _extract_anthropic_usage(response)
+        return message_text, tool_calls, None, reasoning_parts or None, usage
 
     async def _create_stream(
         self,
         *,
         client: Any,
         params: dict[str, object],
-    ) -> tuple[None, None, AsyncIterator[StreamEvent], None]:
-        """执行流式 Anthropic 请求并返回事件迭代器。"""
+    ) -> tuple[None, None, AsyncIterator[StreamEvent], None, None]:
+        """执行流式 Anthropic 请求并返回事件迭代器。
+
+        流式响应中 usage 信息分两处出现：
+        - ``message_start`` 事件携带 input_tokens 和 cache 相关字段；
+        - ``message_delta`` 事件携带 output_tokens。
+
+        两者合并后通过 StreamEvent(usage=...) 产出。
+        """
         stream_manager = client.messages.stream(**params)
 
         async def iter_events() -> AsyncIterator[StreamEvent]:
             tool_block_meta: dict[int, tuple[str | None, str | None]] = {}
+            # Anthropic 流式 usage 分两处：message_start 给 input，message_delta 给 output
+            input_usage: dict[str, Any] = {}
 
             async with stream_manager as stream:
                 async for event in stream:
                     event_type = _get_attr(event, "type")
-                    if event_type in {"message_start", "message_stop", "ping", "content_block_stop", "message_delta"}:
+
+                    # ── message_start：提取 input 侧 usage ──
+                    if event_type == "message_start":
+                        msg_obj = _get_attr(event, "message")
+                        if msg_obj is not None:
+                            msg_usage = _get_attr(msg_obj, "usage")
+                            if msg_usage is not None:
+                                input_usage = _extract_anthropic_usage(msg_usage)
+                        continue
+
+                    # ── message_delta：合并 output 侧 usage 并产出 StreamEvent ──
+                    if event_type == "message_delta":
+                        delta_usage = _get_attr(event, "usage")
+                        if delta_usage is not None:
+                            output_tokens = _get_attr(delta_usage, "output_tokens", 0) or 0
+                            input_usage["completion_tokens"] = output_tokens
+                            # Anthropic output_tokens 已包含 reasoning tokens
+                            input_usage["completion_includes_reasoning"] = True
+                        yield StreamEvent(usage=dict(input_usage) if input_usage else None)
+                        continue
+
+                    if event_type in {"message_stop", "ping", "content_block_stop"}:
                         continue
 
                     if event_type == "error":
@@ -598,7 +659,7 @@ class AnthropicChatClient:
                             tool_args_delta=str(_get_attr(delta, "partial_json", "")),
                         )
 
-        return None, None, iter_events(), None
+        return None, None, iter_events(), None, None
 
 
 __all__ = [

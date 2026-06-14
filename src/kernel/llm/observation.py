@@ -103,11 +103,20 @@ def make_stream_stats_recorder(
 
 
 def calculate_request_cost(*, model: ModelEntry, usage: Mapping[str, Any]) -> float:
-    """根据模型定价和 usage 估算请求成本。"""
+    """根据模型定价和 usage 估算请求成本。
+
+    当 usage 中包含 ``reasoning_tokens`` 时，需要判断是否应将其额外计入
+    output 成本。如果 ``completion_includes_reasoning=True``，说明
+    ``completion_tokens`` 已经包含了 ``reasoning_tokens``，不需要重复加；
+    否则需要将 ``reasoning_tokens`` 额外计入 output 成本（按 output 单价计费）。
+    """
     prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
     cache_hit_tokens = int(usage.get("cache_hit_tokens", 0) or 0)
     completion_tokens = int(usage.get("completion_tokens", 0) or 0)
     cache_miss_tokens = int(usage.get("cache_miss_tokens", 0) or 0)
+    reasoning_tokens = int(usage.get("reasoning_tokens", 0) or 0)
+    completion_includes_reasoning = bool(usage.get("completion_includes_reasoning", False))
+
     price_in = float(model.get("price_in", 0.0) or 0.0)
     cache_hit_price_raw = model.get("cache_hit_price_in", price_in)
     cache_hit_price_in = (
@@ -126,7 +135,13 @@ def calculate_request_cost(*, model: ModelEntry, usage: Mapping[str, Any]) -> fl
     input_cost = (
         billable_prompt_tokens * price_in + cache_hit_tokens * cache_hit_price_in
     )
-    output_cost = completion_tokens * price_out
+
+    # reasoning_tokens 按 output 单价计费；若 completion_tokens 已包含则不再重复加
+    effective_output_tokens = completion_tokens
+    if reasoning_tokens > 0 and not completion_includes_reasoning:
+        effective_output_tokens = completion_tokens + reasoning_tokens
+
+    output_cost = effective_output_tokens * price_out
     return round((input_cost + output_cost) / 1_000_000, 8)
 
 
@@ -172,6 +187,7 @@ def _record_llm_stats(observation: RequestObservation) -> None:
             cache_hit_tokens=usage_data.get("cache_hit_tokens", 0),
             cache_miss_tokens=usage_data.get("cache_miss_tokens", 0),
             cache_write_tokens=usage_data.get("cache_write_tokens", 0),
+            reasoning_tokens=usage_data.get("reasoning_tokens", 0),
             cost=cost,
             latency=observation.latency,
             success=observation.success,

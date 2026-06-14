@@ -201,6 +201,22 @@ async def run_chat_stream(
         """检查当前驱动器任务是否仍然拥有该流。"""
         return context.stream_loop_task is current_task
 
+    # 后台喂狗任务：独立于 tick 循环定期发送心跳，防止长时间 LLM API 调用阻塞 tick 导致看门狗误报
+    async def _watchdog_feeder() -> None:
+        try:
+            from src.core.config import get_core_config
+            interval = max(5.0, get_core_config().bot.tick_interval)
+        except Exception:
+            interval = 5.0
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                get_watchdog().feed_dog(stream_id=stream_id)
+            except Exception:
+                pass
+
+    feeder_task = asyncio.create_task(_watchdog_feeder(), name=f"watchdog_feeder_{stream_id[:16]}")
+
     try:
         from src.core.managers import get_chatter_manager
         from src.core.managers import get_event_manager
@@ -417,6 +433,13 @@ async def run_chat_stream(
     except asyncio.CancelledError:
         logger.info(f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, 被取消")
     finally:
+        # 停止后台喂狗任务
+        feeder_task.cancel()
+        try:
+            await feeder_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
         # 清理活跃生成器（生成器是任务相关的，不跨任务持久化）
         manager._chatter_genes.pop(stream_id, None)
 

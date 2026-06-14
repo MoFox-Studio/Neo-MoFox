@@ -17,6 +17,7 @@ from src.core.components.base import (
     Stop,
     Success,
     Wait,
+    WaitResumeEvent,
 )
 from src.core.components.base.command import cmd_route
 from src.core.components.loader import register_plugin
@@ -44,4 +45,5 @@ __all__ = [
     "Stop",
     "Success",
     "Wait",
+    "WaitResumeEvent",
 ]

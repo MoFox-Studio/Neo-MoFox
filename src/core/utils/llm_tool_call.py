@@ -113,6 +113,7 @@ async def create_llm_usable_execution(
     stream_id: str | None = None,
     message: "Message | None" = None,
     kwargs: dict[str, Any] | None = None,
+    task_observer: Callable[[asyncio.Task[None]], None] | None = None,
 ) -> LLMUsableExecution:
     """实例化一个 LLMUsable，并返回其执行包装对象。
 
@@ -165,7 +166,11 @@ async def create_llm_usable_execution(
 
     if should_strip_auto_reason_argument(instance.execute, call_kwargs):
         call_kwargs.pop("reason", None)
-    return instance._wrap_execute(**call_kwargs)
+
+    execution = instance._wrap_execute(**call_kwargs)
+    if task_observer is not None:
+        execution.add_task_observer(task_observer)
+    return execution
 
 
 async def exec_llm_usable(
@@ -175,6 +180,7 @@ async def exec_llm_usable(
     stream_id: str | None = None,
     message: "Message | None" = None,
     kwargs: dict[str, Any] | None = None,
+    task_observer: Callable[[asyncio.Task[None]], None] | None = None,
 ) -> tuple[bool, object]:
     """执行单个 LLMUsable，并规范化返回结果。
 
@@ -194,6 +200,7 @@ async def exec_llm_usable(
         stream_id=stream_id,
         message=message,
         kwargs=kwargs,
+        task_observer=task_observer,
     )
     await run_llm_usable_executions([execution])
     return _normalize_execute_result(execution.result)
@@ -264,6 +271,7 @@ async def run_tool_call(
     resolve_component_plugin: Callable[[str | None], "BasePlugin"] | None = None,
     logger_name: str = "chatter",
     display_name: str = "",
+    task_observer: Callable[[asyncio.Task[None]], None] | None = None,
 ) -> list[tuple[bool, bool]]:
     """执行一次 LLM 响应中的全部普通 tool calls。
 
@@ -315,6 +323,7 @@ async def run_tool_call(
                     stream_id=stream_id,
                     message=trigger_msg,
                     kwargs=args,
+                    task_observer=task_observer,
                 )
             except Exception as exc:
                 prepared_call.result_text = f"执行异常: {exc}"

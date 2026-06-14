@@ -38,9 +38,6 @@ async def _on_message_received(
     Returns:
         tuple[EventDecision, dict[str, object]]: (事件决策, 事件参数)
     """
-    from src.core.managers.stream_manager import get_stream_manager
-    from src.core.transport.distribution.stream_loop_manager import get_stream_loop_manager
-
     message = params.get("message")
     if not isinstance(message, Message):
         logger.warning("ON_MESSAGE_RECEIVED 事件缺少 message 参数")
@@ -65,56 +62,64 @@ async def _on_message_received(
                 logger.error(f"命令分发异常: text={text[:60]!r}, error={e}", exc_info=True)
                 # 分发出错时放行，避免消息丢失
 
-    try:
-        # 1. 获取或创建 ChatStream
-        # message.stream_id 已经是标准哈希格式（由 extract_stream_id 生成）
-        sm = get_stream_manager()
-        group_id = message.extra.get("group_id", "")
-        group_name = message.extra.get("group_name", "")
-        user_id = message.sender_id if message.chat_type != "group" else ""
-
-        # 群聊用群名，私聊用"xxx的私聊"（优先 cardname，fallback sender_name/sender_id）
-        if message.chat_type == "group":
-            stream_name = group_name or ""
-        else:
-            display_name = message.sender_cardname or message.sender_name
-            stream_name = f"{display_name}的私聊" if display_name else ""
-
-        chat_stream = await sm.get_or_create_stream(
-            platform=message.platform,
-            stream_id=message.stream_id,
-            chat_type=message.chat_type,
-            user_id=user_id,
-            group_id=str(group_id) if group_id else "",
-            group_name=str(stream_name),
-        )
-
-        stream_id = chat_stream.stream_id
-        context = chat_stream.context
-
-        # 2. 持久化消息到数据库 + 更新未读消息
-        await sm.add_message(message)
-
-        # 3. 更新消息缓冲时间戳。
-        # 注意：不要在“每次收到新消息”时重置 message_buffer_skip_count。
-        # 否则在高压群聊下，skip_count 会被反复清零，导致缓冲逻辑永远达不到
-        # max_skip 的强制放行阈值，从而 Tick 可能被无限跳过。
-        import time
-
-        context.last_message_time = time.time()
-
-        # 4. 尝试启动该流的 Tick 驱动器（如果已在运行则跳过）
-        slm = get_stream_loop_manager()
-        if slm.is_running:
-            # 检查是否已有驱动器在运行
-            if not (context.stream_loop_task and not context.stream_loop_task.done()):
-                await slm.start_stream_loop(stream_id)
-        else:
-            logger.warning("StreamLoopManager 未启动，跳过驱动器启动")
-
-    except Exception as e:
-        logger.error(f"消息分发失败: {e}", exc_info=True)
-
+    # 将消息分发逻辑放入后台任务，避免 EventBus 的 wait_for 超时取消关键操作
+    import asyncio
+    
+    async def _do_dispatch() -> None:
+        try:
+            from src.core.managers.stream_manager import get_stream_manager
+            from src.core.transport.distribution.stream_loop_manager import get_stream_loop_manager
+    
+            sm = get_stream_manager()
+            group_id = message.extra.get("group_id", "")
+            group_name = message.extra.get("group_name", "")
+            user_id = message.sender_id if message.chat_type != "group" else ""
+    
+            if message.chat_type == "group":
+                stream_name = group_name or ""
+            else:
+                display_name = message.sender_cardname or message.sender_name
+                stream_name = f"{display_name}的私聊" if display_name else ""
+    
+            chat_stream = await sm.get_or_create_stream(
+                platform=message.platform,
+                stream_id=message.stream_id,
+                chat_type=message.chat_type,
+                user_id=user_id,
+                group_id=str(group_id) if group_id else "",
+                group_name=str(stream_name),
+            )
+    
+            stream_id = chat_stream.stream_id
+            context = chat_stream.context
+    
+            # 检查 Chatter 是否要求禁用消息缓冲（如交互式 TUI）
+            if context.allow_message_buffer is None:
+                try:
+                    from src.core.managers.chatter_manager import get_chatter_manager
+                    cm = get_chatter_manager()
+                    chatter_cls = cm._select_chatter_class(message.chat_type, message.platform)
+                    if chatter_cls and getattr(chatter_cls, "allow_message_buffer", None) is False:
+                        context.allow_message_buffer = False
+                except Exception:
+                    pass
+    
+            await sm.add_message(message)
+    
+            import time
+            context.last_message_time = time.time()
+    
+            slm = get_stream_loop_manager()
+            if slm.is_running:
+                if not (context.stream_loop_task and not context.stream_loop_task.done()):
+                    await slm.start_stream_loop(stream_id)
+            else:
+                logger.warning("StreamLoopManager 未启动，跳过驱动器启动")
+    
+        except Exception as e:
+            logger.error(f"消息分发失败: {e}", exc_info=True)
+    
+    asyncio.create_task(_do_dispatch())
     return EventDecision.SUCCESS, params
 
 
