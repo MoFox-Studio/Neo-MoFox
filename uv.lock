@@ -1644,7 +1644,7 @@ wheels = [
 
 [[package]]
 name = "neo-mofox"
-version = "1.2.0rc0"
+version = "1.2.0rc1"
 source = { virtual = "." }
 dependencies = [
     { name = "aiofiles" },
