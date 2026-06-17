@@ -46,6 +46,7 @@ class LLMResponse:
     reasoning_content: str | None = None
     reasoning_parts: list[ReasoningText] | None = None
     call_list: list[ToolCall] | None = None
+    stop_reason: str | None = None
     tool_call_compat: bool = False
     _stream_stats_recorder: Callable[[dict[str, object] | None, float], None] | None = (
         None
@@ -155,9 +156,32 @@ class LLMResponse:
         self.reasoning_content = result.reasoning_content or self.reasoning_content
         self.call_list = result.call_list
         self._usage = result.usage
+        self.stop_reason = result.stop_reason
         self._maybe_apply_tool_call_compat()
         self._maybe_append_response_to_context()
         self._maybe_record_stream_stats()
+
+    def has_visible_or_actionable_output(self) -> bool:
+        """是否有对用户可见或可执行的内容（text 或 tool call）。"""
+        return bool(
+            (self.message and self.message.strip())
+            or self.call_list
+        )
+
+    def has_any_model_output(self) -> bool:
+        """模型是否有任何产出（包括 thinking / reasoning）。"""
+        return bool(
+            self.has_visible_or_actionable_output()
+            or self.reasoning_content
+            or self.reasoning_parts
+        )
+
+    def is_reasoning_only(self) -> bool:
+        """是否仅有 reasoning 输出，没有可见文本或工具调用。"""
+        return bool(
+            not self.has_visible_or_actionable_output()
+            and (self.reasoning_content or self.reasoning_parts)
+        )
 
     def _maybe_append_response_to_context(self) -> None:
         """按需把 assistant payload 追加回上下文。"""

@@ -400,7 +400,7 @@ def _should_backfill_reasoning_content(messages: list[dict[str, Any]]) -> bool:
 
 
 def _thinking_enabled(model_set: dict[str, Any]) -> bool:
-    """判断当前模型请求是否显式开启了 thinking 模式。"""
+    """判断当前模型请求是否显式开启了 thinking / reasoning 模式。"""
     extra_params = model_set.get("extra_params")
     if not isinstance(extra_params, dict):
         return False
@@ -414,6 +414,16 @@ def _thinking_enabled(model_set: dict[str, Any]) -> bool:
     if isinstance(thinking, dict):
         enabled = thinking.get("enabled")
         if enabled is not False:
+            return True
+
+    reasoning_effort = extra_params.get("reasoning_effort")
+    if isinstance(reasoning_effort, str) and reasoning_effort.lower() != "none":
+        return True
+
+    reasoning = extra_params.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.lower() != "none":
             return True
 
     return False
@@ -467,6 +477,36 @@ def _has_usage_field(usage_obj: Any, field_name: str) -> bool:
     return _get_usage_field(usage_obj, field_name, _USAGE_FIELD_MISSING) is not _USAGE_FIELD_MISSING
 
 
+def _coerce_usage_number(value: Any, default: int = 0) -> int:
+    """将 usage 字段归一化为整数，过滤掉 mock/非数值对象。"""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return int(value)
+    return default
+
+
+def _looks_like_usage_obj(usage_obj: Any) -> bool:
+    """判断对象是否为真正的 usage 结构"""
+    if isinstance(usage_obj, dict):
+        return True
+    for attr in (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ):
+        value = getattr(usage_obj, attr, None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return True
+    return False
+
+
 def _extract_usage_from_obj(usage_obj: Any) -> dict[str, Any]:
     """从 OpenAI usage 对象中提取统计信息。
 
@@ -475,13 +515,13 @@ def _extract_usage_from_obj(usage_obj: Any) -> dict[str, Any]:
     reasoning_tokens，因此设置 ``completion_includes_reasoning=True`` 标记
     以避免下游重复计算。
     """
-    if usage_obj is None:
+    if usage_obj is None or not _looks_like_usage_obj(usage_obj):
         return {}
 
     result: dict[str, Any] = {
-        "prompt_tokens": _get_usage_field(usage_obj, "prompt_tokens", 0) or 0,
-        "completion_tokens": _get_usage_field(usage_obj, "completion_tokens", 0) or 0,
-        "total_tokens": _get_usage_field(usage_obj, "total_tokens", 0) or 0,
+        "prompt_tokens": _coerce_usage_number(_get_usage_field(usage_obj, "prompt_tokens", 0)),
+        "completion_tokens": _coerce_usage_number(_get_usage_field(usage_obj, "completion_tokens", 0)),
+        "total_tokens": _coerce_usage_number(_get_usage_field(usage_obj, "total_tokens", 0)),
         "cache_hit_tokens": 0,
         "cache_miss_tokens": 0,
     }
@@ -490,17 +530,17 @@ def _extract_usage_from_obj(usage_obj: Any) -> dict[str, Any]:
     if details is None:
         details = _get_usage_field(usage_obj, "input_tokens_details", None)
     if details is not None:
-        result["cache_hit_tokens"] = _get_usage_field(details, "cached_tokens", 0) or 0
+        result["cache_hit_tokens"] = _coerce_usage_number(_get_usage_field(details, "cached_tokens", 0))
 
     explicit_cache_hit = (
-        _get_usage_field(usage_obj, "prompt_cache_hit_tokens", 0)
-        or _get_usage_field(usage_obj, "cache_read_input_tokens", 0)
+        _coerce_usage_number(_get_usage_field(usage_obj, "prompt_cache_hit_tokens", 0))
+        or _coerce_usage_number(_get_usage_field(usage_obj, "cache_read_input_tokens", 0))
         or 0
     )
-    explicit_cache_miss = _get_usage_field(usage_obj, "prompt_cache_miss_tokens", 0) or 0
+    explicit_cache_miss = _coerce_usage_number(_get_usage_field(usage_obj, "prompt_cache_miss_tokens", 0))
     result["cache_hit_tokens"] = result["cache_hit_tokens"] or explicit_cache_hit
     result["cache_miss_tokens"] = explicit_cache_miss
-    result["cache_write_tokens"] = _get_usage_field(usage_obj, "cache_creation_input_tokens", 0) or 0
+    result["cache_write_tokens"] = _coerce_usage_number(_get_usage_field(usage_obj, "cache_creation_input_tokens", 0))
 
     has_cache_signal = (
         _has_usage_field(usage_obj, "prompt_cache_hit_tokens")
@@ -523,7 +563,7 @@ def _extract_usage_from_obj(usage_obj: Any) -> dict[str, Any]:
     if completion_details is None:
         completion_details = _get_usage_field(usage_obj, "output_tokens_details", None)
     if completion_details is not None:
-        reasoning_tokens = _get_usage_field(completion_details, "reasoning_tokens", 0) or 0
+        reasoning_tokens = _coerce_usage_number(_get_usage_field(completion_details, "reasoning_tokens", 0))
         if reasoning_tokens:
             result["reasoning_tokens"] = reasoning_tokens
             result["completion_includes_reasoning"] = True
@@ -793,6 +833,8 @@ class OpenAIChatClient:
         )
         # force_sync_http 已废弃，移除后不传给 API
         extra_params.pop("force_sync_http", None)
+        # 控制是否向兼容供应商发送 reasoning_content 历史字段
+        reasoning_history_mode = extra_params.pop("reasoning_history_mode", True)
 
         client = self._get_client(
             api_key=api_key,
@@ -802,6 +844,15 @@ class OpenAIChatClient:
             force_ipv4=force_ipv4,
         )
         messages, openai_tools = _payloads_to_openai_messages(payloads)
+        # 默认不向 OpenAI-compatible provider 发送非标准 reasoning_content 历史字段，
+        # 避免污染请求结构；需要时通过 reasoning_history_mode 显式开启。
+        allow_reasoning_history = ( reasoning_history_mode == True )
+
+        if not allow_reasoning_history:
+            for msg in messages:
+                if msg.get("role") == "assistant":
+                    msg.pop("reasoning_content", None)
+
         tool_call_compat = bool(model_set.get("tool_call_compat", False))
 
         if tool_call_compat and openai_tools:
@@ -825,8 +876,6 @@ class OpenAIChatClient:
         params.update(extra_params)
         if openai_tools and not tool_call_compat:
             params["tools"] = openai_tools
-            if "tool_choice" not in params:
-                params["tool_choice"] = "auto"
         else:
             params.pop("tool_choice", None)
 
@@ -835,7 +884,8 @@ class OpenAIChatClient:
             "model", "messages", "max_tokens", "temperature", "top_p", "n", "stream",
             "stop", "presence_penalty", "frequency_penalty", "logit_bias", "user",
             "tools", "tool_choice", "response_format", "seed", "parallel_tool_calls",
-            "functions", "function_call", "extra_body"
+            "functions", "function_call", "extra_body", "stream_options",
+            "reasoning_effort",
         }
         extra_body: dict[str, Any] = {}
         for key in list(params.keys()):
@@ -849,9 +899,12 @@ class OpenAIChatClient:
             else:
                 params["extra_body"] = extra_body
 
-        # thinking 模式下，或上下文中已存在 reasoning_content 时，
-        # 为缺失字段的 assistant 历史统一回填，避免 follow-up 400。
-        if _thinking_enabled(model_set) or _should_backfill_reasoning_content(messages):
+        # 仅在显式允许 reasoning 历史模式时，才为缺失字段的 assistant 历史回填
+        # reasoning_content；默认模式下前面已经清理过该字段。
+        if allow_reasoning_history and (
+            _thinking_enabled(model_set)
+            or _should_backfill_reasoning_content(messages)
+        ):
             for msg in messages:
                 if (
                     msg.get("role") == "assistant"
@@ -1001,6 +1054,10 @@ class OpenAIChatClient:
                     if not chunk.choices:
                         continue
                     choice = chunk.choices[0]
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    if isinstance(finish_reason, str) and finish_reason:
+                        yield StreamEvent(finish_reason=finish_reason)
+
                     delta = choice.delta
 
                     content = getattr(delta, "content", None)
@@ -1018,14 +1075,13 @@ class OpenAIChatClient:
                             tc_id: str | None = getattr(tc, "id", None)
                             tc_index: int | None = getattr(tc, "index", None)
 
-                            if tc_id and tc_index is not None:
-                                index_to_id[tc_index] = tc_id
-
-                            effective_id = tc_id or (
-                                index_to_id.get(tc_index)
-                                if tc_index is not None
-                                else None
-                            )
+                            if tc_index is not None:
+                                effective_id = index_to_id.get(tc_index)
+                                if effective_id is None:
+                                    effective_id = tc_id or f"call_stream_{tc_index}"
+                                    index_to_id[tc_index] = effective_id
+                            else:
+                                effective_id = tc_id or "call_stream_0"
 
                             yield StreamEvent(
                                 tool_call_id=effective_id,

@@ -14,10 +14,13 @@ class StreamEvent:
     reasoning_delta: str | None = None
     reasoning_signature_delta: str | None = None
     reasoning_block_type: str | None = None
+    reasoning_redacted_data: str | None = None
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_args_delta: str | None = None
     usage: dict[str, Any] | None = None
+    finish_reason: str | None = None
+    stop_reason: str | None = None
 
 
 class ChatModelClient(Protocol):

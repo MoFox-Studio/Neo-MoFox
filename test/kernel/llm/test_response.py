@@ -12,8 +12,9 @@ from src.kernel.llm.exceptions import LLMResponseConsumedError
 from src.kernel.llm.model_client.base import StreamEvent
 from src.kernel.llm.payload import LLMPayload, ReasoningText, Text, ToolCall
 from src.kernel.llm.request import LLMRequest
-from src.kernel.llm.response import LLMResponse, _ToolCallAccumulator
+from src.kernel.llm.response import LLMResponse
 from src.kernel.llm.roles import ROLE
+from src.kernel.llm.stream_state import _ToolCallAccumulator
 
 
 # ============================================================================

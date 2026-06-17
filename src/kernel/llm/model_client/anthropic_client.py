@@ -238,8 +238,6 @@ def _payloads_to_anthropic_messages(
                     }
                     if part.call_id:
                         block["tool_use_id"] = part.call_id
-                    if part.name:
-                        block["tool_name"] = part.name
                     content_blocks.append(block)
                     continue
                 fallback_parts.append(part)
@@ -320,21 +318,6 @@ def _payloads_to_anthropic_messages(
                 continue
 
             content_blocks.append({"type": "text", "text": str(part)})
-
-        if (
-            payload.role == ROLE.ASSISTANT
-            and previous_role == ROLE.TOOL_RESULT
-            and not has_reasoning_block
-        ):
-            synthesized_thinking = "".join(chunk for chunk in text_chunks if isinstance(chunk, str)).strip()
-            if synthesized_thinking:
-                content_blocks.insert(
-                    0,
-                    {
-                        "type": "thinking",
-                        "thinking": synthesized_thinking,
-                    },
-                )
 
         messages.append({
             "role": role,
@@ -507,6 +490,8 @@ class AnthropicChatClient:
 
         api_key, base_url, timeout, trust_env, force_ipv4, extra_params = self._extract_model_params(model_set)
         tool_format = str(extra_params.pop("tool_format", "anthropic"))
+        # 提取 Anthropic 原生 thinking 参数，由 SDK 负责校验和序列化
+        thinking = extra_params.pop("thinking", None)
         client = self._get_client(
             api_key=api_key,
             base_url=base_url,
@@ -531,8 +516,11 @@ class AnthropicChatClient:
             params.setdefault("tool_choice", {"type": "auto"})
 
         temperature = model_set.get("temperature")
-        if isinstance(temperature, (int, float)) and "thinking" not in extra_params:
+        if isinstance(temperature, (int, float)) and thinking is None:
             params["temperature"] = float(temperature)
+
+        if thinking is not None:
+            params["thinking"] = thinking
 
         params.update(extra_params)
 
@@ -601,6 +589,9 @@ class AnthropicChatClient:
 
                     # ── message_delta：合并 output 侧 usage 并产出 StreamEvent ──
                     if event_type == "message_delta":
+                        delta = _get_attr(event, "delta")
+                        stop_reason = _get_attr(delta, "stop_reason")
+
                         delta_usage = _get_attr(event, "usage")
                         if delta_usage is not None:
                             output_tokens = _get_attr(delta_usage, "output_tokens", 0) or 0
@@ -608,7 +599,10 @@ class AnthropicChatClient:
                             # Anthropic output_tokens 已包含 reasoning tokens
                             input_usage["completion_includes_reasoning"] = True
                             input_usage["total_tokens"] = input_usage.get("prompt_tokens", 0) + output_tokens
-                        yield StreamEvent(usage=dict(input_usage) if input_usage else None)
+                        yield StreamEvent(
+                            usage=dict(input_usage) if input_usage else None,
+                            stop_reason=str(stop_reason) if stop_reason else None,
+                        )
                         continue
 
                     if event_type in {"message_stop", "ping", "content_block_stop"}:
@@ -624,7 +618,14 @@ class AnthropicChatClient:
                         content_block = _get_attr(event, "content_block")
                         block_type = _get_attr(content_block, "type")
                         if block_type in {"thinking", "redacted_thinking"}:
-                            yield StreamEvent(reasoning_block_type=str(block_type))
+                            if block_type == "redacted_thinking":
+                                redacted_data = _get_attr(content_block, "data")
+                                yield StreamEvent(
+                                    reasoning_block_type=str(block_type),
+                                    reasoning_redacted_data=str(redacted_data) if redacted_data else None,
+                                )
+                            else:
+                                yield StreamEvent(reasoning_block_type=str(block_type))
                             continue
                         if block_type in {"tool_use", "server_tool_use"}:
                             tool_call_id = _get_attr(content_block, "id")
