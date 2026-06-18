@@ -29,7 +29,7 @@ const WindowControls = () => {
 
 function App() {
   const [appState, setAppState] = useState<AppState>('booting');
-  const [activePort, setActivePort] = useState<number>(8680);
+  const [activePort, setActivePort] = useState<number>(8681);
   const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
@@ -60,7 +60,7 @@ function App() {
         
         if (status === 'running' || status === 'exited:0') {
           try {
-            const PORTS = [8680, 8681, 8682, 8683, 8684];
+            const PORTS = [8681, 8682, 8683, 8684, 8685];
             
             const checkPort = async (port: number) => {
               const res = await fetch(`http://127.0.0.1:${port}/api/config`);
@@ -99,11 +99,19 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleSetupComplete = () => {
+  const handleSetupComplete = async () => {
+    try {
+      await invoke('restart_backend');
+    } catch (e) {
+      console.error("Failed to restart backend:", e);
+    }
+    
     if (showSettings) {
       setShowSettings(false);
-      const iframe = document.getElementById('plugin-iframe') as HTMLIFrameElement;
-      if (iframe) iframe.src = iframe.src;
+      setAppState('booting');
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
     } else {
       setAppState('booting');
       setTimeout(() => {

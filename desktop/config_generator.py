@@ -99,8 +99,8 @@ def _generate_core_toml(wizard_config: dict[str, Any], path: Path) -> None:
     data["personality"]["reply_style"] = personality.get("reply_style", "自然口语化")
     data["personality"]["identity"] = personality.get("identity", "AI助手")
     data["personality"]["background_story"] = personality.get("background_story", "")
-    data["personality"]["personality_side"] = ""
-    data["personality"]["alias_names"] = []
+    data["personality"]["personality_side"] = personality.get("personality_side", "")
+    data["personality"]["alias_names"] = personality.get("alias_names", [])
     data["personality"]["safety_guidelines"] = personality.get("safety_guidelines", [])
     data["personality"]["negative_behaviors"] = personality.get("negative_behaviors", [])
 
@@ -177,7 +177,7 @@ def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
                 "api_provider": provider,
                 "price_in": 0.0,
                 "price_out": 0.0,
-                "max_context": 131072,
+                "max_context": m.get("max_context", 131072),
             })
 
         # 角色 → 任务映射（roles 中的值已经是 "ProviderName/ModelId" 格式的 name）
@@ -330,7 +330,7 @@ def _generate_coding_agent_config(
 
     # WebSocket 配置
     data["ws"]["host"] = "127.0.0.1"
-    data["ws"]["port"] = 8765
+    data["ws"]["port"] = 8766
 
     # Console 工具 — 自动检测终端
     data["console"]["preferred_terminal"] = ""
@@ -394,11 +394,11 @@ def _generate_webui_config(path: Path) -> None:
 
     # 服务器配置
     data["server"]["host"] = "127.0.0.1"
-    data["server"]["port"] = 8680
+    data["server"]["port"] = 8681
 
     # WebSocket 后端
     data["ws"]["host"] = "127.0.0.1"
-    data["ws"]["port"] = 8765
+    data["ws"]["port"] = 8766
 
     # UI 配置
     data["ui"]["title"] = "MoFox Code"

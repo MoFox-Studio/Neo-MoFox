@@ -98,12 +98,28 @@ def parse_configs(config_dir: str = "config") -> dict[str, Any]:
     # ── Model Profiles ─────────────────────────
     model_profiles = ca_data.get("model_profiles", [])
     if not model_profiles:
-        model_profiles = [{
-            "profile_name": "Default",
-            "model_name": main_name,
-            "temperature": 0.5,
+        model_profiles = [
+            {
+                "profile_name": "Default",
+                "model_name": main_name,
+                "temperature": 0.5,
+                "max_tokens": 16384,
+            },
+            {
+                "profile_name": "Coder",
+                "model_name": coder_name,
+                "temperature": 0.2,
+                "max_tokens": 16384,
+            }
+        ]
+    elif len(model_profiles) == 1:
+        # 兼容老配置：如果只有一个 Default，补全 Coder
+        model_profiles.append({
+            "profile_name": "Coder",
+            "model_name": coder_name,
+            "temperature": 0.2,
             "max_tokens": 16384,
-        }]
+        })
 
     return {
         "status": "ok",
@@ -112,7 +128,9 @@ def parse_configs(config_dir: str = "config") -> dict[str, Any]:
         "roles": roles,
         "personality": {
             "nickname": personality.get("nickname", "MoFox"),
+            "alias_names": personality.get("alias_names", []),
             "personality_core": personality.get("personality_core", ""),
+            "personality_side": personality.get("personality_side", ""),
             "reply_style": personality.get("reply_style", ""),
             "identity": personality.get("identity", ""),
             "background_story": personality.get("background_story", ""),

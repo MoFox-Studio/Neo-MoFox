@@ -18,6 +18,7 @@ interface Provider {
 interface ModelEntry {
   model_id: string;
   api_provider: string;
+  max_context?: string | number;
 }
 
 const BASE_URL_DEFAULTS: Record<string, string> = {
@@ -65,8 +66,10 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
 
   // Step 4 — Personality
   const [botName, setBotName] = useState("MoFox");
+  const [aliasNames, setAliasNames] = useState("");
   const [botBio, setBotBio] = useState("我是一个AI编程助手，致力于帮助你编写高质量代码。");
   const [personalityCore, setPersonalityCore] = useState("友好、专业、简洁");
+  const [personalitySide, setPersonalitySide] = useState("");
   const [replyStyle, setReplyStyle] = useState("自然口语化");
   const [botIdentity, setBotIdentity] = useState("AI编程助手");
 
@@ -199,6 +202,7 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
       const impModels: ModelEntry[] = (d.models ?? []).map((m: any) => ({
         model_id: m.model_id ?? "",
         api_provider: m.api_provider ?? impProviders[0]?.name ?? "",
+        max_context: m.max_context ?? "",
       }));
       if (impModels.length > 0) setModels(impModels);
 
@@ -213,8 +217,10 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
       // 回填 Personality
       const personality = d.personality ?? {};
       if (personality.nickname) setBotName(personality.nickname);
+      if (personality.alias_names) setAliasNames(personality.alias_names.join(", "));
       if (personality.background_story) setBotBio(personality.background_story);
       if (personality.personality_core) setPersonalityCore(personality.personality_core);
+      if (personality.personality_side) setPersonalitySide(personality.personality_side);
       if (personality.reply_style) setReplyStyle(personality.reply_style);
       if (personality.identity) setBotIdentity(personality.identity);
 
@@ -257,6 +263,18 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
         enabled: true,
       }));
 
+    const parseMaxContext = (val?: string | number): number | undefined => {
+      if (!val) return undefined;
+      if (typeof val === 'number') return val;
+      const s = val.toString().trim().toLowerCase();
+      if (s.endsWith('k')) {
+        const num = parseFloat(s.slice(0, -1));
+        if (!isNaN(num)) return num * 1024;
+      }
+      const num = parseInt(s, 10);
+      return isNaN(num) ? undefined : num;
+    };
+
     const configPayload = {
       api_providers: providers.map((p) => ({
         name: p.name.trim(),
@@ -267,12 +285,15 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
       models: models.map((m) => ({
         model_id: m.model_id.trim(),
         api_provider: m.api_provider,
+        max_context: parseMaxContext(m.max_context),
       })),
       roles: { main: chat, coder, researcher, reviewer, title },
       personality: {
         nickname: botName.trim(),
+        alias_names: aliasNames.split(',').map(s => s.trim()).filter(Boolean),
         background_story: botBio.trim(),
         personality_core: personalityCore.trim(),
+        personality_side: personalitySide.trim(),
         reply_style: replyStyle.trim(),
         identity: botIdentity.trim(),
       },
@@ -452,18 +473,23 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
                   <button title="删除模型" onClick={() => removeModel(i)} style={{ position: "absolute", top: "8px", right: "8px", background: "none", border: "none", color: "#ef4444", cursor: "pointer" }}>
                     <Trash2 size={14} />
                   </button>
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    <div style={{ flex: 2 }}>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    <div style={{ flex: "1 1 40%" }}>
                       <label className="setup-label" style={{ fontSize: "11px" }}>模型 ID</label>
                       <input className="setup-input" style={{ padding: "6px" }} value={m.model_id}
-                        onChange={(e) => updateModel(i, { model_id: e.target.value })} placeholder="如: gpt-4o, claude-3-7-sonnet-latest" />
+                        onChange={(e) => updateModel(i, { model_id: e.target.value })} placeholder="如: gpt-4o" />
                     </div>
-                    <div style={{ flex: 1 }}>
+                    <div style={{ flex: "1 1 30%" }}>
                       <label className="setup-label" style={{ fontSize: "11px" }}>所属服务商</label>
                       <select title="所属服务商" className="setup-input" style={{ padding: "6px" }} value={m.api_provider}
                         onChange={(e) => updateModel(i, { api_provider: e.target.value })}>
                         {providers.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
                       </select>
+                    </div>
+                    <div style={{ flex: "1 1 20%" }}>
+                      <label className="setup-label" style={{ fontSize: "11px" }}>最大上下文</label>
+                      <input className="setup-input" style={{ padding: "6px" }} value={m.max_context || ""}
+                        onChange={(e) => updateModel(i, { max_context: e.target.value })} placeholder="如: 128k (留空默认)" />
                     </div>
                   </div>
                   <div style={{ fontSize: "11px", color: "#6b7280", marginTop: "4px" }}>
@@ -526,13 +552,23 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
                   <input className="setup-input" value={botName} onChange={(e) => setBotName(e.target.value)} placeholder="如: MoFox" />
                 </div>
                 <div className="setup-form-group" style={{ flex: 1 }}>
-                  <label className="setup-label">身份特征</label>
-                  <input className="setup-input" value={botIdentity} onChange={(e) => setBotIdentity(e.target.value)} placeholder="如: AI编程助手" />
+                  <label className="setup-label">别名 (逗号分隔)</label>
+                  <input className="setup-input" value={aliasNames} onChange={(e) => setAliasNames(e.target.value)} placeholder="如: 小狐狸, 莫狐" />
                 </div>
               </div>
               <div className="setup-form-group">
-                <label className="setup-label">核心性格</label>
-                <input className="setup-input" value={personalityCore} onChange={(e) => setPersonalityCore(e.target.value)} placeholder="如: 友好、专业、简洁" />
+                <label className="setup-label">身份特征 (System Identity)</label>
+                <input className="setup-input" value={botIdentity} onChange={(e) => setBotIdentity(e.target.value)} placeholder="如: AI编程助手" />
+              </div>
+              <div style={{ display: "flex", gap: "10px" }}>
+                <div className="setup-form-group" style={{ flex: 1 }}>
+                  <label className="setup-label">核心性格</label>
+                  <input className="setup-input" value={personalityCore} onChange={(e) => setPersonalityCore(e.target.value)} placeholder="如: 友好、专业、简洁" />
+                </div>
+                <div className="setup-form-group" style={{ flex: 1 }}>
+                  <label className="setup-label">扩展设定</label>
+                  <input className="setup-input" value={personalitySide} onChange={(e) => setPersonalitySide(e.target.value)} placeholder="如: 说话带有口头禅等" />
+                </div>
               </div>
               <div className="setup-form-group">
                 <label className="setup-label">表达风格</label>

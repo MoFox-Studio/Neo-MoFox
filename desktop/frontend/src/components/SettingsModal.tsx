@@ -34,10 +34,25 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
   const handleSave = async () => {
     setSaving(true);
     try {
+      const parsedConfig = JSON.parse(JSON.stringify(config));
+      if (parsedConfig.models) {
+        parsedConfig.models = parsedConfig.models.map((m: any) => {
+          let mc = m.max_context;
+          if (typeof mc === 'string' && mc.toLowerCase().endsWith('k')) {
+            const num = parseFloat(mc.slice(0, -1));
+            if (!isNaN(num)) mc = num * 1024;
+          } else if (typeof mc === 'string') {
+            const num = parseInt(mc, 10);
+            mc = isNaN(num) ? undefined : num;
+          }
+          return { ...m, max_context: mc };
+        });
+      }
+
       const res = await fetch(`http://127.0.0.1:${port}/api/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(config)
+        body: JSON.stringify(parsedConfig)
       });
       const data = await res.json();
       if (data.status === 'error') {
@@ -144,18 +159,50 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
                 </div>
                 
                 <div className="space-y-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 shadow-sm">
+                  <div className="grid grid-cols-1 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">AI 昵称 (Nickname)</label>
+                      <input
+                        type="text"
+                        value={config?.personality?.nickname || ''}
+                        onChange={(e) => updateNestedConfig(['personality', 'nickname'], e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                        placeholder="例如: MoFox"
+                      />
+                    </div>
+                  </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">AI 昵称</label>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">别名 (Alias Names)</label>
                     <input
                       type="text"
-                      value={config?.personality?.nickname || ''}
-                      onChange={(e) => updateNestedConfig(['personality', 'nickname'], e.target.value)}
+                      value={config?.personality?.alias_names?.join(', ') || ''}
+                      onChange={(e) => updateNestedConfig(['personality', 'alias_names'], e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
                       className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-                      placeholder="例如: 小狐狸"
+                      placeholder="逗号分隔，例如: 小狐狸, 莫狐"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">回复风格</label>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">核心设定 (Personality Core)</label>
+                    <textarea
+                      value={config?.personality?.personality_core || ''}
+                      onChange={(e) => updateNestedConfig(['personality', 'personality_core'], e.target.value)}
+                      rows={2}
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-y"
+                      placeholder="AI 的核心性格设定"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">扩展设定 (Personality Side)</label>
+                    <textarea
+                      value={config?.personality?.personality_side || ''}
+                      onChange={(e) => updateNestedConfig(['personality', 'personality_side'], e.target.value)}
+                      rows={2}
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-y"
+                      placeholder="AI 的扩展细节、口头禅等"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">回复风格 (Reply Style)</label>
                     <input
                       type="text"
                       value={config?.personality?.reply_style || ''}
@@ -165,13 +212,13 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">身份设定 (System Prompt)</label>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">身份设定 (System Identity)</label>
                     <textarea
                       value={config?.personality?.identity || ''}
                       onChange={(e) => updateNestedConfig(['personality', 'identity'], e.target.value)}
-                      rows={4}
+                      rows={3}
                       className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all resize-y"
-                      placeholder="描述 AI 的背景和基础设定"
+                      placeholder="描述 AI 的背景和基础系统设定"
                     />
                   </div>
                 </div>
@@ -279,12 +326,19 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
                         <select
                           value={model.api_provider}
                           onChange={(e) => updateModel(idx, 'api_provider', e.target.value)}
-                          className="w-40 px-3 py-1.5 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white text-sm"
+                          className="w-32 px-3 py-1.5 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white text-sm"
                         >
                           {config.api_providers?.map((p: any) => (
                             <option key={p.name} value={p.name}>{p.name}</option>
                           ))}
                         </select>
+                        <input
+                          type="text"
+                          value={model.max_context || ''}
+                          onChange={(e) => updateModel(idx, 'max_context', e.target.value)}
+                          className="w-24 px-3 py-1.5 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white text-sm"
+                          placeholder="例如: 128k"
+                        />
                         <button
                           onClick={() => setConfig((prev: any) => {
                             const newConfig = { ...prev };
@@ -316,22 +370,60 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
                   <h3 className="text-sm font-semibold text-gray-900 dark:text-white">角色绑定 (Role Assignments)</h3>
                   <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 shadow-sm space-y-4">
                     <p className="text-xs text-gray-500 mb-4">选择 MoFox Code 在不同工作环节中默认使用的模型。</p>
-                    {['main', 'coder', 'researcher'].map((role) => (
-                      <div key={role} className="flex items-center justify-between">
-                        <label className="text-sm font-medium text-gray-700 dark:text-gray-300 capitalize w-24">{role}</label>
-                        <select
-                          value={config?.roles?.[role] || ''}
-                          onChange={(e) => updateNestedConfig(['roles', role], e.target.value)}
-                          className="flex-1 px-3 py-1.5 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white text-sm"
-                        >
-                          <option value="">-- 选择模型 --</option>
-                          {config?.models?.map((m: any) => {
-                            const name = `${m.api_provider}/${m.model_id}`;
-                            return <option key={name} value={name}>{name}</option>;
-                          })}
-                        </select>
+                    <div className="space-y-4">
+                      {['main', 'coder', 'researcher', 'reviewer', 'title'].map((role) => (
+                        <div key={role} className="flex items-center justify-between">
+                          <label className="text-sm font-medium text-gray-700 dark:text-gray-300 capitalize w-24 shrink-0">{role}</label>
+                          <select
+                            value={config?.roles?.[role] || ''}
+                            onChange={(e) => updateNestedConfig(['roles', role], e.target.value)}
+                            className="flex-1 min-w-0 px-3 py-1.5 border border-gray-300 dark:border-gray-700 rounded-lg bg-transparent text-gray-900 dark:text-white text-sm"
+                          >
+                            <option value="">-- 选择模型 --</option>
+                            {config?.models?.map((m: any) => {
+                              const name = `${m.api_provider}/${m.model_id}`;
+                              return <option key={name} value={name}>{name}</option>;
+                            })}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Coder Profile */}
+                <div className="space-y-3 pt-4 border-t border-gray-200 dark:border-gray-800">
+                  <h3 className="text-sm font-semibold text-gray-900 dark:text-white">Coder 模型配置 (Coder Profile)</h3>
+                  <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl p-5 shadow-sm space-y-6">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Temperature</label>
+                      <p className="text-xs text-gray-500 mb-3">控制 Coder 输出代码的随机性 (建议 0.0 - 0.2)</p>
+                      <div className="flex items-center gap-4">
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                          value={String(config?.model_profiles?.find((p: any) => p.profile_name === 'Coder')?.temperature || 0.2)}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            const idx = config?.model_profiles?.findIndex((p: any) => p.profile_name === 'Coder');
+                            if (idx >= 0) {
+                              updateNestedConfig(['model_profiles', String(idx), 'temperature'], val);
+                            } else {
+                              setConfig((prev: any) => ({
+                                ...prev,
+                                model_profiles: [...(prev.model_profiles || []), { profile_name: 'Coder', temperature: val, max_tokens: 16384 }]
+                              }));
+                            }
+                          }}
+                          className="flex-1 accent-blue-600"
+                        />
+                        <span className="w-12 text-right text-sm font-mono text-gray-600 dark:text-gray-400">
+                          {config?.model_profiles?.find((p: any) => p.profile_name === 'Coder')?.temperature || 0.2}
+                        </span>
                       </div>
-                    ))}
+                    </div>
                   </div>
                 </div>
 

@@ -176,6 +176,7 @@ def _create_setup_app(config_dir: str, server_ref: list | None = None):
                 models_out.append({
                     "model_id": m.get("model_identifier", ""),
                     "api_provider": m.get("api_provider", api_providers[0]["name"] if api_providers else ""),
+                    "max_context": m.get("max_context", ""),
                 })
 
             # ── Roles（从 model_tasks 映射，值为 "Provider/ModelId" 格式）──
@@ -223,7 +224,9 @@ def _create_setup_app(config_dir: str, server_ref: list | None = None):
                 "roles": roles,
                 "personality": {
                     "nickname": personality.get("nickname", ""),
+                    "alias_names": personality.get("alias_names", []),
                     "personality_core": personality.get("personality_core", ""),
+                    "personality_side": personality.get("personality_side", ""),
                     "reply_style": personality.get("reply_style", ""),
                     "identity": personality.get("identity", ""),
                     "background_story": personality.get("background_story", ""),
@@ -269,7 +272,7 @@ def _create_setup_app(config_dir: str, server_ref: list | None = None):
 
 async def run_setup_server(
     host: str = "127.0.0.1",
-    port: int = 8680,
+    port: int = 8681,
     config_dir: str = "config",
 ) -> None:
     """启动临时 Setup API 服务器。
