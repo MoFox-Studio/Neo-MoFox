@@ -57,7 +57,7 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
     { id: 4, title: '定制助手人格', desc: '赋予您的 AI 助手独特的名字、身份和性格。' },
     { id: 5, title: '接入外部工具', desc: '连接至 MCP 获取额外的工具能力。' }
   ];
-  const [step, setStep] = useState<number | 'completed'>(1);
+  const [step, setStep] = useState<number | 'completed'>(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -334,6 +334,16 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
       setIsSubmitting(false);
     }
   };
+  const startSetup = () => {
+    if (document.startViewTransition) {
+      document.startViewTransition(() => {
+        setStep(1);
+      });
+    } else {
+      setStep(1);
+    }
+  };
+
   /* ── Render ──────────────────────────────────────────── */
 
   // 庆祝界面
@@ -348,19 +358,45 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
       <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-blue-500/10 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-purple-500/10 rounded-full blur-3xl pointer-events-none" />
 
-      {/* 主卡片 */}
-      <div className="w-full max-w-[1000px] h-[85vh] min-h-[550px] bg-white dark:bg-gray-900 rounded-[2rem] shadow-2xl flex flex-col md:flex-row overflow-hidden relative z-10 border border-gray-100 dark:border-gray-800">
+      {step === 0 ? (
+        <div className="flex flex-col items-center justify-center relative z-10 w-full max-w-2xl text-center space-y-8 animate-in fade-in duration-700">
+          <div className="w-32 h-32 relative mx-auto" style={{ viewTransitionName: 'mofox-logo' }}>
+            <img src="/logo.png" className="w-full h-full object-contain rounded-3xl drop-shadow-2xl" alt="MoFox" onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling?.classList.remove('hidden'); }} />
+            <div className="hidden absolute inset-0 w-full h-full rounded-3xl bg-blue-600 flex items-center justify-center text-white shadow-xl shadow-blue-500/30">
+              <Sparkles className="w-12 h-12" />
+            </div>
+          </div>
+          
+          <div className="space-y-4" style={{ viewTransitionName: 'mofox-title' }}>
+            <h1 className="text-4xl sm:text-5xl font-extrabold tracking-tight text-gray-900 dark:text-white">
+              欢迎使用 MoFox Code
+            </h1>
+            <p className="text-lg text-gray-500 dark:text-gray-400 font-medium max-w-lg mx-auto">
+              您的下一代 AI 编程助手。<br/>让我们进行一些基础配置，释放它的全部潜能。
+            </p>
+          </div>
+
+          <button 
+            onClick={startSetup}
+            className="mt-8 px-8 py-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-2xl shadow-xl hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 flex items-center gap-2 mx-auto group"
+          >
+            <span>开始体验</span>
+            <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+          </button>
+        </div>
+      ) : (
+      <div className="w-full max-w-[1000px] h-[85vh] min-h-[550px] bg-white dark:bg-gray-900 rounded-[2rem] shadow-2xl flex flex-col md:flex-row overflow-hidden relative z-10 border border-gray-100 dark:border-gray-800 animate-in fade-in zoom-in-95 duration-500">
         
         {/* 左侧向导区域 */}
         <div className="w-full md:w-80 bg-gray-50 dark:bg-gray-900/50 p-8 sm:p-10 border-r border-gray-100 dark:border-gray-800 flex flex-col shrink-0">
           <div className="flex items-center gap-3 mb-12">
-            <div className="w-10 h-10 relative">
+            <div className="w-10 h-10 relative" style={{ viewTransitionName: 'mofox-logo' }}>
               <img src="/logo.png" className="w-full h-full object-contain rounded-xl drop-shadow-sm" alt="MoFox" onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.nextElementSibling?.classList.remove('hidden'); }} />
               <div className="hidden absolute inset-0 w-full h-full rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-lg shadow-blue-500/30">
                 <Sparkles className="w-5 h-5" />
               </div>
             </div>
-            <h1 className="text-xl font-bold text-gray-900 dark:text-white tracking-tight">MoFox Setup</h1>
+            <h1 className="text-xl font-bold text-gray-900 dark:text-white tracking-tight" style={{ viewTransitionName: 'mofox-title' }}>MoFox Setup</h1>
           </div>
 
           <div className="flex-1 relative">
@@ -732,6 +768,7 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
 
         </div>
       </div>
+      )}
     </div>
   );
 };
