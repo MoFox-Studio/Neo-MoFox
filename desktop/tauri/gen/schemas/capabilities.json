@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for MoFox Code Desktop","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Default capabilities for MoFox Code Desktop","local":true,"windows":["main"],"permissions":["core:default","core:window:allow-start-dragging","core:window:allow-minimize","core:window:allow-toggle-maximize","core:window:allow-close"]}}

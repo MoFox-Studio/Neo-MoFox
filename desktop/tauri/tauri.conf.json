@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.mofox.code.desktop",
   "build": {
-    "beforeDevCommand": "cd ../../plugins/coding_agent_webui/frontend && npm run dev",
+    "beforeDevCommand": "cd ../frontend && npm run dev",
     "devUrl": "http://127.0.0.1:5173",
-    "beforeBuildCommand": "cd ../../plugins/coding_agent_webui/frontend && npm run build",
-    "frontendDist": "../../plugins/coding_agent_webui/frontend/dist"
+    "beforeBuildCommand": "cd ../frontend && npm run build",
+    "frontendDist": "../frontend/dist"
   },
   "app": {
     "windows": [
@@ -17,7 +17,8 @@
         "height": 800,
         "minWidth": 800,
         "minHeight": 600,
-        "center": true
+        "center": true,
+        "decorations": false
       }
     ],
     "security": {

@@ -1,0 +1,569 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+:root {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: light dark;
+  background-color: #f9fafb;
+  color: #111827;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background-color: #030712;
+    color: #f9fafb;
+  }
+}
+
+body {
+  margin: 0;
+  display: flex;
+  place-items: center;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow: hidden;
+  background-color: transparent;
+}
+
+#root {
+  max-width: 100%;
+  margin: 0 auto;
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Base UI Components */
+.shell-container {
+  display: flex;
+  width: 100%;
+  height: 100vh;
+  position: relative;
+  overflow: hidden;
+}
+
+/* iframe to contain the webui plugin */
+.plugin-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background-color: transparent;
+}
+
+/* Splash & Setup Containers */
+.splash-container, .setup-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100vh;
+  position: relative;
+  overflow: hidden;
+  z-index: 50;
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Modal Card Style for Setup */
+.setup-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background-color: #ffffff;
+  border-radius: 24px;
+  padding: 40px;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.01);
+  border: 1px solid #f3f4f6;
+  width: 100%;
+  max-width: 400px;
+  position: relative;
+  z-index: 10;
+  animation: slideUpFade 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@media (prefers-color-scheme: dark) {
+  .setup-card {
+    background-color: #111827;
+    border-color: #1f2937;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+  }
+}
+
+/* Splash Flat Design (VS Studio Style) */
+.splash-flat-card {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  background-color: #f9fafb;
+  position: relative;
+  z-index: 10;
+}
+
+@media (prefers-color-scheme: dark) {
+  .splash-flat-card {
+    background-color: #030712;
+  }
+}
+
+.splash-flat-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 60px 80px;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.splash-flat-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: 10vh;
+}
+
+.splash-flat-logo-box {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 24px;
+}
+
+.splash-flat-logo {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.splash-flat-title-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.splash-flat-title {
+  font-size: 48px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: #111827;
+  background: linear-gradient(135deg, #111827 0%, #374151 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.splash-flat-subtitle {
+  font-size: 20px;
+  font-weight: 500;
+  color: #6b7280;
+  margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .splash-flat-title {
+    background: linear-gradient(135deg, #ffffff 0%, #9ca3af 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .splash-flat-subtitle {
+    color: #9ca3af;
+  }
+}
+
+.splash-flat-bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  margin-bottom: 5vh;
+}
+
+.splash-flat-status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.splash-flat-spinner {
+  color: #3b82f6;
+  animation: spin 1.5s linear infinite;
+}
+
+.splash-flat-status-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.splash-flat-loading-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.splash-flat-loading-step {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+@media (prefers-color-scheme: dark) {
+  .splash-flat-loading-label {
+    color: #f9fafb;
+  }
+  .splash-flat-loading-step {
+    color: #9ca3af;
+  }
+}
+
+.splash-flat-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.splash-flat-version, .splash-flat-copyright {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 0;
+}
+
+/* Original Setup Titles */
+.setup-title {
+  font-size: 24px;
+  font-weight: 700;
+  margin: 0 0 8px 0;
+  color: #111827;
+}
+
+.setup-subtitle {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 0 0 32px 0;
+  text-align: center;
+}
+
+@media (prefers-color-scheme: dark) {
+  .setup-title {
+    color: #f9fafb;
+  }
+  .setup-subtitle {
+    color: #9ca3af;
+  }
+}
+
+/* Native Window Controls Overlay */
+.shell-window-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  z-index: 9999;
+  height: 48px;
+  background: transparent;
+  /* Make sure the controls area doesn't capture drag, only the buttons handle clicks */
+  -webkit-app-region: no-drag;
+}
+
+.shell-window-btn {
+  width: 46px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: #374151;
+  transition: background-color 0.1s;
+  cursor: default;
+}
+
+@media (prefers-color-scheme: dark) {
+  .shell-window-btn {
+    color: #d1d5db;
+  }
+}
+
+.shell-window-btn:hover {
+  background-color: rgba(0, 0, 0, 0.05);
+}
+
+@media (prefers-color-scheme: dark) {
+  .shell-window-btn:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+  }
+}
+
+.shell-window-close:hover {
+  background-color: #e81123 !important;
+  color: white !important;
+}
+
+.shell-main-content {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Settings Modal in Shell */
+.shell-settings-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  animation: fadeIn 0.2s ease-out forwards;
+}
+
+.shell-settings-modal {
+  width: 90%;
+  max-width: 600px;
+  max-height: 90%;
+  background-color: #ffffff;
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+  animation: slideUpFade 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@media (prefers-color-scheme: dark) {
+  .shell-settings-modal {
+    background-color: #111827;
+    border: 1px solid #1f2937;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.3);
+  }
+}
+
+.shell-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+@media (prefers-color-scheme: dark) {
+  .shell-settings-header {
+    border-bottom-color: #1f2937;
+  }
+}
+
+.shell-settings-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.shell-settings-close {
+  background: transparent;
+  border: none;
+  color: #9ca3af;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.shell-settings-close:hover {
+  background-color: #f3f4f6;
+  color: #111827;
+}
+
+@media (prefers-color-scheme: dark) {
+  .shell-settings-close:hover {
+    background-color: #374151;
+    color: #f9fafb;
+  }
+}
+
+.shell-settings-body {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  /* Override setup-card padding so it fits well in modal */
+}
+
+.shell-settings-body .setup-container {
+  height: 100%;
+}
+
+.shell-settings-body .setup-card {
+  box-shadow: none;
+  border: none;
+  max-width: 100%;
+  border-radius: 0;
+  background-color: transparent;
+  padding: 24px;
+}
+
+/* Form Groups */
+.setup-form-group {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 20px;
+  align-items: flex-start;
+}
+
+.setup-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  margin-bottom: 6px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .setup-label {
+    color: #d1d5db;
+  }
+}
+
+.setup-input {
+  width: 100%;
+  padding: 10px 12px;
+  background-color: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #111827;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  box-sizing: border-box;
+}
+
+.setup-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.setup-input:disabled {
+  background-color: #f3f4f6;
+  color: #6b7280;
+  cursor: not-allowed;
+}
+
+@media (prefers-color-scheme: dark) {
+  .setup-input {
+    background-color: #1f2937;
+    border-color: #374151;
+    color: #f9fafb;
+  }
+  .setup-input:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+  }
+  .setup-input:disabled {
+    background-color: #111827;
+    color: #4b5563;
+  }
+}
+
+.setup-button {
+  width: 100%;
+  padding: 10px;
+  margin-top: 10px;
+  background-color: #111827;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  transition: background-color 0.2s;
+}
+
+.setup-button:hover:not(:disabled) {
+  background-color: #1f2937;
+}
+
+.setup-button:disabled {
+  background-color: #9ca3af;
+  cursor: not-allowed;
+}
+
+@media (prefers-color-scheme: dark) {
+  .setup-button {
+    background-color: #ffffff;
+    color: #111827;
+  }
+  .setup-button:hover:not(:disabled) {
+    background-color: #e5e7eb;
+  }
+  .setup-button:disabled {
+    background-color: #4b5563;
+    color: #9ca3af;
+  }
+}
+
+.setup-error {
+  color: #ef4444;
+  font-size: 13px;
+  margin-top: 12px;
+  padding: 8px;
+  background-color: #fef2f2;
+  border-radius: 6px;
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+@media (prefers-color-scheme: dark) {
+  .setup-error {
+    background-color: rgba(239, 68, 68, 0.1);
+    color: #fca5a5;
+  }
+}
+
+/* Animations */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes slideUpFade {
+  0% {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes fadeIn {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+

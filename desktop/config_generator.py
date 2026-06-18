@@ -46,12 +46,13 @@ def generate_configs(wizard_config: dict[str, Any], config_dir: str = "config") 
 
     # 3. mcp.toml
     mcp_path = base / "mcp.toml"
-    _generate_mcp_toml(mcp_path)
+    _generate_mcp_toml(wizard_config, mcp_path)
     generated["mcp"] = mcp_path
 
     # 4. plugins/coding_agent/config.toml
+    mcp_server_names = _get_all_mcp_server_names(wizard_config)
     ca_path = base / "plugins" / "coding_agent" / "config.toml"
-    _generate_coding_agent_config(wizard_config, ca_path)
+    _generate_coding_agent_config(wizard_config, mcp_server_names, ca_path)
     generated["coding_agent"] = ca_path
 
     # 5. plugins/coding_agent_webui/config.toml
@@ -130,7 +131,7 @@ def _generate_core_toml(wizard_config: dict[str, Any], path: Path) -> None:
 def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
     """生成 model.toml 配置文件。
 
-    从向导配置中的 api_provider 构建 API 提供商和模型列表。
+    支持新格式（多提供商 + 多模型）以及旧格式（单提供商）向后兼容。
     """
     from src.core.config.model_config import (
         APIProviderSection,
@@ -140,54 +141,93 @@ def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
     )
     from src.kernel.config.core import _render_toml_with_signature
 
-    api_provider_data = wizard_config.get("api_provider", {})
-    provider_name = api_provider_data.get("name", "OpenAI")
-    client_type = api_provider_data.get("client_type", "openai")
-    models_map = api_provider_data.get("models", {})
     model_profiles = wizard_config.get("model_profiles", [])
-
-    # 主模型名（用于所有 task）
-    main_model = models_map.get("main", "gpt-4o")
-    coder_model = models_map.get("coder", main_model)
-    researcher_model = models_map.get("researcher", main_model)
-    reviewer_model = models_map.get("reviewer", main_model)
-    title_model = models_map.get("title", main_model)
-
-    # 收集所有不同的模型名
-    all_model_names = list(dict.fromkeys([
-        main_model, coder_model, researcher_model, reviewer_model, title_model,
-    ]))
-
-    # 构建 ModelConfig 数据字典
     data: dict[str, Any] = {}
 
-    # API 提供商
-    data["api_providers"] = [
-        {
-            "name": provider_name,
-            "base_url": api_provider_data.get("base_url", "https://api.openai.com/v1"),
+    # ── 兼容旧格式（单 api_provider）与新格式（api_providers 数组）──
+    if "api_providers" in wizard_config and isinstance(wizard_config["api_providers"], list):
+        raw_providers = wizard_config["api_providers"]
+        raw_models = wizard_config.get("models", [])
+        roles = wizard_config.get("roles", {})
+        _base_url_defaults = {"openai": "https://api.openai.com/v1", "anthropic": "https://api.anthropic.com"}
+
+        # 构建提供商列表
+        data["api_providers"] = []
+        for p in raw_providers:
+            ct = p.get("client_type", "openai")
+            raw_url = p.get("base_url", "").strip()
+            data["api_providers"].append({
+                "name": p.get("name", ""),
+                "base_url": raw_url if raw_url else _base_url_defaults.get(ct, ""),
+                "api_key": p.get("api_key", ""),
+                "client_type": ct,
+                "max_retry": 2,
+                "timeout": 30,
+                "retry_interval": 10,
+            })
+
+        # 构建模型列表 — name 由 "ProviderName/ModelId" 程序化生成
+        data["models"] = []
+        for m in raw_models:
+            model_id = m.get("model_id", "")
+            provider = m.get("api_provider", "")
+            data["models"].append({
+                "model_identifier": model_id,
+                "name": f"{provider}/{model_id}",
+                "api_provider": provider,
+                "price_in": 0.0,
+                "price_out": 0.0,
+                "max_context": 131072,
+            })
+
+        # 角色 → 任务映射（roles 中的值已经是 "ProviderName/ModelId" 格式的 name）
+        fallback = data["models"][0]["name"] if data["models"] else "OpenAI/gpt-4o"
+        main_name = roles.get("main", fallback)
+        coder_name = roles.get("coder", main_name)
+        researcher_name = roles.get("researcher", main_name)
+        reviewer_name = roles.get("reviewer", main_name)
+        title_name = roles.get("title", main_name)
+
+    else:
+        # 旧格式向后兼容
+        api_provider_data = wizard_config.get("api_provider", {})
+        provider_name = api_provider_data.get("name", "OpenAI")
+        client_type = api_provider_data.get("client_type", "openai")
+        models_map = api_provider_data.get("models", {})
+        _base_url_defaults = {"openai": "https://api.openai.com/v1", "anthropic": "https://api.anthropic.com"}
+        raw_base_url = api_provider_data.get("base_url", "").strip()
+        base_url = raw_base_url if raw_base_url else _base_url_defaults.get(client_type, "")
+
+        data["api_providers"] = [{
+            "name": provider_name, "base_url": base_url,
             "api_key": api_provider_data.get("api_key", ""),
-            "client_type": client_type,
-            "max_retry": 2,
-            "timeout": 30,
-            "retry_interval": 10,
-        }
-    ]
+            "client_type": client_type, "max_retry": 2, "timeout": 30, "retry_interval": 10,
+        }]
 
-    # 模型信息列表
-    data["models"] = []
-    for model_name in all_model_names:
-        data["models"].append({
-            "model_identifier": model_name,
-            "name": model_name,
-            "api_provider": provider_name,
-            "price_in": 0.0,
-            "price_out": 0.0,
-            "max_context": 131072,
-        })
+        main_id = models_map.get("main", "gpt-4o")
+        for mid in dict.fromkeys([
+            main_id,
+            models_map.get("coder", main_id),
+            models_map.get("researcher", main_id),
+            models_map.get("reviewer", main_id),
+            models_map.get("title", main_id),
+        ]):
+            data["models"].append({
+                "model_identifier": mid, "name": f"{provider_name}/{mid}",
+                "api_provider": provider_name, "price_in": 0.0, "price_out": 0.0, "max_context": 131072,
+            })
 
-    # 任务配置
-    # 每个 task 的默认 profile（从 model_profiles 或使用默认值）
+        def _n(mid: str) -> str:
+            return f"{provider_name}/{mid}"
+
+        main_name = _n(main_id)
+        coder_name = _n(models_map.get("coder", main_id))
+        researcher_name = _n(models_map.get("researcher", main_id))
+        reviewer_name = _n(models_map.get("reviewer", main_id))
+        title_name = _n(models_map.get("title", main_id))
+        fallback = main_name
+
+    # ── 任务配置 ──────────────────────────────────────────────────
     default_profile = model_profiles[0] if model_profiles else {}
 
     def _make_task(model_name: str, profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -200,21 +240,20 @@ def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
         }
 
     data["model_tasks"] = {
-        "coding_main": _make_task(main_model),
-        "coding_coder": _make_task(coder_model),
-        "coding_researcher": _make_task(researcher_model),
-        "coding_reviewer": _make_task(reviewer_model),
-        "coding_title": _make_task(title_model),
-        # 保留默认任务（不会被 coding_agent 使用，但保证 model.toml 完整性）
-        "utils": _make_task(main_model),
-        "utils_small": _make_task(main_model),
-        "actor": _make_task(main_model),
-        "sub_actor": _make_task(main_model),
-        "vlm": _make_task(main_model),
-        "voice": _make_task(main_model),
-        "video": _make_task(main_model),
-        "tool_use": _make_task(main_model),
-        "embedding": {"model_list": [main_model], "max_tokens": 800, "temperature": 0.7, "concurrency_count": 1, "embedding_dimension": 1024},
+        "coding_main": _make_task(main_name),
+        "coding_coder": _make_task(coder_name),
+        "coding_researcher": _make_task(researcher_name),
+        "coding_reviewer": _make_task(reviewer_name),
+        "coding_title": _make_task(title_name),
+        "utils": _make_task(main_name),
+        "utils_small": _make_task(main_name),
+        "actor": _make_task(main_name),
+        "sub_actor": _make_task(main_name),
+        "vlm": _make_task(main_name),
+        "voice": _make_task(main_name),
+        "video": _make_task(main_name),
+        "tool_use": _make_task(main_name),
+        "embedding": {"model_list": [main_name], "max_tokens": 800, "temperature": 0.7, "concurrency_count": 1, "embedding_dimension": 1024},
     }
 
     toml_content = _render_toml_with_signature(ModelConfig, data)
@@ -222,8 +261,8 @@ def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
     path.write_text(toml_content, encoding="utf-8")
 
 
-def _generate_mcp_toml(path: Path) -> None:
-    """生成 mcp.toml — 预置 fetch 和 bing-search MCP 服务器。"""
+def _generate_mcp_toml(wizard_config: dict[str, Any], path: Path) -> None:
+    """生成 mcp.toml — 预置 fetch 和 bing-search，并合并用户在向导中配置的 MCP 服务器。"""
     from src.core.config.mcp_config import MCPConfig
     from src.kernel.config.core import _render_toml_with_signature
 
@@ -247,12 +286,41 @@ def _generate_mcp_toml(path: Path) -> None:
         },
     }
 
+    # 合并用户在向导中配置的 MCP 服务器（覆盖同名预设）
+    user_mcp_servers = wizard_config.get("mcp_servers", [])
+    for server in user_mcp_servers:
+        if not server.get("name") or not server.get("command"):
+            continue
+        if server.get("enabled") is False:
+            continue
+        data["mcp"]["stdio_servers"][server["name"]] = {
+            "command": server["command"],
+            "args": server.get("args", []),
+            "env": server.get("env", {}),
+            "instructions": server.get("instructions", ""),
+            "defer_loading": False,
+        }
+
     toml_content = _render_toml_with_signature(MCPConfig, data)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(toml_content, encoding="utf-8")
 
 
-def _generate_coding_agent_config(wizard_config: dict[str, Any], path: Path) -> None:
+def _get_all_mcp_server_names(wizard_config: dict[str, Any]) -> list[str]:
+    """汇总所有 MCP 服务器名称（预设 + 用户配置），用于 coding_agent 的 MCP 引用。"""
+    server_names = {"fetch", "bing-search"}  # 预设服务器
+    for server in wizard_config.get("mcp_servers", []):
+        name = server.get("name", "").strip()
+        if name and server.get("enabled", True):
+            server_names.add(name)
+    return sorted(server_names)
+
+
+def _generate_coding_agent_config(
+    wizard_config: dict[str, Any],
+    mcp_server_names: list[str],
+    path: Path,
+) -> None:
     """生成 plugins/coding_agent/config.toml。"""
     from plugins.coding_agent.config import CodingAgentConfig, CoderModelProfile
     from src.kernel.config.core import _render_toml_with_signature
@@ -270,10 +338,22 @@ def _generate_coding_agent_config(wizard_config: dict[str, Any], path: Path) -> 
     # 模型任务名保持默认
     # coding_main, coding_coder, coding_researcher, coding_reviewer, coding_title
 
-    # MCP 服务器 — 预置 fetch 和 bing-search
-    data["mcp"]["main_mcp_servers"] = ["fetch", "bing-search"]
-    data["mcp"]["coder_mcp_servers"] = ["fetch", "bing-search"]
-    data["mcp"]["researcher_mcp_servers"] = ["fetch", "bing-search"]
+    # MCP 服务器 — 使用所有可用的服务器名（预设 + 用户配置）
+    data["mcp"]["main_mcp_servers"] = list(mcp_server_names)
+    data["mcp"]["coder_mcp_servers"] = list(mcp_server_names)
+    data["mcp"]["researcher_mcp_servers"] = list(mcp_server_names)
+
+    # 模型名统一使用 "ProviderName/ModelId" 格式，与 model.toml 中的 name 一致
+    if "roles" in wizard_config:
+        # 新格式：roles.main 已经是 "ProviderName/ModelId"
+        main_model_name = wizard_config["roles"].get("main", "OpenAI/gpt-4o")
+    else:
+        # 旧格式兼容
+        api_provider = wizard_config.get("api_provider", {})
+        provider_name = api_provider.get("name", "OpenAI")
+        models_map = api_provider.get("models", {})
+        main_model_id = models_map.get("main", "gpt-4o")
+        main_model_name = f"{provider_name}/{main_model_id}"
 
     # 模型 Profile 列表
     if model_profiles:
@@ -288,14 +368,11 @@ def _generate_coding_agent_config(wizard_config: dict[str, Any], path: Path) -> 
                 "max_tokens": mp.get("max_tokens"),
             })
     else:
-        # 默认 profile
-        api_provider = wizard_config.get("api_provider", {})
-        models_map = api_provider.get("models", {})
-        main_model = models_map.get("main", "gpt-4o")
+        # 默认 profile — 引用新的 model name 格式
         data["model_profiles"] = [
             {
                 "profile_name": "Default",
-                "model_name": main_model,
+                "model_name": main_model_name,
                 "tags": ["通用"],
                 "description": "默认模型配置",
                 "temperature": 0.5,

@@ -142,7 +142,7 @@ class CoreConfig(ConfigBase):
             step=10.0,
         )
         stream_step_timeout: float = Field(
-            default=90.0,
+            default=0,
             description=(
                 "单次聊天流步进超时时间（秒），用于保护 chatter 内部工具调用或外部 await 卡死；"
                 "设为 0 或负数可禁用该保护。"
@@ -154,7 +154,7 @@ class CoreConfig(ConfigBase):
             hint="设为 0 禁用保护",
         )
         message_buffer_window: float = Field(
-            default=8.0,
+            default=0,
             description=(
                 "消息缓冲窗口（秒）。收到新消息后，在此时间窗口内的 Tick 将被跳过，"
                 "以等待用户可能发出的连续消息合并处理。设为 0 可禁用此功能。"
@@ -166,7 +166,7 @@ class CoreConfig(ConfigBase):
             hint="等待连续消息合并的时间窗口",
         )
         message_buffer_max_skip: int = Field(
-            default=3,
+            default=0,
             description=(
                 "消息缓冲最多连续跳过的 Tick 次数上限。"
                 "防止群聊高压环境下因消息持续涌入导致 Tick 始终被跳过、Bot 无法响应。"
