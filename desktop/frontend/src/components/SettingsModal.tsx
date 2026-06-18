@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Cpu, Network, RefreshCw, Plus, Trash2, Settings as SettingsIcon } from 'lucide-react';
+import { User, Cpu, Network, RefreshCw, Plus, Trash2, Settings as SettingsIcon, Info } from 'lucide-react';
 
 interface SettingsModalProps {
   port: number;
@@ -13,6 +13,14 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [version, setVersion] = useState<Record<string, string> | null>(null);
+
+  useEffect(() => {
+    fetch(`http://127.0.0.1:${port}/api/version`)
+      .then(res => res.json())
+      .then(data => setVersion(data))
+      .catch(() => {});
+  }, [port]);
 
   useEffect(() => {
     fetch(`http://127.0.0.1:${port}/api/settings`)
@@ -122,6 +130,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
     { id: 'models', label: '模型与 API', icon: Cpu },
     { id: 'mcp', label: 'MCP 服务器', icon: Network },
     { id: 'advanced', label: '高级设置', icon: SettingsIcon },
+    { id: 'about', label: '关于', icon: Info },
   ];
 
   return (
@@ -420,6 +429,34 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
                       <input type="number" value={String(config?.model_profiles?.[0]?.max_tokens || 16384)} onChange={(e) => updateNestedConfig(['model_profiles', '0', 'max_tokens'], parseInt(e.target.value))} className="w-full px-3 py-1.5 border border-gray-300 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-950 text-sm focus:ring-1 focus:ring-blue-500 outline-none font-mono" />
                     </div>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'about' && (
+              <div className="space-y-5 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div>
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-1">关于 MoFox Code</h2>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">版本信息与组件清单</p>
+                </div>
+                <div className="bg-gray-50 dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <tbody>
+                      {[
+                        { label: 'MoFox Code Desktop', key: 'desktop' },
+                        { label: 'Neo-MoFox 框架', key: 'framework' },
+                        { label: 'coding_agent 插件', key: 'coding_agent' },
+                        { label: 'coding_agent_webui 插件', key: 'coding_agent_webui' },
+                      ].map(({ label, key }) => (
+                        <tr key={key} className="border-b border-gray-200 dark:border-gray-800 last:border-b-0">
+                          <td className="px-4 py-3 text-gray-700 dark:text-gray-300 font-medium">{label}</td>
+                          <td className="px-4 py-3 text-gray-500 dark:text-gray-400 font-mono text-xs">
+                            {version?.[key] ?? <RefreshCw className="animate-spin inline w-3 h-3" />}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             )}
