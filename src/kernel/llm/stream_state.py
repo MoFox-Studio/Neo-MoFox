@@ -24,6 +24,7 @@ class StreamReductionResult:
     reasoning_parts: list[ReasoningText]
     call_list: list[ToolCall]
     usage: dict[str, Any] | None
+    stop_reason: str | None = None
     error: Exception | None = None
 
 
@@ -36,6 +37,7 @@ class LLMStreamReducer:
         self._tool_acc = _ToolCallAccumulator()
         self._reasoning_acc = _ReasoningBlockAccumulator()
         self._usage: dict[str, Any] | None = None
+        self._stop_reason: str | None = None
 
     def apply(self, event: StreamEvent) -> str | None:
         """应用一个流事件，并返回其中产生的文本增量。"""
@@ -54,6 +56,10 @@ class LLMStreamReducer:
             self._tool_acc.apply(event)
         if event.usage:
             self._usage = dict(event.usage)
+        if event.stop_reason:
+            self._stop_reason = event.stop_reason
+        if event.finish_reason:
+            self._stop_reason = event.finish_reason
         return text_delta
 
     def finalize(self, error: Exception | None = None) -> StreamReductionResult:
@@ -71,6 +77,7 @@ class LLMStreamReducer:
             reasoning_parts=reasoning_parts,
             call_list=self._tool_acc.finalize(),
             usage=self._usage,
+            stop_reason=self._stop_reason,
             error=error,
         )
 
@@ -146,6 +153,7 @@ class _ReasoningBlockAccumulator:
         self._current_type: str | None = None
         self._current_text: list[str] = []
         self._current_signature: str | None = None
+        self._current_redacted_data: str | None = None
         self._blocks: list[ReasoningText] = []
 
     def apply(self, event: StreamEvent) -> None:
@@ -155,6 +163,7 @@ class _ReasoningBlockAccumulator:
             self._current_type = event.reasoning_block_type
             self._current_text = []
             self._current_signature = None
+            self._current_redacted_data = event.reasoning_redacted_data
 
         if event.reasoning_delta:
             if self._current_type is None:
@@ -185,8 +194,8 @@ class _ReasoningBlockAccumulator:
                     signature=self._current_signature,
                 )
             )
-        elif self._current_type == "redacted_thinking" and self._current_signature:
-            blocks.append(ReasoningText("", redacted_data=self._current_signature))
+        elif self._current_type == "redacted_thinking" and self._current_redacted_data:
+            blocks.append(ReasoningText("", redacted_data=self._current_redacted_data))
         return blocks
 
     def _flush_current(self) -> None:
@@ -199,9 +208,10 @@ class _ReasoningBlockAccumulator:
                         signature=self._current_signature,
                     )
                 )
-        elif self._current_type == "redacted_thinking" and self._current_signature:
-            self._blocks.append(ReasoningText("", redacted_data=self._current_signature))
+        elif self._current_type == "redacted_thinking" and self._current_redacted_data:
+            self._blocks.append(ReasoningText("", redacted_data=self._current_redacted_data))
 
         self._current_type = None
         self._current_text = []
         self._current_signature = None
+        self._current_redacted_data = None

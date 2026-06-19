@@ -18,8 +18,9 @@ from src.kernel.llm.context import LLMContextManager
 from src.kernel.llm.model_client.base import StreamEvent
 from src.kernel.llm.payload import LLMPayload, Text, ToolCall, ToolResult
 from src.kernel.llm.request import LLMRequest
-from src.kernel.llm.response import LLMResponse, _ToolCallAccumulator
+from src.kernel.llm.response import LLMResponse
 from src.kernel.llm.roles import ROLE
+from src.kernel.llm.stream_state import _ToolCallAccumulator
 
 
 def dummy_model_set():

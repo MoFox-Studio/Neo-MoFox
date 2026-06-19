@@ -141,7 +141,6 @@ class TestPayloadsToAnthropicMessages:
                     "type": "tool_result",
                     "content": '{"temp": 23}',
                     "tool_use_id": "toolu_1",
-                    "tool_name": "get_weather",
                 }
             ],
         }
@@ -207,8 +206,8 @@ def test_convert_assistant_preserves_redacted_thinking_block() -> None:
     ]
 
 
-def test_convert_assistant_after_tool_result_synthesizes_missing_thinking() -> None:
-    """紧随 TOOL_RESULT 的 assistant 若缺少 reasoning block，应自动用文本补 thinking。"""
+def test_convert_assistant_after_tool_result_no_synthesized_thinking() -> None:
+    """紧随 TOOL_RESULT 的 assistant 若缺少 reasoning block，不应伪造 thinking。"""
     payloads = [
         LLMPayload(
             ROLE.ASSISTANT,
@@ -226,7 +225,6 @@ def test_convert_assistant_after_tool_result_synthesizes_missing_thinking() -> N
     assert messages[2] == {
         "role": "assistant",
         "content": [
-            {"type": "thinking", "thinking": "__SUSPEND__"},
             {"type": "text", "text": "__SUSPEND__"},
         ],
     }
@@ -424,6 +422,7 @@ async def test_create_stream_emits_text_reasoning_and_tool_deltas(monkeypatch: p
         ),
         SimpleNamespace(
             type="message_delta",
+            delta=SimpleNamespace(stop_reason="end_turn"),
             usage=SimpleNamespace(output_tokens=120),
         ),
         SimpleNamespace(type="message_stop"),
@@ -467,5 +466,74 @@ async def test_create_stream_emits_text_reasoning_and_tool_deltas(monkeypatch: p
     assert usage_events[0].usage["prompt_tokens"] == 200
     assert usage_events[0].usage["completion_tokens"] == 120
     assert usage_events[0].usage["total_tokens"] == 320
+    # 验证 message_delta 产出的 stop_reason
+    assert usage_events[0].stop_reason == "end_turn"
     stream_params = messages_api.stream_calls[0]
     assert stream_params["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+
+@pytest.mark.asyncio
+async def test_create_stream_roundtrips_redacted_thinking(monkeypatch: pytest.MonkeyPatch) -> None:
+    """redacted_thinking block 的 data 字段应通过 reasoning_redacted_data 正确传递到 StreamEvent。"""
+    events = [
+        SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(usage=SimpleNamespace(input_tokens=100)),
+        ),
+        SimpleNamespace(
+            type="content_block_start",
+            index=0,
+            content_block=SimpleNamespace(type="redacted_thinking", data="opaque-redacted-blob"),
+        ),
+        SimpleNamespace(
+            type="content_block_start",
+            index=1,
+            content_block=SimpleNamespace(type="text", text=""),
+        ),
+        SimpleNamespace(
+            type="content_block_delta",
+            index=1,
+            delta=SimpleNamespace(type="text_delta", text="visible text"),
+        ),
+        SimpleNamespace(
+            type="message_delta",
+            delta=SimpleNamespace(stop_reason="end_turn"),
+            usage=SimpleNamespace(output_tokens=50),
+        ),
+        SimpleNamespace(type="message_stop"),
+    ]
+    messages_api = _FakeMessagesAPI(stream_events=events)
+    fake_client = _FakeClient(messages_api)
+    client = AnthropicChatClient()
+    monkeypatch.setattr(client, "_get_client", lambda **_: fake_client)
+
+    message, tool_calls, stream_iter, reasoning, usage = await client.create(
+        model_name="claude-sonnet-4-6",
+        payloads=[LLMPayload(ROLE.USER, Text("hello"))],
+        tools=[],
+        request_name="redacted-test",
+        model_set={
+            "api_key": "sk-ant-test",
+            "max_tokens": 256,
+            "extra_params": {"thinking": {"type": "enabled", "budget_tokens": 5000}},
+        },
+        stream=True,
+    )
+
+    assert stream_iter is not None
+    collected = [event async for event in stream_iter]
+
+    # redacted_thinking block 应携带 reasoning_redacted_data
+    redacted_events = [e for e in collected if e.reasoning_block_type == "redacted_thinking"]
+    assert len(redacted_events) == 1
+    assert redacted_events[0].reasoning_redacted_data == "opaque-redacted-blob"
+
+    # text_delta 正常传递
+    text_events = [e for e in collected if e.text_delta]
+    assert len(text_events) == 1
+    assert text_events[0].text_delta == "visible text"
+
+    # stop_reason 正常传递
+    stop_events = [e for e in collected if e.stop_reason is not None]
+    assert len(stop_events) == 1
+    assert stop_events[0].stop_reason == "end_turn"

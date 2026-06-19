@@ -118,7 +118,8 @@ async def test_response_preserves_structured_reasoning_blocks_in_payload() -> No
     assert assistant_payload.content[0] == ReasoningText("step ", signature="sig_1")
 
 
-def test_add_payload_appends_current_response_before_tool_result() -> None:
+def test_add_payload_appends_tool_result_after_response_payload() -> None:
+    """测试把 tool_result 追加到已写回上下文的 assistant payload 之后。"""
     req = LLMRequest(dummy_model_set(), request_name="t")
     resp = LLMResponse(
         _stream=None,
@@ -130,6 +131,9 @@ def test_add_payload_appends_current_response_before_tool_result() -> None:
         reasoning_parts=[ReasoningText("step ", signature="sig_1")],
         call_list=[ToolCall(id="toolu_1", name="demo_tool", args={})],
     )
+
+    # 先把当前响应内容写回上下文，再追加 tool_result，避免上下文序列校验失败。
+    resp._append_current_response_payload()
 
     resp.add_payload(
         LLMPayload(
@@ -183,3 +187,49 @@ async def test_response_send_inherits_upper_stream_metadata() -> None:
 
     assert next_resp.message == "done"
     assert captured["meta_data"] == {"trace_id": "trace-1", "stream_id": "stream-789"}
+
+
+def test_response_reasoning_only_state():
+    """测试 LLMResponse 能正确识别 reasoning-only 状态。"""
+    req = LLMRequest(dummy_model_set(), request_name="t")
+    resp = LLMResponse(
+        _stream=None,
+        _upper=req,
+        _auto_append_response=False,
+        payloads=[LLMPayload(ROLE.USER, Text("hi"))],
+        model_set=req.model_set,
+        message="",
+        call_list=[],
+        reasoning_content="thinking...",
+    )
+
+    assert resp.has_any_model_output()
+    assert not resp.has_visible_or_actionable_output()
+    assert resp.is_reasoning_only()
+
+    resp_with_text = LLMResponse(
+        _stream=None,
+        _upper=req,
+        _auto_append_response=False,
+        payloads=[LLMPayload(ROLE.USER, Text("hi"))],
+        model_set=req.model_set,
+        message="answer",
+        call_list=[],
+        reasoning_content="thinking...",
+    )
+    assert not resp_with_text.is_reasoning_only()
+    assert resp_with_text.has_visible_or_actionable_output()
+
+    empty_resp = LLMResponse(
+        _stream=None,
+        _upper=req,
+        _auto_append_response=False,
+        payloads=[LLMPayload(ROLE.USER, Text("hi"))],
+        model_set=req.model_set,
+        message="",
+        call_list=[],
+        reasoning_content=None,
+        reasoning_parts=[],
+    )
+    assert not empty_resp.has_any_model_output()
+    assert not empty_resp.is_reasoning_only()

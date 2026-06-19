@@ -102,6 +102,11 @@ class Bot:
         self.load_results: dict[str, bool] = {}
         self._telemetry_log_unsubscribe: Any | None = None
 
+        # DNS 专用线程池与原始 loop 方法（用于关闭时恢复）
+        self._dns_executor: ThreadPoolExecutor | None = None
+        self._original_getaddrinfo: Any | None = None
+        self._original_getnameinfo: Any | None = None
+
         # 统计数据
         self._stats: dict[str, int | bool | dict] = {
             "plugins_loaded": 0,
@@ -196,19 +201,23 @@ class Bot:
         """优化异步网络运行时：线程池与 DNS 预解析。"""
         loop = asyncio.get_running_loop()
 
+        # 保存原始方法，供 shutdown 时恢复
+        self._original_getaddrinfo = loop.getaddrinfo
+        self._original_getnameinfo = loop.getnameinfo
+
         # 默认线程池：承载 to_thread / run_in_executor(None, ...)
         loop.set_default_executor(ThreadPoolExecutor(max_workers=192))
 
         # DNS 专用线程池：避免 getaddrinfo 被通用任务挤占
-        dns_executor = ThreadPoolExecutor(max_workers=16)
+        self._dns_executor = ThreadPoolExecutor(max_workers=16)
 
         async def _patched_getaddrinfo(host, port, *args, **kwargs):
             func = partial(socket.getaddrinfo, host, port, *args, **kwargs)
-            return await loop.run_in_executor(dns_executor, func)
+            return await loop.run_in_executor(self._dns_executor, func)
 
         async def _patched_getnameinfo(sockaddr, flags=0):
             func = partial(socket.getnameinfo, sockaddr, flags)
-            return await loop.run_in_executor(dns_executor, func)
+            return await loop.run_in_executor(self._dns_executor, func)
 
         loop.getaddrinfo = _patched_getaddrinfo  # type: ignore[method-assign]
         loop.getnameinfo = _patched_getnameinfo  # type: ignore[method-assign]
@@ -1164,6 +1173,33 @@ class Bot:
             from src.kernel.llm.stats import close_llm_stats_db
             await close_llm_stats_db()
 
+            # 10.6.1 停止 StreamLoopManager
+            from src.core.transport.distribution.stream_loop_manager import (
+                get_stream_loop_manager,
+            )
+            stream_loop_manager = get_stream_loop_manager()
+            if stream_loop_manager.is_running:
+                await stream_loop_manager.stop()
+
+            # 10.6.2 恢复 DNS patch 并关闭 DNS 线程池
+            loop = asyncio.get_running_loop()
+            if self._original_getaddrinfo is not None:
+                loop.getaddrinfo = self._original_getaddrinfo  # type: ignore[method-assign]
+                self._original_getaddrinfo = None
+            if self._original_getnameinfo is not None:
+                loop.getnameinfo = self._original_getnameinfo  # type: ignore[method-assign]
+                self._original_getnameinfo = None
+
+            if self._dns_executor is not None:
+                self._dns_executor.shutdown(wait=False, cancel_futures=True)
+                self._dns_executor = None
+
+            # 10.6.3 显式关闭默认线程池
+            default_executor = loop._default_executor  # type: ignore[attr-defined]
+            if default_executor is not None:
+                default_executor.shutdown(wait=False, cancel_futures=True)
+                loop._default_executor = None  # type: ignore[attr-defined]
+
             await self._record_runtime_snapshot(event_name="shutdown_complete")
 
             if callable(self._telemetry_log_unsubscribe):
@@ -1178,6 +1214,13 @@ class Bot:
             from src.kernel.logger import shutdown_logger_system
 
             shutdown_logger_system()
+
+            # 12. 取消并等待所有剩余 asyncio 任务
+            remaining = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            if remaining:
+                for t in remaining:
+                    t.cancel()
+                await asyncio.wait(remaining, timeout=5.0)
 
             self.ui.display_success("关闭完成")
 

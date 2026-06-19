@@ -304,7 +304,7 @@ class TestSchemaNormalization:
 
     def test_normalize_array_and_remove_none_default(self):
         """测试补齐 array.items 并移除 default=None。"""
-        from src.kernel.llm.model_client.openai_client import _normalize_schema_for_grammar
+        from src.kernel.llm.model_client.shared import normalize_schema_for_grammar
 
         schema = {
             "type": "object",
@@ -316,7 +316,7 @@ class TestSchemaNormalization:
             },
         }
 
-        _normalize_schema_for_grammar(schema)
+        normalize_schema_for_grammar(schema)
         tags = schema["properties"]["tags"]
         assert "default" not in tags
         assert tags["items"]["type"] == "string"
@@ -546,7 +546,7 @@ class TestOpenAIChatClient:
             "extra_params": {},
         }
 
-        message, tool_calls, stream_iter, reasoning_content = await client.create(
+        message, tool_calls, stream_iter, reasoning_content, usage = await client.create(
             model_name="gpt-4",
             payloads=payloads,
             tools=[],
@@ -559,6 +559,7 @@ class TestOpenAIChatClient:
         assert tool_calls == []
         assert stream_iter is None
         assert reasoning_content is None
+        assert usage is not None
 
     @pytest.mark.asyncio
     async def test_create_with_tool_calls(self):
@@ -596,7 +597,7 @@ class TestOpenAIChatClient:
             "extra_params": {},
         }
 
-        message, tool_calls, stream_iter, reasoning_content = await client.create(
+        message, tool_calls, stream_iter, reasoning_content, usage = await client.create(
             model_name="gpt-4",
             payloads=payloads,
             tools=[],
@@ -611,6 +612,8 @@ class TestOpenAIChatClient:
         assert tool_calls[0]["id"] == "call_123"
         assert tool_calls[0]["name"] == "calculator"
         assert tool_calls[0]["args"] == {"a": 1, "b": 2}
+        assert reasoning_content is None
+        assert usage is not None
         assert reasoning_content is None
 
     @pytest.mark.asyncio
@@ -867,7 +870,10 @@ class TestOpenAIChatClient:
             "timeout": None,
             "max_tokens": None,
             "temperature": None,
-            "extra_params": {"enable_thinking": True},
+            "extra_params": {
+                "enable_thinking": True,
+                "reasoning_history_mode": "deepseek",
+            },
         }
 
         await client.create(
@@ -889,7 +895,7 @@ class TestOpenAIChatClient:
 
     @pytest.mark.asyncio
     async def test_create_backfills_reasoning_content_when_history_already_contains_it(self):
-        """测试当上下文中已有 reasoning_content 时，会为其他 assistant 历史回填。"""
+        """测试当上下文中已有 reasoning_content 并开启 auto 模式时，会为其他 assistant 历史回填。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
 
         mock_completion = MagicMock()
@@ -925,7 +931,7 @@ class TestOpenAIChatClient:
             "timeout": None,
             "max_tokens": None,
             "temperature": None,
-            "extra_params": {},
+            "extra_params": {"reasoning_history_mode": "auto"},
         }
 
         await client.create(
@@ -1196,7 +1202,7 @@ class TestOpenAIChatClient:
             "extra_params": {},
         }
 
-        message, tool_calls, _, reasoning_content = await client.create(
+        message, tool_calls, _, reasoning_content, usage = await client.create(
             model_name="gpt-4",
             payloads=payloads,
             tools=[],
@@ -1216,6 +1222,7 @@ class TestOpenAIChatClient:
         assert len(tool_calls) == 1
         assert tool_calls[0]["name"] == "calculator"
         assert tool_calls[0]["args"] == {"a": 1}
+        assert usage is not None
         assert reasoning_content is None
 
     @pytest.mark.asyncio
@@ -1273,7 +1280,7 @@ class TestOpenAIChatClient:
             "extra_params": {},
         }
 
-        message, tool_calls, stream_iter, reasoning_content = await client.create(
+        message, tool_calls, stream_iter, reasoning_content, usage = await client.create(
             model_name="gpt-4",
             payloads=payloads,
             tools=[],
@@ -1286,10 +1293,245 @@ class TestOpenAIChatClient:
         assert tool_calls is None
         assert stream_iter is not None
         assert reasoning_content is None
+        assert usage is None
 
         event = await anext(stream_iter)
         assert event.text_delta == "hello"
 
         await cast(Any, stream_iter).aclose()
         assert fake_stream.closed is True
+
+
+class TestThinkingEnabled:
+    """测试 _thinking_enabled 对 reasoning 相关参数的识别。"""
+
+    def test_enable_thinking(self):
+        """测试 enable_thinking=True 被识别。"""
+        from src.kernel.llm.model_client.openai_client import _thinking_enabled
+
+        assert _thinking_enabled({"extra_params": {"enable_thinking": True}}) is True
+
+    def test_reasoning_effort_high(self):
+        """测试 reasoning_effort=high 被识别。"""
+        from src.kernel.llm.model_client.openai_client import _thinking_enabled
+
+        assert _thinking_enabled({"extra_params": {"reasoning_effort": "high"}}) is True
+
+    def test_reasoning_effort_medium(self):
+        """测试 reasoning_effort=medium 被识别。"""
+        from src.kernel.llm.model_client.openai_client import _thinking_enabled
+
+        assert _thinking_enabled({"extra_params": {"reasoning_effort": "medium"}}) is True
+
+    def test_reasoning_effort_none(self):
+        """测试 reasoning_effort=none 不开启 thinking。"""
+        from src.kernel.llm.model_client.openai_client import _thinking_enabled
+
+        assert _thinking_enabled({"extra_params": {"reasoning_effort": "none"}}) is False
+
+    def test_reasoning_dict_effort(self):
+        """测试 reasoning.effort 被识别。"""
+        from src.kernel.llm.model_client.openai_client import _thinking_enabled
+
+        assert _thinking_enabled({"extra_params": {"reasoning": {"effort": "high"}}}) is True
+
+    def test_no_extra_params(self):
+        """测试无额外参数时默认不开启。"""
+        from src.kernel.llm.model_client.openai_client import _thinking_enabled
+
+        assert _thinking_enabled({}) is False
+
+
+class TestReasoningHistoryMode:
+    """测试 reasoning_history_mode 对 reasoning_content 历史字段的控制。"""
+
+    @pytest.mark.asyncio
+    async def test_default_mode_strips_reasoning_content(self):
+        """默认 none 模式下应移除 assistant 历史中的 reasoning_content。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock()]
+        mock_completion.choices[0].message.content = "OK"
+        mock_completion.choices[0].message.tool_calls = None
+        mock_completion.usage = None
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [
+            LLMPayload(ROLE.USER, Text("Hi")),
+            LLMPayload(ROLE.ASSISTANT, [ReasoningText("think"), Text("answer")]),
+        ]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": None,
+            "timeout": None,
+            "max_tokens": None,
+            "temperature": None,
+            "extra_params": {},
+        }
+
+        await client.create(
+            model_name="gpt-4",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=False,
+        )
+
+        call_kwargs = mock_chat.completions.create.call_args.kwargs
+        messages = call_kwargs["messages"]
+        assert messages[1]["role"] == "assistant"
+        assert "reasoning_content" not in messages[1]
+
+    @pytest.mark.asyncio
+    async def test_deepseek_mode_keeps_and_backfills_reasoning_content(self):
+        """deepseek 模式下应保留并回填 assistant 历史的 reasoning_content。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock()]
+        mock_completion.choices[0].message.content = "OK"
+        mock_completion.choices[0].message.tool_calls = None
+        mock_completion.usage = None
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [
+            LLMPayload(ROLE.USER, Text("Hi")),
+            LLMPayload(ROLE.ASSISTANT, [ReasoningText("think"), Text("answer")]),
+            LLMPayload(ROLE.ASSISTANT, [Text("plain")]),
+        ]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": None,
+            "max_tokens": None,
+            "temperature": None,
+            "extra_params": {"reasoning_history_mode": "deepseek"},
+        }
+
+        await client.create(
+            model_name="deepseek-chat",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=False,
+        )
+
+        call_kwargs = mock_chat.completions.create.call_args.kwargs
+        messages = call_kwargs["messages"]
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["reasoning_content"] == "think"
+        assert messages[2]["role"] == "assistant"
+        assert messages[2]["reasoning_content"] == "plain"
+
+    @pytest.mark.asyncio
+    async def test_kimi_mode_backfills_reasoning_content(self):
+        """kimi 模式下同样会回填 assistant 历史的 reasoning_content。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock()]
+        mock_completion.choices[0].message.content = "OK"
+        mock_completion.choices[0].message.tool_calls = None
+        mock_completion.usage = None
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [
+            LLMPayload(ROLE.USER, Text("Hi")),
+            LLMPayload(ROLE.ASSISTANT, [Text("plain")]),
+        ]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": None,
+            "max_tokens": None,
+            "temperature": None,
+            "extra_params": {"reasoning_history_mode": "kimi"},
+        }
+
+        await client.create(
+            model_name="moonshotai/kimi-k2.5",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=False,
+        )
+
+        call_kwargs = mock_chat.completions.create.call_args.kwargs
+        messages = call_kwargs["messages"]
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["reasoning_content"] == "plain"
+
+
+@pytest.mark.asyncio
+async def test_create_keeps_stream_options_as_top_level_param():
+    """测试 stream_options 作为顶层参数传递，不会被塞进 extra_body。"""
+    from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+    mock_completion = MagicMock()
+    mock_completion.choices = [MagicMock()]
+    mock_completion.choices[0].message.content = "OK"
+    mock_completion.choices[0].message.tool_calls = None
+    mock_completion.usage = None
+
+    mock_chat = AsyncMock()
+    mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+    mock_openai_client = MagicMock()
+    mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+    client = OpenAIChatClient()
+    client._clients = {}
+    client._get_client = MagicMock(return_value=mock_openai_client)
+
+    payloads = [LLMPayload(ROLE.USER, Text("Hi"))]
+    model_set = {
+        "api_key": "test-key",
+        "base_url": None,
+        "timeout": None,
+        "max_tokens": None,
+        "temperature": None,
+        "extra_params": {"stream_options": {"include_usage": False}},
+    }
+
+    await client.create(
+        model_name="gpt-4",
+        payloads=payloads,
+        tools=[],
+        request_name="test",
+        model_set=model_set,
+        stream=False,
+    )
+
+    call_kwargs = mock_chat.completions.create.call_args.kwargs
+    assert call_kwargs["stream_options"] == {"include_usage": False}
+    assert "stream_options" not in call_kwargs.get("extra_body", {})
 

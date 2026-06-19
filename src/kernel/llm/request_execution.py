@@ -203,6 +203,10 @@ async def execute_request(
                 reasoning_parts=reasoning_parts,
                 call_list=[],
             )
+            # 保存原始 payloads 副本，供流式消费重试时恢复使用
+            resp._original_payloads = list(trimmed_payloads)
+            # 保存原始 payloads 副本，供流式消费重试时恢复使用
+            resp._original_payloads = list(trimmed_payloads)
 
             if tool_calls:
                 from .payload import ToolCall
