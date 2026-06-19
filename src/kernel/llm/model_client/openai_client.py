@@ -1110,7 +1110,9 @@ class OpenAIChatClient:
 
                 close_sync = getattr(stream_resp, "close", None)
                 if callable(close_sync):
-                    close_sync()
+                    maybe_awaitable = close_sync()
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
 
         return None, None, iter_events(), None, None
 
