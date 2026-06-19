@@ -1,0 +1,142 @@
+name: Build Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch/tag to build'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '22'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    name: Build Windows (NSIS + Portable)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || '' }}
+
+      # ── Toolchains ──────────────────────────────────
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: |
+            desktop/frontend/package-lock.json
+            plugins/coding_agent_webui/frontend/package-lock.json
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: true
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --locked
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      # ── Python deps ─────────────────────────────────
+
+      - name: Install Python dependencies
+        run: |
+          uv sync
+          uv pip install pyinstaller
+
+      # ── Frontend builds ─────────────────────────────
+
+      - name: Build WebUI frontend
+        working-directory: plugins/coding_agent_webui/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Tauri shell frontend deps
+        working-directory: desktop/frontend
+        run: npm ci
+
+      # ── PyInstaller backend ─────────────────────────
+
+      - name: PyInstaller build backend
+        run: >
+          uv run python -m PyInstaller desktop/mofox-backend.spec
+          --distpath desktop/dist
+          --workpath desktop/build
+          --clean
+
+      - name: Copy plugins to output root
+        run: |
+          robocopy desktop/dist/mofox-backend/_internal/plugins desktop/dist/mofox-backend/plugins /E /NFL /NDL /NJH /NJS
+          if ($LASTEXITCODE -ge 8) { exit $LASTEXITCODE }
+
+      # ── Tauri build ─────────────────────────────────
+      # beforeBuildCommand (cd ../frontend && npm run build) runs automatically
+
+      - name: Tauri build (NSIS)
+        id: tauri-build
+        continue-on-error: true
+        working-directory: desktop/tauri
+        run: cargo tauri build --bundles nsis
+
+      # ── Portable fallback ───────────────────────────
+      # Only runs if NSIS build fails
+
+      - name: Create portable package (fallback)
+        if: steps.tauri-build.outcome == 'failure'
+        run: |
+          $portableDir = "desktop/dist/MoFox-Code-portable"
+          if (Test-Path $portableDir) { Remove-Item -Recurse -Force $portableDir }
+          New-Item -ItemType Directory -Force -Path $portableDir
+          Copy-Item "desktop/tauri/target/release/mofox-code-desktop.exe" "$portableDir/"
+          robocopy desktop/dist/mofox-backend "$portableDir/mofox-backend" /E /NFL /NDL /NJH /NJS
+          Compress-Archive -Path "$portableDir" -DestinationPath "desktop/dist/MoFox-Code-portable.zip" -Force
+          echo "Portable package created: desktop/dist/MoFox-Code-portable.zip"
+
+      # ── Collect artifacts ───────────────────────────
+
+      - name: Upload NSIS installer artifact
+        if: steps.tauri-build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mofox-code-installer
+          path: desktop/tauri/target/release/bundle/nsis/*.exe
+          compression-level: 0
+
+      - name: Upload portable artifact
+        if: steps.tauri-build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mofox-code-portable
+          path: desktop/dist/MoFox-Code-portable.zip
+
+      # ── Release upload ──────────────────────────────
+
+      - name: Upload to Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/tauri/target/release/bundle/nsis/*.exe
+            desktop/dist/MoFox-Code-portable.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
