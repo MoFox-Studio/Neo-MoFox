@@ -39,6 +39,9 @@ def parse_configs(config_dir: str = "config") -> dict[str, Any]:
             "api_key": api_key if isinstance(api_key, str) else "",
             "base_url": p.get("base_url", ""),
             "client_type": p.get("client_type", "openai"),
+            "max_retry": p.get("max_retry", 2),
+            "timeout": p.get("timeout", 30),
+            "retry_interval": p.get("retry_interval", 10),
         })
 
     # ── Models ─────────────────────────────────
@@ -53,6 +56,13 @@ def parse_configs(config_dir: str = "config") -> dict[str, Any]:
             "model_id": m.get("model_identifier", ""),
             "api_provider": m.get("api_provider", api_providers[0]["name"] if api_providers else ""),
             "max_context": m.get("max_context", ""),
+            "price_in": m.get("price_in", 0.0),
+            "price_out": m.get("price_out", 0.0),
+            "cache_hit_price_in": m.get("cache_hit_price_in"),
+            "force_stream_mode": m.get("force_stream_mode", False),
+            "tool_call_compat": m.get("tool_call_compat", False),
+            "anti_truncation": m.get("anti_truncation", False),
+            "extra_params": m.get("extra_params", {}),
         })
 
     # ── Roles ──────────────────────────────────
@@ -138,4 +148,12 @@ def parse_configs(config_dir: str = "config") -> dict[str, Any]:
         },
         "mcp_servers": mcp_servers,
         "model_profiles": model_profiles,
+        "coding_agent": {
+            "tui_username": ca_data.get("ws", {}).get("tui_username", "User"),
+            "preferred_terminal": ca_data.get("console", {}).get("preferred_terminal", ""),
+            "default_timeout": ca_data.get("console", {}).get("default_timeout", 30),
+            "max_output_lines": ca_data.get("console", {}).get("max_output_lines", 200),
+            "cache_ttl_hours": ca_data.get("context", {}).get("cache_ttl_hours", 24),
+            "max_parallel_researchers": ca_data.get("context", {}).get("max_parallel_researchers", 6),
+        },
     }

@@ -1,7 +1,4 @@
 @echo off
-REM MoFox Code Desktop 构建脚本
-REM 用法: build.bat
-REM 前置条件: .venv 已配置，webui 前端已 npm install
 echo === Step 1: Build webui frontend ===
 cd /d %~dp0..\plugins\coding_agent_webui\frontend
 call npm run build

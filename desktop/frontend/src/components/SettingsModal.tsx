@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { User, Cpu, Network, RefreshCw, Plus, Trash2, Settings as SettingsIcon, Info } from 'lucide-react';
+import { User, Cpu, Network, RefreshCw, Plus, Trash2, Settings as SettingsIcon, Info, ChevronDown, ChevronRight } from 'lucide-react';
 
 interface SettingsModalProps {
   port: number;
@@ -14,6 +14,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [version, setVersion] = useState<Record<string, string> | null>(null);
+  const [expandedModel, setExpandedModel] = useState<number | null>(null);
 
   useEffect(() => {
     fetch(`http://127.0.0.1:${port}/api/version`)
@@ -101,7 +102,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
     });
   };
 
-  const updateModel = (index: number, field: string, value: string) => {
+  const updateModel = (index: number, field: string, value: any) => {
     setConfig((prev: any) => {
       const newConfig = { ...prev };
       newConfig.models[index][field] = value;
@@ -113,6 +114,17 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
     setConfig((prev: any) => {
       const newConfig = { ...prev };
       newConfig.mcp_servers[index][field] = value;
+      return newConfig;
+    });
+  };
+
+  const updateCodingAgent = (field: string, value: any) => {
+    setConfig((prev: any) => {
+      const newConfig = { ...prev };
+      if (!newConfig.coding_agent) {
+        newConfig.coding_agent = { tui_username: 'User', preferred_terminal: '', max_parallel_researchers: 6, cache_ttl_hours: 24 };
+      }
+      newConfig.coding_agent[field] = value;
       return newConfig;
     });
   };
@@ -270,31 +282,56 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
                     </button>
                   </div>
                   <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl shadow-sm overflow-hidden text-sm">
-                    <div className="grid grid-cols-12 bg-gray-50 dark:bg-gray-800/50 px-4 py-2 border-b border-gray-200 dark:border-gray-800 text-xs font-semibold text-gray-500 uppercase">
-                      <div className="col-span-5">模型 ID</div>
-                      <div className="col-span-4">服务商</div>
+                    <div className="grid grid-cols-13 bg-gray-50 dark:bg-gray-800/50 px-4 py-2 border-b border-gray-200 dark:border-gray-800 text-xs font-semibold text-gray-500 uppercase">
+                      <div className="col-span-1"></div>
+                      <div className="col-span-4">模型 ID</div>
+                      <div className="col-span-3">服务商</div>
                       <div className="col-span-2">最大上下文</div>
+                      <div className="col-span-2">价格 (入/出)</div>
                       <div className="col-span-1 text-right">操作</div>
                     </div>
                     {config?.models?.map((model: any, idx: number) => (
-                      <div key={idx} className="grid grid-cols-12 gap-3 px-4 py-2.5 items-center border-b border-gray-100 dark:border-gray-800 last:border-0 hover:bg-gray-50/50 dark:hover:bg-gray-800/30">
-                        <div className="col-span-5">
-                          <input type="text" value={model.model_id} onChange={(e) => updateModel(idx, 'model_id', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-300 dark:hover:border-gray-700 focus:border-blue-500 rounded bg-transparent outline-none transition-colors" placeholder="gpt-4o" />
+                      <React.Fragment key={idx}>
+                        <div className="grid grid-cols-13 gap-3 px-4 py-2.5 items-center border-b border-gray-100 dark:border-gray-800 hover:bg-gray-50/50 dark:hover:bg-gray-800/30">
+                          <div className="col-span-1">
+                            <button onClick={() => setExpandedModel(expandedModel === idx ? null : idx)} className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded transition-colors">
+                              {expandedModel === idx ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                            </button>
+                          </div>
+                          <div className="col-span-4">
+                            <input type="text" value={model.model_id} onChange={(e) => updateModel(idx, 'model_id', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-300 dark:hover:border-gray-700 focus:border-blue-500 rounded bg-transparent outline-none transition-colors" placeholder="gpt-4o" />
+                          </div>
+                          <div className="col-span-3">
+                            <select value={model.api_provider} onChange={(e) => updateModel(idx, 'api_provider', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-300 dark:hover:border-gray-700 focus:border-blue-500 rounded bg-transparent outline-none transition-colors">
+                              {config.api_providers?.map((p: any) => <option key={p.name} value={p.name}>{p.name}</option>)}
+                            </select>
+                          </div>
+                          <div className="col-span-2">
+                            <input type="text" value={model.max_context || ''} onChange={(e) => updateModel(idx, 'max_context', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-300 dark:hover:border-gray-700 focus:border-blue-500 rounded bg-transparent outline-none transition-colors" placeholder="如 128k" />
+                          </div>
+                          <div className="col-span-2 flex gap-2">
+                            <input type="text" value={model.price_in ?? ''} onChange={(e) => updateModel(idx, 'price_in', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-300 dark:hover:border-gray-700 focus:border-blue-500 rounded bg-transparent outline-none transition-colors" placeholder="入" />
+                            <input type="text" value={model.price_out ?? ''} onChange={(e) => updateModel(idx, 'price_out', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-300 dark:hover:border-gray-700 focus:border-blue-500 rounded bg-transparent outline-none transition-colors" placeholder="出" />
+                          </div>
+                          <div className="col-span-1 text-right">
+                            <button onClick={() => setConfig((prev: any) => { const newConfig = { ...prev }; newConfig.models.splice(idx, 1); return newConfig; })} className="p-1.5 text-gray-400 hover:text-red-500 rounded hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors">
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
                         </div>
-                        <div className="col-span-4">
-                          <select value={model.api_provider} onChange={(e) => updateModel(idx, 'api_provider', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-300 dark:hover:border-gray-700 focus:border-blue-500 rounded bg-transparent outline-none transition-colors">
-                            {config.api_providers?.map((p: any) => <option key={p.name} value={p.name}>{p.name}</option>)}
-                          </select>
-                        </div>
-                        <div className="col-span-2">
-                          <input type="text" value={model.max_context || ''} onChange={(e) => updateModel(idx, 'max_context', e.target.value)} className="w-full px-2 py-1 border border-transparent hover:border-gray-300 dark:hover:border-gray-700 focus:border-blue-500 rounded bg-transparent outline-none transition-colors" placeholder="如 128k" />
-                        </div>
-                        <div className="col-span-1 text-right">
-                          <button onClick={() => setConfig((prev: any) => { const newConfig = { ...prev }; newConfig.models.splice(idx, 1); return newConfig; })} className="p-1.5 text-gray-400 hover:text-red-500 rounded hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors">
-                            <Trash2 size={15} />
-                          </button>
-                        </div>
-                      </div>
+                        {expandedModel === idx && (
+                          <div className="px-10 py-3 bg-gray-50/50 dark:bg-gray-800/20 border-b border-gray-100 dark:border-gray-800 grid grid-cols-2 gap-4">
+                            <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+                              <input type="checkbox" checked={model.force_stream_mode === true} onChange={(e) => updateModel(idx, 'force_stream_mode', e.target.checked)} className="rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500" />
+                              强制流式模式
+                            </label>
+                            <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+                              <input type="checkbox" checked={model.tool_call_compat === true} onChange={(e) => updateModel(idx, 'tool_call_compat', e.target.checked)} className="rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500" />
+                              工具调用兼容
+                            </label>
+                          </div>
+                        )}
+                      </React.Fragment>
                     ))}
                   </div>
                 </div>
@@ -427,6 +464,38 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ port, onClose }) => {
                     </div>
                     <div className="w-64">
                       <input type="number" value={String(config?.model_profiles?.[0]?.max_tokens || 16384)} onChange={(e) => updateNestedConfig(['model_profiles', '0', 'max_tokens'], parseInt(e.target.value))} className="w-full px-3 py-1.5 border border-gray-300 dark:border-gray-700 rounded-md bg-gray-50 dark:bg-gray-950 text-sm focus:ring-1 focus:ring-blue-500 outline-none font-mono" />
+                    </div>
+                  </div>
+
+                  <div className="w-full h-px bg-gray-100 dark:bg-gray-800" />
+
+                  {/* Coding Agent 设置 */}
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">Coding Agent 设置</h3>
+                    <p className="text-[11px] text-gray-500 mb-4">配置内置编码助手插件的行为参数。</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-gray-700 dark:text-gray-300">用户称呼</label>
+                        <input type="text" value={config?.coding_agent?.tui_username || 'User'} onChange={(e) => updateCodingAgent('tui_username', e.target.value)} className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-gray-50 dark:bg-gray-950 focus:ring-1 focus:ring-blue-500 outline-none" placeholder="User" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-gray-700 dark:text-gray-300">首选终端环境</label>
+                        <select value={config?.coding_agent?.preferred_terminal || ''} onChange={(e) => updateCodingAgent('preferred_terminal', e.target.value)} className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-gray-50 dark:bg-gray-950 focus:ring-1 focus:ring-blue-500 outline-none">
+                          <option value="">自动检测</option>
+                          <option value="powershell">PowerShell 5</option>
+                          <option value="pwsh">PowerShell 7</option>
+                          <option value="cmd">CMD</option>
+                          <option value="bash">Bash</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-gray-700 dark:text-gray-300">最大并行研究员数</label>
+                        <input type="number" min={1} max={20} value={config?.coding_agent?.max_parallel_researchers || 6} onChange={(e) => updateCodingAgent('max_parallel_researchers', parseInt(e.target.value) || 6)} className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-gray-50 dark:bg-gray-950 focus:ring-1 focus:ring-blue-500 outline-none" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs font-medium text-gray-700 dark:text-gray-300">缓存有效期（小时）</label>
+                        <input type="number" min={1} max={720} value={config?.coding_agent?.cache_ttl_hours || 24} onChange={(e) => updateCodingAgent('cache_ttl_hours', parseInt(e.target.value) || 24)} className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-gray-50 dark:bg-gray-950 focus:ring-1 focus:ring-blue-500 outline-none" />
+                      </div>
                     </div>
                   </div>
                 </div>

@@ -161,9 +161,9 @@ def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
                 "base_url": raw_url if raw_url else _base_url_defaults.get(ct, ""),
                 "api_key": p.get("api_key", ""),
                 "client_type": ct,
-                "max_retry": 2,   # 向导默认值：合理的基础重试次数
-                "timeout": 30,    # 向导默认值：30秒超时，适配多数 API 响应时间
-                "retry_interval": 10,
+                "max_retry": p.get("max_retry", 2),
+                "timeout": p.get("timeout", 30),
+                "retry_interval": p.get("retry_interval", 10),
             })
 
         # 构建模型列表 — name 由 "ProviderName/ModelId" 程序化生成
@@ -175,9 +175,14 @@ def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
                 "model_identifier": model_id,
                 "name": f"{provider}/{model_id}",
                 "api_provider": provider,
-                "price_in": 0.0,
-                "price_out": 0.0,
+                "price_in": m.get("price_in", 0.0),
+                "price_out": m.get("price_out", 0.0),
+                "cache_hit_price_in": m.get("cache_hit_price_in"),
                 "max_context": m.get("max_context", 131072),
+                "force_stream_mode": m.get("force_stream_mode", False),
+                "tool_call_compat": m.get("tool_call_compat", False),
+                "anti_truncation": m.get("anti_truncation", False),
+                "extra_params": m.get("extra_params", {}),
             })
 
         # 角色 → 任务映射（roles 中的值已经是 "ProviderName/ModelId" 格式的 name）
@@ -202,7 +207,10 @@ def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
         data["api_providers"] = [{
             "name": provider_name, "base_url": base_url,
             "api_key": api_provider_data.get("api_key", ""),
-            "client_type": client_type, "max_retry": 2, "timeout": 30, "retry_interval": 10,
+            "client_type": client_type,
+            "max_retry": api_provider_data.get("max_retry", 2),
+            "timeout": api_provider_data.get("timeout", 30),
+            "retry_interval": api_provider_data.get("retry_interval", 10),
         }]
 
         main_id = models_map.get("main", "gpt-4o")
@@ -215,7 +223,14 @@ def _generate_model_toml(wizard_config: dict[str, Any], path: Path) -> None:
         ]):
             data["models"].append({
                 "model_identifier": mid, "name": f"{provider_name}/{mid}",
-                "api_provider": provider_name, "price_in": 0.0, "price_out": 0.0, "max_context": 131072,
+                "api_provider": provider_name,
+                "price_in": 0.0, "price_out": 0.0,
+                "cache_hit_price_in": None,
+                "max_context": 131072,
+                "force_stream_mode": False,
+                "tool_call_compat": False,
+                "anti_truncation": False,
+                "extra_params": {},
             })
 
         def _n(mid: str) -> str:
@@ -328,13 +343,21 @@ def _generate_coding_agent_config(
 
     data = CodingAgentConfig.default()
     model_profiles = wizard_config.get("model_profiles", [])
+    coding_agent = wizard_config.get("coding_agent", {})
 
     # WebSocket 配置
     data["ws"]["host"] = "127.0.0.1"
     data["ws"]["port"] = 8766
+    data["ws"]["tui_username"] = coding_agent.get("tui_username", "User")
 
-    # Console 工具 — 自动检测终端
-    data["console"]["preferred_terminal"] = ""
+    # Console 工具
+    data["console"]["preferred_terminal"] = coding_agent.get("preferred_terminal", "")
+    data["console"]["default_timeout"] = coding_agent.get("default_timeout", 30)
+    data["console"]["max_output_lines"] = coding_agent.get("max_output_lines", 200)
+
+    # Context 上下文管理
+    data["context"]["cache_ttl_hours"] = coding_agent.get("cache_ttl_hours", 24)
+    data["context"]["max_parallel_researchers"] = coding_agent.get("max_parallel_researchers", 6)
 
     # 模型任务名保持默认
     # coding_main, coding_coder, coding_researcher, coding_reviewer, coding_title

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ArrowRight, ArrowLeft, Check, Plus, Trash2, Sparkles, Loader2 } from 'lucide-react';
+import { ArrowRight, ArrowLeft, Check, Plus, Trash2, Sparkles, Loader2, User } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 const WindowControls = () => {
@@ -31,6 +31,9 @@ interface Provider {
   client_type: string;
   api_key: string;
   base_url: string;
+  max_retry?: number;
+  timeout?: number;
+  retry_interval?: number;
 }
 
 interface ModelEntry {
@@ -49,13 +52,15 @@ const BASE_URL_DEFAULTS: Record<string, string> = {
 /* ── 主组件 ────────────────────────────────────────────── */
 
 const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
-  const TOTAL_STEPS = 5;
+  const TOTAL_STEPS = 7;
   const steps = [
     { id: 1, title: '连接到 AI 世界', desc: '输入您的 API 凭据，以便我们可以调用大模型能力。' },
     { id: 2, title: '配置模型清单', desc: '添加你需要使用的具体模型，并关联对应的服务商。' },
     { id: 3, title: '分配角色职责', desc: '为不同的任务指定默认模型。' },
     { id: 4, title: '定制助手人格', desc: '赋予您的 AI 助手独特的名字、身份和性格。' },
-    { id: 5, title: '接入外部工具', desc: '连接至 MCP 获取额外的工具能力。' }
+    { id: 5, title: '接入外部工具', desc: '连接至 MCP 获取额外的工具能力。' },
+    { id: 6, title: '个性化设置', desc: '配置终端偏好、并行研究员数等内置插件参数。' },
+    { id: 7, title: '初次见面', desc: '让我们互相认识一下，建立更紧密的联系。' }
   ];
   const [step, setStep] = useState<number | 'completed'>(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -95,6 +100,12 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
 
   // Step 5 — MCP
   const [mcpServers, setMcpServers] = useState<Array<{ name: string; command: string; args: string }>>([]);
+
+  // Step 6 — Coding Agent (个性化设置)
+  const [tuiUsername, setTuiUsername] = useState("User");
+  const [preferredTerminal, setPreferredTerminal] = useState("");
+  const [maxParallelResearchers, setMaxParallelResearchers] = useState(6);
+  const [cacheTtlHours, setCacheTtlHours] = useState(24);
 
   /* ── 辅助 ────────────────────────────────────────────── */
 
@@ -218,6 +229,9 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
         client_type: (p.client_type ?? "openai") as "openai" | "anthropic",
         api_key: p.api_key ?? "",
         base_url: p.base_url ?? "",
+        max_retry: p.max_retry ?? 2,
+        timeout: p.timeout ?? 30,
+        retry_interval: p.retry_interval ?? 10,
       }));
       if (impProviders.length > 0) { setProviders(impProviders); setEditingProvider(0); }
 
@@ -258,6 +272,12 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
         args: Array.isArray(s.args) ? s.args.join(" ") : (s.args ?? ""),
       }));
       if (mcpList.length > 0) setMcpServers(mcpList);
+
+      const ca = d.coding_agent ?? {};
+      if (ca.tui_username) setTuiUsername(ca.tui_username);
+      if (ca.preferred_terminal !== undefined) setPreferredTerminal(ca.preferred_terminal);
+      if (ca.max_parallel_researchers) setMaxParallelResearchers(ca.max_parallel_researchers);
+      if (ca.cache_ttl_hours) setCacheTtlHours(ca.cache_ttl_hours);
 
       setImportSuccess(true);
     } catch (err: any) {
@@ -306,6 +326,9 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
         client_type: p.client_type,
         api_key: p.api_key.trim(),
         base_url: p.base_url.trim() || (BASE_URL_DEFAULTS[p.client_type] ?? ""),
+        max_retry: p.max_retry ?? 2,
+        timeout: p.timeout ?? 30,
+        retry_interval: p.retry_interval ?? 10,
       })),
       models: models.map((m) => ({
         model_id: m.model_id.trim(),
@@ -324,6 +347,14 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
       },
       model_profiles: [],
       mcp_servers: parsedMcp,
+      coding_agent: {
+        tui_username: tuiUsername.trim() || "User",
+        preferred_terminal: preferredTerminal,
+        max_parallel_researchers: maxParallelResearchers || 6,
+        cache_ttl_hours: cacheTtlHours || 24,
+        default_timeout: 30,
+        max_output_lines: 200,
+      },
     };
 
     try {
@@ -579,6 +610,26 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
                             <label className="text-xs font-semibold text-gray-900 dark:text-white">Base URL (选填)</label>
                             <input type="text" value={providers[editingProvider].base_url} onChange={(e) => updateProvider(editingProvider, { base_url: e.target.value })} className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg text-sm bg-white dark:bg-gray-950 font-mono focus:ring-2 focus:ring-blue-500/50 outline-none" placeholder="https://api.openai.com/v1" />
                           </div>
+
+                          <details className="mt-3 group">
+                            <summary className="text-xs font-semibold text-gray-500 dark:text-gray-400 cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition-colors select-none">
+                              高级设置
+                            </summary>
+                            <div className="grid grid-cols-3 gap-3 mt-3 pt-3 border-t border-gray-100 dark:border-gray-800/50">
+                              <div className="space-y-1.5">
+                                <label className="text-[11px] font-semibold text-gray-500 uppercase">最大重试</label>
+                                <input type="number" min={0} max={10} value={providers[editingProvider].max_retry ?? 2} onChange={(e) => updateProvider(editingProvider, { max_retry: parseInt(e.target.value) || 0 })} className="w-full px-2.5 py-1.5 border border-gray-300 dark:border-gray-700 rounded-md text-sm bg-white dark:bg-gray-950 focus:ring-1 focus:ring-blue-500 outline-none" />
+                              </div>
+                              <div className="space-y-1.5">
+                                <label className="text-[11px] font-semibold text-gray-500 uppercase">超时 (秒)</label>
+                                <input type="number" min={1} max={300} value={providers[editingProvider].timeout ?? 30} onChange={(e) => updateProvider(editingProvider, { timeout: parseInt(e.target.value) || 30 })} className="w-full px-2.5 py-1.5 border border-gray-300 dark:border-gray-700 rounded-md text-sm bg-white dark:bg-gray-950 focus:ring-1 focus:ring-blue-500 outline-none" />
+                              </div>
+                              <div className="space-y-1.5">
+                                <label className="text-[11px] font-semibold text-gray-500 uppercase">重试间隔 (秒)</label>
+                                <input type="number" min={0} max={120} value={providers[editingProvider].retry_interval ?? 10} onChange={(e) => updateProvider(editingProvider, { retry_interval: parseInt(e.target.value) || 0 })} className="w-full px-2.5 py-1.5 border border-gray-300 dark:border-gray-700 rounded-md text-sm bg-white dark:bg-gray-950 focus:ring-1 focus:ring-blue-500 outline-none" />
+                              </div>
+                            </div>
+                          </details>
                         </div>
                       )}
                     </div>
@@ -750,6 +801,59 @@ const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete, port }) => {
                   <button type="button" onClick={addMcp} className="w-full py-4 border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-xl text-sm font-medium text-gray-600 dark:text-gray-400 hover:border-blue-500 hover:text-blue-600 dark:hover:border-blue-500 dark:hover:text-blue-400 transition-colors flex items-center justify-center gap-2">
                     <Plus size={18} /> 添加 MCP 服务
                   </button>
+                </div>
+              )}
+
+              {/* ══ STEP 6: Coding Agent 个性化 ══ */}
+              {step === 6 && (
+                <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-500">
+                  <div className="space-y-2 mb-6">
+                    <p className="text-sm text-gray-500 dark:text-gray-400">请调整您的个人偏好和内置插件的行为参数。</p>
+                  </div>
+
+                  <div className="space-y-5">
+                    {/* 首选终端 */}
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium text-gray-700 dark:text-gray-300">首选终端环境</label>
+                      <select value={preferredTerminal} onChange={(e) => setPreferredTerminal(e.target.value)} className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500/50">
+                        <option value="">自动检测</option>
+                        <option value="powershell">PowerShell 5</option>
+                        <option value="pwsh">PowerShell 7</option>
+                        <option value="cmd">CMD</option>
+                        <option value="bash">Bash</option>
+                      </select>
+                      <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">执行终端命令时使用的 shell 类型。选择"自动检测"将根据系统自动选择。</p>
+                    </div>
+
+                    {/* 最大并行研究员数 */}
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium text-gray-700 dark:text-gray-300">最大并行研究员数</label>
+                      <input type="number" min={1} max={20} value={maxParallelResearchers} onChange={(e) => setMaxParallelResearchers(parseInt(e.target.value) || 1)} className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500/50" />
+                      <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">项目研究阶段同时运行的研究员数量上限。建议值：4-8。</p>
+                    </div>
+
+                    {/* 缓存有效期 */}
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium text-gray-700 dark:text-gray-300">项目理解缓存有效期（小时）</label>
+                      <input type="number" min={1} max={720} value={cacheTtlHours} onChange={(e) => setCacheTtlHours(parseInt(e.target.value) || 1)} className="w-full px-3 py-2 bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500/50" />
+                      <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">对项目结构和文件分析结果的缓存时间。建议值：24-72 小时。</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ══ STEP 7: 用户称呼 ══ */}
+              {step === 7 && (
+                <div className="flex flex-col items-center justify-center min-h-[300px] animate-in zoom-in-95 duration-700">
+                  <div className="w-20 h-20 mb-6 rounded-2xl bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800/50 flex items-center justify-center shadow-sm">
+                    <User size={36} className="text-blue-500 dark:text-blue-400" strokeWidth={1.5} />
+                  </div>
+                  <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-2 text-center">该如何称呼您？</h3>
+                  <p className="text-gray-500 dark:text-gray-400 text-sm mb-8 text-center max-w-sm">在未来的旅程中，我希望能用您喜欢的方式与您交流。</p>
+                  
+                  <div className="w-full max-w-sm relative">
+                    <input type="text" value={tuiUsername} onChange={(e) => setTuiUsername(e.target.value)} className="w-full px-4 py-3.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl text-center text-lg font-medium shadow-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all placeholder:text-gray-300 dark:placeholder:text-gray-700" placeholder="请输入您的名字或昵称..." autoFocus />
+                  </div>
                 </div>
               )}
             </div>
