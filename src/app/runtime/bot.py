@@ -1215,6 +1215,13 @@ class Bot:
 
             shutdown_logger_system()
 
+            # 12. 取消并等待所有剩余 asyncio 任务
+            remaining = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+            if remaining:
+                for t in remaining:
+                    t.cancel()
+                await asyncio.wait(remaining, timeout=5.0)
+
             self.ui.display_success("关闭完成")
 
         except Exception as e:
