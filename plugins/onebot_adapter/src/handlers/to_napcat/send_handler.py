@@ -73,8 +73,9 @@ class SendHandler:
         action: str | None = None
         id_name: str | None = None
         processed_message: list = []
+        is_group = bool(group_info and group_info.get("group_id"))
         try:
-            processed_message = await self.handle_seg_recursive(seg_data, user_info or {})
+            processed_message = await self.handle_seg_recursive(seg_data, user_info or {}, is_group=is_group)
         except Exception as e:
             logger.error(f"处理消息时发生错误: {e}")
             return None
@@ -232,7 +233,7 @@ class SendHandler:
             return 1 + max(self.get_level(seg) for seg in seg_data.get("data", []) if isinstance(seg, dict))
         return 1
 
-    async def handle_seg_recursive(self, seg_data: SegPayload, user_info: UserInfoPayload) -> list:
+    async def handle_seg_recursive(self, seg_data: SegPayload, user_info: UserInfoPayload, *, is_group: bool = True) -> list:
         payload: list = []
         if seg_data.get("type") == "seglist":
             if not seg_data.get("data"):
@@ -240,12 +241,12 @@ class SendHandler:
             for seg in seg_data["data"]:
                 if not isinstance(seg, dict):
                     continue
-                payload = await self.process_message_by_type(seg, payload, user_info)
+                payload = await self.process_message_by_type(seg, payload, user_info, is_group=is_group)
         else:
-            payload = await self.process_message_by_type(seg_data, payload, user_info)
+            payload = await self.process_message_by_type(seg_data, payload, user_info, is_group=is_group)
         return payload
 
-    async def process_message_by_type(self, seg: SegPayload, payload: list, user_info: UserInfoPayload) -> list:
+    async def process_message_by_type(self, seg: SegPayload, payload: list, user_info: UserInfoPayload, *, is_group: bool = True) -> list:
         new_payload = payload
         seg_type = seg.get("type")
         if seg_type == "reply":
@@ -253,7 +254,7 @@ class SendHandler:
             target_id = str(target_id)
             if target_id == "notice":
                 return payload
-            new_payload = self.build_payload(payload, await self.handle_reply_message(target_id, user_info), True)
+            new_payload = self.build_payload(payload, await self.handle_reply_message(target_id, user_info, is_group=is_group), True)
         elif seg_type == "text":
             text = seg.get("data")
             if not text:
@@ -293,7 +294,7 @@ class SendHandler:
             for sub_seg in seg.get("data", []):
                 if not isinstance(sub_seg, dict):
                     continue
-                nested_payload = await self.process_message_by_type(sub_seg, nested_payload, user_info)
+                nested_payload = await self.process_message_by_type(sub_seg, nested_payload, user_info, is_group=is_group)
             new_payload = self.build_payload(payload, nested_payload, False)
         return new_payload
 
@@ -318,10 +319,15 @@ class SendHandler:
             payload.append(addon)
         return payload
 
-    async def handle_reply_message(self, message_id: str, user_info: UserInfoPayload) -> dict | list:
+    async def handle_reply_message(self, message_id: str, user_info: UserInfoPayload, *, is_group: bool = True) -> dict | list:
         """处理回复消息"""
         logger.debug(f"开始处理回复消息，消息ID: {message_id}")
         reply_seg = {"type": "reply", "data": {"id": message_id}}
+
+        # 私聊中不需要艾特
+        if not is_group:
+            logger.info("私聊消息，跳过引用艾特")
+            return reply_seg
 
         # 检查是否启用引用艾特功能
         enable_reply_at = False
