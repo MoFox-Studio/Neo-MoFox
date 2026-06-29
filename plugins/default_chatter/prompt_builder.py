@@ -131,6 +131,7 @@ class DefaultChatterPromptBuilder:
         history_text: str,
         unread_lines: str,
         extra: str = "",
+        clean_mode: bool = False,
     ) -> str:
         """通过 user prompt 模板构建用户提示词。"""
         from src.app.plugin_system.api import adapter_api
@@ -149,6 +150,10 @@ class DefaultChatterPromptBuilder:
         stream_name = chat_stream.stream_name
         tmpl = get_prompt_manager().get_template("default_chatter_user_prompt")
         assert tmpl, "缺少 default_chatter_user_prompt 模板，请检查提示词管理器配置"
+
+        if clean_mode:
+            tmpl = tmpl.clone()
+            tmpl.name = "default_chatter_user_prompt_clean"
 
         return await (
             tmpl
