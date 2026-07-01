@@ -522,7 +522,26 @@ class DefaultChatterSession:
                             "LLM stream observer disabled because tool_call_compat is enabled."
                         )
 
+                    last_user_payload = None
+                    if state.unread_msgs_to_flush and getattr(state.response, "payloads", None):
+                        if state.response.payloads[-1].role == ROLE.USER:
+                            last_user_payload = state.response.payloads[-1]
+
                     state.response = await state.response.send(stream=use_stream)
+                    
+                    if last_user_payload is not None:
+                        unread_lines = "\n".join(
+                            self.adapters.unread_adapter.format_message_line(msg) for msg in state.unread_msgs_to_flush
+                        )
+                        clean_text = await self.adapters.prompt_adapter._build_user_prompt(
+                            chat_stream,
+                            history_text=history_text if not state.history_merged else "",
+                            unread_lines=unread_lines,
+                            extra="",
+                            clean_mode=True,
+                        )
+                        last_user_payload.content = [Text(clean_text)]
+
                     if use_stream and stream_observer is not None:
                         await state.response.stream_events_with_callback(stream_observer)
                         finalize = getattr(stream_observer, "finalize", None)
