@@ -87,6 +87,7 @@ class PromptAdapter(Protocol):
         history_text: str,
         unread_lines: str,
         extra: str = "",
+        clean_mode: bool = False,
     ) -> str:
         ...
 

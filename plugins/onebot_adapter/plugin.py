@@ -355,13 +355,20 @@ class OneBotAdapterPlugin(BasePlugin):
     plugin_version = "2.0.0"
     plugin_author = "MoFox Team"
     plugin_description = "OneBot 11 适配器（基于 Neo-MoFox 重写）"
-    configs = [OneBotAdapterConfig]
+    configs: list[type] = [OneBotAdapterConfig]
 
 
     def get_components(self) -> list[type]:
         """获取插件内所有组件类
 
+        若配置中 plugin.enabled 为 False，则返回空列表以跳过加载。
+
         Returns:
             list[type]: 插件内所有组件类的列表
         """
+        if self.config:
+            config = cast(OneBotAdapterConfig, self.config)
+            if not config.plugin.enabled:
+                logger.info("OneBot 适配器已在配置中禁用，跳过加载")
+                return []
         return [OneBotAdapter]

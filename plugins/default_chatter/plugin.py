@@ -830,6 +830,7 @@ class DefaultChatter(BaseChatter):
         history_text: str,
         unread_lines: str,
         extra: str = "",
+        clean_mode: bool = False,
     ) -> str:
         """通过 user prompt 模板构建用户提示词。
 
@@ -838,6 +839,7 @@ class DefaultChatter(BaseChatter):
             history_text: 格式化后的历史消息文本（各行已用统一格式）
             unread_lines: 格式化后的未读消息文本
             extra: 额外信息文本
+            clean_mode: 是否启用净输出模式以跳过 on_prompt_build 注入，用于发送后恢复文本
 
         Returns:
             str: 渲染后的 user 提示词
@@ -847,6 +849,7 @@ class DefaultChatter(BaseChatter):
             history_text,
             unread_lines,
             extra,
+            clean_mode,
         )
 
     @staticmethod
