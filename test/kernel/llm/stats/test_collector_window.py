@@ -185,3 +185,41 @@ async def test_request_name_window_summary_orders_by_token_usage() -> None:
     assert item["model_identifier"] == "provider/model-b"
     assert item["base_urls"] == ["https://api.example.com/v1"]
     assert item["success_rate"] == 0.5
+
+
+@pytest.mark.asyncio
+async def test_time_range_summary_includes_success_rate() -> None:
+    """get_by_time_range 摘要必须包含 success_rate / success_count / avg_latency 字段。
+
+    回归测试：前端 last-hours 接口依赖该摘要的 success_rate，缺失会导致
+    WebUI 成功率恒为 0。
+    """
+    collector = get_llm_stats_collector()
+    now = time.time()
+    await collector.record(
+        LLMRequestRecord(
+            model_name="ok-model",
+            request_name="ok",
+            success=True,
+            latency=0.3,
+            timestamp=now - 60,
+        )
+    )
+    await collector.record(
+        LLMRequestRecord(
+            model_name="err-model",
+            request_name="err",
+            success=False,
+            error_type="timeout",
+            latency=1.2,
+            timestamp=now - 30,
+        )
+    )
+
+    summary = await collector.get_by_time_range(start_ts=now - 3600, end_ts=now + 60)
+
+    assert summary["total_requests"] == 2
+    assert summary["success_count"] == 1
+    assert summary["error_count"] == 1
+    assert summary["success_rate"] == 0.5
+    assert summary["avg_latency"] > 0

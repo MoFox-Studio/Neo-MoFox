@@ -643,12 +643,15 @@ class LLMStatsCollector:
         sql = """
             SELECT
                 COUNT(*) as total_requests,
+                SUM(CASE WHEN success THEN 1 ELSE 0 END) as success_count,
+                SUM(CASE WHEN success THEN 0 ELSE 1 END) as error_count,
                 COALESCE(SUM(prompt_tokens), 0) as total_prompt_tokens,
                 COALESCE(SUM(completion_tokens), 0) as total_completion_tokens,
                 COALESCE(SUM(total_tokens), 0) as total_tokens,
                 COALESCE(SUM(cache_hit_tokens), 0) as total_cache_hit_tokens,
                 COALESCE(SUM(cache_miss_tokens), 0) as total_cache_miss_tokens,
-                COALESCE(SUM(cost), 0.0) as total_cost
+                COALESCE(SUM(cost), 0.0) as total_cost,
+                COALESCE(AVG(latency), 0.0) as avg_latency
             FROM llm_requests
             WHERE timestamp >= ? AND timestamp <= ?
         """
@@ -660,6 +663,9 @@ class LLMStatsCollector:
         cache_total = (row["total_cache_hit_tokens"] or 0) + (row["total_cache_miss_tokens"] or 0)
         return {
             "total_requests": total,
+            "success_count": row["success_count"] or 0,
+            "error_count": row["error_count"] or 0,
+            "success_rate": (row["success_count"] / total) if total > 0 else 0.0,
             "total_prompt_tokens": row["total_prompt_tokens"] or 0,
             "total_completion_tokens": row["total_completion_tokens"] or 0,
             "total_tokens": row["total_tokens"] or 0,
@@ -667,6 +673,7 @@ class LLMStatsCollector:
             "total_cache_miss_tokens": row["total_cache_miss_tokens"] or 0,
             "cache_hit_rate": (row["total_cache_hit_tokens"] / cache_total) if cache_total > 0 else 0.0,
             "total_cost": round(row["total_cost"] or 0.0, 6),
+            "avg_latency": round(row["avg_latency"] or 0.0, 4),
         }
 
     # ------------------------------------------------------------------
