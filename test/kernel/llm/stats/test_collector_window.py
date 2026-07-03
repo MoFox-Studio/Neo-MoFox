@@ -189,10 +189,8 @@ async def test_request_name_window_summary_orders_by_token_usage() -> None:
 
 @pytest.mark.asyncio
 async def test_time_range_summary_includes_success_rate() -> None:
-    """get_by_time_range 摘要必须包含 success_rate / success_count / avg_latency 字段。
-
-    回归测试：前端 last-hours 接口依赖该摘要的 success_rate，缺失会导致
-    WebUI 成功率恒为 0。
+    """
+    get_by_time_range 摘要必须包含 success_rate / success_count / avg_latency 字段。
     """
     collector = get_llm_stats_collector()
     now = time.time()
