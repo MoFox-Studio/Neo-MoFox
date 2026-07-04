@@ -93,14 +93,14 @@ class VideoDownloader:
                         except ValueError:
                             return None
                     return None
-                # 200：服务器不支持 Range，Content-Length 即文件总大小
-                if response.status == 200:
-                    content_length = response.headers.get("Content-Length")
-                    if content_length is not None:
-                        try:
-                            return int(content_length)
-                        except ValueError:
-                            return None
+                # 200：服务器不支持 Range，Content-Length 即文件总大小(qq多媒体服务器在2026年7月4日返回了206状态吗，所以把200注释掉以避免无意义分支，当然，因为后面qq服务器可能会被爆改，所以先留着)
+                #if response.status == 200:
+                    #content_length = response.headers.get("Content-Length")
+                    #if content_length is not None:
+                        #try:
+                            #return int(content_length)
+                        #except ValueError:
+                            #return None
                 # 其他状态码留给后续正式下载环节处理
                 return None
         except Exception as e:
@@ -134,7 +134,7 @@ class VideoDownloader:
                 # 先用 Range 请求探测文件大小（QQ 多媒体服务器不支持 HEAD，会返回 400）
                 probed_size = await self._probe_file_size(session, url)
                 if probed_size is not None:
-                    logger.info(f"探测到文件大小: {probed_size} 字节")
+                    logger.debug(f"探测到文件大小: {probed_size} 字节")
                     if not self.check_file_size(str(probed_size)):
                         return {
                             "success": False,
