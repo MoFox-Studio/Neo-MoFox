@@ -172,11 +172,6 @@ class VideoDownloader:
                                     "url": url,
                                 }
 
-                    # 再次检查Content-Length
-                    content_length = response.headers.get("Content-Length")
-                    if not self.check_file_size(content_length):
-                        return {"success": False, "error": f"视频文件过大，超过{self.max_size_mb}MB限制", "url": url}
-
                     # 读取文件内容
                     video_data = await response.read()
 
