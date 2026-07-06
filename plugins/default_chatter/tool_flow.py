@@ -32,6 +32,7 @@ class ToolCallOutcome:
     should_stop: bool = False
     stop_minutes: float = 0.0
     has_pending_tool_results: bool = False
+    execution_results: list[dict[str, object]] | None = None
 
 
 async def process_tool_calls(
@@ -69,7 +70,7 @@ async def process_tool_calls(
     Returns:
         ToolCallOutcome: 本轮控制流与普通调用执行后的汇总结果。
     """
-    outcome = ToolCallOutcome()
+    outcome = ToolCallOutcome(execution_results=[])
     seen_call_signatures: set[str] = set()
     pending_calls: list[ToolCall] = []
 
@@ -83,7 +84,10 @@ async def process_tool_calls(
         results = await run_tool_call(current_pending, response, usable_map, trigger_msg)
 
         for pending_call, (appended, success) in zip(current_pending, results, strict=False):
-            _ = success
+            assert outcome.execution_results is not None
+            outcome.execution_results.append(
+                {"name": pending_call.name, "success": bool(success)}
+            )
 
             if appended and not pending_call.name.startswith("action-"):
                 outcome.has_pending_tool_results = True
