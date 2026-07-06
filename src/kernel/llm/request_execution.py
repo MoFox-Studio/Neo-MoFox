@@ -86,7 +86,7 @@ def normalize_client_create_result(
         message, tool_calls, stream_iter = result
         return message, tool_calls, stream_iter, None, None
     raise ValueError(
-        "client.create must return a 3/4/5-tuple: "
+        "client.create 必须返回 3/4/5 元组："
         "(message, tool_calls, stream_iter[, reasoning_content[, usage]])"
     )
 
@@ -138,7 +138,7 @@ async def execute_request(
         model_identifier = model.get("model_identifier")
         if not isinstance(model_identifier, str) or not model_identifier:
             raise LLMConfigurationError(
-                "model.model_identifier must be a non-empty string"
+                "model.model_identifier 必须是非空字符串"
             )
 
         if step.delay_seconds and step.delay_seconds > 0:
@@ -205,8 +205,6 @@ async def execute_request(
             )
             # 保存原始 payloads 副本，供流式消费重试时恢复使用
             resp._original_payloads = list(trimmed_payloads)
-            # 保存原始 payloads 副本，供流式消费重试时恢复使用
-            resp._original_payloads = list(trimmed_payloads)
 
             if tool_calls:
                 from .payload import ToolCall
@@ -257,7 +255,7 @@ async def execute_request(
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 logger.debug(
-                    f"LLM request cancelled: model={model_identifier}, "
+                    f"LLM 请求已取消：model={model_identifier}, "
                     f"request={request.request_name or '__default__'}",
                     exc_info=True,
                 )
@@ -290,7 +288,7 @@ async def execute_request(
             next_step = session.next_after_error(classified_error)
             if next_step.model is None:
                 logger.error(
-                    f"LLM retries exhausted: request={request.request_name or '__default__'}, "
+                    f"LLM 重试已耗尽：request={request.request_name or '__default__'}, "
                     f"retry_count={retry_count}, "
                     f"last_error={type(classified_error).__name__}: {classified_error}",
                 )
@@ -302,7 +300,7 @@ async def execute_request(
                     else "<unknown>"
                 )
                 logger.warning(
-                    f"LLM request will retry: request={request.request_name or '__default__'}, "
+                    f"LLM 请求将重试：request={request.request_name or '__default__'}, "
                     f"retry_count={retry_count}, next_model={next_model_name}, "
                     f"delay_seconds={float(next_step.delay_seconds):.2f}",
                 )
@@ -320,13 +318,11 @@ def _log_request_error(
 ) -> None:
     """根据错误是否可能重试，按不同严重级别记录日志。"""
     error_type = type(error).__name__
-    status_code: int | None = (
-        error.status_code
-        if isinstance(error, LLMAPIError)
-        and isinstance(error.status_code, int)
-        and error.status_code >= 500
-        else None
-    )
+    status_code: int | None = None
+    if isinstance(error, LLMAPIError):
+        raw_status = error.status_code
+        if isinstance(raw_status, int) and raw_status >= 500:
+            status_code = raw_status
     if (
         isinstance(error, (LLMTimeoutError, LLMRateLimitError, TimeoutError))
         or status_code is not None
@@ -334,20 +330,20 @@ def _log_request_error(
     ):
         status_hint = f", status_code={status_code}" if status_code is not None else ""
         logger.warning(
-            f"LLM request temporarily failed: model={model_identifier}, "
+            f"LLM 请求暂时失败：model={model_identifier}, "
             f"request={request_name or '__default__'}, "
-            f"error_type={error_type}{status_hint}",
+            f"error_type={error_type}{status_hint}, reason={str(error)}",
         )
         logger.debug(
-            f"LLM request temporarily failed (detail): model={model_identifier}, "
-            f"request={request_name or '__default__'}, reason={error}",
+            f"LLM 请求暂时失败（详情）：model={model_identifier}, "
+            f"request={request_name or '__default__'}, reason={str(error)}",
             exc_info=True,
         )
         return
 
     logger.error(
-        f"LLM request failed: model={model_identifier}, "
+        f"LLM 请求失败：model={model_identifier}, "
         f"request={request_name or '__default__'}, "
-        f"error_type={error_type}, reason={error}",
+        f"error_type={error_type}, reason={str(error)}",
         exc_info=True,
     )
