@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, cast
 
 from src.core.components.types import ChatType
 from src.app.plugin_system.api.log_api import get_logger
@@ -57,11 +57,6 @@ from .type_defs import (
 
 logger = get_logger("default_chatter")
 
-_SUB_AGENT_BASE_BYPASS_PROBABILITY = 0.1
-_SUB_AGENT_NAME_MENTION_BONUS = 0.7
-_SUB_AGENT_ALIAS_MENTION_BONUS = 0.4
-_SUB_AGENT_UNREAD_MESSAGE_BONUS = 0.05
-_SUB_AGENT_NEXT_TICK_REPLY_BONUS = 0.5
 _SUB_AGENT_NEXT_TICK_BONUS_ATTR = "_default_chatter_next_tick_bonus"
 _SEND_TEXT_TYPING_DELAY_PER_CHAR = 0.5
 _SEND_TEXT_TYPING_DELAY_MAX_SECONDS = 10.0
@@ -283,9 +278,11 @@ class SendTextAction(BaseAction):
     def _mark_sub_agent_bonus_on_success(self, success: bool) -> None:
         """发送成功后提高下一次 tick 的 sub-agent 直通概率。"""
         if success and self._is_programmatic_controller_enabled():
+            plugin_config = cast(DefaultChatterConfig, self.plugin.config)
+            bonus = plugin_config.plugin.programmatic_probability.next_tick_reply_bonus
             _set_next_tick_sub_agent_bonus(
                 self.chat_stream,
-                _SUB_AGENT_NEXT_TICK_REPLY_BONUS,
+                bonus,
             )
 
     @staticmethod
@@ -693,18 +690,27 @@ class DefaultChatter(BaseChatter):
         """计算本地概率直通 sub-agent 的放行概率。"""
         nickname, alias_names = self._get_sub_agent_identity_names(chat_stream)
 
-        probability = _SUB_AGENT_BASE_BYPASS_PROBABILITY
-        reasons = [f"基础概率 {_SUB_AGENT_BASE_BYPASS_PROBABILITY:.2f}"]
+        prob_cfg = cast(
+            DefaultChatterConfig, self.plugin.config
+        ).plugin.programmatic_probability
+
+        base_prob = prob_cfg.base_bypass_probability
+        name_bonus = prob_cfg.name_mention_bonus
+        alias_bonus = prob_cfg.alias_mention_bonus
+        unread_per_msg_bonus = prob_cfg.unread_message_bonus
+
+        probability = base_prob
+        reasons = [f"基础概率 {base_prob:.2f}"]
 
         if nickname and self._messages_contain_any_name(unread_msgs, [nickname]):
-            probability += _SUB_AGENT_NAME_MENTION_BONUS
-            reasons.append(f"命中名字 +{_SUB_AGENT_NAME_MENTION_BONUS:.2f}")
+            probability += name_bonus
+            reasons.append(f"命中名字 +{name_bonus:.2f}")
 
         if self._messages_contain_any_name(unread_msgs, alias_names):
-            probability += _SUB_AGENT_ALIAS_MENTION_BONUS
-            reasons.append(f"命中别名 +{_SUB_AGENT_ALIAS_MENTION_BONUS:.2f}")
+            probability += alias_bonus
+            reasons.append(f"命中别名 +{alias_bonus:.2f}")
 
-        unread_bonus = len(unread_msgs) * _SUB_AGENT_UNREAD_MESSAGE_BONUS
+        unread_bonus = len(unread_msgs) * unread_per_msg_bonus
         if unread_bonus > 0:
             probability += unread_bonus
             reasons.append(

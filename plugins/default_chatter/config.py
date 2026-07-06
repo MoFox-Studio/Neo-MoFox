@@ -86,6 +86,51 @@ class DefaultChatterConfig(BaseConfig):
             tag="ai",
             hint="留空时回退为 actor；可配置为单独的子代理模型任务，例如 sub_agent_actor"
         )
+
+        @config_section("programmatic_probability", title="程序化概率配置", tag="ai")
+        class ProgrammaticProbabilitySection(SectionBase):
+            """程序化 sub-agent 直通概率参数。
+
+            这些参数控制 enable_programmatic_controller 开启时的本地概率门逻辑：
+            当随机值低于放行概率时，直接跳过 LLM sub-agent 决策。
+            """
+
+            base_bypass_probability: float = Field(
+                default=0.1,
+                description="群聊本地概率直通的基础放行概率。每轮 tick 的起始概率。",
+                label="基础放行概率",
+                tag="ai",
+                hint="有效范围 0.0-1.0。值越大，群聊中越容易跳过 LLM sub-agent 直接响应。",
+            )
+            name_mention_bonus: float = Field(
+                default=0.7,
+                description="未读消息命中机器人昵称时叠加的放行概率加成。",
+                label="命中名字加成",
+                tag="ai",
+                hint="有效范围 0.0-1.0。当未读消息包含机器人昵称时叠加到基础概率。",
+            )
+            alias_mention_bonus: float = Field(
+                default=0.4,
+                description="未读消息命中机器人别名时叠加的放行概率加成。",
+                label="命中别名加成",
+                tag="ai",
+                hint="有效范围 0.0-1.0。当未读消息包含任意别名时叠加到基础概率。",
+            )
+            unread_message_bonus: float = Field(
+                default=0.05,
+                description="每条未读消息叠加的放行概率加成。累积值 = 未读消息数 * 该值。",
+                label="未读消息加成",
+                tag="ai",
+                hint="有效范围 0.0-1.0。未读消息越多，直通概率越高。",
+            )
+            next_tick_reply_bonus: float = Field(
+                default=0.5,
+                description="上一次 send_text 成功后，下一 tick 叠加的放行概率加成，用于提升连续对话的连贯性。",
+                label="回复后下一 tick 加成",
+                tag="ai",
+                hint="有效范围 0.0-1.0。发送成功后写入流上下文，下一次概率门判定时消耗。",
+            )
+
         enable_stop_direct_message_wake: bool = Field(
             default=False,
             description="是否允许私聊或 @Bot 消息按概率提前解除 stop 冷却。",
@@ -111,6 +156,11 @@ class DefaultChatterConfig(BaseConfig):
             label="原生多模态",
             tag="ai",
             hint="启用前请确认 actor 模型支持图片输入"
+        )
+        programmatic_probability: ProgrammaticProbabilitySection = Field(
+            default_factory=ProgrammaticProbabilitySection,
+            description="程序化 sub-agent 直通概率参数",
+            label="程序化概率配置"
         )
         theme_guide: ThemeGuideSection = Field(
             default_factory=ThemeGuideSection,
