@@ -32,7 +32,7 @@ logger = get_logger(
     enable_event_broadcast=False,
 )
 
-EVENT_HANDLER_TIMEOUT_SECONDS = 5.0
+EVENT_HANDLER_TIMEOUT_SECONDS = 10.0
 
 EventParams = dict[str, Any]
 

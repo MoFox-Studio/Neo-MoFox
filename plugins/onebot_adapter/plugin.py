@@ -351,11 +351,11 @@ class OneBotAdapter(BaseAdapter):
 class OneBotAdapterPlugin(BasePlugin):
     """OneBot 适配器插件"""
 
-    plugin_name = "onebot_adapter"
-    plugin_version = "2.0.0"
-    plugin_author = "MoFox Team"
-    plugin_description = "OneBot 11 适配器（基于 Neo-MoFox 重写）"
-    configs = [OneBotAdapterConfig]
+    plugin_name: str = "onebot_adapter"
+    plugin_version: str = "2.0.0"
+    plugin_author: str = "MoFox Team"
+    plugin_description: str = "OneBot 11 适配器（基于 Neo-MoFox 重写）"
+    configs: list[type] = [OneBotAdapterConfig]
 
 
     def get_components(self) -> list[type]:
@@ -363,5 +363,10 @@ class OneBotAdapterPlugin(BasePlugin):
 
         Returns:
             list[type]: 插件内所有组件类的列表
+
         """
-        return [OneBotAdapter]
+        components = []
+        config = cast(OneBotAdapterConfig, self.config)
+        if config.plugin.enabled:
+            components.append(OneBotAdapter)
+        return components
