@@ -62,6 +62,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.kernel.db import AggregateQuery, CRUDBase, QueryBuilder
+from src.kernel.db.core.cache import invalidate_model_cache
 from src.kernel.logger import get_logger
 from src.kernel.storage import JSONStore
 
@@ -280,6 +281,13 @@ class PluginDatabase:
             ``AggregateQuery`` 实例。
         """
         return AggregateQuery(model, session_factory=self._require_initialized())
+
+    def invalidate(self, model: type[Any]) -> None:
+        """使原始 SQL 写入后该模型的进程内读缓存失效。"""
+        invalidate_model_cache(
+            model,
+            session_factory=self._require_initialized(),
+        )
 
     @asynccontextmanager
     async def session(self) -> AsyncGenerator[AsyncSession, None]:

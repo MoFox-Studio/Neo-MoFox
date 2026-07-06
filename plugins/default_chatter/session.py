@@ -46,6 +46,8 @@ class DefaultChatterSessionState:
     unread_msgs_to_flush: list[Message]
     plain_text_retry_count: int = 0
     used_tools_in_round: set[str] = field(default_factory=set)
+    tool_results_in_round: list[dict[str, object]] = field(default_factory=list)
+    internal_context_ids: list[str] = field(default_factory=list)
 
     def has_tool_result_tail(self) -> bool:
         payloads = getattr(self.response, "payloads", None)
@@ -94,10 +96,18 @@ def collect_used_tool_names(calls: list[Any]) -> set[str]:
 def _consume_actor_round_step_data(state: DefaultChatterSessionState) -> dict[str, Any]:
     used_tools = sorted(state.used_tools_in_round)
     state.used_tools_in_round.clear()
-    return {
+    tool_results = list(state.tool_results_in_round)
+    state.tool_results_in_round.clear()
+    internal_context_ids = list(state.internal_context_ids)
+    state.internal_context_ids.clear()
+    step_data: dict[str, Any] = {
         "step_scope": _AFTER_CHATTER_STEP_SCOPE,
         "used_tools": used_tools,
     }
+    if internal_context_ids:
+        step_data["tool_results"] = tool_results
+        step_data["internal_context_ids"] = internal_context_ids
+    return step_data
 
 
 def _is_suspend_message(message: str | None, suspend_text: str) -> bool:
@@ -110,6 +120,34 @@ def _is_timer_resume_event(event: WaitResumeEvent | None) -> bool:
 
 def _is_sub_agent_resume_event(event: WaitResumeEvent | None) -> bool:
     return event is not None and event.source == "sub_agent"
+
+
+def _is_internal_context_resume_event(event: WaitResumeEvent | None) -> bool:
+    return event is not None and event.source == "internal_context"
+
+
+async def _request_internal_context(
+    stream_id: str,
+    event: WaitResumeEvent,
+) -> tuple[str, list[str]]:
+    """从事件总线请求插件提供的内部上下文。"""
+    from src.core.components.types import EventType
+    from src.core.managers.event_manager import get_event_manager
+
+    result = await get_event_manager().publish_event(
+        EventType.ON_INTERNAL_CONTEXT_REQUESTED,
+        {
+            "stream_id": stream_id,
+            "context_key": event.context_key,
+            "content": "",
+            "context_ids": [],
+        },
+    )
+    params = result.get("params") or {}
+    content = str(params.get("content") or "").strip()
+    raw_ids = params.get("context_ids") or []
+    context_ids = [str(item) for item in raw_ids if str(item).strip()]
+    return content, context_ids
 
 
 def _append_suspend_payload_if_tool_result_tail(
@@ -420,8 +458,10 @@ class DefaultChatterSession:
                     continue
 
             if state.phase == DefaultChatterSessionPhase.WAIT_USER:
-                if _is_timer_resume_event(current_resume_event) or _is_sub_agent_resume_event(
-                    current_resume_event
+                if (
+                    _is_timer_resume_event(current_resume_event)
+                    or _is_sub_agent_resume_event(current_resume_event)
+                    or _is_internal_context_resume_event(current_resume_event)
                 ):
                     assert current_resume_event is not None
                     state.cross_round_seen_signatures.clear()
@@ -429,11 +469,21 @@ class DefaultChatterSession:
                     state.used_tools_in_round.clear()
                     state.unreads = []
                     state.unread_msgs_to_flush = []
-                    reminder_text = (
-                        _build_sub_agent_resume_prompt(current_resume_event)
-                        if _is_sub_agent_resume_event(current_resume_event)
-                        else _build_wait_timeout_prompt(current_resume_event)
-                    )
+                    if _is_internal_context_resume_event(current_resume_event):
+                        reminder_text, context_ids = await _request_internal_context(
+                            self.stream_id,
+                            current_resume_event,
+                        )
+                        state.internal_context_ids.extend(context_ids)
+                        if not reminder_text:
+                            resume_event = yield Wait()
+                            continue
+                    else:
+                        reminder_text = (
+                            _build_sub_agent_resume_prompt(current_resume_event)
+                            if _is_sub_agent_resume_event(current_resume_event)
+                            else _build_wait_timeout_prompt(current_resume_event)
+                        )
                     if _is_sub_agent_resume_event(current_resume_event):
                         from .sub_agent_collaboration import get_sub_agent_collaboration_manager
 
@@ -454,7 +504,11 @@ class DefaultChatterSession:
                         reason=(
                             "子代理完成"
                             if _is_sub_agent_resume_event(current_resume_event)
-                            else "等待计时器到期"
+                            else (
+                                "内部上下文到达"
+                                if _is_internal_context_resume_event(current_resume_event)
+                                else "等待计时器到期"
+                            )
                         ),
                     )
                     continue
@@ -648,6 +702,9 @@ class DefaultChatterSession:
                     pass_call_name=self.pass_call_name,
                     stop_call_name=self.stop_call_name,
                     cross_round_seen_signatures=state.cross_round_seen_signatures,
+                )
+                state.tool_results_in_round.extend(
+                    getattr(call_outcome, "execution_results", None) or []
                 )
 
                 if call_outcome.should_stop:
