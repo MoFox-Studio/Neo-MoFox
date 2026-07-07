@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from src.kernel.scheduler import UnifiedScheduler
     from src.kernel.storage import JSONStore
     from src.kernel.vector_db import VectorDBBase
+    from src.kernel.logger.cleanup import LoggerCleanupManager
 
 class Bot:
     """Neo-MoFox Bot 主类
@@ -89,6 +90,7 @@ class Bot:
         self.vector_db: VectorDBBase | None = None
         self.scheduler: UnifiedScheduler | None = None
         self.storage: JSONStore | None = None
+        self._log_cleanup_manager: "LoggerCleanupManager | None" = None
 
         # Core 层组件（延迟初始化）
         self.message_receiver: MessageReceiver | None = None
@@ -308,10 +310,25 @@ class Bot:
         self.ui.update_phase_status("配置", "已加载")
 
         # Step 2: Logger
-        from src.kernel.logger import get_logger, initialize_logger_system, COLOR
+        from src.kernel.logger import (
+            get_logger,
+            initialize_logger_system,
+            COLOR,
+            LoggerCleanupManager,
+        )
 
         initialize_logger_system(log_dir=self.log_dir, log_level=self.config.bot.log_level)
         self.logger = get_logger(name="console", display="控制台", color=COLOR.BLUE)
+
+        # 创建日志自动清理管理器（在 run() 中调度器启动后注册任务）
+        self._log_cleanup_manager = LoggerCleanupManager(
+            log_dir=self.log_dir,
+            max_age_days=self.config.bot.log_max_age_days,
+            max_files=self.config.bot.log_max_files,
+            cleanup_interval_hours=self.config.bot.log_cleanup_interval_hours,
+            enabled=self.config.bot.log_cleanup_enabled,
+        )
+
         self.ui.update_phase_status("日志", "已初始化")
 
         await self._preflight_llm_providers()
@@ -795,6 +812,14 @@ class Bot:
         await self.scheduler.start()
         self._stats["scheduler_running"] = True
 
+        # 启动日志自动清理任务
+        if self._log_cleanup_manager is not None:
+            try:
+                await self._log_cleanup_manager.start()
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"启动日志自动清理失败: {e}")
+
         # 启动云端遥测客户端发送循环
         try:
             from src.app.cloud_telemetry import get_cloud_telemetry_client
@@ -1119,7 +1144,15 @@ class Bot:
             # 3. 卸载插件
             await self._unload_all_plugins()
 
-            # 4. 停止调度器
+            # 4. 停止日志自动清理任务（需在调度器停止前移除）
+            if self._log_cleanup_manager is not None:
+                try:
+                    await self._log_cleanup_manager.stop()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"停止日志自动清理失败: {e}")
+
+            # 5. 停止调度器
             if self.scheduler:
                 await self.scheduler.stop()
                 self._stats["scheduler_running"] = False

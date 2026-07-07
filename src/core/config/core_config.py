@@ -178,6 +178,40 @@ class CoreConfig(ConfigBase):
             hint="防止高频消息导致无响应",
         )
 
+        # ========== 日志自动清理配置 ==========
+        log_cleanup_enabled: bool = Field(
+            default=True,
+            description="是否启用日志自动清理",
+            label="启用日志清理",
+            tag="file",
+            input_type="switch",
+        )
+        log_max_age_days: int = Field(
+            default=30,
+            description="日志文件最大保留天数，0 表示不按时间清理",
+            label="日志保留天数",
+            tag="file",
+            input_type="number",
+            ge=0,
+        )
+        log_max_files: int = Field(
+            default=100,
+            description="日志目录最大文件数，0 表示不限制。超出时删除最旧的文件",
+            label="日志最大文件数",
+            tag="file",
+            input_type="number",
+            ge=0,
+        )
+        log_cleanup_interval_hours: float = Field(
+            default=6.0,
+            description="日志清理任务执行间隔（小时）",
+            label="日志清理间隔",
+            tag="timer",
+            input_type="number",
+            step=0.5,
+            ge=0.1,
+        )
+
     bot: BotSection = Field(default_factory=BotSection)
 
     @config_section("chat")
@@ -213,6 +247,40 @@ class CoreConfig(ConfigBase):
             rows=3,
             placeholder="请描述这张图片的内容...",
             hint="留空使用默认提示词",
+        )
+
+        # ========== 媒体缓存自动清理配置 ==========
+        media_cache_cleanup_enabled: bool = Field(
+            default=True,
+            description="是否启用媒体缓存自动清理（清理 pending 之外的已识别文件）",
+            label="启用媒体缓存清理",
+            tag="file",
+            input_type="switch",
+        )
+        media_cache_max_age_days: int = Field(
+            default=7,
+            description="已识别媒体文件最大保留天数，0 表示不按时间清理",
+            label="媒体缓存保留天数",
+            tag="file",
+            input_type="number",
+            ge=0,
+        )
+        media_cache_max_total_size_mb: int = Field(
+            default=500,
+            description="已识别媒体文件总容量上限（MB），0 表示不限制。超出时从最旧文件开始删除",
+            label="媒体缓存最大容量",
+            tag="file",
+            input_type="number",
+            ge=0,
+        )
+        media_cache_cleanup_interval_hours: float = Field(
+            default=1.0,
+            description="媒体缓存清理任务执行间隔（小时）",
+            label="媒体缓存清理间隔",
+            tag="timer",
+            input_type="number",
+            step=0.5,
+            ge=0.1,
         )
 
         @property
