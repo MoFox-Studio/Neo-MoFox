@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
+from src.core.prompt import (
+    STREAM_BUCKET_PREFIX,
+    SystemReminderConsumeType,
+    SystemReminderInsertType,
+)
 
 if TYPE_CHECKING:
     from src.core.prompt import PromptManager, PromptTemplate
@@ -222,16 +226,23 @@ def _stream_bucket(stream_id: str, bucket: Any) -> str:
     Args:
         stream_id: 聊天流 ID。
         bucket: 原始 bucket 名称（如 ``"actor"``）或
-            :class:`SystemReminderBucket` 枚举值（str 子类，直接拼即可）。
+            :class:`SystemReminderBucket` 枚举值。注意 ``str(enum)``
+            会返回 ``"Class.MEMBER"`` 而非 ``value``，因此这里必须取
+            ``.value`` 才能拿到纯字符串。
 
     Returns:
         形如 ``stream:{stream_id}:{bucket}`` 的流私有 bucket key。
     """
 
     _validate_non_empty(stream_id, "stream_id")
-    # SystemReminderBucket 继承 str，str() 即返回其 value；
-    # 对普通 str 传入也兼容。
-    return f"stream:{stream_id}:{bucket}"
+    # strip 防止上游传入带空格的 stream_id 导致 bucket key 不一致
+    # （chatter 的 self.stream_id 不做 strip，但 tool.py 等处会 strip，
+    # 为保持一致性这里统一 strip）。
+    normalized_stream_id = stream_id.strip()
+    # SystemReminderBucket 继承 str 但 str(枚举值) 返回 "Class.MEMBER"
+    # 而非 value，因此对枚举必须取 .value。
+    bucket_value = getattr(bucket, "value", str(bucket))
+    return f"{STREAM_BUCKET_PREFIX}{normalized_stream_id}:{bucket_value}"
 
 
 def add_stream_reminder(
@@ -338,7 +349,9 @@ def clear_stream_reminders(stream_id: str) -> None:
     """
 
     _validate_non_empty(stream_id, "stream_id")
-    _get_system_reminder_store().clear_by_prefix(f"stream:{stream_id}:")
+    _get_system_reminder_store().clear_by_prefix(
+        f"{STREAM_BUCKET_PREFIX}{stream_id.strip()}:"
+    )
 
 
 __all__ = [
@@ -352,4 +365,8 @@ __all__ = [
     "count_templates",
     "add_system_reminder",
     "get_system_reminder",
+    "add_stream_reminder",
+    "get_stream_reminder",
+    "delete_stream_reminder",
+    "clear_stream_reminders",
 ]

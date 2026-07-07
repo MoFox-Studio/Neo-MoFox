@@ -476,14 +476,14 @@ class BaseChatter(ABC):
         self,
         task: str = "actor",
         request_name: str = "",
-        with_reminder: str | list[str] | None = None,
+        with_reminder: str | SystemReminderBucket | None = None,
     ) -> "LLMRequest":
         """快速创建 LLM 请求，自动加载任务模型集与上下文管理器。
 
         封装了「获取模型集 → 创建上下文管理器 → 创建 LLMRequest」的固定样板。
         request_name 默认取 chatter_name。
 
-        当 ``with_reminder`` 非空时，会自动为每个 bucket 生成两个 reminder source：
+        当 ``with_reminder`` 非空时，会自动为该 bucket 生成两个 reminder source：
 
         1. **全局 source** — bucket 原名，读取所有流共享的全局 reminder。
         2. **流私有 source** — ``stream:{stream_id}:{bucket}``，仅读取当前流的私有 reminder。
@@ -495,9 +495,8 @@ class BaseChatter(ABC):
         Args:
             task: 模型任务名称（对应 config/model.toml 中的 task key），默认 "actor"
             request_name: LLM 请求名称，默认使用 chatter_name
-            with_reminder: 可选的 system reminder bucket 名称，支持单个 ``str``
-                或 ``list[str]``（也接受 :class:`SystemReminderBucket` 枚举值，
-                因其继承 :class:`str`）。
+            with_reminder: 可选的 system reminder bucket 名称（也接受
+                :class:`SystemReminderBucket` 枚举值，因其继承 :class:`str`）。
                 传入后会自动登记全局 + 流私有两个 bucket 到上下文管理器。
 
         Returns:
@@ -507,33 +506,29 @@ class BaseChatter(ABC):
             KeyError: 当 task 在模型配置中不存在时
         """
         from src.core.config import get_model_config
+        from src.core.prompt import STREAM_BUCKET_PREFIX
         from src.kernel.llm import LLMRequest, LLMContextManager, ReminderSourceSpec
 
         model_set = get_model_config().get_task(task)
         reminder_sources = None
         if with_reminder is not None:
-            # SystemReminderBucket 继承 str，因此 isinstance(str) 即可覆盖两种类型，
-            # 避免在运行时引用 TYPE_CHECKING-only 的 SystemReminderBucket。
-            if isinstance(with_reminder, str):
-                buckets = [str(with_reminder)]
-            else:
-                buckets = [str(b) for b in with_reminder]
+            # SystemReminderBucket 继承 str 但 str(枚举值) 返回 "Class.MEMBER"
+            # 而非 value，因此对枚举必须取 .value 才能拿到纯字符串。
+            bucket = getattr(with_reminder, "value", str(with_reminder))
 
-            reminder_sources = []
-            for bucket in buckets:
+            reminder_sources = [
+                ReminderSourceSpec(
+                    bucket=bucket,
+                    wrap_with_system_tag=True,
+                )
+            ]
+            if self.stream_id:
                 reminder_sources.append(
                     ReminderSourceSpec(
-                        bucket=bucket,
+                        bucket=f"{STREAM_BUCKET_PREFIX}{self.stream_id}:{bucket}",
                         wrap_with_system_tag=True,
                     )
                 )
-                if self.stream_id:
-                    reminder_sources.append(
-                        ReminderSourceSpec(
-                            bucket=f"stream:{self.stream_id}:{bucket}",
-                            wrap_with_system_tag=True,
-                        )
-                    )
 
         context_manager = LLMContextManager(
             context_compression_handler=default_chat_context_compression_handler,

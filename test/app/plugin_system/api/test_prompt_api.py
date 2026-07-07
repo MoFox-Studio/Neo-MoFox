@@ -200,6 +200,57 @@ def test_get_system_reminder_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     assert captured == {"bucket": "actor", "names": ["a"]}
 
 
+# ── SystemReminderBucket 枚举值兼容性测试 ───────────────────────
+
+
+def test_stream_bucket_handles_system_reminder_bucket_enum() -> None:
+    """_stream_bucket 正确把 SystemReminderBucket 枚举值转成 value。
+
+    SystemReminderBucket 继承 str，但 str(枚举) 返回 "Class.MEMBER" 而非 value，
+    因此 _stream_bucket 必须用 getattr(bucket, "value", str(bucket)) 来取值，
+    否则拼出来的 bucket key 会变成 "stream:s1:SystemReminderBucket.ACTOR"。
+    """
+    from src.core.prompt import SystemReminderBucket
+
+    # 枚举值 → 取 .value
+    assert prompt_api._stream_bucket("s1", SystemReminderBucket.ACTOR) == "stream:s1:actor"
+    # 普通 str → 直接用
+    assert prompt_api._stream_bucket("s1", "actor") == "stream:s1:actor"
+    # 两种入参产生的 bucket key 应该一致
+    assert (
+        prompt_api._stream_bucket("s1", SystemReminderBucket.ACTOR)
+        == prompt_api._stream_bucket("s1", "actor")
+    )
+
+
+def test_add_stream_reminder_accepts_system_reminder_bucket_enum(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """add_stream_reminder 接受 SystemReminderBucket 枚举值，写入正确的流私有 bucket。"""
+    from src.core.prompt import SystemReminderBucket
+
+    captured: dict[str, object] = {}
+
+    class _FakeStore:
+        def set(
+            self,
+            bucket: str,
+            name: str,
+            content: str,
+            insert_type: object,
+            consume: object,
+        ) -> None:
+            captured["bucket"] = bucket
+
+    monkeypatch.setattr(prompt_api, "_get_system_reminder_store", lambda: _FakeStore())
+
+    prompt_api.add_stream_reminder(
+        "s1", SystemReminderBucket.ACTOR, "n", "c"
+    )
+    # 必须是 "stream:s1:actor"，而不是 "stream:s1:SystemReminderBucket.ACTOR"
+    assert captured["bucket"] == "stream:s1:actor"
+
+
 # ── 流隔离 reminder API 测试 ──────────────────────────────────────
 
 

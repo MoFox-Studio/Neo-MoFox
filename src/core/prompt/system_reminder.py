@@ -35,6 +35,12 @@ from threading import RLock
 from typing import Sequence, TypeAlias
 
 
+# 流私有 bucket 命名前缀：流私有 bucket 形如 ``stream:{stream_id}:{role}``。
+# 所有读写流私有 bucket 的代码都应通过此常量拼接，避免硬编码不一致。
+# 相关函数：prompt_api.add_stream_reminder / chatter.create_request 等。
+STREAM_BUCKET_PREFIX = "stream:"
+
+
 class SystemReminderBucket(str, Enum):
     """预定义的系统提醒分类（bucket）。可以根据实际需求扩展更多分类。"""
 
@@ -312,6 +318,7 @@ def reset_system_reminder_store() -> None:
 
 
 __all__ = [
+    "STREAM_BUCKET_PREFIX",
     "SystemReminderBucket",
     "SystemReminderInsertType",
     "SystemReminderConsumeType",
