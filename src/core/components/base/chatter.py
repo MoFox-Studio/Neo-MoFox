@@ -504,6 +504,7 @@ class BaseChatter(ABC):
                 ReminderSourceSpec(
                     bucket=str(with_reminder),
                     wrap_with_system_tag=True,
+                    stream_id=self.stream_id,
                 )
             ]
 
