@@ -161,7 +161,7 @@ class SystemReminderStore:
       第三层键为 name。
     - 提供 set 和 get 方法来添加和检索 reminder，支持按 bucket、stream_id
       和 name 进行过滤。
-    - ``stream_id=None`` 时为全局命名空间，所有聊天流共享，保持向后兼容。
+    - ``stream_id=None`` 时为全局命名空间，所有聊天流共享。
     - ``stream_id`` 为具体值时为流私有命名空间，仅对该流可见。
     - 使用 RLock 确保在多线程环境下的安全访问。
     """
@@ -184,12 +184,12 @@ class SystemReminderStore:
 
         Args:
             bucket: reminder所属的 bucket。
-            name: reminder的名称，在 bucket + stream_id 范围内唯一。
+            name: reminder的名称。
             content: reminder的内容文本。
             insert_type: reminder 的插入位置类型。
             consume: reminder 的消费模式。
             stream_id: 聊天流 ID。为 ``None`` 时写入全局命名空间（所有流共享）；
-                为具体值时仅对该流可见。
+                为具体值时仅对该流可见。name 在同一 bucket + stream_id 范围内唯一。
         """
 
         bucket_key = _normalize_bucket(bucket)
@@ -224,7 +224,7 @@ class SystemReminderStore:
         Args:
             bucket: reminder所属的 bucket。
             names: 可选的reminder名称列表。如果提供，则仅返回这些 name 的 reminder。
-            stream_id: 聊天流 ID。为 ``None`` 时从全局命名空间读取（向后兼容）；
+            stream_id: 聊天流 ID。为 ``None`` 时从全局命名空间读取；
                 为具体值时从该流的私有命名空间读取。
 
         Returns:
@@ -282,8 +282,7 @@ class SystemReminderStore:
         Args:
             bucket: reminder所属的 bucket。
             stream_id: 聊天流 ID。为 ``None`` 时清空全局命名空间；
-                为具体值时仅清空该流的私有命名空间。不传或传 ``None``
-                不会影响其他流的私有数据。
+                为具体值时仅清空该流的私有命名空间。
         """
 
         bucket_key = _normalize_bucket(bucket)
