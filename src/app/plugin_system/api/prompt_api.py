@@ -17,8 +17,7 @@ from src.core.prompt import (
 )
 
 if TYPE_CHECKING:
-    from src.core.prompt import PromptManager, PromptTemplate
-    from src.core.prompt import SystemReminderBucket
+    from src.core.prompt import PromptManager, PromptTemplate, SystemReminderBucket
     from src.core.prompt.system_reminder import SystemReminderStore
 
 
@@ -220,15 +219,14 @@ def get_system_reminder(
 # 全局 bucket 和当前流私有 bucket，无需插件感知底层命名约定。
 
 
-def _stream_bucket(stream_id: str, bucket: Any) -> str:
+def _stream_bucket(stream_id: str, bucket: str) -> str:
     """构造流私有 bucket 名称。
 
     Args:
         stream_id: 聊天流 ID。
-        bucket: 原始 bucket 名称（如 ``"actor"``）或
-            :class:`SystemReminderBucket` 枚举值。注意 ``str(enum)``
-            会返回 ``"Class.MEMBER"`` 而非 ``value``，因此这里必须取
-            ``.value`` 才能拿到纯字符串。
+        bucket: bucket 名称（如 ``"actor"``），必须是纯字符串。
+            若调用方持有 :class:`SystemReminderBucket` 枚举值，
+            应在上层取 ``.value`` 后再传入。
 
     Returns:
         形如 ``stream:{stream_id}:{bucket}`` 的流私有 bucket key。
@@ -236,18 +234,13 @@ def _stream_bucket(stream_id: str, bucket: Any) -> str:
 
     _validate_non_empty(stream_id, "stream_id")
     # strip 防止上游传入带空格的 stream_id 导致 bucket key 不一致
-    # （chatter 的 self.stream_id 不做 strip，但 tool.py 等处会 strip，
-    # 为保持一致性这里统一 strip）。
     normalized_stream_id = stream_id.strip()
-    # SystemReminderBucket 继承 str 但 str(枚举值) 返回 "Class.MEMBER"
-    # 而非 value，因此对枚举必须取 .value。
-    bucket_value = getattr(bucket, "value", str(bucket))
-    return f"{STREAM_BUCKET_PREFIX}{normalized_stream_id}:{bucket_value}"
+    return f"{STREAM_BUCKET_PREFIX}{normalized_stream_id}:{bucket}"
 
 
 def add_stream_reminder(
     stream_id: str,
-    bucket: str | SystemReminderBucket,
+    bucket: str,
     name: str,
     content: str,
     insert_type: str | SystemReminderInsertType = SystemReminderInsertType.FIXED,
@@ -294,7 +287,7 @@ def add_stream_reminder(
 
 def get_stream_reminder(
     stream_id: str,
-    bucket: str | SystemReminderBucket,
+    bucket: str,
     names: list[str] | None = None,
 ) -> str:
     """从指定聊天流的私有 bucket 读取 reminder 文本。
@@ -317,7 +310,7 @@ def get_stream_reminder(
 
 def delete_stream_reminder(
     stream_id: str,
-    bucket: str | SystemReminderBucket,
+    bucket: str,
     name: str,
 ) -> bool:
     """从指定聊天流的私有 bucket 删除单条 reminder。

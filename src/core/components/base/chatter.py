@@ -21,7 +21,6 @@ from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger, COLOR
 
 if TYPE_CHECKING:
-    from src.core.prompt import SystemReminderBucket
     from src.core.components.base.action import BaseAction
     from src.core.components.base.agent import BaseAgent
     from src.core.components.base.tool import BaseTool
@@ -476,7 +475,7 @@ class BaseChatter(ABC):
         self,
         task: str = "actor",
         request_name: str = "",
-        with_reminder: str | SystemReminderBucket | None = None,
+        with_reminder: str | None = None,
     ) -> "LLMRequest":
         """快速创建 LLM 请求，自动加载任务模型集与上下文管理器。
 
@@ -512,9 +511,7 @@ class BaseChatter(ABC):
         model_set = get_model_config().get_task(task)
         reminder_sources = None
         if with_reminder is not None:
-            # SystemReminderBucket 继承 str 但 str(枚举值) 返回 "Class.MEMBER"
-            # 而非 value，因此对枚举必须取 .value 才能拿到纯字符串。
-            bucket = getattr(with_reminder, "value", str(with_reminder))
+            bucket = with_reminder
 
             reminder_sources = [
                 ReminderSourceSpec(
