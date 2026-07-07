@@ -53,6 +53,7 @@ class RegisteredReminderSource:
     bucket: str
     names: tuple[str, ...] | None
     wrap_with_system_tag: bool
+    stream_id: str | None = None
     last_rendered: tuple[RegisteredReminder, ...] = ()
 
 
@@ -62,6 +63,7 @@ class ReminderSourceSpec:
     bucket: str
     names: tuple[str, ...] | None = None
     wrap_with_system_tag: bool = False
+    stream_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -104,6 +106,7 @@ class LLMContextManager:
                     bucket=normalized_bucket,
                     names=normalized_names,
                     wrap_with_system_tag=bool(source.wrap_with_system_tag),
+                    stream_id=source.stream_id,
                 )
             )
 
@@ -248,7 +251,11 @@ class LLMContextManager:
                 for previous in source.last_rendered:
                     strip_texts_by_type[previous.insert_type].append(previous.text)
 
-                items = store.get_items(source.bucket, names=source.names)
+                items = store.get_items(
+                    source.bucket,
+                    names=source.names,
+                    stream_id=source.stream_id,
+                )
                 current_items: list[RegisteredReminder] = []
                 for item in items:
                     rendered_content = item.render()
