@@ -163,7 +163,6 @@ def add_system_reminder(
     content: str,
     insert_type: str | SystemReminderInsertType = SystemReminderInsertType.FIXED,
     consume: str | SystemReminderConsumeType = SystemReminderConsumeType.FOREVER,
-    stream_id: str | None = None,
 ) -> None:
     """添加（或覆盖）一条 system reminder。
 
@@ -175,8 +174,6 @@ def add_system_reminder(
         name: reminder 名称
         content: reminder 内容
         insert_type: reminder 插入位置类型，支持 fixed 和 dynamic
-        stream_id: 聊天流 ID。为 ``None`` 时写入全局命名空间（所有流共享，
-            向后兼容）；为具体值时仅对该聊天流可见，实现 per-stream 隔离注入。
 
     Returns:
         None
@@ -191,32 +188,24 @@ def add_system_reminder(
         content=content,
         insert_type=insert_type,
         consume=consume,
-        stream_id=stream_id,
     )
 
 
 def get_system_reminder(
     bucket: str | SystemReminderBucket,
     names: list[str] | None = None,
-    stream_id: str | None = None,
 ) -> str:
     """获取指定 bucket 的 system reminder 内容。
 
     Args:
         bucket: bucket 名称
         names: 可选的 name 列表；传入时仅返回这些 name 对应的 reminder（按 names 顺序拼接）。
-        stream_id: 聊天流 ID。为 ``None`` 时从全局命名空间读取；为具体值时从该流
-            的私有命名空间读取。
 
     Returns:
         拼接后的 reminder 字符串；若 bucket 为空或无内容则返回空字符串。
     """
 
-    return _get_system_reminder_store().get(
-        bucket=bucket,
-        names=names,
-        stream_id=stream_id,
-    )
+    return _get_system_reminder_store().get(bucket=bucket, names=names)
 
 
 __all__ = [
