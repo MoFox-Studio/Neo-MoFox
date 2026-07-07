@@ -266,6 +266,25 @@ class SystemReminderStore:
                 self._data.pop(bucket_key, None)
             return True
 
+    def clear_by_prefix(self, prefix: str) -> None:
+        """删除所有 key 以指定前缀开头的 bucket。
+
+        主要用于流隔离场景：流私有 bucket 命名形如
+        ``stream:{stream_id}:{role}``，通过传入 ``stream:{stream_id}:``
+        前缀即可一次性清除该流的所有私有 reminder。
+
+        Args:
+            prefix: bucket key 前缀。为空字符串时直接返回（不做任何操作），
+                以防误清空所有 bucket。
+        """
+
+        if not prefix:
+            return
+        with self._lock:
+            for key in list(self._data):
+                if key.startswith(prefix):
+                    self._data.pop(key, None)
+
     def clear_all(self) -> None:
         """清空所有 bucket 下的所有 reminder。"""
 

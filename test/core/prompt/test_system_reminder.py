@@ -174,3 +174,42 @@ def test_global_store_singleton_and_reset() -> None:
     s3 = get_system_reminder_store()
     assert s3 is not s1
     assert s3.get("actor") == ""
+
+
+def test_store_clear_by_prefix_removes_matching_buckets() -> None:
+    """clear_by_prefix 删除所有 key 以指定前缀开头的 bucket。"""
+    store = SystemReminderStore()
+    store.set("stream:s1:actor", name="a", content="A1")
+    store.set("stream:s1:sub_agent", name="a", content="SUB1")
+    store.set("stream:s2:actor", name="a", content="A2")
+    store.set("actor", name="a", content="GLOBAL")
+
+    store.clear_by_prefix("stream:s1:")
+
+    # stream:s1:* 被清空
+    assert store.get("stream:s1:actor") == ""
+    assert store.get("stream:s1:sub_agent") == ""
+    # 其他流不受影响
+    assert store.get("stream:s2:actor") == "[a]\nA2"
+    # 全局 bucket 不受影响
+    assert store.get("actor") == "[a]\nGLOBAL"
+
+
+def test_store_clear_by_prefix_empty_prefix_is_noop() -> None:
+    """空前缀不执行任何操作（防止误清空所有 bucket）。"""
+    store = SystemReminderStore()
+    store.set("actor", name="a", content="A")
+
+    store.clear_by_prefix("")
+
+    assert store.get("actor") == "[a]\nA"
+
+
+def test_store_clear_by_prefix_no_match_is_noop() -> None:
+    """无匹配前缀时不影响任何 bucket。"""
+    store = SystemReminderStore()
+    store.set("actor", name="a", content="A")
+
+    store.clear_by_prefix("stream:s1:")
+
+    assert store.get("actor") == "[a]\nA"

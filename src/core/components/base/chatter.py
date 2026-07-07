@@ -476,17 +476,29 @@ class BaseChatter(ABC):
         self,
         task: str = "actor",
         request_name: str = "",
-        with_reminder: str | SystemReminderBucket | None = None,
+        with_reminder: str | list[str] | None = None,
     ) -> "LLMRequest":
         """快速创建 LLM 请求，自动加载任务模型集与上下文管理器。
 
         封装了「获取模型集 → 创建上下文管理器 → 创建 LLMRequest」的固定样板。
         request_name 默认取 chatter_name。
 
+        当 ``with_reminder`` 非空时，会自动为每个 bucket 生成两个 reminder source：
+
+        1. **全局 source** — bucket 原名，读取所有流共享的全局 reminder。
+        2. **流私有 source** — ``stream:{stream_id}:{bucket}``，仅读取当前流的私有 reminder。
+
+        插件通过 :func:`prompt_api.add_system_reminder` 写入全局 reminder，
+        通过 :func:`prompt_api.add_stream_reminder` 写入流私有 reminder，
+        chatter 侧无需任何额外操作即可同时拾取两者。
+
         Args:
             task: 模型任务名称（对应 config/model.toml 中的 task key），默认 "actor"
             request_name: LLM 请求名称，默认使用 chatter_name
-            with_reminder: 可选的 system reminder bucket；传入后会自动登记到上下文管理器
+            with_reminder: 可选的 system reminder bucket 名称，支持单个 ``str``
+                或 ``list[str]``（也接受 :class:`SystemReminderBucket` 枚举值，
+                因其继承 :class:`str`）。
+                传入后会自动登记全局 + 流私有两个 bucket 到上下文管理器。
 
         Returns:
             LLMRequest: 配置好上下文管理器的 LLM 请求对象
@@ -500,12 +512,28 @@ class BaseChatter(ABC):
         model_set = get_model_config().get_task(task)
         reminder_sources = None
         if with_reminder is not None:
-            reminder_sources = [
-                ReminderSourceSpec(
-                    bucket=str(with_reminder),
-                    wrap_with_system_tag=True,
+            # SystemReminderBucket 继承 str，因此 isinstance(str) 即可覆盖两种类型，
+            # 避免在运行时引用 TYPE_CHECKING-only 的 SystemReminderBucket。
+            if isinstance(with_reminder, str):
+                buckets = [str(with_reminder)]
+            else:
+                buckets = [str(b) for b in with_reminder]
+
+            reminder_sources = []
+            for bucket in buckets:
+                reminder_sources.append(
+                    ReminderSourceSpec(
+                        bucket=bucket,
+                        wrap_with_system_tag=True,
+                    )
                 )
-            ]
+                if self.stream_id:
+                    reminder_sources.append(
+                        ReminderSourceSpec(
+                            bucket=f"stream:{self.stream_id}:{bucket}",
+                            wrap_with_system_tag=True,
+                        )
+                    )
 
         context_manager = LLMContextManager(
             context_compression_handler=default_chat_context_compression_handler,
