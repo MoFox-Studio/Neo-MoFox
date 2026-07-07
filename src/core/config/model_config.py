@@ -522,6 +522,7 @@ class ModelConfig(ConfigBase):
                 "max_tokens": task_config.max_tokens,
                 "max_context": model_info.max_context,
                 "tool_call_compat": model_info.tool_call_compat,
+                "force_stream_mode": model_info.force_stream_mode,
                 "extra_params": extra_params,
             }
             
@@ -602,6 +603,7 @@ class ModelConfig(ConfigBase):
             "max_tokens": max_tokens if max_tokens is not None else 800,
             "max_context": model_info.max_context,
             "tool_call_compat": model_info.tool_call_compat,
+            "force_stream_mode": model_info.force_stream_mode,
             "extra_params": extra_params,
         }
         

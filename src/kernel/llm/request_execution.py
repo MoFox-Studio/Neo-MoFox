@@ -135,6 +135,7 @@ async def execute_request(
     while step.model is not None:
         # 每次循环都是一次具体的 provider 调用尝试，由当前重试策略会话决定。
         model = validate_model_entry(step.model)
+        actual_stream = stream or bool(model.get("force_stream_mode", False))
         model_identifier = model.get("model_identifier")
         if not isinstance(model_identifier, str) or not model_identifier:
             raise LLMConfigurationError(
@@ -170,7 +171,7 @@ async def execute_request(
                     tools=tools,
                     request_name=request.request_name,
                     model_set=model,
-                    stream=stream,
+                    stream=actual_stream,
                 )
                 if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0:
                     result = await asyncio.wait_for(
@@ -219,7 +220,7 @@ async def execute_request(
                     for tc in tool_calls
                 ]
 
-            if request.enable_metrics and not stream:
+            if request.enable_metrics and not actual_stream:
                 model_index = step.meta.get("model_index", 0) if step.meta else 0
                 stats_recorder(
                     model=model,
@@ -233,7 +234,7 @@ async def execute_request(
                     retry_count=retry_count,
                     model_index=model_index,
                 )
-            elif request.enable_metrics and stream:
+            elif request.enable_metrics and actual_stream:
                 resp._stream_stats_recorder = (
                     lambda final_usage, final_latency: stats_recorder(
                         model=model,
@@ -278,7 +279,7 @@ async def execute_request(
                     latency=timer.elapsed,
                     usage=None,
                     success=False,
-                    stream=stream,
+                    stream=actual_stream,
                     retry_count=retry_count,
                     model_index=step.meta.get("model_index", 0) if step.meta else 0,
                     error=classified_error,

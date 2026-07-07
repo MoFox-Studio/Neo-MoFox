@@ -32,7 +32,7 @@ class TestAPIProviderSection:
         assert provider.base_url == "https://api.openai.com/v1"
         assert provider.api_key == "sk-test123"
         assert provider.client_type == "openai"
-        assert provider.max_retry == 3
+        assert provider.max_retry == 2
         assert provider.timeout == 30
         assert provider.retry_interval == 10
 
@@ -441,6 +441,56 @@ class TestModelConfig:
         assert entry["max_tokens"] == 1000
         assert entry["max_context"] == 20000
         assert entry["tool_call_compat"] is False
+        assert entry["force_stream_mode"] is False
+
+    def test_get_task_model_set_with_force_stream_mode(self):
+        """测试任务 ModelSet 传递模型级强制流式配置。"""
+        config = ModelConfig(
+            api_providers=[
+                APIProviderSection(
+                    name="openai",
+                    base_url="https://api.openai.com/v1",
+                    api_key="sk-test",
+                ),
+            ],
+            models=[
+                ModelInfoSection(
+                    model_identifier="gpt-4",
+                    name="gpt4",
+                    api_provider="openai",
+                    force_stream_mode=True,
+                ),
+            ],
+        )
+        config.model_tasks.utils = TaskConfigSection(model_list=["gpt4"])
+
+        model_set = config.get_task("utils")
+
+        assert model_set[0]["force_stream_mode"] is True
+
+    def test_get_model_set_by_name_with_force_stream_mode(self):
+        """测试按模型名获取 ModelSet 时传递强制流式配置。"""
+        config = ModelConfig(
+            api_providers=[
+                APIProviderSection(
+                    name="openai",
+                    base_url="https://api.openai.com/v1",
+                    api_key="sk-test",
+                ),
+            ],
+            models=[
+                ModelInfoSection(
+                    model_identifier="gpt-4",
+                    name="gpt4",
+                    api_provider="openai",
+                    force_stream_mode=True,
+                ),
+            ],
+        )
+
+        model_set = config.get_model_set_by_name("gpt4")
+
+        assert model_set[0]["force_stream_mode"] is True
 
     def test_get_task_model_set_with_custom_context_and_compat_fields(self):
         """测试模型集支持模型级 max_context/tool_call_compat，预留参数存于 extra_params。"""

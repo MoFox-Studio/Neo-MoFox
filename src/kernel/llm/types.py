@@ -35,6 +35,7 @@ class ModelEntry(TypedDict, total=True):
     max_tokens: int
     max_context: int
     tool_call_compat: bool
+    force_stream_mode: bool
     extra_params: dict[str, Any]
 
 
