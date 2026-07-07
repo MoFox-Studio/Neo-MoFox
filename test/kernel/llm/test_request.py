@@ -334,6 +334,7 @@ class TestValidateModelEntry:
         }
         result = _validate_model_entry(model)
         assert result == model
+        assert result["force_stream_mode"] is False
 
     def test_missing_required_fields(self) -> None:
         """Test validation with missing required fields."""
@@ -386,6 +387,34 @@ class TestValidateModelEntry:
             "extra_params": {},
         }
         with pytest.raises(LLMConfigurationError, match="model.tool_call_compat 必须是 bool"):
+            _validate_model_entry(model)
+
+    def test_force_stream_mode_validation(self) -> None:
+        """Test validation of force_stream_mode type and value."""
+        from src.kernel.llm.request import _validate_model_entry
+
+        model = {
+            "api_provider": "openai",
+            "base_url": "https://api.openai.com/v1",
+            "model_identifier": "gpt-4",
+            "api_key": "sk-test",
+            "client_type": "openai",
+            "max_retry": 2,
+            "timeout": 30.0,
+            "retry_interval": 1.0,
+            "price_in": 0.00003,
+            "price_out": 0.00006,
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "force_stream_mode": True,
+            "extra_params": {},
+        }
+
+        result = _validate_model_entry(model)
+        assert result["force_stream_mode"] is True
+
+        model["force_stream_mode"] = "true"  # type: ignore[assignment]
+        with pytest.raises(LLMConfigurationError, match="model.force_stream_mode 必须是 bool"):
             _validate_model_entry(model)
 
 
@@ -580,6 +609,40 @@ class TestLLMRequestSend:
             chunks.append(chunk)
 
         assert " ".join(chunks) == "Hello  world !"
+
+    @pytest.mark.asyncio
+    async def test_force_stream_mode_overrides_false_stream_argument(
+        self, mock_model_set: list[dict[str, Any]]
+    ) -> None:
+        """Test model force_stream_mode makes stream=False requests use streaming."""
+        forced_model_set = [dict(mock_model_set[0], force_stream_mode=True)]
+        request = LLMRequest(forced_model_set, "test")
+        request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
+
+        mock_client = TrackingChatClient()
+        request.clients.openai = mock_client
+
+        response = await request.send(stream=False)
+        text = await response
+
+        assert mock_client.calls[0]["stream"] is True
+        assert text == "Hello world!"
+
+    @pytest.mark.asyncio
+    async def test_false_stream_argument_remains_non_streaming_without_force(
+        self, mock_model_set: list[dict[str, Any]]
+    ) -> None:
+        """Test stream=False remains non-streaming when force_stream_mode is disabled."""
+        request = LLMRequest(mock_model_set, "test")
+        request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
+
+        mock_client = TrackingChatClient()
+        request.clients.openai = mock_client
+
+        response = await request.send(stream=False)
+
+        assert mock_client.calls[0]["stream"] is False
+        assert response.message == "Success response!"
 
     @pytest.mark.asyncio
     async def test_send_with_tool_calls(
@@ -967,6 +1030,62 @@ class TestLLMRequestSend:
 
         with patch("src.kernel.llm.request._record_llm_stats", side_effect=fake_record):
             response = await request.send(stream=True)
+            assert captured == []
+
+            text = await response
+
+        assert text == "hello"
+        assert len(captured) == 1
+        assert captured[0]["stream"] is True
+        assert captured[0]["usage"]["total_tokens"] == 150
+        assert captured[0]["meta_data"]["stream_id"] == "stream-1"
+
+    @pytest.mark.asyncio
+    async def test_force_stream_stats_use_actual_stream_after_consumption(
+        self, mock_model_set: list[dict[str, Any]]
+    ) -> None:
+        """Test force_stream_mode records stats as streaming after response consumption."""
+
+        class StreamUsageClient:
+            async def create(
+                self,
+                *,
+                model_name: str,
+                payloads: list[LLMPayload],
+                tools: list[LLMUsable],
+                request_name: str,
+                model_set: Any,
+                stream: bool,
+            ) -> tuple[str | None, list[dict[str, Any]] | None, AsyncIterator[StreamEvent] | None, str | None, dict[str, Any] | None]:
+                assert stream is True
+                del model_name, payloads, tools, request_name, model_set
+
+                async def stream_gen() -> AsyncIterator[StreamEvent]:
+                    yield StreamEvent(text_delta="hello")
+                    yield StreamEvent(
+                        usage={
+                            "prompt_tokens": 120,
+                            "completion_tokens": 30,
+                            "total_tokens": 150,
+                            "cache_hit_tokens": 80,
+                            "cache_miss_tokens": 40,
+                        }
+                    )
+
+                return None, None, stream_gen(), None, None
+
+        forced_model_set = [dict(mock_model_set[0], force_stream_mode=True)]
+        request = LLMRequest(forced_model_set, "stream_stats", meta_data={"stream_id": "stream-1"})
+        request.add_payload(LLMPayload(ROLE.USER, Text("Hello")))
+        request.clients.openai = StreamUsageClient()
+
+        captured: list[dict[str, Any]] = []
+
+        def fake_record(**kwargs: Any) -> None:
+            captured.append(kwargs)
+
+        with patch("src.kernel.llm.request._record_llm_stats", side_effect=fake_record):
+            response = await request.send(stream=False)
             assert captured == []
 
             text = await response
