@@ -39,6 +39,7 @@ from src.core.prompt.manager import (
 
 # system reminder
 from src.core.prompt.system_reminder import (
+    STREAM_BUCKET_PREFIX,
     SystemReminderBucket,
     SystemReminderInsertType,
     SystemReminderConsumeType,
@@ -67,6 +68,7 @@ __all__ = [
     "PromptManager",
     "reset_prompt_manager",
     # system reminder
+    "STREAM_BUCKET_PREFIX",
     "SystemReminderBucket",
     "SystemReminderInsertType",
     "SystemReminderConsumeType",
