@@ -231,9 +231,17 @@ def test_classify_sdk_rate_limit_retry_after(sdk_module, headers, expected):
 
 
 @pytest.mark.parametrize("sdk_module", ["openai", "anthropic"])
-def test_classify_sdk_rate_limit_http_date(sdk_module):
+def test_classify_sdk_rate_limit_http_date(sdk_module, monkeypatch):
     sdk = __import__(sdk_module)
-    retry_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+    now = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.kernel.llm.exceptions.datetime", FixedDateTime)
+    retry_at = now + timedelta(seconds=30)
     response = httpx.Response(
         429,
         headers={"retry-after": format_datetime(retry_at, usegmt=True)},
@@ -244,7 +252,7 @@ def test_classify_sdk_rate_limit_http_date(sdk_module):
     classified = classify_exception(error)
 
     assert isinstance(classified, LLMRateLimitError)
-    assert classified.retry_after == pytest.approx(30.0, abs=2.0)
+    assert classified.retry_after == 30.0
 
 
 def test_classify_openai_connection_error():
