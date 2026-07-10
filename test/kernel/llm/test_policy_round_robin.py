@@ -1,5 +1,6 @@
 import pytest
 
+from src.kernel.llm import LLMRateLimitError, LLMTimeoutError
 from src.kernel.llm.policy.round_robin import RoundRobinPolicy
 
 
@@ -133,3 +134,39 @@ def test_round_robin_exhausted_all_attempts():
 
     assert step.model is None
     assert step.meta.get("reason") == "exhausted"
+
+
+def test_round_robin_applies_backoff_to_retry_and_switch(monkeypatch):
+    monkeypatch.setattr(
+        "src.kernel.llm.policy.backoff.random.uniform", lambda low, high: high
+    )
+    models = [
+        {"model_identifier": "a", "max_retry": 1, "retry_interval": 2},
+        {"model_identifier": "b", "max_retry": 1, "retry_interval": 3},
+    ]
+    session = RoundRobinPolicy().new_session(model_set=models, request_name="req")
+    session.first()
+
+    retry = session.next_after_error(LLMTimeoutError("timeout"))
+    switched = session.next_after_error(LLMTimeoutError("timeout"))
+    next_model_retry = session.next_after_error(LLMTimeoutError("timeout"))
+
+    assert retry.delay_seconds == 2.0
+    assert switched.delay_seconds == 4.0
+    assert next_model_retry.delay_seconds == 3.0
+
+
+def test_round_robin_retry_after_applies_when_switching():
+    models = [
+        {"model_identifier": "a", "max_retry": 0, "retry_interval": 1},
+        {"model_identifier": "b", "max_retry": 0, "retry_interval": 1},
+    ]
+    session = RoundRobinPolicy().new_session(model_set=models, request_name="req")
+    session.first()
+
+    step = session.next_after_error(
+        LLMRateLimitError("limited", retry_after=12.5)
+    )
+
+    assert step.model["model_identifier"] == "b"
+    assert step.delay_seconds == 12.5

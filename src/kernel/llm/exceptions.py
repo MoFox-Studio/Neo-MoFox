@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +114,58 @@ def decide_retry(error: BaseException) -> RetryDecision:
     return RetryDecision(False, "unknown_error")
 
 
+def _valid_retry_after(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        delay = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return delay
+
+
+def _get_header(headers: Any, name: str) -> object | None:
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        value = getter(name)
+        if value is not None:
+            return value
+    items = getattr(headers, "items", None)
+    if callable(items):
+        for key, value in items():
+            if str(key).casefold() == name.casefold():
+                return value
+    return None
+
+
+def _extract_retry_after(error: BaseException) -> float | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        retry_after_ms = _valid_retry_after(_get_header(headers, "retry-after-ms"))
+        if retry_after_ms is not None:
+            return retry_after_ms / 1000.0
+
+        retry_after_value = _get_header(headers, "retry-after")
+        retry_after = _valid_retry_after(retry_after_value)
+        if retry_after is not None:
+            return retry_after
+        if isinstance(retry_after_value, str):
+            try:
+                retry_at = parsedate_to_datetime(retry_after_value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                if math.isfinite(delay):
+                    return max(0.0, delay)
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+    return _valid_retry_after(getattr(error, "retry_after", None))
+
+
 def classify_exception(error: BaseException, model: str | None = None) -> BaseException:
     """将第三方 SDK 异常转换为标准化的 LLM 异常。
 
@@ -130,8 +186,7 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
         )
 
         if isinstance(error, RateLimitError):
-            # 尝试从错误中提取 retry_after
-            retry_after = getattr(error, "retry_after", None)
+            retry_after = _extract_retry_after(error)
             return LLMRateLimitError(str(error), retry_after=retry_after, model=model)
 
         if isinstance(error, APITimeoutError):
@@ -172,7 +227,7 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
         )
 
         if isinstance(error, AnthropicRateLimitError):
-            retry_after = getattr(error, "retry_after", None)
+            retry_after = _extract_retry_after(error)
             return LLMRateLimitError(str(error), retry_after=retry_after, model=model)
 
         if isinstance(error, AnthropicAPITimeoutError):

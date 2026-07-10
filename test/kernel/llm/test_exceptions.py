@@ -6,6 +6,10 @@
 3. 异常分类功能（classify_exception）
 """
 
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+
+import httpx
 import pytest
 
 from src.kernel.llm import (
@@ -196,6 +200,51 @@ def test_decide_retry_by_failure_type(error, retryable, reason):
 
     assert decision.retryable is retryable
     assert decision.reason == reason
+
+
+@pytest.mark.parametrize("sdk_module", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"retry-after": "2.5"}, 2.5),
+        ({"retry-after-ms": "1500", "retry-after": "3"}, 1.5),
+        ({"retry-after": "-1"}, None),
+        ({"retry-after": "nan"}, None),
+        ({"retry-after": "inf"}, None),
+        ({"retry-after": "1e999999"}, None),
+        ({"retry-after": "invalid"}, None),
+    ],
+)
+def test_classify_sdk_rate_limit_retry_after(sdk_module, headers, expected):
+    sdk = __import__(sdk_module)
+    response = httpx.Response(
+        429,
+        headers=headers,
+        request=httpx.Request("POST", "https://example.test"),
+    )
+    error = sdk.RateLimitError("rate limited", response=response, body={})
+
+    classified = classify_exception(error)
+
+    assert isinstance(classified, LLMRateLimitError)
+    assert classified.retry_after == expected
+
+
+@pytest.mark.parametrize("sdk_module", ["openai", "anthropic"])
+def test_classify_sdk_rate_limit_http_date(sdk_module):
+    sdk = __import__(sdk_module)
+    retry_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+    response = httpx.Response(
+        429,
+        headers={"retry-after": format_datetime(retry_at, usegmt=True)},
+        request=httpx.Request("POST", "https://example.test"),
+    )
+    error = sdk.RateLimitError("rate limited", response=response, body={})
+
+    classified = classify_exception(error)
+
+    assert isinstance(classified, LLMRateLimitError)
+    assert classified.retry_after == pytest.approx(30.0, abs=2.0)
 
 
 def test_classify_openai_connection_error():

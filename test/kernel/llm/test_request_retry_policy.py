@@ -7,11 +7,12 @@ from src.kernel.llm import (
     LLMAuthenticationError,
     LLMConfigurationError,
     LLMContentFilterError,
+    LLMRateLimitError,
     LLMTimeoutError,
     LLMTokenLimitError,
 )
 from src.kernel.llm.model_client import ModelClientRegistry
-from src.kernel.llm.policy import RoundRobinPolicy
+from src.kernel.llm.policy import LoadBalancedPolicy, RoundRobinPolicy
 from src.kernel.llm.request import LLMRequest
 
 
@@ -95,7 +96,7 @@ class CancelClient:
         raise asyncio.CancelledError
 
 
-def _model(identifier: str, *, max_retry: int):
+def _model(identifier: str, *, max_retry: int, retry_interval: float = 0):
     return {
         "api_provider": "OpenAI",
         "base_url": "https://api.openai.com/v1",
@@ -104,7 +105,7 @@ def _model(identifier: str, *, max_retry: int):
         "client_type": "openai",
         "max_retry": max_retry,
         "timeout": 1,
-        "retry_interval": 0,
+        "retry_interval": retry_interval,
         "price_in": 0.0,
         "price_out": 0.0,
         "temperature": 0.1,
@@ -182,6 +183,40 @@ async def test_retryable_failure_uses_existing_policy(error):
 
     assert resp.message == "ok"
     assert dummy.calls == ["a", "b"]
+
+
+@pytest.mark.parametrize("policy", [RoundRobinPolicy(), LoadBalancedPolicy()])
+@pytest.mark.asyncio
+async def test_retry_after_is_slept_before_model_switch(monkeypatch, policy):
+    events: list[tuple[str, object]] = []
+
+    async def fake_sleep(delay: float) -> None:
+        events.append(("sleep", delay))
+
+    class EventClient(RecoveringClient):
+        async def create(self, **kwargs):
+            events.append(("call", kwargs["model_name"]))
+            return await super().create(**kwargs)
+
+    monkeypatch.setattr(
+        "src.kernel.llm.request_execution.asyncio.sleep", fake_sleep
+    )
+    model_set = [
+        _model("a", max_retry=0, retry_interval=1),
+        _model("b", max_retry=0, retry_interval=1),
+    ]
+    client = EventClient(LLMRateLimitError("limited", retry_after=7.5))
+    request = LLMRequest(
+        model_set,
+        request_name="req",
+        policy=policy,
+        clients=ModelClientRegistry(openai=client),
+    )
+
+    response = await request.send(stream=False)
+
+    assert response.message == "ok"
+    assert events == [("call", "a"), ("sleep", 7.5), ("call", "b")]
 
 
 @pytest.mark.asyncio

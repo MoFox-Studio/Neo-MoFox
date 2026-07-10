@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from src.kernel.llm.exceptions import LLMTimeoutError
+from src.kernel.llm.exceptions import LLMRateLimitError, LLMTimeoutError
 from src.kernel.llm.policy.base import ModelStep, Policy, PolicySession
 from src.kernel.llm.policy.load_balanced import LoadBalancedPolicy
 from src.kernel.llm.policy.round_robin import RoundRobinPolicy, _RoundRobinSession
@@ -264,8 +264,9 @@ class TestRoundRobinSession:
         assert step.model == mock_model_set[2]
         assert step.meta["model_index"] == 2
 
-    def test_next_after_error_same_model_retry(self, mock_model_set: list[dict]) -> None:
+    def test_next_after_error_same_model_retry(self, mock_model_set: list[dict], monkeypatch) -> None:
         """Test retrying same model on error."""
+        monkeypatch.setattr("src.kernel.llm.policy.backoff.random.uniform", lambda low, high: high)
         session = _RoundRobinSession(model_set=mock_model_set, start_index=0)
 
         # First attempt
@@ -807,15 +808,33 @@ class TestLoadBalancedSession:
     def test_next_after_error_same_model_retry(self, policy: LoadBalancedPolicy, mock_model_set: list[dict]) -> None:
         """Test retrying same model on error."""
         session = policy.new_session(model_set=mock_model_set, request_name="test")
-        
+
         step1 = session.first()
         model_name = step1.meta["model_name"]
-        
+
         # Error, should retry same model
         step2 = session.next_after_error(LLMTimeoutError("Timeout"))
         assert step2.model is not None
         assert step2.meta["model_name"] == model_name
         assert step2.meta["retry"] == 1
+
+    def test_retry_after_applies_to_switch(
+        self, policy: LoadBalancedPolicy
+    ) -> None:
+        model_set = [
+            {"model_identifier": "a", "max_retry": 0, "retry_interval": 1},
+            {"model_identifier": "b", "max_retry": 0, "retry_interval": 1},
+        ]
+        session = policy.new_session(model_set=model_set, request_name="test")
+        session.first()
+
+        step = session.next_after_error(
+            LLMRateLimitError("limited", retry_after=9.0)
+        )
+
+        assert step.model is not None
+        assert step.meta.get("switch") is True
+        assert step.delay_seconds == 9.0
 
     def test_next_after_error_updates_failure_penalty(self, policy: LoadBalancedPolicy, mock_model_set: list[dict]) -> None:
         """Test that next_after_error updates failure penalty."""
