@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from src.kernel.llm import LLMRateLimitError
+from src.kernel.llm import LLMAPIError, LLMRateLimitError, LLMTimeoutError
 from src.kernel.llm.policy import backoff
 
 
@@ -22,6 +22,28 @@ def test_retry_delay_uses_exponential_full_jitter(
     )
 
     assert delay == expected_upper_bound / 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        LLMTimeoutError("timeout"),
+        ConnectionResetError("reset"),
+        LLMAPIError("request timeout", status_code=408),
+        LLMAPIError("server error", status_code=503),
+        LLMRateLimitError("limited", retry_after=None),
+    ],
+)
+def test_retryable_errors_use_model_retry_interval(monkeypatch, error):
+    monkeypatch.setattr(backoff.random, "uniform", lambda low, high: high)
+
+    delay = backoff.retry_delay(
+        model={"retry_interval": 7.5},
+        error=error,
+        retry_ordinal=2,
+    )
+
+    assert delay == 15.0
 
 
 def test_retry_after_takes_priority_without_jitter(monkeypatch):
