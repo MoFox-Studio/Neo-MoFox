@@ -1,5 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class RetryDecision:
+    """请求失败后的重试决策。"""
+
+    retryable: bool
+    reason: str
 
 
 class LLMError(RuntimeError):
@@ -77,6 +86,30 @@ class LLMAPIError(LLMError):
         self.model = model
 
 
+def decide_retry(error: BaseException) -> RetryDecision:
+    """根据标准化异常判断初始请求是否应交给框架重试。"""
+    if isinstance(error, LLMAuthenticationError):
+        return RetryDecision(False, "authentication_error")
+    if isinstance(error, LLMTokenLimitError):
+        return RetryDecision(False, "token_limit")
+    if isinstance(error, LLMContentFilterError):
+        return RetryDecision(False, "content_filter")
+    if isinstance(error, LLMConfigurationError):
+        return RetryDecision(False, "configuration_error")
+    if isinstance(error, LLMRateLimitError):
+        return RetryDecision(True, "rate_limit")
+    if isinstance(error, (LLMTimeoutError, TimeoutError, ConnectionError)):
+        return RetryDecision(True, "transient_transport_error")
+    if isinstance(error, LLMAPIError):
+        status_code = error.status_code
+        if status_code in (408, 429) or (
+            isinstance(status_code, int) and 500 <= status_code < 600
+        ):
+            return RetryDecision(True, "transient_api_error")
+        return RetryDecision(False, "api_request_error")
+    return RetryDecision(False, "unknown_error")
+
+
 def classify_exception(error: BaseException, model: str | None = None) -> BaseException:
     """将第三方 SDK 异常转换为标准化的 LLM 异常。
 
@@ -89,6 +122,7 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
     try:
         from openai import (
             APITimeoutError,
+            APIConnectionError,
             RateLimitError,
             AuthenticationError,
             BadRequestError,
@@ -102,6 +136,9 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
 
         if isinstance(error, APITimeoutError):
             return LLMTimeoutError(str(error), model=model)
+
+        if isinstance(error, APIConnectionError):
+            return ConnectionError(str(error))
 
         if isinstance(error, AuthenticationError):
             return LLMAuthenticationError(str(error), model=model)
@@ -126,6 +163,7 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
     try:
         from anthropic import (
             APITimeoutError as AnthropicAPITimeoutError,
+            APIConnectionError as AnthropicAPIConnectionError,
             APIError as AnthropicAPIError,
             APIStatusError as AnthropicAPIStatusError,
             AuthenticationError as AnthropicAuthenticationError,
@@ -139,6 +177,9 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
 
         if isinstance(error, AnthropicAPITimeoutError):
             return LLMTimeoutError(str(error), model=model)
+
+        if isinstance(error, AnthropicAPIConnectionError):
+            return ConnectionError(str(error))
 
         if isinstance(error, AnthropicAuthenticationError):
             return LLMAuthenticationError(str(error), model=model)

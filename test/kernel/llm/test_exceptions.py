@@ -6,6 +6,7 @@
 3. 异常分类功能（classify_exception）
 """
 
+import pytest
 
 from src.kernel.llm import (
     LLMError,
@@ -19,6 +20,7 @@ from src.kernel.llm import (
     LLMAPIError,
     classify_exception,
 )
+from src.kernel.llm.exceptions import decide_retry
 
 
 def test_llm_error_base():
@@ -169,6 +171,53 @@ def test_llm_api_error_without_attributes():
     assert error.status_code is None
     assert error.error_code is None
     assert error.model is None
+
+
+@pytest.mark.parametrize(
+    ("error", "retryable", "reason"),
+    [
+        (LLMAuthenticationError("unauthorized"), False, "authentication_error"),
+        (LLMTokenLimitError("too many tokens"), False, "token_limit"),
+        (LLMContentFilterError("filtered"), False, "content_filter"),
+        (LLMConfigurationError("invalid config"), False, "configuration_error"),
+        (LLMAPIError("invalid request", status_code=400), False, "api_request_error"),
+        (LLMAPIError("forbidden", status_code=403), False, "api_request_error"),
+        (LLMTimeoutError("timeout"), True, "transient_transport_error"),
+        (ConnectionResetError("reset"), True, "transient_transport_error"),
+        (LLMRateLimitError("rate limited"), True, "rate_limit"),
+        (LLMAPIError("request timeout", status_code=408), True, "transient_api_error"),
+        (LLMAPIError("rate limited", status_code=429), True, "transient_api_error"),
+        (LLMAPIError("server error", status_code=500), True, "transient_api_error"),
+        (ValueError("serialization failed"), False, "unknown_error"),
+    ],
+)
+def test_decide_retry_by_failure_type(error, retryable, reason):
+    decision = decide_retry(error)
+
+    assert decision.retryable is retryable
+    assert decision.reason == reason
+
+
+def test_classify_openai_connection_error():
+    import httpx
+    from openai import APIConnectionError
+
+    error = APIConnectionError(request=httpx.Request("POST", "https://example.test"))
+    classified = classify_exception(error)
+
+    assert isinstance(classified, ConnectionError)
+    assert decide_retry(classified).retryable is True
+
+
+def test_classify_anthropic_connection_error():
+    import httpx
+    from anthropic import APIConnectionError
+
+    error = APIConnectionError(request=httpx.Request("POST", "https://example.test"))
+    classified = classify_exception(error)
+
+    assert isinstance(classified, ConnectionError)
+    assert decide_retry(classified).retryable is True
 
 
 def test_classify_exception_generic_rate_limit():
