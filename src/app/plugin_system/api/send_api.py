@@ -19,14 +19,19 @@ async def send_text(
     stream_id: str,
     platform: str | None = None,
     reply_to: str | None = None,
+    adapter_signature: str | None = None,
 ) -> bool:
     """发送文本消息
 
     Args:
         content: 文本内容
         stream_id: 聊天流 ID
-        platform: 平台名称（可选，会从 stream_id 推断）
+        platform: 平台名称（可选，会从 stream_id 推断）；当指定 ``adapter_signature``
+                  时该参数被忽略
         reply_to: 要回复的消息 ID（可选）
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后直接通过该
+                           适配器发送，不再按 platform 推断
 
     Returns:
         是否发送成功
@@ -34,6 +39,10 @@ async def send_text(
     Example:
         success = await send_text("Hello!", "qq_group_123456")
         success = await send_text("Reply!", "qq_group_123456", reply_to="msg_id_123")
+        success = await send_text(
+            "Hello!", "qq_group_123456",
+            adapter_signature="onebot:adapter:napcat"
+        )
     """
     return await _send_message(
         content=content,
@@ -42,6 +51,7 @@ async def send_text(
         platform=platform,
         processed_plain_text=content,
         reply_to=reply_to,
+        adapter_signature=adapter_signature,
     )
 
 
@@ -51,15 +61,19 @@ async def send_image(
     platform: str | None = None,
     processed_plain_text: str = "[图片]",
     reply_to: str | None = None,
+    adapter_signature: str | None = None,
 ) -> bool:
     """发送图片消息
 
     Args:
         image_data: 图片数据（base64 或 URL）
         stream_id: 聊天流 ID
-        platform: 平台名称（可选）
+        platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
         processed_plain_text: 人类可读文本（可选）
         reply_to: 要回复的消息 ID（可选）
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后直接通过该
+                           适配器发送，不再按 platform 推断
 
     Returns:
         是否发送成功
@@ -67,6 +81,10 @@ async def send_image(
     Example:
         success = await send_image(base64_image, "qq_group_123456")
         success = await send_image(base64_image, "qq_group_123456", reply_to="msg_id_123")
+        success = await send_image(
+            base64_image, "qq_group_123456",
+            adapter_signature="onebot:adapter:napcat"
+        )
     """
     return await _send_message(
         content=image_data,
@@ -75,6 +93,7 @@ async def send_image(
         platform=platform,
         processed_plain_text=processed_plain_text,
         reply_to=reply_to,
+        adapter_signature=adapter_signature,
     )
 
 
@@ -83,14 +102,18 @@ async def send_emoji(
     stream_id: str,
     platform: str | None = None,
     processed_plain_text: str = "",
+    adapter_signature: str | None = None,
 ) -> bool:
     """发送表情包
 
     Args:
         emoji_data: 表情数据（base64 或 URL）
         stream_id: 聊天流 ID
-        platform: 平台名称（可选）
+        platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
         processed_plain_text: 人类可读文本（可选，如 "[表情包: 开心挥手]"）
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后直接通过该
+                           适配器发送，不再按 platform 推断
 
     Returns:
         是否发送成功
@@ -98,6 +121,10 @@ async def send_emoji(
     Example:
         success = await send_emoji(emoji_base64, "qq_group_123456",
                                    processed_plain_text="[表情包: 开心挥手]")
+        success = await send_emoji(
+            emoji_base64, "qq_group_123456",
+            adapter_signature="onebot:adapter:napcat"
+        )
     """
     return await _send_message(
         content=emoji_data,
@@ -105,6 +132,7 @@ async def send_emoji(
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
+        adapter_signature=adapter_signature,
     )
 
 
@@ -112,20 +140,29 @@ async def send_voice(
     voice_data: str,
     stream_id: str,
     platform: str | None = None,
-    processed_plain_text = "[语音]",
+    processed_plain_text: str = "[语音]",
+    adapter_signature: str | None = None,
 ) -> bool:
     """发送语音消息
 
     Args:
         voice_data: 语音数据（base64 或 URL）
         stream_id: 聊天流 ID
-        platform: 平台名称（可选）
+        platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
+        processed_plain_text: 人类可读文本（可选）
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后直接通过该
+                           适配器发送，不再按 platform 推断
 
     Returns:
         是否发送成功
 
     Example:
         success = await send_voice(voice_base64, "qq_user_987654")
+        success = await send_voice(
+            voice_base64, "qq_user_987654",
+            adapter_signature="onebot:adapter:napcat"
+        )
     """
     return await _send_message(
         content=voice_data,
@@ -133,6 +170,7 @@ async def send_voice(
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
+        adapter_signature=adapter_signature,
     )
 
 
@@ -140,20 +178,29 @@ async def send_video(
     video_data: str,
     stream_id: str,
     platform: str | None = None,
-    processed_plain_text = "[视频]",
+    processed_plain_text: str = "[视频]",
+    adapter_signature: str | None = None,
 ) -> bool:
     """发送视频消息
 
     Args:
         video_data: 视频数据（base64 或 URL）
         stream_id: 聊天流 ID
-        platform: 平台名称（可选）
+        platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
+        processed_plain_text: 人类可读文本（可选）
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后直接通过该
+                           适配器发送，不再按 platform 推断
 
     Returns:
         是否发送成功
 
     Example:
         success = await send_video(video_base64, "qq_group_123456")
+        success = await send_video(
+            video_base64, "qq_group_123456",
+            adapter_signature="onebot:adapter:napcat"
+        )
     """
     return await _send_message(
         content=video_data,
@@ -161,6 +208,7 @@ async def send_video(
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
+        adapter_signature=adapter_signature,
     )
 
 
@@ -169,20 +217,28 @@ async def send_file(
     stream_id: str,
     platform: str | None = None,
     file_name: str | None = None,
+    adapter_signature: str | None = None,
 ) -> bool:
     """发送文件
 
     Args:
         file_path: 文件路径
         stream_id: 聊天流 ID
-        platform: 平台名称（可选）
+        platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
         file_name: 显示的文件名（可选）
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后直接通过该
+                           适配器发送，不再按 platform 推断
 
     Returns:
         是否发送成功
 
     Example:
         success = await send_file("/path/to/file.pdf", "qq_group_123456")
+        success = await send_file(
+            "/path/to/file.pdf", "qq_group_123456",
+            adapter_signature="onebot:adapter:napcat"
+        )
     """
     content = {"path": file_path}
     if file_name:
@@ -194,6 +250,7 @@ async def send_file(
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=file_name or "[文件]",
+        adapter_signature=adapter_signature,
     )
 
 
@@ -203,6 +260,7 @@ async def send_custom(
     stream_id: str,
     platform: str | None = None,
     processed_plain_text: str = "",
+    adapter_signature: str | None = None,
 ) -> bool:
     """发送自定义类型消息
 
@@ -210,8 +268,11 @@ async def send_custom(
         content: 消息内容
         message_type: 消息类型
         stream_id: 聊天流 ID
-        platform: 平台名称（可选）
+        platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
         processed_plain_text: 人类可读文本（可选）
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后直接通过该
+                           适配器发送，不再按 platform 推断
     Returns:
         是否发送成功
 
@@ -220,6 +281,12 @@ async def send_custom(
             {"key": "value"},
             "custom_type",
             "qq_group_123456"
+        )
+        success = await send_custom(
+            {"key": "value"},
+            "custom_type",
+            "qq_group_123456",
+            adapter_signature="onebot:adapter:napcat"
         )
     """
     if isinstance(message_type, str):
@@ -235,6 +302,7 @@ async def send_custom(
                 platform=platform,
                 processed_plain_text=processed_plain_text,
                 extra_media=[{"type": message_type, "data": content}],
+                adapter_signature=adapter_signature,
             )
         message_type = message_type_enum
 
@@ -244,14 +312,18 @@ async def send_custom(
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
+        adapter_signature=adapter_signature,
     )
 
 
-async def send_message(message: Message) -> bool:
+async def send_message(message: Message, adapter_signature: str | None = None) -> bool:
     """直接发送 Message 对象
 
     Args:
         message: Message 对象
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后直接通过该
+                           适配器发送，不再按 platform 推断
 
     Returns:
         是否发送成功
@@ -259,11 +331,14 @@ async def send_message(message: Message) -> bool:
     Example:
         msg = Message(content="Hello", platform="qq", stream_id="qq_group_123456")
         success = await send_message(msg)
+        success = await send_message(
+            msg, adapter_signature="onebot:adapter:napcat"
+        )
     """
     from src.core.transport.message_send import get_message_sender
 
     sender = get_message_sender()
-    return await sender.send_message(message)
+    return await sender.send_message(message, adapter_signature=adapter_signature)
 
 
 # =============================================================================
@@ -279,6 +354,7 @@ async def _send_message(
     processed_plain_text: str = "",
     extra_media: list[dict] | None = None,
     reply_to: str | None = None,
+    adapter_signature: str | None = None,
 ) -> bool:
     """内部消息发送实现
 
@@ -286,11 +362,17 @@ async def _send_message(
         content: 消息内容
         message_type: 消息类型
         stream_id: 聊天流 ID
-        platform: 平台名称（可选，会从 stream_id 推断）
+        platform: 平台名称（可选，会从 stream_id 推断）；
+                  当同时传入 ``adapter_signature`` 时，该参数将被忽略，
+                  以目标适配器自身的 platform 为准
         processed_plain_text: 消息的人类可读文本，由上层调用方显式传入
         extra_media: 额外媒体段列表，用于发送框架 MessageType 枚举不覆盖的自定义类型
                      格式：[{"type": "music", "data": "song_id"}, ...]
         reply_to: 要回复的消息 ID（可选）
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；
+                           指定后会直接通过该适配器发送消息，不再按 platform 推断适配器，
+                           bot 信息也从该适配器实例获取
 
     Returns:
         是否发送成功
@@ -308,29 +390,50 @@ async def _send_message(
         stream_manager = get_stream_manager()
         stream_info = await stream_manager.get_stream_info(stream_id)
 
-        # 推断平台
-        if not platform:
-            platform_from_stream = (
-                stream_info.get("platform") if isinstance(stream_info, dict) else None
-            )
-            if isinstance(platform_from_stream, str) and platform_from_stream:
-                platform = platform_from_stream
-            else:
+        adapter_manager = get_adapter_manager()
+
+        # 指定 adapter 签名时，直接通过该适配器获取 platform 与 bot 信息，
+        # 跳过按 platform 推断适配器的流程
+        if adapter_signature:
+            adapter = adapter_manager.get_adapter(adapter_signature)
+            if adapter is None:
                 logger.error(
-                    "未显式传入 platform，且无法从 stream_manager 解析 platform："
-                    f"stream_id={stream_id}"
+                    f"未找到已启动的适配器: {adapter_signature}，"
+                    f"无法发送消息（stream_id={stream_id}）"
                 )
                 return False
 
-        assert platform is not None
+            # 以目标适配器自身的 platform 为准，忽略外部传入的 platform 参数
+            platform = adapter.platform
+            bot_info = await adapter.get_bot_info()
+            if not bot_info:
+                logger.error(
+                    f"无法从适配器 {adapter_signature} 获取 bot 信息"
+                )
+                return False
+        else:
+            # 推断平台
+            if not platform:
+                platform_from_stream = (
+                    stream_info.get("platform") if isinstance(stream_info, dict) else None
+                )
+                if isinstance(platform_from_stream, str) and platform_from_stream:
+                    platform = platform_from_stream
+                else:
+                    logger.error(
+                        "未显式传入 platform，且无法从 stream_manager 解析 platform："
+                        f"stream_id={stream_id}"
+                    )
+                    return False
 
-        # 获取 bot 信息
-        adapter_manager = get_adapter_manager()
-        bot_info = await adapter_manager.get_bot_info_by_platform(platform)
+            assert platform is not None
 
-        if not bot_info:
-            logger.error(f"无法获取平台 {platform} 的 bot 信息")
-            return False
+            # 获取 bot 信息
+            bot_info = await adapter_manager.get_bot_info_by_platform(platform)
+
+            if not bot_info:
+                logger.error(f"无法获取平台 {platform} 的 bot 信息")
+                return False
 
         chat_type = "private"
         extra: dict[str, Any] = {}
@@ -389,7 +492,7 @@ async def _send_message(
 
         # 发送消息
         sender = get_message_sender()
-        return await sender.send_message(message)
+        return await sender.send_message(message, adapter_signature=adapter_signature)
 
     except Exception as e:
         logger.error(f"发送消息失败: {e}", exc_info=True)
@@ -401,11 +504,17 @@ async def _send_message(
 # =============================================================================
 
 
-async def send_batch(messages: list[Message]) -> list[bool]:
+async def send_batch(
+    messages: list[Message],
+    adapter_signature: str | None = None,
+) -> list[bool]:
     """批量发送消息
 
     Args:
         messages: Message 对象列表
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后所有消息均
+                           通过该适配器发送，不再按 platform 逐条推断
 
     Returns:
         每条消息的发送结果列表
@@ -416,6 +525,9 @@ async def send_batch(messages: list[Message]) -> list[bool]:
             Message(content="Hello 2", platform="qq", stream_id="qq_group_456"),
         ]
         results = await send_batch(messages)
+        results = await send_batch(
+            messages, adapter_signature="onebot:adapter:napcat"
+        )
     """
     from src.core.transport.message_send import get_message_sender
 
@@ -423,17 +535,23 @@ async def send_batch(messages: list[Message]) -> list[bool]:
     results = []
 
     for message in messages:
-        success = await sender.send_message(message)
+        success = await sender.send_message(message, adapter_signature=adapter_signature)
         results.append(success)
 
     return results
 
 
-async def send_batch_parallel(messages: list[Message]) -> list[bool]:
+async def send_batch_parallel(
+    messages: list[Message],
+    adapter_signature: str | None = None,
+) -> list[bool]:
     """并行批量发送消息（速度更快但顺序不保证）
 
     Args:
         messages: Message 对象列表
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后所有消息均
+                           通过该适配器发送，不再按 platform 逐条推断
 
     Returns:
         每条消息的发送结果列表
@@ -444,11 +562,16 @@ async def send_batch_parallel(messages: list[Message]) -> list[bool]:
             Message(content="Hello 2", platform="qq", stream_id="qq_group_456"),
         ]
         results = await send_batch_parallel(messages)
+        results = await send_batch_parallel(
+            messages, adapter_signature="onebot:adapter:napcat"
+        )
     """
     from src.core.transport.message_send import get_message_sender
 
     sender = get_message_sender()
-    tasks = [sender.send_message(msg) for msg in messages]
+    tasks = [
+        sender.send_message(msg, adapter_signature=adapter_signature) for msg in messages
+    ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # 将异常转换为 False
@@ -465,6 +588,7 @@ async def send_text_with_image(
     image_data: str,
     stream_id: str,
     platform: str | None = None,
+    adapter_signature: str | None = None,
 ) -> bool:
     """发送文本 + 图片组合消息
 
@@ -472,7 +596,10 @@ async def send_text_with_image(
         text: 文本内容
         image_data: 图片数据
         stream_id: 聊天流 ID
-        platform: 平台名称（可选）
+        platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
+        adapter_signature: 目标适配器组件签名（可选），格式为
+                           ``plugin_name:adapter:adapter_name``；指定后文本与图片
+                           均通过该适配器发送，不再按 platform 推断
 
     Returns:
         是否发送成功
@@ -483,14 +610,24 @@ async def send_text_with_image(
             image_base64,
             "qq_group_123456"
         )
+        success = await send_text_with_image(
+            "看看这张图片",
+            image_base64,
+            "qq_group_123456",
+            adapter_signature="onebot:adapter:napcat"
+        )
     """
     # 先发送文本
-    text_success = await send_text(text, stream_id, platform)
+    text_success = await send_text(
+        text, stream_id, platform, adapter_signature=adapter_signature
+    )
     if not text_success:
         return False
 
     # 再发送图片
-    return await send_image(image_data, stream_id, platform)
+    return await send_image(
+        image_data, stream_id, platform, adapter_signature=adapter_signature
+    )
 
 
 async def broadcast_text(
