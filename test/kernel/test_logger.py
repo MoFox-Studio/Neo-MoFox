@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from io import StringIO
 
+import pytest
 from rich.console import Console
 
 from src.kernel.logger import (
@@ -1387,3 +1388,169 @@ class TestLogLevelDynamicUpdate:
         log.console = Console(file=buf2)
         log.info("info visible after global change")
         assert "info visible after global change" in buf2.getvalue()
+
+
+class TestLoggerCleanupIntegration:
+    """测试日志清理与 initialize_logger_system 的集成。
+
+    验证 initialize_logger_system 能一并创建清理管理器实例，
+    且 start_logger_cleanup / stop_logger_cleanup 可正确驱动其启停。
+    """
+
+    def test_initialize_creates_cleanup_manager(self, tmp_path: Path) -> None:
+        """initialize_logger_system 应创建全局清理管理器实例。"""
+        from src.kernel.logger import (
+            initialize_logger_system,
+            shutdown_logger_system,
+        )
+        import src.kernel.logger.logger as logger_module
+
+        try:
+            initialize_logger_system(
+                log_dir=tmp_path,
+                log_level="DEBUG",
+                enable_file=False,
+                log_cleanup_enabled=True,
+                log_max_age_days=7,
+                log_max_files=50,
+                log_cleanup_interval_hours=1.0,
+            )
+            # 全局清理管理器应已被创建
+            manager = logger_module._global_cleanup_manager
+            assert manager is not None
+            assert manager.log_dir == tmp_path
+            assert manager.max_age_days == 7
+            assert manager.max_files == 50
+            assert manager.cleanup_interval_hours == 1.0
+            assert manager.enabled is True
+        finally:
+            shutdown_logger_system()
+            clear_all_loggers()
+
+    def test_initialize_disabled_cleanup_manager(self, tmp_path: Path) -> None:
+        """log_cleanup_enabled=False 时清理管理器 enabled 应为 False。"""
+        from src.kernel.logger import (
+            initialize_logger_system,
+            shutdown_logger_system,
+        )
+        import src.kernel.logger.logger as logger_module
+
+        try:
+            initialize_logger_system(
+                log_dir=tmp_path,
+                log_level="DEBUG",
+                enable_file=False,
+                log_cleanup_enabled=False,
+            )
+            manager = logger_module._global_cleanup_manager
+            assert manager is not None
+            assert manager.enabled is False
+        finally:
+            shutdown_logger_system()
+            clear_all_loggers()
+
+    @pytest.mark.asyncio
+    async def test_start_cleanup_without_init_raises(
+        self, tmp_path: Path
+    ) -> None:
+        """未初始化日志系统时调用 start_logger_cleanup 应抛 RuntimeError。"""
+        from src.kernel.logger import (
+            initialize_logger_system,
+            shutdown_logger_system,
+            start_logger_cleanup,
+        )
+        import src.kernel.logger.logger as logger_module
+
+        # 确保清理管理器为 None
+        initialize_logger_system(
+            log_dir=tmp_path,
+            log_level="DEBUG",
+            enable_file=False,
+        )
+        shutdown_logger_system()
+
+        assert logger_module._global_cleanup_manager is None
+        with pytest.raises(RuntimeError):
+            await start_logger_cleanup()
+
+    @pytest.mark.asyncio
+    async def test_start_stop_cleanup_drives_manager(
+        self, tmp_path: Path
+    ) -> None:
+        """start_logger_cleanup / stop_logger_cleanup 应驱动清理管理器启停。"""
+        from src.kernel.logger import (
+            initialize_logger_system,
+            shutdown_logger_system,
+            start_logger_cleanup,
+            stop_logger_cleanup,
+        )
+
+        try:
+            initialize_logger_system(
+                log_dir=tmp_path,
+                log_level="DEBUG",
+                enable_file=False,
+                log_cleanup_enabled=True,
+            )
+
+            # mock 清理管理器的 start/stop 以避免依赖真实调度器
+            import src.kernel.logger.logger as logger_module
+
+            manager = logger_module._global_cleanup_manager
+            assert manager is not None
+
+            start_calls: list[bool] = []
+            stop_calls: list[bool] = []
+
+            async def fake_start() -> None:
+                start_calls.append(True)
+
+            async def fake_stop() -> None:
+                stop_calls.append(True)
+
+            manager.start = fake_start  # type: ignore[assignment]
+            manager.stop = fake_stop  # type: ignore[assignment]
+
+            await start_logger_cleanup()
+            assert start_calls == [True]
+
+            await stop_logger_cleanup()
+            assert stop_calls == [True]
+        finally:
+            shutdown_logger_system()
+            clear_all_loggers()
+
+    @pytest.mark.asyncio
+    async def test_stop_cleanup_without_init_is_noop(self) -> None:
+        """未初始化日志系统时调用 stop_logger_cleanup 应安全跳过。"""
+        from src.kernel.logger import (
+            shutdown_logger_system,
+            stop_logger_cleanup,
+        )
+        import src.kernel.logger.logger as logger_module
+
+        # 确保清理管理器为 None（依赖前序测试已 shutdown）
+        if logger_module._global_cleanup_manager is not None:
+            shutdown_logger_system()
+        assert logger_module._global_cleanup_manager is None
+        # 不应抛异常
+        await stop_logger_cleanup()
+
+    def test_shutdown_releases_cleanup_manager(self, tmp_path: Path) -> None:
+        """shutdown_logger_system 应释放清理管理器引用。"""
+        from src.kernel.logger import (
+            initialize_logger_system,
+            shutdown_logger_system,
+        )
+        import src.kernel.logger.logger as logger_module
+
+        initialize_logger_system(
+            log_dir=tmp_path,
+            log_level="DEBUG",
+            enable_file=False,
+            log_cleanup_enabled=True,
+        )
+        assert logger_module._global_cleanup_manager is not None
+        shutdown_logger_system()
+        assert logger_module._global_cleanup_manager is None
+        clear_all_loggers()

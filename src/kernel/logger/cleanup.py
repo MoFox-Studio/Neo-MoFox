@@ -80,7 +80,7 @@ class LoggerCleanupManager:
             task_name="log_file_cleanup",
             force_overwrite=True,
         )
-        logger.debug(
+        logger.info(
             f"日志自动清理已启动(每 {self.cleanup_interval_hours} 小时, "
             f"保留 {self.max_age_days} 天, 上限 {self.max_files} 文件)"
         )

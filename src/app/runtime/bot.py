@@ -11,7 +11,7 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from src.core.config import CORE_VERSION
@@ -31,7 +31,6 @@ if TYPE_CHECKING:
     from src.kernel.scheduler import UnifiedScheduler
     from src.kernel.storage import JSONStore
     from src.kernel.vector_db import VectorDBBase
-    from src.kernel.logger.cleanup import LoggerCleanupManager
 
 class Bot:
     """Neo-MoFox Bot 主类
@@ -90,7 +89,6 @@ class Bot:
         self.vector_db: VectorDBBase | None = None
         self.scheduler: UnifiedScheduler | None = None
         self.storage: JSONStore | None = None
-        self._log_cleanup_manager: "LoggerCleanupManager | None" = None
 
         # Core 层组件（延迟初始化）
         self.message_receiver: MessageReceiver | None = None
@@ -108,6 +106,11 @@ class Bot:
         self._dns_executor: ThreadPoolExecutor | None = None
         self._original_getaddrinfo: Any | None = None
         self._original_getnameinfo: Any | None = None
+
+        # 日志清理启停函数引用（由 initialize() 中 initialize_logger_system 后赋值，
+        # 由 run()/shutdown() 在调度器启停时调用）
+        self._start_logger_cleanup: Callable[[], Awaitable[None]] | None = None
+        self._stop_logger_cleanup: Callable[[], Awaitable[None]] | None = None
 
         # 统计数据
         self._stats: dict[str, int | bool | dict] = {
@@ -313,21 +316,25 @@ class Bot:
         from src.kernel.logger import (
             get_logger,
             initialize_logger_system,
+            start_logger_cleanup,
+            stop_logger_cleanup,
             COLOR,
-            LoggerCleanupManager,
         )
 
-        initialize_logger_system(log_dir=self.log_dir, log_level=self.config.bot.log_level)
-        self.logger = get_logger(name="console", display="控制台", color=COLOR.BLUE)
-
-        # 创建日志自动清理管理器（在 run() 中调度器启动后注册任务）
-        self._log_cleanup_manager = LoggerCleanupManager(
+        # 初始化日志系统（含日志自动清理管理器的创建）
+        # 清理调度任务的注册需在调度器启动后调用 start_logger_cleanup() 完成
+        initialize_logger_system(
             log_dir=self.log_dir,
-            max_age_days=self.config.bot.log_max_age_days,
-            max_files=self.config.bot.log_max_files,
-            cleanup_interval_hours=self.config.bot.log_cleanup_interval_hours,
-            enabled=self.config.bot.log_cleanup_enabled,
+            log_level=self.config.bot.log_level,
+            log_cleanup_enabled=self.config.bot.log_cleanup_enabled,
+            log_max_age_days=self.config.bot.log_max_age_days,
+            log_max_files=self.config.bot.log_max_files,
+            log_cleanup_interval_hours=self.config.bot.log_cleanup_interval_hours,
         )
+        self.logger = get_logger(name="console", display="控制台", color=COLOR.BLUE)
+        # 保存启停函数引用，供 run()/shutdown() 调用
+        self._start_logger_cleanup = start_logger_cleanup
+        self._stop_logger_cleanup = stop_logger_cleanup
 
         self.ui.update_phase_status("日志", "已初始化")
 
@@ -812,10 +819,10 @@ class Bot:
         await self.scheduler.start()
         self._stats["scheduler_running"] = True
 
-        # 启动日志自动清理任务
-        if self._log_cleanup_manager is not None:
+        # 启动日志自动清理任务（由 logger 模块统一管理）
+        if self._start_logger_cleanup is not None:
             try:
-                await self._log_cleanup_manager.start()
+                await self._start_logger_cleanup()
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"启动日志自动清理失败: {e}")
@@ -1144,10 +1151,10 @@ class Bot:
             # 3. 卸载插件
             await self._unload_all_plugins()
 
-            # 4. 停止日志自动清理任务（需在调度器停止前移除）
-            if self._log_cleanup_manager is not None:
+            # 4. 停止日志自动清理任务（由 logger 模块统一管理，需在调度器停止前移除）
+            if self._stop_logger_cleanup is not None:
                 try:
-                    await self._log_cleanup_manager.stop()
+                    await self._stop_logger_cleanup()
                 except Exception as e:
                     if self.logger:
                         self.logger.warning(f"停止日志自动清理失败: {e}")
