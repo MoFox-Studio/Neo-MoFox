@@ -5,7 +5,7 @@
 
 from .bot import Bot
 from .command_parser import CommandParser, CommandExecutionError
-from .console_ui import ConsoleUIManager, UILevel
+from .console_ui import ConsoleUIManager
 from .exceptions import (
     BotInitializationError,
     BotRuntimeError,
@@ -19,7 +19,6 @@ __all__ = [
     "Bot",
     # UI 相关
     "ConsoleUIManager",
-    "UILevel",
     # 异常
     "BotRuntimeError",
     "BotInitializationError",

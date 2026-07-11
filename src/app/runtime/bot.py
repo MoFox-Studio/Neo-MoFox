@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from src.core.config import CORE_VERSION
 
-from .console_ui import ConsoleUIManager, UILevel
+from .console_ui import ConsoleUIManager
 from .exceptions import BotInitializationError, BotRuntimeError, BotShutdownError
 from .signal_handler import SignalHandler
 
@@ -48,7 +48,6 @@ class Bot:
         config_path: 配置文件路径
         plugins_dir: 插件目录
         log_dir: 日志目录
-        ui_level: UI 详细程度
     """
 
     bot_name: str = "Neo-MoFox"
@@ -58,7 +57,6 @@ class Bot:
         config_path: str = "config/core.toml",
         plugins_dir: str = "plugins",
         log_dir: str = "logs",
-        ui_level: UILevel = UILevel.STANDARD,
     ) -> None:
         """初始化 Bot
 
@@ -66,14 +64,13 @@ class Bot:
             config_path: 配置文件路径
             plugins_dir: 插件目录
             log_dir: 日志目录
-            ui_level: UI 详细程度
         """
         self.config_path = config_path
         self.plugins_dir = plugins_dir
         self.log_dir = log_dir
 
         # UI 管理器
-        self.ui = ConsoleUIManager(level=ui_level)
+        self.ui = ConsoleUIManager()
 
         # 状态标志
         self._initialized = False
@@ -848,10 +845,6 @@ class Bot:
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"触发 ON_START 事件失败: {e}")
-        
-        # 启动实时仪表盘（如果 UI 级别为 VERBOSE）
-        if self.ui.level == UILevel.VERBOSE:
-            self.ui.start_live_dashboard()
 
         # 启动信号处理器
         signal_handler = SignalHandler(self)
@@ -879,10 +872,6 @@ class Bot:
 
                     if not should_continue:
                         break
-
-                    # 更新仪表盘统计
-                    if self.ui.level == UILevel.VERBOSE:
-                        await self._update_runtime_stats()
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -900,27 +889,8 @@ class Bot:
             await self._record_runtime_snapshot(event_name="run_stopped")
             command_parser.close()
 
-            # 停止实时仪表盘
-            if self.ui.level == UILevel.VERBOSE:
-                self.ui.stop_live_dashboard()
-
             # 恢复信号处理器
             signal_handler.restore_handlers()
-
-    async def _update_runtime_stats(self) -> None:
-        """更新运行时统计数据（用于仪表盘）"""
-        assert self.task_manager is not None
-
-        stats = {
-            "plugins_loaded": self._stats["plugins_loaded"],
-            "plugins_failed": self._stats["plugins_failed"],
-            "components_by_type": self._stats["components_by_type"],
-            "tasks_active": len(self.task_manager.get_all_tasks()),
-            "db_connected": self._stats["db_connected"],
-            "scheduler_running": self._stats["scheduler_running"],
-        }
-
-        self.ui.update_dashboard_stats(stats)
 
     def _install_telemetry_hooks(self) -> None:
         """安装遥测日志订阅。"""

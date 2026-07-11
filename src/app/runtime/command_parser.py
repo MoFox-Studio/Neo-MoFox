@@ -32,7 +32,6 @@ class CommandParser:
     - /stop:   停止 Bot
     - /plugins: 列出所有插件及状态
     - /tasks:  显示当前任务统计
-    - /ui level [minimal|standard|verbose]: 调整 UI 级别
 
     Attributes:
         bot: Bot 实例
@@ -99,9 +98,6 @@ class CommandParser:
         self.register_command("stop", self.cmd_stop, "停止 Bot")
         self.register_command("plugins", self.cmd_plugins, "列出所有插件及状态")
         self.register_command("tasks", self.cmd_tasks, "显示当前任务统计")
-        self.register_command(
-            "ui", self.cmd_ui, "调整 UI 级别 (minimal|standard|verbose)"
-        )
 
     def register_command(
         self, name: str, handler: Callable[[list[str]], Any], help_text: str
@@ -333,62 +329,5 @@ class CommandParser:
             table.add_row(task_name, status)
 
         self.bot.ui.console.print(table)
-
-    async def cmd_ui(self, args: list[str]) -> None:
-        """调整 UI 级别
-
-        Args:
-            args: 命令参数 (minimal|standard|verbose)
-        """
-        if not args:
-            self.bot.ui.console.print(
-                "[yellow]用法: /ui level <minimal|standard|verbose>[/yellow]"
-            )
-            return
-
-        if args[0] != "level":
-            self.bot.ui.console.print(
-                "[yellow]用法: /ui level <minimal|standard|verbose>[/yellow]"
-            )
-            return
-
-        if len(args) < 2:
-            self.bot.ui.console.print(
-                "[yellow]请指定 UI 级别: minimal, standard, 或 verbose[/yellow]"
-            )
-            return
-
-        from .console_ui import UILevel
-
-        level_map = {
-            "minimal": UILevel.MINIMAL,
-            "standard": UILevel.STANDARD,
-            "verbose": UILevel.VERBOSE,
-        }
-
-        level_str = args[1].lower()
-        if level_str not in level_map:
-            self.bot.ui.console.print(
-                f"[red]无效的 UI 级别: {level_str}[/red]\n"
-                "[yellow]有效选项: minimal, standard, verbose[/yellow]"
-            )
-            return
-
-        new_level = level_map[level_str]
-
-        # 如果当前是 VERBOSE，需要停止仪表盘
-        if self.bot.ui.level == UILevel.VERBOSE:
-            self.bot.ui.stop_live_dashboard()
-
-        # 更新 UI 级别
-        self.bot.ui.level = new_level
-        self.bot.ui.console.print(
-            f"[green]UI 级别已更改为: {level_str}[/green]"
-        )
-
-        # 如果新级别是 VERBOSE，启动仪表盘
-        if new_level == UILevel.VERBOSE and self.bot._running:
-            self.bot.ui.start_live_dashboard()
-
 
 __all__ = ["CommandParser", "CommandExecutionError"]

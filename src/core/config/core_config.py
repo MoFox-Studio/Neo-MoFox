@@ -23,24 +23,6 @@ class CoreConfig(ConfigBase):
         定义 Bot 基本配置、UI 配置和路径配置。
         """
 
-        ui_level: str = Field(
-            default="verbose",
-            description="UI 级别：minimal|standard|verbose",
-            label="UI 级别",
-            tag="general",
-            input_type="select",
-            choices=["minimal", "standard", "verbose"],
-            hint="控制控制台输出的详细程度",
-        )
-        ui_refresh_interval: float = Field(
-            default=1.0,
-            description="仪表盘刷新间隔（秒）",
-            label="刷新间隔",
-            tag="performance",
-            input_type="number",
-            step=0.1,
-            hint="控制台仪表盘更新频率",
-        )
         plugins_dir: str = Field(
             default="plugins",
             description="插件目录",
