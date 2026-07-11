@@ -185,7 +185,7 @@ class CoreConfig(ConfigBase):
             ge=0,
         )
         log_cleanup_interval_hours: float = Field(
-            default=6.0,
+            default=1.0,
             description="日志清理任务执行间隔（小时）",
             label="日志清理间隔",
             tag="timer",
