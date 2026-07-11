@@ -70,7 +70,9 @@ class MediaManager:
         self._register_prompts()
         self._setup_media_folders()
         self._load_cleanup_config()
-        self._cleanup_task_id = None
+        # 两个独立的清理任务：缓存清理（pending 目录）与文件清理（images/emojis 目录）
+        self._cache_cleanup_task_id: str | None = None
+        self._file_cleanup_task_id: str | None = None
         self._start_cleanup_scheduler()
 
     def _initialize_vlm(self) -> None:
@@ -146,39 +148,57 @@ class MediaManager:
             logger.error(f"创建媒体文件夹失败: {e}")
 
     def _load_cleanup_config(self) -> None:
-        """从核心配置加载媒体缓存清理参数。
+        """从核心配置加载媒体清理参数。
+
+        媒体清理分为两类，各自拥有独立的配置：
+        - 媒体缓存清理（pending 目录）：由 ``media_cache_cleanup_*`` 控制
+        - 媒体文件清理（images/emojis 目录）：由 ``media_file_cleanup_*`` 控制
 
         配置加载失败时直接抛出异常，不使用 fallback 默认值，
         避免掩盖配置错误导致清理行为与预期不符。
         """
         config = get_core_config()
         chat_cfg = config.chat
-        self._media_cleanup_enabled = chat_cfg.media_cache_cleanup_enabled
-        self._media_max_age_days = chat_cfg.media_cache_max_age_days
-        self._media_max_total_size_mb = chat_cfg.media_cache_max_total_size_mb
-        self._media_cleanup_interval_hours = chat_cfg.media_cache_cleanup_interval_hours
+
+        # pending 目录清理配置
+        self._media_cache_cleanup_enabled = chat_cfg.media_cache_cleanup_enabled
+        self._media_cache_cleanup_interval_hours = chat_cfg.media_cache_cleanup_interval_hours
+
+        # images/emojis 目录清理配置
+        self._media_file_cleanup_enabled = chat_cfg.media_file_cleanup_enabled
+        self._media_file_max_age_days = chat_cfg.media_file_max_age_days
+        self._media_file_max_total_size_mb = chat_cfg.media_file_max_total_size_mb
+        self._media_file_cleanup_interval_hours = chat_cfg.media_file_cleanup_interval_hours
 
     def _start_cleanup_scheduler(self) -> None:
-        """启动定时清理任务（每5分钟清理一次缓存）。"""
+        """启动两个独立的定时清理任务。
+
+        - 缓存清理任务：高频清理 pending 目录中的陈旧文件
+        - 文件清理任务：按用户配置间隔清理 images/emojis 目录中的已识别文件
+        """
         try:
-            # 延迟导入，避免循环依赖
-            # 确保在异步上下文中创建任务
-            asyncio.create_task(self._register_cleanup_task())
-            
-            logger.info("媒体缓存清理调度器已启动(每5分钟)")
+            asyncio.create_task(self._register_cache_cleanup_task())
+            asyncio.create_task(self._register_file_cleanup_task())
+            logger.info(
+                "媒体清理调度器已启动"
+                f"(缓存清理每 {self._media_cache_cleanup_interval_hours}h，"
+                f"文件清理每 {self._media_file_cleanup_interval_hours}h)"
+            )
         except Exception as e:
             logger.error(f"启动清理调度器失败: {e}")
 
-    async def _register_cleanup_task(self) -> None:
-        """注册定时清理任务到调度器。"""
+    async def _register_cache_cleanup_task(self) -> None:
+        """注册 pending 目录的定时清理任务到调度器。"""
         try:
-            scheduler = get_unified_scheduler()
+            if not self._media_cache_cleanup_enabled:
+                logger.info("媒体缓存清理已禁用，跳过 pending 目录清理任务注册")
+                return
 
-            # 使用配置的清理间隔（小时转秒）
-            interval_seconds = self._media_cleanup_interval_hours * 3600
+            scheduler = get_unified_scheduler()
+            interval_seconds = self._media_cache_cleanup_interval_hours * 3600
 
             schedule_id = await scheduler.create_schedule(
-                callback=self._cleanup_all_media,
+                callback=self._cleanup_pending_folder,
                 trigger_type=TriggerType.TIME,
                 trigger_config={"delay_seconds": interval_seconds},
                 is_recurring=True,
@@ -186,30 +206,60 @@ class MediaManager:
                 force_overwrite=True,
             )
 
-            self._cleanup_task_id = schedule_id
+            self._cache_cleanup_task_id = schedule_id
             logger.info(
-                f"媒体缓存清理任务已注册(间隔 {self._media_cleanup_interval_hours}h): {schedule_id}"
+                f"媒体缓存清理任务已注册(间隔 {self._media_cache_cleanup_interval_hours}h): {schedule_id}"
             )
         except Exception as e:
-            logger.error(f"注册清理任务失败: {e}")
+            logger.error(f"注册缓存清理任务失败: {e}")
+
+    async def _register_file_cleanup_task(self) -> None:
+        """注册 images/emojis 目录的定时清理任务到调度器。"""
+        try:
+            if not self._media_file_cleanup_enabled:
+                logger.info("媒体文件清理已禁用，跳过 images/emojis 目录清理任务注册")
+                return
+
+            scheduler = get_unified_scheduler()
+            interval_seconds = self._media_file_cleanup_interval_hours * 3600
+
+            schedule_id = await scheduler.create_schedule(
+                callback=self._cleanup_media_files,
+                trigger_type=TriggerType.TIME,
+                trigger_config={"delay_seconds": interval_seconds},
+                is_recurring=True,
+                task_name="media_file_cleanup",
+                force_overwrite=True,
+            )
+
+            self._file_cleanup_task_id = schedule_id
+            logger.info(
+                f"媒体文件清理任务已注册(间隔 {self._media_file_cleanup_interval_hours}h): {schedule_id}"
+            )
+        except Exception as e:
+            logger.error(f"注册文件清理任务失败: {e}")
 
     async def _cleanup_pending_folder(self) -> None:
-        """清理待识别文件夹中的陈旧文件。"""
+        """清理待识别文件夹中的陈旧文件。
+
+        删除 pending 目录中超过 5 分钟（300 秒）未被处理的文件。
+        该任务独立调度，不受 images/emojis 目录清理配置影响。
+        """
         try:
             if not self.pending_folder.exists():
                 return
-            
+
             current_time = time.time()
             cleanup_count = 0
-            
+
             # 遍历所有待识别文件
             for file_path in self.pending_folder.iterdir():
                 if not file_path.is_file():
                     continue
-                
+
                 # 获取文件修改时间
                 file_mtime = file_path.stat().st_mtime
-                
+
                 # 如果文件超过5分钟未处理，删除它
                 if current_time - file_mtime >= 300:  # 5分钟 = 300秒
                     try:
@@ -217,26 +267,20 @@ class MediaManager:
                         cleanup_count += 1
                     except Exception as e:
                         logger.warning(f"删除文件失败 {file_path.name}: {e}")
-            
+
             if cleanup_count > 0:
                 logger.info(f"媒体缓存清理完成，删除了 {cleanup_count} 个陈旧文件")
         except Exception as e:
             logger.error(f"清理待识别文件夹失败: {e}")
 
-    async def _cleanup_all_media(self) -> None:
-        """执行全部媒体缓存清理。
+    async def _cleanup_media_files(self) -> None:
+        """清理 images/emojis 目录中的已识别媒体文件。
 
-        整合 pending 目录清理和 images/emojis 目录清理。
-        pending 目录始终清理（与原有行为一致），
-        images/emojis 目录根据配置决定是否清理。
+        整合 images 与 emojis 两个分类目录的清理，
+        各目录按文件年龄和总容量两个维度清理：
+        1. 删除超过 ``media_file_max_age_days`` 的文件
+        2. 若总容量超过 ``media_file_max_total_size_mb``，从最旧文件开始删除直到达标
         """
-        # 保留原有 pending 清理逻辑
-        await self._cleanup_pending_folder()
-
-        if not self._media_cleanup_enabled:
-            return
-
-        # 清理已识别的分类目录
         await self._cleanup_category_folder(self.images_folder)
         await self._cleanup_category_folder(self.emojis_folder)
 
@@ -244,8 +288,8 @@ class MediaManager:
         """清理已识别媒体分类文件夹中的陈旧文件。
 
         按文件年龄和总容量两个维度清理：
-        1. 删除超过 max_age_days 的文件
-        2. 若总容量超过 max_total_size_mb，从最旧文件开始删除直到达标
+        1. 删除超过 ``media_file_max_age_days`` 的文件
+        2. 若总容量超过 ``media_file_max_total_size_mb``，从最旧文件开始删除直到达标
 
         Args:
             folder: 要清理的文件夹路径
@@ -272,8 +316,8 @@ class MediaManager:
             files.sort(key=lambda x: x[1])
 
             # 阶段 1：按天数清理
-            if self._media_max_age_days > 0:
-                cutoff_time = now - self._media_max_age_days * 86400
+            if self._media_file_max_age_days > 0:
+                cutoff_time = now - self._media_file_max_age_days * 86400
                 for file_path, mtime, _ in files:
                     if mtime < cutoff_time:
                         deleted_count += self._safe_delete_media(file_path)
@@ -283,8 +327,8 @@ class MediaManager:
                 files = [(fp, mt, sz) for fp, mt, sz in files if fp.exists()]
 
             # 阶段 2：按总容量裁剪
-            if self._media_max_total_size_mb > 0:
-                max_bytes = self._media_max_total_size_mb * 1024 * 1024
+            if self._media_file_max_total_size_mb > 0:
+                max_bytes = self._media_file_max_total_size_mb * 1024 * 1024
                 total_size = sum(sz for _, _, sz in files)
                 if total_size > max_bytes:
                     # 从最旧开始删除
@@ -301,7 +345,7 @@ class MediaManager:
 
             if deleted_count > 0:
                 logger.info(
-                    f"媒体缓存清理完成 [{folder.name}]，删除了 {deleted_count} 个文件"
+                    f"媒体文件清理完成 [{folder.name}]，删除了 {deleted_count} 个文件"
                 )
         except Exception as e:
             logger.error(f"清理媒体分类文件夹失败 [{folder.name}]: {e}")

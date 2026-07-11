@@ -249,34 +249,52 @@ class CoreConfig(ConfigBase):
             hint="留空使用默认提示词",
         )
 
-        # ========== 媒体缓存自动清理配置 ==========
+        # ========== 媒体缓存清理配置（pending 目录）==========
         media_cache_cleanup_enabled: bool = Field(
             default=True,
-            description="是否启用媒体缓存自动清理（清理 pending 之外的已识别文件）",
+            description="是否启用媒体缓存自动清理（仅清理 pending 待识别目录中的陈旧文件）",
             label="启用媒体缓存清理",
             tag="file",
             input_type="switch",
         )
-        media_cache_max_age_days: int = Field(
+        media_cache_cleanup_interval_hours: float = Field(
+            default=0.5,
+            description="媒体缓存清理任务执行间隔（小时），针对 pending 待识别目录",
+            label="媒体缓存清理间隔",
+            tag="timer",
+            input_type="number",
+            step=0.1,
+            ge=0.1,
+        )
+
+        # ========== 媒体文件清理配置（images/emojis 目录）==========
+        media_file_cleanup_enabled: bool = Field(
+            default=True,
+            description="是否启用媒体文件自动清理（清理 images/emojis 目录中已识别的文件）",
+            label="启用媒体文件清理",
+            tag="file",
+            input_type="switch",
+        )
+        media_file_max_age_days: int = Field(
             default=7,
             description="已识别媒体文件最大保留天数，0 表示不按时间清理",
-            label="媒体缓存保留天数",
+            label="媒体文件保留天数",
             tag="file",
             input_type="number",
             ge=0,
         )
-        media_cache_max_total_size_mb: int = Field(
+        media_file_max_total_size_mb: int = Field(
             default=500,
             description="已识别媒体文件总容量上限（MB），0 表示不限制。超出时从最旧文件开始删除",
-            label="媒体缓存最大容量",
+            label="媒体文件最大容量",
             tag="file",
             input_type="number",
             ge=0,
         )
-        media_cache_cleanup_interval_hours: float = Field(
+        media_file_cleanup_interval_hours: float = Field(
             default=1.0,
-            description="媒体缓存清理任务执行间隔（小时）",
-            label="媒体缓存清理间隔",
+            description="媒体文件清理任务执行间隔（小时），针对 images/emojis 已识别目录",
+            label="媒体文件清理间隔",
             tag="timer",
             input_type="number",
             step=0.5,
@@ -1120,6 +1138,71 @@ def _migrate_legacy_chat_context_config(config_path: Path) -> None:
     config_path.write_text(toml_content, encoding="utf-8")
 
 
+def _migrate_legacy_media_cleanup_config(config_path: Path) -> None:
+    """迁移旧的媒体清理配置字段到拆分后的独立配置项。
+
+    旧字段（media_cache_*）原本既控制 pending 目录清理，也控制 images/emojis 目录清理。
+    拆分后：
+    - pending 目录清理由 media_cache_cleanup_enabled / media_cache_cleanup_interval_hours 控制
+    - images/emojis 目录清理由 media_file_* 系列字段控制
+
+    迁移规则：
+    - media_cache_max_age_days -> media_file_max_age_days
+    - media_cache_max_total_size_mb -> media_file_max_total_size_mb
+    - media_cache_cleanup_interval_hours -> media_file_cleanup_interval_hours（若用户未单独设置 media_file_cleanup_interval_hours）
+    - media_cache_cleanup_enabled -> media_cache_cleanup_enabled + media_file_cleanup_enabled
+    """
+    import tomllib
+
+    with config_path.open("rb") as file:
+        raw_config = tomllib.load(file)
+
+    chat_config = raw_config.get("chat")
+    if not isinstance(chat_config, dict):
+        return
+
+    # 检测是否存在任一旧字段，无则跳过迁移
+    legacy_keys = {
+        "media_cache_max_age_days",
+        "media_cache_max_total_size_mb",
+        "media_cache_cleanup_interval_hours",
+        "media_cache_cleanup_enabled",
+    }
+    if not any(key in chat_config for key in legacy_keys):
+        return
+
+    # enabled 开关：旧 enabled 同时控制两套清理，迁移后两边都默认启用
+    if "media_cache_cleanup_enabled" in chat_config:
+        legacy_enabled = chat_config.pop("media_cache_cleanup_enabled")
+        chat_config.setdefault("media_cache_cleanup_enabled", legacy_enabled)
+        chat_config.setdefault("media_file_cleanup_enabled", legacy_enabled)
+
+    # 最大保留天数：旧字段语义是"已识别文件保留天数"，迁移到 media_file_max_age_days
+    if "media_cache_max_age_days" in chat_config:
+        legacy_age = chat_config.pop("media_cache_max_age_days")
+        chat_config.setdefault("media_file_max_age_days", legacy_age)
+
+    # 总容量上限：旧字段语义是"已识别文件总容量上限"，迁移到 media_file_max_total_size_mb
+    if "media_cache_max_total_size_mb" in chat_config:
+        legacy_size = chat_config.pop("media_cache_max_total_size_mb")
+        chat_config.setdefault("media_file_max_total_size_mb", legacy_size)
+
+    # 清理间隔：旧字段同时影响 pending 与 images/emojis。
+    # 拆分后该间隔迁移到 media_file_cleanup_interval_hours（因为 pending 间隔默认更短）。
+    # 若用户旧间隔小于 1.0（如 0.5），说明用户希望更频繁清理，将 media_cache_cleanup_interval_hours 也设为该值。
+    if "media_cache_cleanup_interval_hours" in chat_config:
+        legacy_interval = chat_config.pop("media_cache_cleanup_interval_hours")
+        chat_config.setdefault("media_file_cleanup_interval_hours", legacy_interval)
+        if legacy_interval < 1.0:
+            chat_config.setdefault("media_cache_cleanup_interval_hours", legacy_interval)
+
+    from src.kernel.config.core import _merge_with_model_defaults, _render_toml_with_signature
+
+    migrated_config = _merge_with_model_defaults(CoreConfig, raw_config)
+    toml_content = _render_toml_with_signature(CoreConfig, migrated_config)
+    config_path.write_text(toml_content, encoding="utf-8")
+
+
 def get_core_config() -> CoreConfig:
     """获取全局 Core 配置实例
 
@@ -1177,6 +1260,7 @@ def init_core_config(config_path: str) -> CoreConfig:
         path.write_text(toml_content, encoding="utf-8")
 
     _migrate_legacy_chat_context_config(path)
+    _migrate_legacy_media_cleanup_config(path)
     _global_config = CoreConfig.load(config_path, auto_update=True)
     _inject_kernel_llm_policy(_global_config)
 

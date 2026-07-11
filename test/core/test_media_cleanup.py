@@ -1,11 +1,17 @@
-"""MediaManager 媒体缓存清理逻辑单元测试。
+"""MediaManager 媒体清理逻辑单元测试。
 
-测试 MediaManager 的 _cleanup_category_folder 和 _cleanup_all_media 方法，包括：
+测试 MediaManager 拆分后的两套独立清理逻辑：
+- 缓存清理（_cleanup_pending_folder）：清理 pending 目录中的陈旧文件
+- 文件清理（_cleanup_category_folder / _cleanup_media_files）：清理 images/emojis 目录
+
+覆盖：
 - 按天数删除过期媒体文件
 - 按总容量裁剪大文件
 - 空目录不报错
 - 不存在的目录不报错
 - _safe_delete_media 静态方法
+- pending 目录按 5 分钟阈值清理
+- 两个清理任务各自独立的调度注册逻辑
 """
 
 from __future__ import annotations
@@ -50,7 +56,7 @@ def mock_media_manager(tmp_path: Path) -> MediaManager:
     Returns:
         配置好临时目录的 MediaManager 实例
     """
-    # 使用 MagicMock 绕过 __init__ 的真实初始化
+    # 使用 __new__ 绕过 __init__ 的真实初始化
     manager = MediaManager.__new__(MediaManager)
 
     # 手动设置必要的文件夹路径
@@ -63,12 +69,16 @@ def mock_media_manager(tmp_path: Path) -> MediaManager:
     for folder in [manager.pending_folder, manager.images_folder, manager.emojis_folder]:
         folder.mkdir(parents=True, exist_ok=True)
 
-    # 设置清理配置
-    manager._media_cleanup_enabled = True
-    manager._media_max_age_days = 7
-    manager._media_max_total_size_mb = 500
-    manager._media_cleanup_interval_hours = 1.0
-    manager._cleanup_task_id = None
+    # 设置文件清理配置（images/emojis 目录）
+    manager._media_file_cleanup_enabled = True
+    manager._media_file_max_age_days = 7
+    manager._media_file_max_total_size_mb = 500
+    manager._media_file_cleanup_interval_hours = 1.0
+    # 设置缓存清理配置（pending 目录）
+    manager._media_cache_cleanup_enabled = True
+    manager._media_cache_cleanup_interval_hours = 0.5
+    manager._cache_cleanup_task_id = None
+    manager._file_cleanup_task_id = None
 
     return manager
 
@@ -87,8 +97,8 @@ class TestCleanupCategoryFolder:
         # 创建新文件（1天前）
         new_file = _create_media_file(folder, "new.jpg", age_seconds=1 * 86400, content=b"x" * 100)
 
-        mock_media_manager._media_max_age_days = 7
-        mock_media_manager._media_max_total_size_mb = 0  # 禁用容量清理
+        mock_media_manager._media_file_max_age_days = 7
+        mock_media_manager._media_file_max_total_size_mb = 0  # 禁用容量清理
 
         await mock_media_manager._cleanup_category_folder(folder)
 
@@ -113,8 +123,8 @@ class TestCleanupCategoryFolder:
             files.append(f)
 
         # 总容量 4MB，上限设为 2MB
-        mock_media_manager._media_max_age_days = 0  # 禁用天数清理
-        mock_media_manager._media_max_total_size_mb = 2  # 2MB 上限
+        mock_media_manager._media_file_max_age_days = 0  # 禁用天数清理
+        mock_media_manager._media_file_max_total_size_mb = 2  # 2MB 上限
 
         await mock_media_manager._cleanup_category_folder(folder)
 
@@ -130,8 +140,8 @@ class TestCleanupCategoryFolder:
         """测试空文件夹不报错。"""
         folder = mock_media_manager.images_folder
 
-        mock_media_manager._media_max_age_days = 7
-        mock_media_manager._media_max_total_size_mb = 500
+        mock_media_manager._media_file_max_age_days = 7
+        mock_media_manager._media_file_max_total_size_mb = 500
 
         await mock_media_manager._cleanup_category_folder(folder)
         # 不报错即通过
@@ -141,8 +151,8 @@ class TestCleanupCategoryFolder:
         """测试不存在的文件夹不报错。"""
         folder = mock_media_manager.media_root / "nonexistent"
 
-        mock_media_manager._media_max_age_days = 7
-        mock_media_manager._media_max_total_size_mb = 500
+        mock_media_manager._media_file_max_age_days = 7
+        mock_media_manager._media_file_max_total_size_mb = 500
 
         await mock_media_manager._cleanup_category_folder(folder)
         # 不报错即通过
@@ -154,8 +164,8 @@ class TestCleanupCategoryFolder:
 
         old_file = _create_media_file(folder, "old.jpg", age_seconds=365 * 86400, content=b"x" * 100)
 
-        mock_media_manager._media_max_age_days = 0
-        mock_media_manager._media_max_total_size_mb = 0
+        mock_media_manager._media_file_max_age_days = 0
+        mock_media_manager._media_file_max_total_size_mb = 0
 
         await mock_media_manager._cleanup_category_folder(folder)
 
@@ -175,8 +185,8 @@ class TestCleanupCategoryFolder:
                 content=b"x" * (1 * 1024 * 1024),
             )
 
-        mock_media_manager._media_max_age_days = 0
-        mock_media_manager._media_max_total_size_mb = 0
+        mock_media_manager._media_file_max_age_days = 0
+        mock_media_manager._media_file_max_total_size_mb = 0
 
         await mock_media_manager._cleanup_category_folder(folder)
 
@@ -210,8 +220,8 @@ class TestCleanupCategoryFolder:
             )
             new_files.append(f)
 
-        mock_media_manager._media_max_age_days = 7
-        mock_media_manager._media_max_total_size_mb = 1  # 只保留 1MB
+        mock_media_manager._media_file_max_age_days = 7
+        mock_media_manager._media_file_max_total_size_mb = 1  # 只保留 1MB
 
         await mock_media_manager._cleanup_category_folder(folder)
 
@@ -236,8 +246,8 @@ class TestCleanupCategoryFolder:
         # 创建一个过期文件
         old_file = _create_media_file(folder, "old.jpg", age_seconds=30 * 86400, content=b"x" * 100)
 
-        mock_media_manager._media_max_age_days = 7
-        mock_media_manager._media_max_total_size_mb = 0
+        mock_media_manager._media_file_max_age_days = 7
+        mock_media_manager._media_file_max_total_size_mb = 0
 
         await mock_media_manager._cleanup_category_folder(folder)
 
@@ -251,8 +261,8 @@ class TestCleanupCategoryFolder:
 
         old_file = _create_media_file(folder, "old.jpg", age_seconds=30 * 86400, content=b"x" * 100)
 
-        mock_media_manager._media_max_age_days = 7
-        mock_media_manager._media_max_total_size_mb = 0
+        mock_media_manager._media_file_max_age_days = 7
+        mock_media_manager._media_file_max_total_size_mb = 0
 
         original_unlink = Path.unlink
 
@@ -267,49 +277,164 @@ class TestCleanupCategoryFolder:
             Path.unlink = original_unlink  # type: ignore[method-assign]
 
 
-class TestCleanupAllMedia:
-    """测试 _cleanup_all_media 方法。"""
+class TestCleanupMediaFiles:
+    """测试 _cleanup_media_files 方法（整合 images 与 emojis 目录清理）。"""
 
     @pytest.mark.asyncio
-    async def test_cleanup_all_calls_pending_and_categories(
+    async def test_cleanup_media_files_calls_both_categories(
         self, mock_media_manager: MediaManager
     ) -> None:
-        """测试 _cleanup_all_media 调用 pending 和分类目录清理。"""
-        # 使用 AsyncMock 避免协程复用问题
-        mock_pending = AsyncMock()
+        """测试 _cleanup_media_files 调用 images 与 emojis 两个分类目录清理。"""
         mock_category = AsyncMock()
 
         with patch.object(
-            mock_media_manager, "_cleanup_pending_folder", mock_pending
-        ), patch.object(
             mock_media_manager, "_cleanup_category_folder", mock_category
         ):
-            await mock_media_manager._cleanup_all_media()
+            await mock_media_manager._cleanup_media_files()
 
-            mock_pending.assert_called_once()
-            # 当 enabled=True 时应调用分类清理 2 次（images + emojis）
+            # 应调用分类清理 2 次（images + emojis）
             assert mock_category.call_count == 2
+            called_folders = [call.args[0] for call in mock_category.call_args_list]
+            assert mock_media_manager.images_folder in called_folders
+            assert mock_media_manager.emojis_folder in called_folders
+
+
+class TestCleanupPendingFolder:
+    """测试 _cleanup_pending_folder 方法（独立调度，按 5 分钟阈值清理）。"""
 
     @pytest.mark.asyncio
-    async def test_cleanup_all_disabled_skips_categories(
+    async def test_pending_cleanup_deletes_old_files(self, mock_media_manager: MediaManager) -> None:
+        """测试删除超过 5 分钟未处理的 pending 文件。"""
+        folder = mock_media_manager.pending_folder
+
+        # 创建陈旧文件（10分钟前）
+        old_file = _create_media_file(folder, "old_pending.jpg", age_seconds=600, content=b"x" * 100)
+        # 创建新文件（1分钟前）
+        new_file = _create_media_file(folder, "new_pending.jpg", age_seconds=60, content=b"x" * 100)
+
+        await mock_media_manager._cleanup_pending_folder()
+
+        assert not old_file.exists()
+        assert new_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_pending_cleanup_keeps_recent_files(self, mock_media_manager: MediaManager) -> None:
+        """测试保留不足 5 分钟的 pending 文件。"""
+        folder = mock_media_manager.pending_folder
+
+        recent_file = _create_media_file(folder, "recent.jpg", age_seconds=120, content=b"x" * 50)
+
+        await mock_media_manager._cleanup_pending_folder()
+
+        assert recent_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_pending_cleanup_empty_folder(self, mock_media_manager: MediaManager) -> None:
+        """测试空 pending 文件夹不报错。"""
+        await mock_media_manager._cleanup_pending_folder()
+        # 不报错即通过
+
+    @pytest.mark.asyncio
+    async def test_pending_cleanup_nonexistent_folder(self, mock_media_manager: MediaManager) -> None:
+        """测试 pending 目录不存在时不报错。"""
+        mock_media_manager.pending_folder = mock_media_manager.media_root / "absent"
+        await mock_media_manager._cleanup_pending_folder()
+        # 不报错即通过
+
+    @pytest.mark.asyncio
+    async def test_pending_cleanup_skips_subdirectories(self, mock_media_manager: MediaManager) -> None:
+        """测试 pending 清理时跳过子目录。"""
+        folder = mock_media_manager.pending_folder
+
+        subfolder = folder / "subfolder"
+        subfolder.mkdir()
+
+        # 子目录的 mtime 无关，不会被当作文件删除
+        await mock_media_manager._cleanup_pending_folder()
+
+        assert subfolder.exists()
+
+
+class TestRegisterCacheCleanupTask:
+    """测试 _register_cache_cleanup_task 方法。"""
+
+    @pytest.mark.asyncio
+    async def test_register_cache_cleanup_when_enabled(self, mock_media_manager: MediaManager) -> None:
+        """测试启用时成功注册缓存清理任务。"""
+        mock_scheduler = MagicMock()
+        mock_scheduler.create_schedule = AsyncMock(return_value="cache_schedule_id")
+
+        with patch(
+            "src.core.managers.media_manager.get_unified_scheduler",
+            return_value=mock_scheduler,
+        ):
+            await mock_media_manager._register_cache_cleanup_task()
+
+            mock_scheduler.create_schedule.assert_called_once()
+            call_kwargs = mock_scheduler.create_schedule.call_args.kwargs
+            assert call_kwargs["task_name"] == "media_cache_cleanup"
+            assert call_kwargs["is_recurring"] is True
+            assert mock_media_manager._cache_cleanup_task_id == "cache_schedule_id"
+
+    @pytest.mark.asyncio
+    async def test_register_cache_cleanup_skipped_when_disabled(
         self, mock_media_manager: MediaManager
     ) -> None:
-        """测试 _media_cleanup_enabled=False 时跳过分类清理但保留 pending 清理。"""
-        mock_media_manager._media_cleanup_enabled = False
+        """测试禁用时不注册缓存清理任务。"""
+        mock_media_manager._media_cache_cleanup_enabled = False
 
-        mock_pending = AsyncMock()
-        mock_category = AsyncMock()
+        mock_scheduler = MagicMock()
+        mock_scheduler.create_schedule = AsyncMock()
 
-        with patch.object(
-            mock_media_manager, "_cleanup_pending_folder", mock_pending
-        ), patch.object(
-            mock_media_manager, "_cleanup_category_folder", mock_category
+        with patch(
+            "src.core.managers.media_manager.get_unified_scheduler",
+            return_value=mock_scheduler,
         ):
-            await mock_media_manager._cleanup_all_media()
+            await mock_media_manager._register_cache_cleanup_task()
 
-            mock_pending.assert_called_once()
-            # 当 enabled=False 时不应调用分类清理
-            mock_category.assert_not_called()
+            mock_scheduler.create_schedule.assert_not_called()
+            assert mock_media_manager._cache_cleanup_task_id is None
+
+
+class TestRegisterFileCleanupTask:
+    """测试 _register_file_cleanup_task 方法。"""
+
+    @pytest.mark.asyncio
+    async def test_register_file_cleanup_when_enabled(self, mock_media_manager: MediaManager) -> None:
+        """测试启用时成功注册文件清理任务。"""
+        mock_scheduler = MagicMock()
+        mock_scheduler.create_schedule = AsyncMock(return_value="file_schedule_id")
+
+        with patch(
+            "src.core.managers.media_manager.get_unified_scheduler",
+            return_value=mock_scheduler,
+        ):
+            await mock_media_manager._register_file_cleanup_task()
+
+            mock_scheduler.create_schedule.assert_called_once()
+            call_kwargs = mock_scheduler.create_schedule.call_args.kwargs
+            assert call_kwargs["task_name"] == "media_file_cleanup"
+            assert call_kwargs["is_recurring"] is True
+            assert mock_media_manager._file_cleanup_task_id == "file_schedule_id"
+
+    @pytest.mark.asyncio
+    async def test_register_file_cleanup_skipped_when_disabled(
+        self, mock_media_manager: MediaManager
+    ) -> None:
+        """测试禁用时不注册文件清理任务。"""
+        mock_media_manager._media_file_cleanup_enabled = False
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.create_schedule = AsyncMock()
+
+        with patch(
+            "src.core.managers.media_manager.get_unified_scheduler",
+            return_value=mock_scheduler,
+        ):
+            await mock_media_manager._register_file_cleanup_task()
+
+            mock_scheduler.create_schedule.assert_not_called()
+            assert mock_media_manager._file_cleanup_task_id is None
 
 
 class TestSafeDeleteMedia:
