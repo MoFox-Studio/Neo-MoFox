@@ -98,8 +98,8 @@ class UserQueryHelper:
             "person_id": person_id,
             "platform": platform,
             "user_id": user_id,
-            "nickname": nickname.replace("\x00", "") if nickname else None,
-            "cardname": cardname.replace("\x00", "") if cardname else None,
+            "nickname": nickname,
+            "cardname": cardname,
             "first_interaction": now,
             "last_interaction": now,
             "interaction_count": 1,
@@ -146,9 +146,9 @@ class UserQueryHelper:
         }
 
         if nickname is not None:
-            update_data["nickname"] = nickname.replace("\x00", "")
+            update_data["nickname"] = nickname
         if cardname is not None:
-            update_data["cardname"] = cardname.replace("\x00", "")
+            update_data["cardname"] = cardname
 
         await self.person_crud.update(person.id, update_data)
         logger.info(f"更新用户信息：{person_id} ({nickname})")
