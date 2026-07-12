@@ -293,7 +293,12 @@ class MessageHandler:
                 return None
 
     async def _handle_reply_message(self, segment: dict, raw_message: dict, in_reply: bool) -> Seg | None:
-        """处理回复消息"""
+        """处理回复消息。
+
+        返回的 seglist 会前置一个 ``reply`` 段（data 为被引用消息 ID），
+        以便框架 ``MessageConverter`` 解析出 ``Message.reply_to``；其后保留
+        可读的 ``[回复<昵称(QQ号)>：...]`` 文本预览。
+        """
         if in_reply:
             return None
 
@@ -332,7 +337,12 @@ class MessageHandler:
 
         return {
             "type": "seglist",
-            "data": [{"type": "text", "data": prefix_text}, *brief_segments, {"type": "text", "data": suffix_text}],
+            "data": [
+                {"type": "reply", "data": str(message_id)},
+                {"type": "text", "data": prefix_text},
+                *brief_segments,
+                {"type": "text", "data": suffix_text},
+            ],
         }
 
     async def _handle_record_message(self, segment: dict) -> Seg | None:

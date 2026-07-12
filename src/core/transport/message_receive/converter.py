@@ -574,15 +574,18 @@ class MessageConverter:
     ) -> None:
         """处理 seglist 段（嵌套段列表）。
 
-        如果 seglist 是 reply 引用内容（以 "[回复<" 开头），则只合并文本，
-        不合并其中的 media，避免引用中的文件/图片等被误判为当前消息的内容。
+        如果 seglist 是 reply 引用内容（包含 ``reply`` 段，或首段文本以
+        ``[回复<`` / ``「回复：`` 开头），则只合并文本与 at，不合并其中的
+        media，避免引用中的文件/图片等被误判为当前消息的内容。
         """
         if isinstance(data, list):
             inner = self._parse_segments(data, depth + 1)
 
-            # 检测是否为 reply 引用内容：第一个文本片段以 "[回复<" 开头
-            is_reply_content = False
-            if inner.text_parts:
+            # 检测是否为 reply 引用内容：
+            # 1) seglist 内含 reply 段（适配器前置 reply 段的规范写法）
+            # 2) 或首段文本以 "[回复<" / "「回复：" 开头（兼容旧格式）
+            is_reply_content = bool(inner.reply_to)
+            if not is_reply_content and inner.text_parts:
                 first_text = inner.text_parts[0].strip()
                 if first_text.startswith("[回复<") or first_text.startswith("「回复："):
                     is_reply_content = True
