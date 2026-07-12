@@ -19,6 +19,16 @@ if TYPE_CHECKING:
 
 logger = get_logger("onebot_adapter")
 
+# 控制字符（除常见空格类字符外）移除表
+_INVALID_CHARS = str.maketrans({chr(i): None for i in range(0x20) if i not in (0x09, 0x0A, 0x0D)})
+
+
+def sanitize_text(text: str | None) -> str | None:
+    """移除字符串中可能导致 PostgreSQL UTF-8 存储失败的无效字符"""
+    if text is None:
+        return None
+    return text.translate(_INVALID_CHARS)
+
 # 简单的缓存实现，通过 kernel.storage 实现磁盘持久化存储
 _CACHE_LOADED = False
 _CACHE: dict[str, dict[str, dict[str, Any]]] = {

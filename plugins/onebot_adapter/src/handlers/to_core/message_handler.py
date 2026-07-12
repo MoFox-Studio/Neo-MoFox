@@ -32,6 +32,7 @@ from ..utils import (
     get_message_detail,
     get_record_detail,
     get_self_info,
+    sanitize_text,
 )
 
 if TYPE_CHECKING:
@@ -119,8 +120,8 @@ class MessageHandler:
             .from_user(
                 user_id=str(sender_info.get("user_id", "")),
                 platform="qq",
-                nickname=sender_info.get("nickname", ""),
-                cardname=sender_info.get("card", ""),
+                nickname=sanitize_text(sender_info.get("nickname", "")),
+                cardname=sanitize_text(sender_info.get("card", "")),
                 user_avatar=sender_info.get("avatar", ""),
                 role=sender_info.get("role", ""),
             )
