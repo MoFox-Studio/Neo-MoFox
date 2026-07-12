@@ -13,7 +13,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Union, cast
 
-from mofox_wire import MessageBuilder, SegPayload, UserInfoPayload
+from mofox_wire import MessageBuilder, MessageEnvelope, SegPayload, UserInfoPayload
 from mofox_wire.types import UserRole
 
 from src.app.plugin_system.api.log_api import get_logger
@@ -40,15 +40,21 @@ class NoticeHandler:
         # 戳一戳防抖时间戳
         self.last_poke_time: float = 0.0
 
-    async def handle_notice(self, raw: dict[str, Any]):
+    async def handle_notice(self, raw: dict[str, Any]) -> MessageEnvelope | None:
         """
-        处理通知事件
+        处理通知事件。
+
+        将 OneBot 通知事件（戳一戳、表情回复、禁言、文件上传等）转换为
+        mofox-wire 的 MessageEnvelope。对于暂不支持具体转换的 notice 类型，
+        不丢弃数据，而是将原始 raw 数据包装为 MessageEnvelope（携带在
+        ``raw_message`` 字段及 ``extra.raw`` 中）后交给下游处理。
 
         Args:
-            raw: OneBot 原始通知数据
+            raw: OneBot 原始通知数据。
 
         Returns:
-            MessageEnvelope (dict) or None
+            转换后的 MessageEnvelope；若为不支持的 notice 类型则返回包含
+            原始 raw 数据的 MessageEnvelope；若处理失败或被过滤则返回 None。
         """
         notice_type = raw.get("notice_type")
         message_time: float = time.time()
@@ -104,8 +110,8 @@ class NoticeHandler:
                         ...
 
                     case _:
-                        logger.warning(f"不支持的notify类型: {notice_type}.{sub_type}")
-                        return None
+                        logger.warning(f"不支持的notify类型: {notice_type}.{sub_type}，将原始数据包装为消息后抛出")
+                        return await self._build_raw_passthrough_envelope(raw, notice_type, message_time)
 
             case NoticeType.group_msg_emoji_like:
                 # 检查是否启用表情回复功能
@@ -257,6 +263,84 @@ class NoticeHandler:
         # 但 MessageInfoPayload TypedDict 未声明这些键，故此处以 dict 视图写入。
         message_info = cast(dict[str, Any], envelope["message_info"])
         message_info["extra"] = notice_config
+        # 显式标记消息类型为 notice，使 receiver 路由到 _handle_other 而非普通消息路径
+        message_info["message_type"] = "notice"
+        return envelope
+
+    async def _build_raw_passthrough_envelope(
+        self,
+        raw: dict[str, Any],
+        notice_type: Any,
+        message_time: float,
+    ) -> MessageEnvelope:
+        """
+        将不支持的 notice 原始数据包装为 MessageEnvelope。
+
+        对于暂未实现具体转换逻辑的 notice 类型，不丢弃数据，而是将原始
+        raw 数据携带在 ``raw_message`` 字段及 ``extra.raw`` 中，构造一个
+        合法的 MessageEnvelope 交给下游处理。下游可通过 ``raw_message``
+        或 ``message_info.extra.raw`` 访问原始数据。
+
+        Args:
+            raw: OneBot 原始通知数据。
+            notice_type: notice 类型字符串。
+            message_time: 当前时间戳。
+
+        Returns:
+            包含原始 raw 数据的 MessageEnvelope。
+        """
+        group_id = raw.get("group_id")
+        user_id = raw.get("user_id")
+        self_id = raw.get("self_id")
+
+        # 生成唯一 notice ID：notice类型 + 用户ID + 群ID + 时间戳，避免主键冲突
+        _notice_id_raw = f"notice_{notice_type}_{user_id}_{group_id}_{message_time}"
+        unique_notice_id = "notice_" + hashlib.md5(_notice_id_raw.encode()).hexdigest()[:16]
+
+        msg_builder = MessageBuilder()
+        (
+            msg_builder.direction("incoming")
+            .message_id(unique_notice_id)
+            .timestamp_ms(int(message_time * 1000))
+            .from_user(
+                user_id=str(user_id or self_id or ""),
+                platform="qq",
+            )
+        )
+
+        # 如果是群通知，添加群信息
+        if group_id:
+            fetched_group_info = await get_group_info(group_id)
+            group_name: str | None = None
+            if fetched_group_info:
+                group_name = fetched_group_info.get("group_name")
+            else:
+                logger.warning("无法获取notice消息所在群的名称")
+            msg_builder.from_group(
+                group_id=str(group_id),
+                platform="qq",
+                name=group_name or "",
+            )
+
+        msg_builder.format_info(
+            content_format=["text", "notify"],
+            accept_format=ACCEPT_FORMAT,
+        )
+
+        # 用 text 段承载可读描述，便于下游直接展示
+        msg_builder.text(f"[未支持的notice类型: {notice_type}]")
+
+        envelope = msg_builder.build()
+        # 携带原始 raw 数据，供下游自行解析
+        envelope["raw_message"] = raw
+
+        message_info = cast(dict[str, Any], envelope["message_info"])
+        message_info["extra"] = {
+            "is_notice": False,
+            "is_public_notice": False,
+            "notice_type": str(notice_type),
+            "raw": raw,
+        }
         # 显式标记消息类型为 notice，使 receiver 路由到 _handle_other 而非普通消息路径
         message_info["message_type"] = "notice"
         return envelope
