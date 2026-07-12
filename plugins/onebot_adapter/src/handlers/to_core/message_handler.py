@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -133,6 +134,7 @@ class MessageHandler:
         seg_list: list[SegPayload] = []
 
         for segment in message_segments:
+            logger.info(str(message_segments))
             seg_message = await self.handle_single_segment(segment, raw)
             if seg_message:
                 seg_list.append(seg_message)
@@ -166,6 +168,7 @@ class MessageHandler:
         """
         seg_type = segment.get("type")
 
+        assert self.adapter.plugin is not None
         self.adapter.plugin.config = cast(OneBotAdapterConfig, self.adapter.plugin.config) if self.adapter.plugin and self.adapter.plugin.config else None
         
         match seg_type:
@@ -623,6 +626,13 @@ class MessageHandler:
                 if file_info:
                     return {"type": "file", "data": file_info}
 
+            # 检查是否是群名片分享消息 (com.tencent.contact.lua)
+            if nested_data.get("view") == "contact" and "com.tencent.contact.lua" in str(
+                nested_data.get("app", "")
+            ):
+                logger.debug("检测到群名片分享消息，开始提取信息")
+                return await self._handle_contact_share(nested_data)
+
             # 检查是否是QQ小程序分享消息
             if "app" in nested_data and "com.tencent.miniapp" in str(nested_data.get("app", "")):
                 logger.debug("检测到QQ小程序分享消息，开始提取信息")
@@ -790,4 +800,108 @@ class MessageHandler:
             logger.error(f"从文件回声中提取信息失败: {e}")
 
         return None
+
+    async def _handle_contact_share(self, nested_data: dict[str, Any]) -> SegPayload | None:
+        """
+        处理联系人名片分享消息（群名片 / 好友推荐）。
+
+        通过 prompt 字段使用正则提取分享类型标签与目标名称，并结合
+        bizsrc 与 meta.contact 判定是群名片还是好友推荐，再从
+        jumpUrl / legacyUrl 中正则提取 uin / group_code，最后组装为
+        可读的文本消息。
+
+        Args:
+            nested_data: 解析后的 JSON 消息字典，预期 view 为 contact，
+                app 为 com.tencent.contact.lua。
+
+        Returns:
+            SegPayload | None: 处理后的文本消息段；若提取失败则返回 None。
+        """
+        try:
+            prompt = str(nested_data.get("prompt", ""))
+            bizsrc = str(nested_data.get("bizsrc", ""))
+            meta = nested_data.get("meta", {})
+            contact_info = meta.get("contact", {})
+
+            # 1. 使用正则从 prompt 中提取标签与名称
+            # 群名片示例: "群名片: 墨狐狐\u200b🌟起源之地"
+            # 好友推荐示例: "推荐联系人：一闪"
+            # 标签部分到冒号（兼容半角/全角）为止，冒号后的内容为名称
+            prompt_match = re.match(
+                r"^(?P<tag>[^:：]+)[:：]\s*(?P<name>.+)$", prompt
+            )
+            if prompt_match:
+                prompt_tag = prompt_match.group("tag").strip()
+                target_name = prompt_match.group("name").strip()
+            else:
+                logger.debug(f"联系人名片 prompt 无法正则匹配标签，使用原始值: {prompt}")
+                prompt_tag = "联系人名片"
+                target_name = prompt
+
+            # 2. 判定分享类型：群名片 or 好友推荐
+            # bizsrc 含 "qun" 或 tag 含 "群" 视为群名片，否则视为好友/联系人推荐
+            contact_tag = str(contact_info.get("tag", ""))
+            is_group_share = (
+                "qun" in bizsrc.lower()
+                or "群" in prompt_tag
+                or "群" in contact_tag
+            )
+
+            # 3. 从 contact 中提取附加信息
+            nickname = contact_info.get("nickname", target_name)
+            avatar = contact_info.get("avatar", "")
+            contact_desc = contact_info.get("contact", "")
+            jump_url = contact_info.get("jumpUrl", "")
+            legacy_url = contact_info.get("legacyUrl", "")
+            tag_label = contact_tag or prompt_tag
+
+            # 4. 使用正则从 jumpUrl / legacyUrl 中提取 uin / group_code
+            contact_number = ""
+            for url_candidate in (jump_url, legacy_url):
+                if not url_candidate:
+                    continue
+                uin_match = re.search(r"uin=(\d+)", url_candidate)
+                if uin_match:
+                    contact_number = uin_match.group(1)
+                    break
+                group_code_match = re.search(r"group_code=(\d+)", url_candidate)
+                if group_code_match:
+                    contact_number = group_code_match.group(1)
+                    break
+
+            # 5. 组装格式化文本（根据类型调整标签）
+            content_parts: list[str] = []
+            if is_group_share:
+                content_parts.append(f"这是一条{tag_label}分享消息")
+                content_parts.append(f"群名称: {nickname}")
+                if contact_number:
+                    content_parts.append(f"群号: {contact_number}")
+                if contact_desc:
+                    content_parts.append(f"群简介: {contact_desc}")
+                if avatar:
+                    content_parts.append(f"群头像: {avatar}")
+            else:
+                content_parts.append(f"这是一条{tag_label}分享消息")
+                content_parts.append(f"昵称: {nickname}")
+                if contact_number:
+                    content_parts.append(f"账号: {contact_number}")
+                if contact_desc:
+                    content_parts.append(f"备注: {contact_desc}")
+                if avatar:
+                    content_parts.append(f"头像: {avatar}")
+
+            if jump_url:
+                content_parts.append(f"跳转链接: {jump_url}")
+
+            logger.debug(
+                f"联系人名片分享解析: is_group={is_group_share}, "
+                f"tag={tag_label}, name={nickname}, number={contact_number}"
+            )
+
+            formatted_content = "\n".join(content_parts)
+            return {"type": "text", "data": formatted_content}
+
+        except Exception as e:
+            logger.error(f"处理联系人名片分享消息时发生未知错误: {e}")
+            return None
 
