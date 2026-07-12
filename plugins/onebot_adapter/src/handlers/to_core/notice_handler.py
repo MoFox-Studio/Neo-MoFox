@@ -9,6 +9,7 @@ mofox-wire 的 MessageEnvelope。与 message_handler 类似，部分通知类型
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from typing import TYPE_CHECKING, Any, Union, cast
 
@@ -94,6 +95,7 @@ class NoticeHandler:
                             if handled_segment and user_info:
                                 notice_config["notice_type"] = "poke"
                                 notice_config["is_notice"] = True
+                                notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
                         else:
                             logger.warning("戳一戳消息被禁用，取消戳一戳处理")
                             return None
@@ -124,6 +126,7 @@ class NoticeHandler:
                     if handled_segment and user_info:
                         notice_config["notice_type"] = "emoji_like"
                         notice_config["is_notice"] = True
+                        notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
                 else:
                     logger.warning("群聊表情回复被禁用，取消群聊表情回复处理")
                     return None
@@ -135,22 +138,47 @@ class NoticeHandler:
                         logger.info("处理群禁言")
                         handled_segment, user_info = await self._handle_ban_notify(raw, group_id)
                         if handled_segment and user_info:
+                            operator_name = (
+                                user_info.get("user_nickname")
+                                or user_info.get("user_cardname")
+                                or "某人"
+                            )
+                            seg_data = cast(dict[str, Any], handled_segment.get("data", {}))
                             user_id_in_ban = raw.get("user_id")
                             if user_id_in_ban == 0:
                                 notice_config["notice_type"] = "group_whole_ban"
+                                notice_config["text_description"] = f"{operator_name}开启了全体禁言"
                             else:
                                 notice_config["notice_type"] = "group_ban"
+                                banned_info = seg_data.get("banned_user_info") or {}
+                                banned_name = banned_info.get("user_nickname") or "某人"
+                                duration = seg_data.get("duration", raw.get("duration", 0))
+                                notice_config["text_description"] = (
+                                    f"{operator_name}将{banned_name}禁言了{duration}秒"
+                                )
                             notice_config["is_notice"] = True
 
                     case NoticeType.GroupBan.lift_ban:
                         logger.info("处理解除群禁言")
                         handled_segment, user_info = await self._handle_lift_ban_notify(raw, group_id)
                         if handled_segment and user_info:
+                            operator_name = (
+                                user_info.get("user_nickname")
+                                or user_info.get("user_cardname")
+                                or "某人"
+                            )
+                            seg_data = cast(dict[str, Any], handled_segment.get("data", {}))
                             user_id_in_ban = raw.get("user_id")
                             if user_id_in_ban == 0:
                                 notice_config["notice_type"] = "group_whole_lift_ban"
+                                notice_config["text_description"] = f"{operator_name}关闭了全体禁言"
                             else:
                                 notice_config["notice_type"] = "group_lift_ban"
+                                lifted_info = seg_data.get("lifted_user_info") or {}
+                                lifted_name = lifted_info.get("user_nickname") or "某人"
+                                notice_config["text_description"] = (
+                                    f"{operator_name}解除了{lifted_name}的禁言"
+                                )
                             notice_config["is_notice"] = True
 
                     case _:
@@ -168,6 +196,7 @@ class NoticeHandler:
                 if handled_segment and user_info:
                     notice_config["notice_type"] = "group_upload"
                     notice_config["is_notice"] = True
+                    notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
 
             case _:
                 logger.warning(f"不支持的notice类型: {notice_type}")
@@ -176,40 +205,6 @@ class NoticeHandler:
         if not handled_segment or not user_info:
             logger.warning("notice处理失败或不支持")
             return None
-
-        # 生成可读的 text_description 供下游插件（如 notice_injector）读取
-        seg_type = handled_segment.get("type", "text")
-        seg_data_content = handled_segment.get("data", "")
-        if seg_type == "text" and isinstance(seg_data_content, str):
-            notice_config["text_description"] = seg_data_content
-        elif seg_type == "notify" and isinstance(seg_data_content, dict):
-            operator_name = (
-                user_info.get("user_nickname")
-                or user_info.get("user_cardname")
-                or "某人"
-            )
-            sub_type_in_data = seg_data_content.get("sub_type", "")
-            if sub_type_in_data == "ban":
-                banned = seg_data_content.get("banned_user_info") or {}
-                banned_name = banned.get("user_nickname") or "某人"
-                duration = seg_data_content.get("duration", 0)
-                notice_config["text_description"] = (
-                    f"{operator_name}将{banned_name}禁言了{duration}秒"
-                )
-            elif sub_type_in_data == "whole_ban":
-                notice_config["text_description"] = f"{operator_name}开启了全体禁言"
-            elif sub_type_in_data == "lift_ban":
-                lifted = seg_data_content.get("lifted_user_info") or {}
-                lifted_name = lifted.get("user_nickname") or "某人"
-                notice_config["text_description"] = (
-                    f"{operator_name}解除了{lifted_name}的禁言"
-                )
-            elif sub_type_in_data == "whole_lift_ban":
-                notice_config["text_description"] = f"{operator_name}关闭了全体禁言"
-            else:
-                notice_config["text_description"] = str(seg_data_content)
-        else:
-            notice_config["text_description"] = str(seg_data_content)
 
         # 使用 MessageBuilder 构建消息
         msg_builder = MessageBuilder()

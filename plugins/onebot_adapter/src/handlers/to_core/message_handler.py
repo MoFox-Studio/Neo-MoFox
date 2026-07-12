@@ -148,7 +148,6 @@ class MessageHandler:
         seg_list: list[Seg] = []
 
         for segment in message_segments:
-            logger.info(str(message_segments))
             seg_message = await self.handle_single_segment(segment, raw)
             if seg_message:
                 seg_list.append(seg_message)
