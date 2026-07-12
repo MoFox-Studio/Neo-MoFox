@@ -1,22 +1,34 @@
-"""通知事件处理器"""
+"""通知事件处理器。
+
+本模块将 OneBot 通知事件（戳一戳、表情回复、禁言、文件上传等）转换为
+mofox-wire 的 MessageEnvelope。与 message_handler 类似，部分通知类型
+（如禁言）需要在 SegPayload.data 中携带结构化字典，故内部使用宽松
+类型别名 Seg 承载，并在产出 MessageEnvelope 前 cast 回 SegPayload。
+"""
 
 from __future__ import annotations
 
 import hashlib
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Union, cast
 
 from mofox_wire import MessageBuilder, SegPayload, UserInfoPayload
+from mofox_wire.types import UserRole
 
 from src.app.plugin_system.api.log_api import get_logger
 
 from ...event_models import ACCEPT_FORMAT, QQ_FACE, NoticeType, RealMessageType
 from ..utils import get_group_info, get_member_info, get_message_detail, get_self_info, get_stranger_info
+from ....config import OneBotAdapterConfig
 
 if TYPE_CHECKING:
     from ....plugin import OneBotAdapter
 
 logger = get_logger("onebot_adapter")
+
+# 通知处理器内部使用的宽松消息段类型，详见 message_handler.py 中的说明。
+SegData = Union[str, dict[str, Any], list[Any], "SegPayload"]
+Seg = dict[str, SegData]
 
 
 class NoticeHandler:
@@ -45,7 +57,7 @@ class NoticeHandler:
         user_id = raw.get("user_id")
         target_id = raw.get("target_id")
 
-        handled_segment: SegPayload | None = None
+        handled_segment: Seg | None = None
         user_info: UserInfoPayload | None = None
         notice_config: dict[str, Any] = {
             "is_notice": False,
@@ -71,10 +83,11 @@ class NoticeHandler:
                 match sub_type:
                     case NoticeType.Notify.poke:
                         # 检查是否启用戳一戳功能
+                        plugin = self.adapter.plugin
                         if (
-                            not self.adapter.plugin
-                            or not self.adapter.plugin.config
-                            or self.adapter.plugin.config.features.enable_poke
+                            not plugin
+                            or not plugin.config
+                            or cast(OneBotAdapterConfig, plugin.config).features.enable_poke
                         ):
                             logger.debug("处理戳一戳消息")
                             handled_segment, user_info = await self._handle_poke_notify(raw, group_id, user_id)
@@ -94,10 +107,11 @@ class NoticeHandler:
 
             case NoticeType.group_msg_emoji_like:
                 # 检查是否启用表情回复功能
+                plugin = self.adapter.plugin
                 if (
-                    not self.adapter.plugin
-                    or not self.adapter.plugin.config
-                    or self.adapter.plugin.config.features.enable_emoji_like
+                    not plugin
+                    or not plugin.config
+                    or cast(OneBotAdapterConfig, plugin.config).features.enable_emoji_like
                 ):
                     # 过滤机器人自己贴表情的回声，避免重复动作
                     if str(user_id) == str(self_id):
@@ -231,7 +245,7 @@ class NoticeHandler:
             )
 
         # 设置格式信息
-        content_format = [handled_segment.get("type", "text")]
+        content_format: list[str] = [cast(str, handled_segment.get("type", "text"))]
         if "notify" not in content_format:
             content_format.append("notify")
         msg_builder.format_info(
@@ -240,18 +254,21 @@ class NoticeHandler:
         )
 
         # 设置消息段
-        msg_builder.seg_list([handled_segment])
+        msg_builder.seg_list(cast(list[SegPayload], [handled_segment]))
 
         # 设置 extra（包含 notice 相关配置）
         envelope = msg_builder.build()
-        envelope["message_info"]["extra"] = notice_config
+        # message_info 在运行时会携带 extra / message_type 等扩展字段，
+        # 但 MessageInfoPayload TypedDict 未声明这些键，故此处以 dict 视图写入。
+        message_info = cast(dict[str, Any], envelope["message_info"])
+        message_info["extra"] = notice_config
         # 显式标记消息类型为 notice，使 receiver 路由到 _handle_other 而非普通消息路径
-        envelope["message_info"]["message_type"] = "notice"
+        message_info["message_type"] = "notice"
         return envelope
 
     async def _handle_poke_notify(
         self, raw: dict[str, Any], group_id: Any, user_id: Any
-    ) -> tuple[SegPayload | None, UserInfoPayload | None]:
+    ) -> tuple[Seg | None, UserInfoPayload | None]:
         """处理戳一戳通知"""
         self_info: dict | None = await get_self_info()
 
@@ -268,7 +285,7 @@ class NoticeHandler:
             # 获取防抖时间配置
             debounce_seconds = 2.0
             if self.adapter.plugin and self.adapter.plugin.config:
-                debounce_seconds = self.adapter.plugin.config.features.poke_debounce_seconds
+                debounce_seconds = cast(OneBotAdapterConfig, self.adapter.plugin.config).features.poke_debounce_seconds
 
             if self.last_poke_time > 0:
                 time_diff = current_time - self.last_poke_time
@@ -308,13 +325,13 @@ class NoticeHandler:
             if (
                 self.adapter.plugin
                 and self.adapter.plugin.config
-                and self.adapter.plugin.config.features.ignore_non_self_poke
+                and cast(OneBotAdapterConfig, self.adapter.plugin.config).features.ignore_non_self_poke
             ):
                 logger.debug("忽略不是针对自己的戳一戳消息")
                 return None, None
 
             if group_id:
-                fetched_member_info: dict | None = await get_member_info(group_id, target_id)
+                fetched_member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, target_id))
                 if fetched_member_info:
                     target_name = fetched_member_info.get("nickname", "QQ用户")
                 else:
@@ -337,12 +354,13 @@ class NoticeHandler:
 
         user_info: UserInfoPayload = {
             "platform": "qq",
+            "role": UserRole.MEMBER,
             "user_id": str(user_id),
             "user_nickname": user_name,
             "user_cardname": user_cardname,
         }
 
-        seg_data: SegPayload = {
+        seg_data: Seg = {
             "type": "text",
             "data": f"{display_name}{first_txt}{target_name}{second_txt}（这是QQ的一个功能，用于提及某人，但没那么明显）",
         }
@@ -350,7 +368,7 @@ class NoticeHandler:
 
     async def _handle_group_emoji_like_notify(
         self, raw: dict[str, Any], group_id: Any, user_id: Any
-    ) -> tuple[SegPayload | None, UserInfoPayload | None]:
+    ) -> tuple[Seg | None, UserInfoPayload | None]:
         """处理群聊表情回复通知"""
         if not group_id:
             logger.error("群ID不能为空，无法处理群聊表情回复通知")
@@ -379,6 +397,7 @@ class NoticeHandler:
 
         user_info: UserInfoPayload = {
             "platform": "qq",
+            "role": UserRole.MEMBER,
             "user_id": str(user_id),
             "user_nickname": user_name,
             "user_cardname": user_cardname,
@@ -401,7 +420,7 @@ class NoticeHandler:
         )
 
         emoji_text = QQ_FACE.get(like_emoji_id, f"[表情{like_emoji_id}]")
-        seg_data: SegPayload = {
+        seg_data: Seg = {
             "type": "text",
             "data": f"{user_name}使用Emoji表情{emoji_text}回应了消息[{target_message_text}]",
         }
@@ -451,7 +470,7 @@ class NoticeHandler:
 
     async def _handle_group_upload_notify(
         self, raw: dict[str, Any], group_id: Any, user_id: Any, self_id: Any
-    ) -> tuple[SegPayload | None, UserInfoPayload | None]:
+    ) -> tuple[Seg | None, UserInfoPayload | None]:
         """处理群文件上传通知"""
         if not group_id:
             logger.error("群ID不能为空，无法处理群文件上传通知")
@@ -473,6 +492,7 @@ class NoticeHandler:
 
         user_info: UserInfoPayload = {
             "platform": "qq",
+            "role": UserRole.MEMBER,
             "user_id": str(user_id),
             "user_nickname": user_name,
             "user_cardname": user_cardname,
@@ -481,7 +501,7 @@ class NoticeHandler:
         file_name = file_info.get("name", "未知文件")
         file_size = file_info.get("size", 0)
 
-        seg_data: SegPayload = {
+        seg_data: Seg = {
             "type": "text",
             "data": f"{user_name} 上传了文件: {file_name} (大小: {file_size} 字节)",
         }
@@ -489,7 +509,7 @@ class NoticeHandler:
 
     async def _handle_ban_notify(
         self, raw: dict[str, Any], group_id: Any
-    ) -> tuple[SegPayload | None, UserInfoPayload | None]:
+    ) -> tuple[Seg | None, UserInfoPayload | None]:
         """处理群禁言通知"""
         if not group_id:
             logger.error("群ID不能为空，无法处理禁言通知")
@@ -500,7 +520,7 @@ class NoticeHandler:
         operator_nickname: str = "QQ用户"
         operator_cardname: str = ""
 
-        member_info: dict | None = await get_member_info(group_id, operator_id)
+        member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, operator_id))
         if member_info:
             operator_nickname = member_info.get("nickname", "QQ用户")
             operator_cardname = member_info.get("card", "")
@@ -509,6 +529,7 @@ class NoticeHandler:
 
         operator_info: UserInfoPayload = {
             "platform": "qq",
+            "role": UserRole.MEMBER,
             "user_id": str(operator_id),
             "user_nickname": operator_nickname,
             "user_cardname": operator_cardname,
@@ -530,7 +551,7 @@ class NoticeHandler:
             sub_type = "whole_ban"
         else:  # 单人禁言
             sub_type = "ban"
-            fetched_member_info: dict | None = await get_member_info(group_id, user_id)
+            fetched_member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, user_id))
             if fetched_member_info:
                 user_nickname = fetched_member_info.get("nickname", "QQ用户")
                 user_cardname = fetched_member_info.get("card", "")
@@ -541,7 +562,7 @@ class NoticeHandler:
                 "user_cardname": user_cardname,
             }
 
-        seg_data: SegPayload = {
+        seg_data: Seg = {
             "type": "notify",
             "data": {
                 "sub_type": sub_type,
@@ -554,7 +575,7 @@ class NoticeHandler:
 
     async def _handle_lift_ban_notify(
         self, raw: dict[str, Any], group_id: Any
-    ) -> tuple[SegPayload | None, UserInfoPayload | None]:
+    ) -> tuple[Seg | None, UserInfoPayload | None]:
         """处理解除群禁言通知"""
         if not group_id:
             logger.error("群ID不能为空，无法处理解除禁言通知")
@@ -565,7 +586,7 @@ class NoticeHandler:
         operator_nickname: str = "QQ用户"
         operator_cardname: str = ""
 
-        member_info: dict | None = await get_member_info(group_id, operator_id)
+        member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, operator_id))
         if member_info:
             operator_nickname = member_info.get("nickname", "QQ用户")
             operator_cardname = member_info.get("card", "")
@@ -574,6 +595,7 @@ class NoticeHandler:
 
         operator_info: UserInfoPayload = {
             "platform": "qq",
+            "role": UserRole.MEMBER,
             "user_id": str(operator_id),
             "user_nickname": operator_nickname,
             "user_cardname": operator_cardname,
@@ -590,7 +612,7 @@ class NoticeHandler:
             sub_type = "whole_lift_ban"
         else:  # 单人禁言解除
             sub_type = "lift_ban"
-            fetched_member_info: dict | None = await get_member_info(group_id, user_id)
+            fetched_member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, user_id))
             if fetched_member_info:
                 user_nickname = fetched_member_info.get("nickname", "QQ用户")
                 user_cardname = fetched_member_info.get("card", "")
@@ -603,7 +625,7 @@ class NoticeHandler:
                 "user_cardname": user_cardname,
             }
 
-        seg_data: SegPayload = {
+        seg_data: Seg = {
             "type": "notify",
             "data": {
                 "sub_type": sub_type,

@@ -337,7 +337,8 @@ async def get_image_format(raw_data: str) -> str:
         format: str: 图片的格式类型，如 'jpeg', 'png', 'gif'等
     """
     image_bytes = await asyncio.to_thread(base64_decode_to_bytes, raw_data)
-    return Image.open(io.BytesIO(image_bytes)).format.lower()
+    img_format = Image.open(io.BytesIO(image_bytes)).format
+    return (img_format or "unknown").lower()
 
 
 async def get_stranger_info(
@@ -405,7 +406,7 @@ async def get_record_detail(
 
 async def get_forward_message(
     raw_message: dict, *, adapter: "OneBotAdapter | None" = None
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]] | None:
     forward_message_data: dict = raw_message.get("data", {})
     if not forward_message_data:
         logger.warning("转发消息内容为空")
@@ -433,8 +434,9 @@ async def get_forward_message(
         if len(orjson.dumps(response).decode("utf-8")) > 80
         else orjson.dumps(response).decode("utf-8")
     )
-    response_data: dict = response.get("data")
+    response_data: dict[str, Any] | None = response.get("data")
     if not response_data:
         logger.warning("转发消息内容为空或获取失败")
         return None
-    return response_data.get("messages")
+    messages: list[dict[str, Any]] | None = response_data.get("messages")
+    return messages

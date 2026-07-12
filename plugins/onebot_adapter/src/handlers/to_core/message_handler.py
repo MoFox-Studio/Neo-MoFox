@@ -1,4 +1,11 @@
-"""消息处理器 - 将 OneBot 消息转换为 MessageEnvelope"""
+"""消息处理器 - 将 OneBot 消息转换为 MessageEnvelope。
+
+本模块负责将 OneBot 协议的原始消息段转换为 mofox-wire 的 SegPayload。
+由于 OneBot 的部分消息类型（如视频、文件、JSON 回声）需要在 data 字段
+携带结构化字典，而上游 SegPayload.data 仅声明为 str | List[SegPayload]，
+因此本模块内部使用宽松类型别名 SegData 来承载这些扩展形态，并在构建
+最终 MessageEnvelope 前通过 cast 对齐到 SegPayload 契约。
+"""
 
 from __future__ import annotations
 
@@ -6,7 +13,7 @@ import asyncio
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Union, cast
 
 import orjson
 from mofox_wire import MessageBuilder, SegPayload
@@ -31,6 +38,13 @@ if TYPE_CHECKING:
     from ....plugin import OneBotAdapter
 
 logger = get_logger("onebot_adapter")
+
+# OneBot 适配器内部使用的宽松消息段类型。
+# 上游 SegPayload.data 仅允许 str | List[SegPayload]，但 OneBot 的视频、
+# 文件、JSON 回声等场景需要在 data 中携带结构化字典，故在此扩展为
+# str | dict | list，并在产出 MessageEnvelope 前 cast 回 SegPayload。
+SegData = Union[str, dict[str, Any], list[Any], "SegPayload"]
+Seg = dict[str, SegData]
 
 
 class MessageHandler:
@@ -131,7 +145,7 @@ class MessageHandler:
 
         # 解析消息段
         message_segments = raw.get("message", [])
-        seg_list: list[SegPayload] = []
+        seg_list: list[Seg] = []
 
         for segment in message_segments:
             logger.info(str(message_segments))
@@ -145,17 +159,17 @@ class MessageHandler:
             seg_list.append({"type": "text", "data": "[消息内容为空]"})
 
         msg_builder.format_info(
-            content_format=[seg["type"] for seg in seg_list],
+            content_format=[cast(str, seg["type"]) for seg in seg_list],
             accept_format=ACCEPT_FORMAT,
         )
 
-        msg_builder.seg_list(seg_list)
+        msg_builder.seg_list(cast(list[SegPayload], seg_list))
 
         return msg_builder.build()
 
     async def handle_single_segment(
         self, segment: dict, raw_message: dict, in_reply: bool = False
-    ) -> SegPayload | None:
+    ) -> Seg | None:
         """
         处理单一消息段并转换为 MessageEnvelope
 
@@ -168,9 +182,6 @@ class MessageHandler:
         """
         seg_type = segment.get("type")
 
-        assert self.adapter.plugin is not None
-        self.adapter.plugin.config = cast(OneBotAdapterConfig, self.adapter.plugin.config) if self.adapter.plugin and self.adapter.plugin.config else None
-        
         match seg_type:
             case RealMessageType.text:
                 return await self._handle_text_message(segment)
@@ -186,13 +197,12 @@ class MessageHandler:
                 return await self._handle_record_message(segment)
             case RealMessageType.video:
                 # 检查是否启用了视频处理
-                if (
-                    self.adapter.plugin
-                    and self.adapter.plugin.config
-                    and not self.adapter.plugin.config.features.enable_video_processing
-                ):
-                    logger.debug("视频消息处理已禁用，跳过")
-                    return {"type": "text", "data": "[视频消息]"}
+                plugin = self.adapter.plugin
+                if plugin and plugin.config:
+                    video_config = cast(OneBotAdapterConfig, plugin.config)
+                    if not video_config.features.enable_video_processing:
+                        logger.debug("视频消息处理已禁用，跳过")
+                        return {"type": "text", "data": "[视频消息]"}
                 return await self._handle_video_message(segment)
             case RealMessageType.rps:
                 return await self._handle_rps_message(segment)
@@ -215,13 +225,13 @@ class MessageHandler:
 
     # Utility methods for handling different message types
 
-    async def _handle_text_message(self, segment: dict) -> SegPayload:
+    async def _handle_text_message(self, segment: dict) -> Seg:
         """处理纯文本消息"""
         message_data = segment.get("data", {})
         plain_text = message_data.get("text", "")
         return {"type": "text", "data": plain_text}
 
-    async def _handle_face_message(self, segment: dict) -> SegPayload | None:
+    async def _handle_face_message(self, segment: dict) -> Seg | None:
         """处理表情消息"""
         message_data = segment.get("data", {})
         face_raw_id = str(message_data.get("id", ""))
@@ -232,7 +242,7 @@ class MessageHandler:
             logger.warning(f"不支持的表情：{face_raw_id}")
             return None
 
-    async def _handle_image_message(self, segment: dict) -> SegPayload | None:
+    async def _handle_image_message(self, segment: dict) -> Seg | None:
         """处理图片消息与表情包消息"""
         message_data = segment.get("data", {})
         image_sub_type = message_data.get("sub_type")
@@ -259,7 +269,7 @@ class MessageHandler:
             logger.warning(f"不支持的图片子类型：{image_sub_type}")
             return None
 
-    async def _handle_at_message(self, segment: dict, raw_message: dict) -> SegPayload | None:
+    async def _handle_at_message(self, segment: dict, raw_message: dict) -> Seg | None:
         """处理@消息"""
         seg_data = segment.get("data", {})
         if not seg_data:
@@ -282,7 +292,7 @@ class MessageHandler:
                     return {"type": "at", "data": f"{member_info.get('nickname')}:{member_info.get('user_id')}"}
                 return None
 
-    async def _handle_reply_message(self, segment: dict, raw_message: dict, in_reply: bool) -> SegPayload | None:
+    async def _handle_reply_message(self, segment: dict, raw_message: dict, in_reply: bool) -> Seg | None:
         """处理回复消息"""
         if in_reply:
             return None
@@ -301,7 +311,7 @@ class MessageHandler:
             return {"type": "text", "data": "[无法获取被引用的消息]"}
 
         # 递归处理被引用的消息
-        reply_segments: list[SegPayload] = []
+        reply_segments: list[Seg] = []
         for reply_seg in message_detail.get("message", []):
             if isinstance(reply_seg, dict):
                 reply_result = await self.handle_single_segment(reply_seg, raw_message, in_reply=True)
@@ -325,7 +335,7 @@ class MessageHandler:
             "data": [{"type": "text", "data": prefix_text}, *brief_segments, {"type": "text", "data": suffix_text}],
         }
 
-    async def _handle_record_message(self, segment: dict) -> SegPayload | None:
+    async def _handle_record_message(self, segment: dict) -> Seg | None:
         """处理语音消息"""
         message_data = segment.get("data", {})
         file = message_data.get("file", "")
@@ -349,7 +359,7 @@ class MessageHandler:
 
         return {"type": "voice", "data": audio_base64}
 
-    async def _handle_video_message(self, segment: dict) -> SegPayload | None:
+    async def _handle_video_message(self, segment: dict) -> Seg | None:
         """处理视频消息"""
         message_data = segment.get("data", {})
 
@@ -419,7 +429,7 @@ class MessageHandler:
             logger.error(f"视频消息处理失败: {e!s}")
             return {"type": "text", "data": "[视频消息处理出错]"}
 
-    async def _handle_rps_message(self, segment: dict) -> SegPayload:
+    async def _handle_rps_message(self, segment: dict) -> Seg:
         """处理猜拳消息"""
         message_data = segment.get("data", {})
         res = message_data.get("result", "")
@@ -427,14 +437,14 @@ class MessageHandler:
         shape = shape_map.get(res, "石头")
         return {"type": "text", "data": f"[发送了一个魔法猜拳表情，结果是：{shape}]"}
 
-    async def _handle_dice_message(self, segment: dict) -> SegPayload:
+    async def _handle_dice_message(self, segment: dict) -> Seg:
         """处理骰子消息"""
         message_data = segment.get("data", {})
         res = message_data.get("result", "")
         return {"type": "text", "data": f"[扔了一个骰子，点数是{res}]"}
 
 
-    async def handle_forward_message(self, message_list: list) -> SegPayload | None:
+    async def handle_forward_message(self, message_list: list) -> Seg | None:
         """
         递归处理转发消息，并按照动态方式确定图片处理方式
         Parameters:
@@ -457,18 +467,18 @@ class MessageHandler:
         forward_hint = {"type": "text", "data": "这是一条转发消息：\n"}
         return {"type": "seglist", "data": [forward_hint, processed_message]}
 
-    async def _recursive_parse_image_seg(self, seg_data: SegPayload, to_image: bool) -> SegPayload:
+    async def _recursive_parse_image_seg(self, seg_data: Seg, to_image: bool) -> Seg:
         # sourcery skip: merge-else-if-into-elif
         if seg_data.get("type") == "seglist":
-            new_seg_list = []
+            new_seg_list: list[Seg] = []
             for i_seg in seg_data.get("data", []):
-                parsed_seg = await self._recursive_parse_image_seg(i_seg, to_image)
+                parsed_seg = await self._recursive_parse_image_seg(cast(Seg, i_seg), to_image)
                 new_seg_list.append(parsed_seg)
             return {"type": "seglist", "data": new_seg_list}
 
         if to_image:
             if seg_data.get("type") == "image":
-                image_url = seg_data.get("data")
+                image_url = cast(str, seg_data.get("data", ""))
                 try:
                     encoded_image = await get_image_base64(image_url)
                 except Exception as e:
@@ -476,7 +486,7 @@ class MessageHandler:
                     return {"type": "text", "data": "[图片]"}
                 return {"type": "image", "data": encoded_image}
             if seg_data.get("type") == "emoji":
-                image_url = seg_data.get("data")
+                image_url = cast(str, seg_data.get("data", ""))
                 try:
                     encoded_image = await get_image_base64(image_url)
                 except Exception as e:
@@ -493,7 +503,7 @@ class MessageHandler:
         logger.debug(f"不处理类型: {seg_data.get('type')}")
         return seg_data
 
-    async def _handle_forward_message(self, message_list: list, layer: int) -> tuple[SegPayload | None, int]:
+    async def _handle_forward_message(self, message_list: list, layer: int) -> tuple[Seg | None, int]:
         # sourcery skip: low-code-quality
         """
         递归处理实际转发消息
@@ -504,7 +514,7 @@ class MessageHandler:
             seg_data: Seg: 处理后的消息段
             image_count: int: 图片数量
         """
-        seg_list: list[SegPayload] = []
+        seg_list: list[Seg] = []
         image_count = 0
         if message_list is None:
             return None, 0
@@ -512,7 +522,7 @@ class MessageHandler:
             sender_info: dict = sub_message.get("sender", {})
             user_nickname: str = sender_info.get("nickname", "QQ用户")
             user_nickname_str = f"【{user_nickname}】:"
-            break_seg: SegPayload = {"type": "text", "data": "\n"}
+            break_seg: Seg = {"type": "text", "data": "\n"}
             message_of_sub_message_list: list[dict[str, Any]] = sub_message.get("message")
             if not message_of_sub_message_list:
                 logger.warning("转发消息内容为空")
@@ -521,7 +531,7 @@ class MessageHandler:
             message_type = message_of_sub_message.get("type")
             if message_type == RealMessageType.forward:
                 if layer >= 3:
-                    full_seg_data: SegPayload = {
+                    full_seg_data: Seg = {
                         "type": "text",
                         "data": ("--" * layer) + f"【{user_nickname}】:【转发消息】\n",
                     }
@@ -534,7 +544,7 @@ class MessageHandler:
                     if seg_data is None:
                         continue
                     image_count += count
-                    head_tip: SegPayload = {
+                    head_tip: Seg = {
                         "type": "text",
                         "data": ("--" * layer) + f"【{user_nickname}】: 合并转发消息内容：\n",
                     }
@@ -545,9 +555,9 @@ class MessageHandler:
                 if not sub_message_data:
                     continue
                 text_message = sub_message_data.get("text")
-                seg_data: SegPayload = {"type": "text", "data": text_message}
+                seg_data = {"type": "text", "data": text_message}
                 nickname_prefix = ("--" * layer) + user_nickname_str if layer > 0 else user_nickname_str
-                data_list: list[SegPayload] = [
+                data_list: list[Seg] = [
                     {"type": "text", "data": nickname_prefix},
                     seg_data,
                     break_seg,
@@ -575,7 +585,7 @@ class MessageHandler:
                 seg_list.append(full_seg_data)
         return {"type": "seglist", "data": seg_list}, image_count
 
-    async def _handle_file_message(self, segment: dict) -> SegPayload | None:
+    async def _handle_file_message(self, segment: dict) -> Seg | None:
         """处理文件消息"""
         message_data = segment.get("data", {})
         if not message_data:
@@ -598,7 +608,7 @@ class MessageHandler:
 
         return {"type": "file", "data": file_data}
 
-    async def _handle_json_message(self, segment: dict) -> SegPayload | None:
+    async def _handle_json_message(self, segment: dict) -> Seg | None:
         """
         处理JSON消息
         Parameters:
@@ -801,7 +811,7 @@ class MessageHandler:
 
         return None
 
-    async def _handle_contact_share(self, nested_data: dict[str, Any]) -> SegPayload | None:
+    async def _handle_contact_share(self, nested_data: dict[str, Any]) -> Seg | None:
         """
         处理联系人名片分享消息（群名片 / 好友推荐）。
 
