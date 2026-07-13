@@ -316,7 +316,7 @@ class NoticeHandler:
             
         if user_qq_info:
             user_nickname = user_qq_info.get("nickname", "")
-            user_cardname = sanitize_text(user_qq_info.get("card", ""))
+            user_cardname = sanitize_text(user_qq_info.get("card", "")) or ""
         else:
             logger.debug("无法获取未支持notice类型的用户昵称")
 
@@ -375,7 +375,7 @@ class NoticeHandler:
 
         if user_qq_info:
             user_name = user_qq_info.get("nickname", "QQ用户")
-            user_cardname = sanitize_text(user_qq_info.get("card", ""))
+            user_cardname = sanitize_text(user_qq_info.get("card", "")) or ""
         else:
             user_name = "QQ用户"
             user_cardname = ""
@@ -445,7 +445,7 @@ class NoticeHandler:
         user_qq_info: dict | None = await get_member_info(group_id, user_id)
         if user_qq_info:
             user_name = user_qq_info.get("nickname", "QQ用户")
-            user_cardname = sanitize_text(user_qq_info.get("card", ""))
+            user_cardname = sanitize_text(user_qq_info.get("card", "")) or ""
         else:
             user_name = "QQ用户"
             user_cardname = ""
@@ -547,7 +547,7 @@ class NoticeHandler:
         user_qq_info: dict | None = await get_member_info(group_id, user_id)
         if user_qq_info:
             user_name = user_qq_info.get("nickname", "QQ用户")
-            user_cardname = sanitize_text(user_qq_info.get("card", ""))
+            user_cardname = sanitize_text(user_qq_info.get("card", "")) or ""
         else:
             user_name = "QQ用户"
             user_cardname = ""
@@ -591,7 +591,7 @@ class NoticeHandler:
         member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, operator_id))
         if member_info:
             operator_nickname = member_info.get("nickname", "QQ用户")
-            operator_cardname = sanitize_text(member_info.get("card", ""))
+            operator_cardname = sanitize_text(member_info.get("card", "")) or ""
         else:
             logger.warning("无法获取禁言执行者的昵称，消息可能会无效")
 
@@ -622,7 +622,7 @@ class NoticeHandler:
             fetched_member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, user_id))
             if fetched_member_info:
                 user_nickname = fetched_member_info.get("nickname", "QQ用户")
-                user_cardname = sanitize_text(fetched_member_info.get("card", ""))
+                user_cardname = sanitize_text(fetched_member_info.get("card", "")) or ""
             banned_user_info = {
                 "platform": "qq",
                 "user_id": str(user_id),
@@ -657,7 +657,7 @@ class NoticeHandler:
         member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, operator_id))
         if member_info:
             operator_nickname = member_info.get("nickname", "QQ用户")
-            operator_cardname = sanitize_text(member_info.get("card", ""))
+            operator_cardname = sanitize_text(member_info.get("card", "")) or ""
         else:
             logger.warning("无法获取解除禁言执行者的昵称，消息可能会无效")
 
@@ -683,7 +683,7 @@ class NoticeHandler:
             fetched_member_info: dict | None = await get_member_info(cast(int, group_id), cast(int, user_id))
             if fetched_member_info:
                 user_nickname = fetched_member_info.get("nickname", "QQ用户")
-                user_cardname = sanitize_text(fetched_member_info.get("card", ""))
+                user_cardname = sanitize_text(fetched_member_info.get("card", "")) or ""
             else:
                 logger.warning("无法获取解除禁言消息发送者的昵称，消息可能会无效")
             lifted_user_info = {
