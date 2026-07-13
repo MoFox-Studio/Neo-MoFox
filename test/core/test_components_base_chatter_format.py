@@ -23,4 +23,4 @@ def test_format_message_line_uses_message_fields_directly() -> None:
 
     line = BaseChatter.format_message_line(message, time_format="%H:%M")
 
-    assert line == "【09:05】<成员> [user_1] Alice$A-card [msg_1]： 处理后内容"
+    assert line == "【09:05】<成员> [user_1] 昵称:Alice$群名片:A-card [msg_1]： 处理后内容"

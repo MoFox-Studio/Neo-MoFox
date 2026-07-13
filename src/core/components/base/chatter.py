@@ -642,7 +642,7 @@ class BaseChatter(ABC):
     ) -> str:
         """将单条消息格式化为统一的显示行。
 
-        格式：【时间】<role> [platform_id] nickname$cardname [msg_id]： 消息
+        格式：【时间】<role> [platform_id] 昵称:nickname$群名片:cardname [msg_id]： 消息
 
         Args:
             msg: 消息对象
@@ -669,11 +669,11 @@ class BaseChatter(ABC):
         platform_id = msg.sender_id or ""
         id_part = f"[{platform_id}] " if platform_id else ""
 
-        # 名称部分：nickname$cardname（无 cardname 时省略 $cardname）
+        # 名称部分：昵称:nickname$群名片:cardname（无 cardname 或与 nickname 相同时仅显示 nickname）
         nickname = msg.sender_name or ""
         cardname = msg.sender_cardname
         if cardname and cardname != nickname:
-            name_part = f"{nickname}${cardname}"
+            name_part = f"昵称:{nickname}$群名片:{cardname}"
         else:
             name_part = nickname or "未知发送者"
 
