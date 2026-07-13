@@ -251,6 +251,7 @@ class OneBotAdapter(BaseAdapter):
 
             # 未知事件类型
             else:
+                logger.warning(f"未知事件类型:{post_type},raw={raw}")
                 return None
         except ValueError as ve:
             logger.warning(f"处理 OneBot 事件时数据无效: {ve}")

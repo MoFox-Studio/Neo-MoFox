@@ -107,11 +107,16 @@ class NoticeHandler:
                             return None
 
                     case NoticeType.Notify.input_status:
-                        ...
+                        logger.debug("跳过input_status处理")
+                        return None
 
                     case _:
                         logger.warning(f"不支持的notify类型: {notice_type}.{sub_type}，将原始数据包装为消息后抛出")
-                        return await self._build_raw_passthrough_envelope(raw, notice_type, message_time)
+                        handled_segment, user_info = await self._handle_raw_passthrough(raw, notice_type)
+                        if handled_segment and user_info:
+                            notice_config["notice_type"] = str(notice_type)
+                            notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
+                            notice_config["raw"] = raw
 
             case NoticeType.group_msg_emoji_like:
                 # 检查是否启用表情回复功能
@@ -205,8 +210,12 @@ class NoticeHandler:
                     notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
 
             case _:
-                logger.warning(f"不支持的notice类型: {notice_type}")
-                return None
+                logger.warning(f"不支持的notify类型: {notice_type}，将原始数据包装为消息后抛出")
+                handled_segment, user_info = await self._handle_raw_passthrough(raw, notice_type)
+                if handled_segment and user_info:
+                    notice_config["notice_type"] = str(notice_type)
+                    notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
+                    notice_config["raw"] = raw
 
         if not handled_segment or not user_info:
             logger.warning("notice处理失败或不支持")
@@ -265,85 +274,65 @@ class NoticeHandler:
         message_info["extra"] = notice_config
         # 显式标记消息类型为 notice，使 receiver 路由到 _handle_other 而非普通消息路径
         message_info["message_type"] = "notice"
+        # 对于未支持的 notice 类型，notice_config["raw"] 携带了原始数据，
+        # 额外挂载到 raw_message 字段以便下游通过统一入口访问
+        if "raw" in notice_config:
+            envelope["raw_message"] = notice_config["raw"]
         return envelope
 
-    async def _build_raw_passthrough_envelope(
+    async def _handle_raw_passthrough(
         self,
         raw: dict[str, Any],
         notice_type: Any,
-        message_time: float,
-    ) -> MessageEnvelope:
+    ) -> tuple[Seg | None, UserInfoPayload | None]:
         """
-        将不支持的 notice 原始数据包装为 MessageEnvelope。
+        将不支持的 notice 原始数据转换为消息段与用户信息。
 
-        对于暂未实现具体转换逻辑的 notice 类型，不丢弃数据，而是将原始
-        raw 数据携带在 ``raw_message`` 字段及 ``extra.raw`` 中，构造一个
-        合法的 MessageEnvelope 交给下游处理。下游可通过 ``raw_message``
-        或 ``message_info.extra.raw`` 访问原始数据。
+        对于暂未实现具体转换逻辑的 notice 类型，不丢弃数据，而是构造一个
+        text 消息段承载可读描述，并返回最小化的用户信息。原始 raw 数据由
+        调用方写入 ``notice_config["raw"]``，最终携带在
+        ``message_info.extra.raw`` 及 ``raw_message`` 字段中供下游自行解析。
+
+        与其他 ``_handle_*_notify`` 处理器一致，本方法仅产出 ``Seg`` 与
+        ``UserInfoPayload``，后续 MessageEnvelope 的构建统一交由
+        ``handle_notice`` 主流程完成。
 
         Args:
             raw: OneBot 原始通知数据。
             notice_type: notice 类型字符串。
-            message_time: 当前时间戳。
 
         Returns:
-            包含原始 raw 数据的 MessageEnvelope。
+            包含可读描述的 text 消息段与最小化用户信息；处理失败返回 None。
         """
+        user_id = raw.get("user_id") or raw.get("self_id") or ""
         group_id = raw.get("group_id")
-        user_id = raw.get("user_id")
-        self_id = raw.get("self_id")
 
-        # 生成唯一 notice ID：notice类型 + 用户ID + 群ID + 时间戳，避免主键冲突
-        _notice_id_raw = f"notice_{notice_type}_{user_id}_{group_id}_{message_time}"
-        unique_notice_id = "notice_" + hashlib.md5(_notice_id_raw.encode()).hexdigest()[:16]
+        user_nickname = ""
+        user_cardname = ""
+        if group_id and user_id:
+            user_qq_info: dict | None = await get_member_info(group_id, user_id)
+        else:
+            user_qq_info = await get_stranger_info(user_id) if user_id else None
+            
+        if user_qq_info:
+            user_nickname = user_qq_info.get("nickname", "")
+            user_cardname = sanitize_text(user_qq_info.get("card", ""))
+        else:
+            logger.debug("无法获取未支持notice类型的用户昵称")
 
-        msg_builder = MessageBuilder()
-        (
-            msg_builder.direction("incoming")
-            .message_id(unique_notice_id)
-            .timestamp_ms(int(message_time * 1000))
-            .from_user(
-                user_id=str(user_id or self_id or ""),
-                platform="qq",
-            )
-        )
-
-        # 如果是群通知，添加群信息
-        if group_id:
-            fetched_group_info = await get_group_info(group_id)
-            group_name: str | None = None
-            if fetched_group_info:
-                group_name = fetched_group_info.get("group_name")
-            else:
-                logger.warning("无法获取notice消息所在群的名称")
-            msg_builder.from_group(
-                group_id=str(group_id),
-                platform="qq",
-                name=group_name or "",
-            )
-
-        msg_builder.format_info(
-            content_format=["text", "notify"],
-            accept_format=ACCEPT_FORMAT,
-        )
-
-        # 用 text 段承载可读描述，便于下游直接展示
-        msg_builder.text(f"[未支持的notice类型: {notice_type}]")
-
-        envelope = msg_builder.build()
-        # 携带原始 raw 数据，供下游自行解析
-        envelope["raw_message"] = raw
-
-        message_info = cast(dict[str, Any], envelope["message_info"])
-        message_info["extra"] = {
-            "is_notice": False,
-            "is_public_notice": False,
-            "notice_type": str(notice_type),
-            "raw": raw,
+        user_info: UserInfoPayload = {
+            "platform": "qq",
+            "role": UserRole.MEMBER,
+            "user_id": str(user_id),
+            "user_nickname": user_nickname,
+            "user_cardname": user_cardname,
         }
-        # 显式标记消息类型为 notice，使 receiver 路由到 _handle_other 而非普通消息路径
-        message_info["message_type"] = "notice"
-        return envelope
+
+        seg_data: Seg = {
+            "type": "text",
+            "data": f"[未支持的notice类型: {notice_type}]",
+        }
+        return seg_data, user_info
 
     async def _handle_poke_notify(
         self, raw: dict[str, Any], group_id: Any, user_id: Any
