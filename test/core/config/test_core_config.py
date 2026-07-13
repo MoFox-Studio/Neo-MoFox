@@ -17,17 +17,14 @@ class TestChatSection:
         """测试默认聊天配置。"""
         config = CoreConfig.ChatSection()
 
-        assert config.default_chat_mode == "normal"
         assert config.max_history_messages == 20
 
     def test_custom_chat_config(self):
         """测试自定义聊天配置。"""
         config = CoreConfig.ChatSection(
-            default_chat_mode="focus",
             max_history_messages=200,
         )
 
-        assert config.default_chat_mode == "focus"
         assert config.max_history_messages == 200
 
 
@@ -167,7 +164,7 @@ class TestChatSectionLegacyKeys:
             config_file.write_text(
                 """
 [chat]
-default_chat_mode = \"focus\"
+max_history_messages = 150
 max_context_size = 150
 context_validation_mode = \"repair\"
 """.lstrip(),
@@ -175,7 +172,6 @@ context_validation_mode = \"repair\"
             )
 
             config = init_core_config(str(config_file))
-            assert config.chat.default_chat_mode == "focus"
             assert config.chat.max_history_messages == 150
 
             updated = config_file.read_text(encoding="utf-8")
@@ -203,12 +199,10 @@ class TestCoreConfig:
         """测试聊天配置设置。"""
         config = CoreConfig(
             chat=CoreConfig.ChatSection(
-                default_chat_mode="proactive",
                 max_history_messages=150,
             )
         )
 
-        assert config.chat.default_chat_mode == "proactive"
         assert config.chat.max_history_messages == 150
 
     def test_database_settings(self):
@@ -235,7 +229,6 @@ class TestCoreConfig:
         """测试完整配置。"""
         config = CoreConfig(
             chat=CoreConfig.ChatSection(
-                default_chat_mode="priority",
                 max_history_messages=200,
             ),
             llm=CoreConfig.LLMSection(default_policy="round_robin"),
@@ -255,7 +248,6 @@ class TestCoreConfig:
             ),
         )
 
-        assert config.chat.default_chat_mode == "priority"
         assert config.chat.max_history_messages == 200
         assert config.llm.default_policy == "round_robin"
         assert config.telemetry.enabled is True
@@ -294,8 +286,7 @@ class TestGlobalCoreConfig:
             config_file.write_text(
                 """
 [chat]
-default_chat_mode = "focus"
-max_context_size = 150
+max_history_messages = 150
 
 [llm]
 default_policy = "round_robin"
@@ -315,7 +306,6 @@ allow_operator_promotion = true
             )
 
             config = init_core_config(str(config_file))
-            assert config.chat.default_chat_mode == "focus"
             assert config.chat.max_history_messages == 150
             assert config.llm.default_policy == "round_robin"
             assert config.telemetry.enabled is True
@@ -383,7 +373,6 @@ class TestCoreConfigScenarios:
         config = CoreConfig()
 
         # 应该能使用所有默认值
-        assert config.chat.default_chat_mode == "normal"
         assert config.database.database_type == "sqlite"
         assert config.permissions.default_permission_level == "user"
 
@@ -408,7 +397,6 @@ class TestCoreConfigScenarios:
         """测试开发环境配置。"""
         config = CoreConfig(
             chat=CoreConfig.ChatSection(
-                default_chat_mode="normal",
                 max_history_messages=50,
             ),
             permissions=CoreConfig.PermissionSection(
@@ -428,7 +416,6 @@ class TestCoreConfigScenarios:
         config = CoreConfig(
             database=CoreConfig.DatabaseSection(database_type="postgresql"),
             chat=CoreConfig.ChatSection(
-                default_chat_mode="priority",
                 max_history_messages=200,
             ),
             permissions=CoreConfig.PermissionSection(
