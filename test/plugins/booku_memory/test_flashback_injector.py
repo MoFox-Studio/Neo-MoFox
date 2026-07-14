@@ -21,6 +21,7 @@ from plugins.booku_memory.flashback import (
 )
 from plugins.booku_memory.plugin import BookuMemoryAgentPlugin
 from plugins.booku_memory.service.metadata_repository import BookuMemoryMetadataRepository
+from src.core.components.types import EventType
 from src.core.prompt import get_system_reminder_store, reset_system_reminder_store
 
 
@@ -135,7 +136,7 @@ async def test_flashback_injector_injects_into_extra(tmp_path: Path) -> None:
     old = eh.random.random
     eh.random.random = _rand
     try:
-        decision, out = await handler.execute("on_prompt_build", params)
+        decision, out = await handler.execute(EventType.ON_PROMPT_BUILD, params)
     finally:
         eh.random.random = old
         await repo.close()
@@ -176,7 +177,7 @@ async def test_flashback_injector_skips_other_templates() -> None:
         "strict": False,
     }
 
-    decision, out = await handler.execute("on_prompt_build", params)
+    decision, out = await handler.execute(EventType.ON_PROMPT_BUILD, params)
     assert decision is EventDecision.SUCCESS
     assert out["values"]["extra"] == "keep"
 
@@ -186,7 +187,6 @@ async def test_memory_tool_usage_warning_handler_injects_once_per_stream() -> No
     from plugins.booku_memory.config import BookuMemoryConfig
     from plugins.booku_memory.event_handler import MemoryToolUsageWarningHandler
     from src.core.components.types import EventType
-    from src.core.prompt import PROMPT_BUILD_EVENT
     from src.kernel.event import EventDecision
 
     cfg = BookuMemoryConfig()
@@ -213,12 +213,12 @@ async def test_memory_tool_usage_warning_handler_injects_once_per_stream() -> No
             "strict": False,
         }
 
-    decision, out = await handler.execute(PROMPT_BUILD_EVENT, _build_params())
+    decision, out = await handler.execute(EventType.ON_PROMPT_BUILD, _build_params())
     assert decision is EventDecision.SUCCESS
     assert "已有内容" in out["values"]["extra"]
     assert "警告：检测到你连续多次没有使用记忆工具" in out["values"]["extra"]
 
-    decision, out = await handler.execute(PROMPT_BUILD_EVENT, _build_params())
+    decision, out = await handler.execute(EventType.ON_PROMPT_BUILD, _build_params())
     assert decision is EventDecision.SUCCESS
     assert out["values"]["extra"] == "已有内容"
 
@@ -228,7 +228,6 @@ async def test_memory_tool_usage_warning_handler_resets_after_memory_tool_use() 
     from plugins.booku_memory.config import BookuMemoryConfig
     from plugins.booku_memory.event_handler import MemoryToolUsageWarningHandler
     from src.core.components.types import EventType
-    from src.core.prompt import PROMPT_BUILD_EVENT
     from src.kernel.event import EventDecision
 
     cfg = BookuMemoryConfig()
@@ -259,7 +258,7 @@ async def test_memory_tool_usage_warning_handler_resets_after_memory_tool_use() 
         "policies": {},
         "strict": False,
     }
-    decision, out = await handler.execute(PROMPT_BUILD_EVENT, params)
+    decision, out = await handler.execute(EventType.ON_PROMPT_BUILD, params)
     assert decision is EventDecision.SUCCESS
     assert out["values"]["extra"] == ""
 
@@ -331,9 +330,9 @@ async def test_flashback_injector_dedup_in_cooldown_window(tmp_path: Path) -> No
     eh.random.random = _rand
     eh.time.time = _time
     try:
-        decision1, out1 = await handler.execute("on_prompt_build", params)
+        decision1, out1 = await handler.execute(EventType.ON_PROMPT_BUILD, params)
         extra1 = out1["values"]["extra"]
-        decision2, out2 = await handler.execute("on_prompt_build", params)
+        decision2, out2 = await handler.execute(EventType.ON_PROMPT_BUILD, params)
         extra2 = out2["values"]["extra"]
     finally:
         eh.random.random = old_rand

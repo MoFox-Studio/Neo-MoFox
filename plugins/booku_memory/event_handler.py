@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.components.base import BaseEventHandler
 from src.core.components.types import EventType
-from src.core.prompt import PROMPT_BUILD_EVENT
 from src.kernel.event import EventDecision
 
 from .config import BookuMemoryConfig
@@ -293,7 +292,7 @@ class MemoryFlashbackInjector(BaseEventHandler):
     handler_description: str = "在 default_chatter user prompt extra 板块注入记忆闪回"
     weight: int = 10
     intercept_message: bool = False
-    init_subscribe: list[str] = ["on_prompt_build"]
+    init_subscribe: list[EventType | str] = [EventType.ON_PROMPT_BUILD]
 
     def __init__(self, plugin: Any) -> None:
         super().__init__(plugin)
@@ -444,7 +443,7 @@ class MemoryToolUsageWarningHandler(BaseEventHandler):
     handler_description: str = "跟踪 actor 连续未使用 memory_command 的轮次，并向对应 prompt 注入告警"
     weight: int = 12
     intercept_message: bool = False
-    init_subscribe: list[EventType | str] = [PROMPT_BUILD_EVENT, EventType.AFTER_CHATTER_STEP]
+    init_subscribe: list[EventType | str] = [EventType.ON_PROMPT_BUILD, EventType.AFTER_CHATTER_STEP]
 
     async def execute(
         self, event_name: str, params: dict[str, Any]

@@ -59,12 +59,60 @@ class TestEventType:
         assert EventType.ON_PLUGIN_UNLOADED.value == "on_plugin_unloaded"
         assert EventType.ON_COMPONENT_LOADED.value == "on_component_loaded"
         assert EventType.ON_COMPONENT_UNLOADED.value == "on_component_unloaded"
+
+        # 提示词构建事件
+        assert EventType.ON_PROMPT_BUILD.value == "on_prompt_build"
+
+        # LLM 请求生命周期事件
+        assert EventType.BEFORE_LLM_REQUEST.value == "before_llm_request"
+        assert EventType.AFTER_LLM_REQUEST.value == "after_llm_request"
+        assert EventType.ON_LLM_REQUEST_FAILED.value == "on_llm_request_failed"
+
+        # 工具调用生命周期事件
+        assert EventType.BEFORE_TOOL_CALL.value == "before_tool_call"
+        assert EventType.AFTER_TOOL_CALL.value == "after_tool_call"
+        assert EventType.ON_TOOL_CALL_FAILED.value == "on_tool_call_failed"
+
+        # 动作调用生命周期事件
+        assert EventType.BEFORE_ACTION_CALL.value == "before_action_call"
+        assert EventType.AFTER_ACTION_CALL.value == "after_action_call"
+        assert EventType.ON_ACTION_CALL_FAILED.value == "on_action_call_failed"
+
+        # 命令执行生命周期事件
+        assert EventType.BEFORE_COMMAND_EXECUTE.value == "before_command_execute"
+        assert EventType.AFTER_COMMAND_EXECUTE.value == "after_command_execute"
+        assert EventType.ON_COMMAND_EXECUTE_FAILED.value == "on_command_execute_failed"
+
         assert EventType.CUSTOM.value == "custom"
 
-    def test_event_type_is_usable_as_event_name_string(self):
-        """测试 EventType 可直接作为事件名称字符串使用。"""
-        assert isinstance(EventType.ON_ALL_PLUGIN_LOADED, str)
-        assert EventType.ON_ALL_PLUGIN_LOADED == "on_all_plugin_loaded"
+    def test_new_event_types_are_str_subclass(self):
+        """测试新增事件枚举可直接作为事件名称字符串使用。"""
+        assert isinstance(EventType.ON_PROMPT_BUILD, str)
+        assert EventType.ON_PROMPT_BUILD == "on_prompt_build"
+        assert isinstance(EventType.BEFORE_LLM_REQUEST, str)
+        assert EventType.BEFORE_LLM_REQUEST == "before_llm_request"
+        assert isinstance(EventType.AFTER_LLM_REQUEST, str)
+        assert EventType.AFTER_LLM_REQUEST == "after_llm_request"
+        assert isinstance(EventType.ON_LLM_REQUEST_FAILED, str)
+        assert EventType.ON_LLM_REQUEST_FAILED == "on_llm_request_failed"
+        assert isinstance(EventType.BEFORE_TOOL_CALL, str)
+        assert EventType.BEFORE_TOOL_CALL == "before_tool_call"
+        assert isinstance(EventType.AFTER_TOOL_CALL, str)
+        assert EventType.AFTER_TOOL_CALL == "after_tool_call"
+        assert isinstance(EventType.ON_TOOL_CALL_FAILED, str)
+        assert EventType.ON_TOOL_CALL_FAILED == "on_tool_call_failed"
+        assert isinstance(EventType.BEFORE_ACTION_CALL, str)
+        assert EventType.BEFORE_ACTION_CALL == "before_action_call"
+        assert isinstance(EventType.AFTER_ACTION_CALL, str)
+        assert EventType.AFTER_ACTION_CALL == "after_action_call"
+        assert isinstance(EventType.ON_ACTION_CALL_FAILED, str)
+        assert EventType.ON_ACTION_CALL_FAILED == "on_action_call_failed"
+        assert isinstance(EventType.BEFORE_COMMAND_EXECUTE, str)
+        assert EventType.BEFORE_COMMAND_EXECUTE == "before_command_execute"
+        assert isinstance(EventType.AFTER_COMMAND_EXECUTE, str)
+        assert EventType.AFTER_COMMAND_EXECUTE == "after_command_execute"
+        assert isinstance(EventType.ON_COMMAND_EXECUTE_FAILED, str)
+        assert EventType.ON_COMMAND_EXECUTE_FAILED == "on_command_execute_failed"
 
 
 class TestComponentState:

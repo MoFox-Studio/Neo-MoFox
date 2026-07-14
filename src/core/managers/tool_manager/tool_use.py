@@ -181,6 +181,38 @@ class ToolUse:
             # 记录开始执行
             logger.debug(f"开始执行工具: {tool_instance.tool_name}, 参数: {kwargs}")
 
+            # 触发工具调用执行前事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.BEFORE_TOOL_CALL):
+                    _, modified_params = await event_bus.publish(
+                        EventType.BEFORE_TOOL_CALL,
+                        {
+                            "signature": signature,
+                            "tool_name": tool_instance.tool_name,
+                            "tool_description": getattr(
+                                tool_instance, "tool_description", ""
+                            ),
+                            "args": dict(kwargs),
+                            "message": message,
+                        },
+                    )
+                    # 应用事件处理器对参数的修改
+                    if "args" in modified_params:
+                        new_args = modified_params["args"]
+                        if isinstance(new_args, dict):
+                            kwargs = new_args
+                    if "message" in modified_params:
+                        modified_message = modified_params["message"]
+                        if modified_message is not None:
+                            message = modified_message
+            except Exception:
+                # 事件触发失败不中断工具执行，静默降级
+                pass
+
             # 调用 Tool 的 execute 方法
             success, result = await tool_instance._wrap_execute(**kwargs).wait_done()
 
@@ -230,6 +262,37 @@ class ToolUse:
                 error=None if success else RuntimeError(str(result)),
             )
 
+            # 触发工具调用执行后事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.AFTER_TOOL_CALL):
+                    _, modified_params = await event_bus.publish(
+                        EventType.AFTER_TOOL_CALL,
+                        {
+                            "signature": signature,
+                            "tool_name": tool_instance.tool_name,
+                            "tool_description": getattr(
+                                tool_instance, "tool_description", ""
+                            ),
+                            "args": dict(kwargs),
+                            "result": result,
+                            "success": success,
+                            "execution_time": execution_time,
+                            "message": message,
+                        },
+                    )
+                    # 应用事件处理器对结果和消息的修改
+                    if "result" in modified_params:
+                        new_result = modified_params["result"]
+                        if new_result is not None:
+                            result = new_result
+            except Exception:
+                # 事件触发失败不中断工具执行，静默降级
+                pass
+
             return success, result
 
         except Exception as e:
@@ -257,6 +320,33 @@ class ToolUse:
                 auto_reason_stripped=stripped_auto_reason,
                 error=e,
             )
+
+            # 触发工具调用失败事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.ON_TOOL_CALL_FAILED):
+                    await event_bus.publish(
+                        EventType.ON_TOOL_CALL_FAILED,
+                        {
+                            "signature": signature,
+                            "tool_name": tool_instance.tool_name,
+                            "tool_description": getattr(
+                                tool_instance, "tool_description", ""
+                            ),
+                            "args": dict(kwargs),
+                            "error": e,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "execution_time": execution_time,
+                            "message": message,
+                        },
+                    )
+            except Exception:
+                # 事件触发失败不中断异常传播，静默降级
+                pass
 
             logger.error(f"工具执行失败 ({tool_instance.tool_name}): {e}")
             raise RuntimeError(f"Tool 执行失败: {e}") from e

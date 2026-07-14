@@ -61,6 +61,30 @@ class EventType(str, Enum):
     ON_PLUGIN_UNLOADED = "on_plugin_unloaded"
     ON_COMPONENT_LOADED = "on_component_loaded"
     ON_COMPONENT_UNLOADED = "on_component_unloaded"
+
+    # 提示词构建事件
+    ON_PROMPT_BUILD = "on_prompt_build"
+
+    # LLM 请求生命周期事件
+    BEFORE_LLM_REQUEST = "before_llm_request"
+    AFTER_LLM_REQUEST = "after_llm_request"
+    ON_LLM_REQUEST_FAILED = "on_llm_request_failed"
+
+    # 工具调用生命周期事件
+    BEFORE_TOOL_CALL = "before_tool_call"
+    AFTER_TOOL_CALL = "after_tool_call"
+    ON_TOOL_CALL_FAILED = "on_tool_call_failed"
+
+    # 动作调用生命周期事件
+    BEFORE_ACTION_CALL = "before_action_call"
+    AFTER_ACTION_CALL = "after_action_call"
+    ON_ACTION_CALL_FAILED = "on_action_call_failed"
+
+    # 命令执行生命周期事件
+    BEFORE_COMMAND_EXECUTE = "before_command_execute"
+    AFTER_COMMAND_EXECUTE = "after_command_execute"
+    ON_COMMAND_EXECUTE_FAILED = "on_command_execute_failed"
+
     CUSTOM = "custom"  # 用于自定义事件
 
 

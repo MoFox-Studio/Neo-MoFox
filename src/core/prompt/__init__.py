@@ -28,7 +28,7 @@ Prompt management system.
 """
 
 # 模板相关
-from src.core.prompt.template import PromptTemplate, PROMPT_BUILD_EVENT
+from src.core.prompt.template import PromptTemplate
 
 # 管理器相关
 from src.core.prompt.manager import (
@@ -76,8 +76,6 @@ __all__ = [
     "SystemReminderStore",
     "get_system_reminder_store",
     "reset_system_reminder_store",
-    # 事件
-    "PROMPT_BUILD_EVENT",
     # 渲染策略
     "RenderPolicy",
     "optional",

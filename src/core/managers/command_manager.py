@@ -176,6 +176,7 @@ class CommandManager:
         """执行命令。
 
         解析消息内容并执行匹配的命令。
+        在执行前、执行成功后、执行失败时分别触发对应的生命周期事件。
 
         Args:
             message: 触发的消息
@@ -228,17 +229,125 @@ class CommandManager:
             return False, f"插件未加载: {sig_info['plugin_name']}"
 
         # 创建 Command 实例并执行
+        import time
+        start_time = time.time()
+        routed_text = self._extract_routed_text(command_text, command_path)
         try:
             command_instance = command_cls(plugin=plugin, stream_id=message.stream_id, message_id=message.message_id, message=message)
-            routed_text = self._extract_routed_text(command_text, command_path)
+
+            # 触发命令执行前事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.BEFORE_COMMAND_EXECUTE):
+                    _, modified_params = await event_bus.publish(
+                        EventType.BEFORE_COMMAND_EXECUTE,
+                        {
+                            "signature": signature,
+                            "command_name": command_cls.command_name,
+                            "command_description": getattr(
+                                command_cls, "command_description", ""
+                            ),
+                            "command_path": command_path,
+                            "args": args,
+                            "message_text": routed_text,
+                            "message": message,
+                        },
+                    )
+                    # 应用事件处理器对参数的修改
+                    if "message_text" in modified_params:
+                        new_routed_text = modified_params["message_text"]
+                        if isinstance(new_routed_text, str):
+                            routed_text = new_routed_text
+                    if "message" in modified_params:
+                        modified_message = modified_params["message"]
+                        if modified_message is not None:
+                            message = modified_message
+            except Exception:
+                # 事件触发失败不中断命令执行，静默降级
+                pass
+
             # 传入 stream_id 以便命令可以访问聊天流信息
             result = await command_instance.execute(
                 message_text=routed_text,
             )
+
+            execution_time = time.time() - start_time
+            status_emoji = "✅" if result[0] else "❌"
+            logger.info(
+                f"{status_emoji} 命令执行完成: {command_path}, 耗时: {execution_time:.2f}s"
+            )
+
+            # 触发命令执行后事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.AFTER_COMMAND_EXECUTE):
+                    _, modified_params = await event_bus.publish(
+                        EventType.AFTER_COMMAND_EXECUTE,
+                        {
+                            "signature": signature,
+                            "command_name": command_cls.command_name,
+                            "command_description": getattr(
+                                command_cls, "command_description", ""
+                            ),
+                            "command_path": command_path,
+                            "args": args,
+                            "message_text": routed_text,
+                            "result": result[1],
+                            "success": result[0],
+                            "execution_time": execution_time,
+                            "message": message,
+                        },
+                    )
+                    # 应用事件处理器对结果和消息的修改
+                    if "result" in modified_params:
+                        new_result = modified_params["result"]
+                        if new_result is not None:
+                            result = (result[0], new_result)
+            except Exception:
+                # 事件触发失败不中断命令执行，静默降级
+                pass
+
             return result
 
         except Exception as e:
+            execution_time = time.time() - start_time
             logger.error(f"执行命令失败 ({command_path}): {e}")
+
+            # 触发命令执行失败事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.ON_COMMAND_EXECUTE_FAILED):
+                    await event_bus.publish(
+                        EventType.ON_COMMAND_EXECUTE_FAILED,
+                        {
+                            "signature": signature,
+                            "command_name": command_cls.command_name,
+                            "command_description": getattr(
+                                command_cls, "command_description", ""
+                            ),
+                            "command_path": command_path,
+                            "args": args,
+                            "message_text": routed_text,
+                            "error": e,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "execution_time": execution_time,
+                            "message": message,
+                        },
+                    )
+            except Exception:
+                # 事件触发失败不中断异常传播，静默降级
+                pass
+
             return False, f"命令执行失败: {e}"
 
     def _extract_routed_text(self, text: str, command_path: str) -> str:
