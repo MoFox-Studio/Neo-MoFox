@@ -76,14 +76,22 @@ class NoticeHandler:
             case NoticeType.friend_recall:
                 logger.info("好友撤回一条消息")
                 logger.info(f"撤回消息ID：{raw.get('message_id')}, 撤回时间：{raw.get('time')}")
-                logger.warning("暂时不支持撤回消息处理")
-                return None
+                handled_segment, user_info = await self._handle_friend_recall_notify(raw, user_id)
+                if handled_segment and user_info:
+                    notice_config["notice_type"] = "friend_recall"
+                    notice_config["is_notice"] = True
+                    notice_config["message_id"] = raw.get("message_id")
+                    notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
 
             case NoticeType.group_recall:
                 logger.info("群内用户撤回一条消息")
                 logger.info(f"撤回消息ID：{raw.get('message_id')}, 撤回时间：{raw.get('time')}")
-                logger.warning("暂时不支持撤回消息处理")
-                return None
+                handled_segment, user_info = await self._handle_group_recall_notify(raw, group_id, user_id)
+                if handled_segment and user_info:
+                    notice_config["notice_type"] = "group_recall"
+                    notice_config["is_notice"] = True
+                    notice_config["message_id"] = raw.get("message_id")
+                    notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
 
             case NoticeType.notify:
                 sub_type = raw.get("sub_type")
@@ -137,6 +145,7 @@ class NoticeHandler:
                     if handled_segment and user_info:
                         notice_config["notice_type"] = "emoji_like"
                         notice_config["is_notice"] = True
+                        notice_config["message_id"] = raw.get("message_id","")
                         notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
                 else:
                     logger.warning("群聊表情回复被禁用，取消群聊表情回复处理")
@@ -331,6 +340,152 @@ class NoticeHandler:
         seg_data: Seg = {
             "type": "text",
             "data": f"[未支持的notice类型: {notice_type}]",
+        }
+        return seg_data, user_info
+
+    async def _handle_friend_recall_notify(
+        self, raw: dict[str, Any], user_id: Any
+    ) -> tuple[Seg | None, UserInfoPayload | None]:
+        """处理好友消息撤回通知。
+
+        通过 OneBot API 获取被撤回消息的详情（若仍可获取），生成可读文本段，
+        并发布 ``OneBotEvent.ON_RECEIVED.FRIEND_RECALL`` 事件，随后产出与
+        其他通知一致的 ``Seg`` 与 ``UserInfoPayload``，由主流程统一构建
+        MessageEnvelope 送回核心。
+
+        Args:
+            raw: OneBot 原始通知数据。
+            user_id: 撤回操作者的用户 ID。
+
+        Returns:
+            包含可读描述的 text 消息段与操作者用户信息；处理失败返回 None。
+        """
+        operator_id = raw.get("operator_id") or user_id
+        message_id = raw.get("message_id", "")
+
+        # 获取操作者信息
+        operator_nickname: str = "QQ用户"
+        operator_cardname: str = ""
+        stranger_info: dict | None = await get_stranger_info(operator_id) if operator_id else None
+        if stranger_info:
+            operator_nickname = stranger_info.get("nickname", "QQ用户")
+            operator_cardname = sanitize_text(stranger_info.get("card", "")) or ""
+        else:
+            logger.debug("无法获取好友撤回操作者的昵称")
+
+        user_info: UserInfoPayload = {
+            "platform": "qq",
+            "role": UserRole.MEMBER,
+            "user_id": str(operator_id),
+            "user_nickname": operator_nickname,
+            "user_cardname": operator_cardname,
+        }
+
+        # 尝试获取被撤回消息的详情（部分实现下撤回后仍可短期获取）
+        recalled_text: str = ""
+        if message_id:
+            target_message = await get_message_detail(message_id)
+            if target_message:
+                recalled_text = await self._extract_message_preview(target_message)
+            else:
+                logger.debug("无法获取被撤回消息的详情，可能已过期")
+
+        # 触发好友撤回事件
+        from src.app.plugin_system.api import event_api
+
+        from ...event_types import OneBotEvent
+
+        await event_api.publish_event(
+            OneBotEvent.ON_RECEIVED.FRIEND_RECALL,
+            {
+                "message_id": message_id,
+                "user_id": operator_id,
+            },
+        )
+
+        description = f"{operator_nickname}撤回了一条消息"
+        if recalled_text:
+            description += f"[原消息:{recalled_text}]"
+
+        seg_data: Seg = {
+            "type": "text",
+            "data": description,
+        }
+        return seg_data, user_info
+
+    async def _handle_group_recall_notify(
+        self, raw: dict[str, Any], group_id: Any, user_id: Any
+    ) -> tuple[Seg | None, UserInfoPayload | None]:
+        """处理群聊消息撤回通知。
+
+        通过 OneBot API 获取被撤回消息的详情（若仍可获取），生成可读文本段，
+        并发布 ``OneBotEvent.ON_RECEIVED.GROUP_RECALL`` 事件，随后产出与
+        其他通知一致的 ``Seg`` 与 ``UserInfoPayload``，由主流程统一构建
+        MessageEnvelope 送回核心。
+
+        Args:
+            raw: OneBot 原始通知数据。
+            group_id: 群 ID。
+            user_id: 撤回操作者的用户 ID。
+
+        Returns:
+            包含可读描述的 text 消息段与操作者用户信息；处理失败返回 None。
+        """
+        if not group_id:
+            logger.error("群ID不能为空，无法处理群聊消息撤回通知")
+            return None, None
+
+        operator_id = raw.get("operator_id") or user_id
+        message_id = raw.get("message_id", "")
+
+        # 获取操作者信息
+        operator_nickname: str = "QQ用户"
+        operator_cardname: str = ""
+        member_info: dict | None = await get_member_info(group_id, operator_id) if operator_id else None
+        if member_info:
+            operator_nickname = member_info.get("nickname", "QQ用户")
+            operator_cardname = sanitize_text(member_info.get("card", "")) or ""
+        else:
+            logger.debug("无法获取群撤回操作者的昵称")
+
+        user_info: UserInfoPayload = {
+            "platform": "qq",
+            "role": UserRole.MEMBER,
+            "user_id": str(operator_id),
+            "user_nickname": operator_nickname,
+            "user_cardname": operator_cardname,
+        }
+
+        # 尝试获取被撤回消息的详情（部分实现下撤回后仍可短期获取）
+        recalled_text: str = ""
+        if message_id:
+            target_message = await get_message_detail(message_id)
+            if target_message:
+                recalled_text = await self._extract_message_preview(target_message)
+            else:
+                logger.debug("无法获取被撤回消息的详情，可能已过期")
+
+        # 触发群撤回事件
+        from src.app.plugin_system.api import event_api
+
+        from ...event_types import OneBotEvent
+
+        await event_api.publish_event(
+            OneBotEvent.ON_RECEIVED.GROUP_RECALL,
+            {
+                "message_id": message_id,
+                "group_id": group_id,
+                "user_id": operator_id,
+            },
+        )
+
+        description = f"{operator_nickname}撤回了一条群消息"
+        if recalled_text:
+            description += f"[原消息:{recalled_text}]"
+
+        seg_data: Seg = {
+            "type": "text",
+            "data": description,
         }
         return seg_data, user_info
 

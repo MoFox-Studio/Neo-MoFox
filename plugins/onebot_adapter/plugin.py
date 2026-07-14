@@ -239,15 +239,15 @@ class OneBotAdapter(BaseAdapter):
         try:
             # 消息事件
             if post_type == "message":
-                return await self.message_handler.handle_raw_message(raw)  # type: ignore[return-value]
+                return await self.message_handler.handle_raw_message(raw) 
 
             # 通知事件
             elif post_type == "notice":
-                return await self.notice_handler.handle_notice(raw)  # type: ignore[return-value]
+                return await self.notice_handler.handle_notice(raw)  
 
             # 元事件
             elif post_type == "meta_event":
-                return await self.meta_event_handler.handle_meta_event(raw)  # type: ignore[return-value]
+                return await self.meta_event_handler.handle_meta_event(raw)  
 
             # 未知事件类型
             else:
