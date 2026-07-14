@@ -13,8 +13,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
-
 from .context_budget import (
     AsyncContextCompressionHandler,
     TokenCounter,
@@ -35,6 +33,7 @@ from .roles import ROLE
 from .types import ModelEntry
 
 if TYPE_CHECKING:
+    from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
     from .request import LLMRequest
 
 
@@ -157,6 +156,8 @@ class LLMContextManager:
 
     def _apply_reminders(self, payloads: list[LLMPayload]) -> list[LLMPayload]:
         """把解析后的 reminder 注入到首个和/或最后一个 user payload。"""
+        from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
+
         updated = list(payloads)
         user_indices = [
             index for index, payload in enumerate(updated) if payload.role == ROLE.USER
@@ -234,6 +235,8 @@ class LLMContextManager:
         self,
     ) -> tuple[list[RegisteredReminder], dict[SystemReminderInsertType, list[str]]]:
         """从 store 中解析 reminder bucket，并记录需要剥离的旧文本。"""
+        from src.core.prompt import SystemReminderInsertType
+
         resolved: list[RegisteredReminder] = []
         strip_texts_by_type: dict[SystemReminderInsertType, list[str]] = {
             SystemReminderInsertType.FIXED: [],
