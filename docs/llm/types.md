@@ -55,14 +55,63 @@ class ModelEntry(TypedDict, total=True):
 | api_key | str | API 密钥 |
 | base_url | str | API 基础 URL |
 | max_retry | int | 最大重试次数 |
-| 	imeout | loat | 请求超时（秒） |
-| retry_interval | loat | 重试间隔（秒） |
-| 	emperature | loat | 采样温度 |
+| 	imeout | float | 请求超时（秒） |
+| retry_interval | float | 重试间隔（秒） |
+| 	emperature | float | 采样温度 |
 | max_tokens | int | 最大输出 token 数 |
 | max_context | int | 模型上下文窗口大小 |
-| price_in / price_out | loat | 输入/输出价格（用于成本计算） |
+| price_in / price_out | float | 输入/输出价格（用于成本计算） |
 | tool_call_compat | tool | 是否启用工具调用兼容模式 |
-| extra_params | dict | 额外参数透传 |
+| extra_params | dict | 额外参数透传（支持 `headers`/`query`/`body` 三个 HTTP 层特殊键，详见下方说明） |
+
+### `extra_params` HTTP 层特殊键
+
+`extra_params` 中的 `headers`、`query`、`body` 是三个特殊键，会被独立提取并
+注入到 HTTP 请求的不同位置，**不会**进入请求体业务字段：
+
+| 特殊键 | 类型 | 用途 |
+|---|---|---|
+| `headers` | `dict[str, str]` | 注入 HTTP 请求头（透传给底层 SDK 的 `extra_headers`） |
+| `query` | `dict[str, Any]` | 注入 URL 查询参数（透传给底层 SDK 的 `extra_query`） |
+| `body` | `dict[str, Any]` | 合并到请求体字段（透传给底层 SDK 的 `extra_body`） |
+
+其余键保持原有透传逻辑：OpenAI 兼容客户端会把非标准参数自动归并到 `extra_body`
+（即请求体），Anthropic 客户端直接合并到请求体。
+
+**示例：**
+
+```toml
+[[models]]
+model_identifier = "custom-model-v1"
+name = "custom-model"
+api_provider = "custom"
+
+# HTTP 头、URL 查询参数和请求体字段分别由三个特殊键注入；
+# enable_thinking 等其它键按原有透传逻辑处理。
+extra_params = {
+  headers = {"X-API-Version" = "2024-06", "X-Priority" = "high"},
+  query = {version = "2024-01-01"},
+  body = {metadata = {source = "maibot"}},
+  enable_thinking = false
+}
+```
+
+> ⚠️ 注意：Python 3.11 自带的 `tomllib`（TOML 1.0）**不支持多行 inline table**。
+> 上例的多行写法需使用支持 TOML 1.1 的解析器（如 `toml` JS 库、`tomli-w`、
+> `tomlkit`），或改成以下两种等价格式之一：
+>
+> 1. 单行 inline table：
+>    ```toml
+>    extra_params = {headers = {"X-API-Version" = "2024-06", "X-Priority" = "high"}, query = {version = "2024-01-01"}, body = {metadata = {source = "maibot"}}, enable_thinking = false}
+>    ```
+> 2. 子表语法（仅当本节为单条记录或位于 `[[models]]` 数组末尾时可用）：
+>    ```toml
+>    [models.extra_params]
+>    headers = {"X-API-Version" = "2024-06", "X-Priority" = "high"}
+>    query = {version = "2024-01-01"}
+>    body = {metadata = {source = "maibot"}}
+>    enable_thinking = false
+>    ```
 
 ---
 

@@ -350,6 +350,32 @@ models1 = [{"client_type": "openai", "model_identifier": "gpt-4", ...}]
 models2 = [{"client_type": "gemini", "model_identifier": "gemini-pro", ...}]
 ```
 
+### Q: 如何向请求注入自定义 HTTP 头、URL 查询参数或请求体字段？
+
+A: 在模型配置的 `extra_params` 中使用三个特殊键：`headers`、`query`、`body`。
+两者都会被独立提取并透传给底层 SDK 的同名 `extra_*` 参数：
+
+```python
+models = [{
+    "client_type": "openai",
+    "model_identifier": "custom-model",
+    "api_key": "...",
+    "extra_params": {
+        "headers": {"X-API-Version": "2024-06", "X-Priority": "high"},
+        "query": {"version": "2024-01-01"},
+        "body": {"metadata": {"source": "maibot"}},
+        "enable_thinking": False,  # 其余键按原有透传逻辑处理
+    },
+}]
+```
+
+- `headers`：必须是 `dict[str, str]`，注入到 HTTP 请求头。
+- `query`：必须是 `dict`，注入到 URL 查询参数。
+- `body`：必须是 `dict`，合并到请求体字段（可嵌套）。
+
+OpenAI 客户端在透传时还会把非标准参数自动归并到 `extra_body`，用户显式声明的
+`body` 优先级高于非标准参数。Anthropic 客户端则直接合并到请求体。
+
 ### Q: OpenAI 的重试是如何工作的？
 
 A: OpenAI 客户端禁用了 SDK 级别的重试。重试由 `policy` 层完全控制，允许更细粒度的控制。

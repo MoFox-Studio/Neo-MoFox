@@ -604,6 +604,15 @@ class OpenAIChatClient:
     - ``force_ipv4``：是否强制使用 IPv4 出口，默认 False。
     - ``context_reserve_ratio`` / ``context_reserve_tokens``：由上层策略使用，此处忽略。
     - ``force_sync_http``：已废弃，忽略。
+
+    支持的 extra_params HTTP 层特殊键：
+
+    - ``headers``：dict[str, str]，注入到 HTTP 请求头（透传给 OpenAI SDK 的 extra_headers）。
+    - ``query``：dict[str, Any]，注入到 URL 查询参数（透传给 OpenAI SDK 的 extra_query）。
+    - ``body``：dict[str, Any]，合并到请求体字段（透传给 OpenAI SDK 的 extra_body）。
+
+    这三个特殊键不存在时，其余参数行为与历史一致；同时存在时，特殊键优先
+    于非标准参数（即 ``body`` 会覆盖同名非标准参数）。
     """
 
     def __init__(self) -> None:
@@ -761,7 +770,18 @@ class OpenAIChatClient:
 
     def _extract_model_params(
         self, model_set: dict[str, Any]
-    ) -> tuple[str, str | None, float | None, bool, bool, dict[str, Any]]:
+    ) -> tuple[
+        str,
+        str | None,
+        float | None,
+        bool,
+        bool,
+        dict[str, Any],
+        dict[str, str],
+        dict[str, Any],
+        dict[str, Any],
+    ]:
+        """从 model_set 提取传输层参数，含 headers/query/body 三个特殊键。"""
         try:
             (
                 api_key,
@@ -770,6 +790,9 @@ class OpenAIChatClient:
                 trust_env,
                 force_ipv4,
                 extra_params,
+                extra_headers,
+                extra_query,
+                extra_body,
             ) = extract_model_transport_params(model_set)
         except ValueError as exc:
             message = str(exc)
@@ -785,6 +808,9 @@ class OpenAIChatClient:
             trust_env,
             force_ipv4,
             dict(extra_params),
+            dict(extra_headers),
+            dict(extra_query),
+            dict(extra_body),
         )
 
 
@@ -828,7 +854,7 @@ class OpenAIChatClient:
         if not isinstance(model_set, dict):
             raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, extra_params = (
+        api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = (
             self._extract_model_params(model_set)
         )
         # force_sync_http 已废弃，移除后不传给 API
@@ -879,25 +905,44 @@ class OpenAIChatClient:
         else:
             params.pop("tool_choice", None)
 
-        # 新增：区分标准参数与非标准参数（统一走 extra_body，避免 openai SDK 因未知参数报错）
+        # 区分标准参数与非标准参数（统一走 extra_body，避免 openai SDK 因未知参数报错）
+        # extra_headers/extra_query 是 OpenAI SDK 原生支持的 HTTP 层透传键，不要被
+        # 当成非标准参数塞进 extra_body。
         standard_params = {
             "model", "messages", "max_tokens", "temperature", "top_p", "n", "stream",
             "stop", "presence_penalty", "frequency_penalty", "logit_bias", "user",
             "tools", "tool_choice", "response_format", "seed", "parallel_tool_calls",
             "functions", "function_call", "extra_body", "stream_options",
-            "reasoning_effort",
+            "reasoning_effort", "extra_headers", "extra_query",
         }
-        extra_body: dict[str, Any] = {}
+        non_standard_body: dict[str, Any] = {}
         for key in list(params.keys()):
             if key not in standard_params:
-                extra_body[key] = params.pop(key)
-        if extra_body:
+                non_standard_body[key] = params.pop(key)
+
+        # 合并非标准参数与用户显式声明的 body 字段：
+        # 用户显式声明的 body 优先级高于非标准参数（即同名时以用户 body 为准），
+        # 这样可以保证用户对请求体的精确控制。
+        merged_body: dict[str, Any] = {}
+        if non_standard_body:
+            merged_body.update(non_standard_body)
+        if explicit_body:
+            merged_body.update(explicit_body)
+
+        if merged_body:
             existing = params.get("extra_body")
             if isinstance(existing, dict):
-                merged = {**existing, **extra_body}
-                params["extra_body"] = merged
+                # 程序化设置的 extra_body 优先级最高，避免被用户配置覆盖
+                params["extra_body"] = {**merged_body, **existing}
             else:
-                params["extra_body"] = extra_body
+                params["extra_body"] = merged_body
+
+        # 应用 HTTP 层参数：headers 走 extra_headers、query 走 extra_query，
+        # 由 OpenAI SDK 在底层注入到实际 HTTP 请求中。
+        if extra_headers:
+            params["extra_headers"] = extra_headers
+        if extra_query:
+            params["extra_query"] = extra_query
 
         # 仅在显式允许 reasoning 历史模式时，才为缺失字段的 assistant 历史回填
         # reasoning_content；默认模式下前面已经清理过该字段。
@@ -1146,7 +1191,7 @@ class OpenAIChatClient:
         if not inputs:
             raise ValueError("inputs 不能为空")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, extra_params = (
+        api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = (
             self._extract_model_params(model_set)
         )
         client = self._get_client(
@@ -1162,6 +1207,19 @@ class OpenAIChatClient:
             "input": inputs,
         }
         params.update(extra_params)
+
+        # 应用 extra_params 中的特殊键：headers/query/body
+        # 与 chat completions 一致，body 走 extra_body，headers/query 走 SDK 透传。
+        if explicit_body:
+            existing = params.get("extra_body")
+            if isinstance(existing, dict):
+                params["extra_body"] = {**explicit_body, **existing}
+            else:
+                params["extra_body"] = explicit_body
+        if extra_headers:
+            params["extra_headers"] = extra_headers
+        if extra_query:
+            params["extra_query"] = extra_query
 
         log_provider_request_body(
             "embeddings.create",
@@ -1221,7 +1279,7 @@ class OpenAIChatClient:
         if not documents:
             raise ValueError("documents 不能为空")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, extra_params = (
+        api_key, base_url, timeout, trust_env, force_ipv4, _extra_params, extra_headers, extra_query, explicit_body = (
             self._extract_model_params(model_set)
         )
         client = self._get_client(
@@ -1245,6 +1303,15 @@ class OpenAIChatClient:
             }
             if isinstance(top_n, int) and top_n > 0:
                 params["top_n"] = top_n
+
+            # 应用 extra_params 中的特殊键：headers/query/body
+            # rerank 接口参数集合有限，普通 extra_params 不透传，仅这三个 HTTP 层特殊键生效
+            if explicit_body:
+                params["extra_body"] = explicit_body
+            if extra_headers:
+                params["extra_headers"] = extra_headers
+            if extra_query:
+                params["extra_query"] = extra_query
 
             log_provider_request_body(
                 "rerank.create",
@@ -1312,7 +1379,7 @@ class OpenAIChatClient:
         if not isinstance(model_set, dict):
             raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, _ = (
+        api_key, base_url, timeout, trust_env, force_ipv4, _, extra_headers, extra_query, explicit_body = (
             self._extract_model_params(model_set)
         )
         client = self._get_client(
@@ -1323,9 +1390,18 @@ class OpenAIChatClient:
             force_ipv4=force_ipv4,
         )
 
-        resp = await client.audio.transcriptions.create(
-            model=model_name,
-            file=("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
-        )
+        kwargs: dict[str, Any] = {
+            "model": model_name,
+            "file": ("audio.wav", io.BytesIO(audio_bytes), "audio/wav"),
+        }
+        # 应用 HTTP 层参数：headers/query/body
+        if explicit_body:
+            kwargs["extra_body"] = explicit_body
+        if extra_headers:
+            kwargs["extra_headers"] = extra_headers
+        if extra_query:
+            kwargs["extra_query"] = extra_query
+
+        resp = await client.audio.transcriptions.create(**kwargs)
         text = getattr(resp, "text", None)
         return text if isinstance(text, str) else str(resp)
