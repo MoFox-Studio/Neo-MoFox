@@ -203,15 +203,6 @@ class CoreConfig(ConfigBase):
         定义聊天相关的配置参数。
         """
 
-        default_chat_mode: str = Field(
-            default="normal",
-            description="默认聊天模式：focus/normal/proactive/priority",
-            label="默认聊天模式",
-            tag="ai",
-            input_type="select",
-            choices=["focus", "normal", "proactive", "priority"],
-            hint="决定 Bot 的响应策略",
-        )
         max_history_messages: int = Field(
             default=20,
             description="每个聊天流在内存中保留的最大历史消息数",
