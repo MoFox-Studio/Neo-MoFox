@@ -381,7 +381,18 @@ class AnthropicChatClient:
 
     def _extract_model_params(
         self, model_set: Mapping[str, object]
-    ) -> tuple[str, str | None, float | None, bool, bool, dict[str, object]]:
+    ) -> tuple[
+        str,
+        str | None,
+        float | None,
+        bool,
+        bool,
+        dict[str, object],
+        dict[str, str],
+        dict[str, object],
+        dict[str, object],
+    ]:
+        """从 model_set 提取传输层参数，含 headers/query/body 三个特殊键。"""
         try:
             (
                 api_key,
@@ -390,6 +401,9 @@ class AnthropicChatClient:
                 trust_env,
                 force_ipv4,
                 extra_params,
+                extra_headers,
+                extra_query,
+                extra_body,
             ) = extract_model_transport_params(model_set)
         except ValueError as exc:
             message = str(exc)
@@ -405,6 +419,9 @@ class AnthropicChatClient:
             trust_env,
             force_ipv4,
             dict(extra_params),
+            dict(extra_headers),
+            dict(extra_query),
+            dict(extra_body),
         )
 
     def _get_client(
@@ -488,7 +505,7 @@ class AnthropicChatClient:
         if not isinstance(model_set, dict):
             raise TypeError("AnthropicChatClient 期望 model_set 为单个模型配置 dict")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, extra_params = self._extract_model_params(model_set)
+        api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = self._extract_model_params(model_set)
         tool_format = str(extra_params.pop("tool_format", "anthropic"))
         # 提取 Anthropic 原生 thinking 参数，由 SDK 负责校验和序列化
         thinking = extra_params.pop("thinking", None)
@@ -523,6 +540,20 @@ class AnthropicChatClient:
             params["thinking"] = thinking
 
         params.update(extra_params)
+
+        # 应用 extra_params 中的 HTTP 层特殊键：headers/query/body
+        # Anthropic SDK 原生支持 extra_headers/extra_query/extra_body，
+        # 这些参数直接注入到实际 HTTP 请求中，与普通请求体字段区分开。
+        if explicit_body:
+            existing = params.get("extra_body")
+            if isinstance(existing, dict):
+                params["extra_body"] = {**explicit_body, **existing}
+            else:
+                params["extra_body"] = explicit_body
+        if extra_headers:
+            params["extra_headers"] = extra_headers
+        if extra_query:
+            params["extra_query"] = extra_query
 
         # 请求检查和 token 估算统一走共享观测 seam，这里只负责上报原始请求体。
         log_provider_request_body(

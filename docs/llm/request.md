@@ -55,7 +55,21 @@ class LLMRequest:
 | `max_tokens` | `int` | 最大输出 token 数 |
 | `max_context` | `int` | 最大上下文窗口（0 表示不限制） |
 | `tool_call_compat` | `bool` | 是否启用工具调用兼容模式 |
-| `extra_params` | `dict[str, Any]` | 额外参数（可含 `context_reserve_ratio`、`context_reserve_tokens`） |
+| `extra_params` | `dict[str, Any]` | 额外参数（可含 `context_reserve_ratio`、`context_reserve_tokens`、`headers`、`query`、`body`） |
+
+#### `extra_params` HTTP 层特殊键
+
+`extra_params` 中的 `headers`、`query`、`body` 是 HTTP 层特殊键，会被独立提取并
+透传给底层 SDK 的 `extra_headers`/`extra_query`/`extra_body`：
+
+| 键 | 类型 | 用途 |
+|---|---|---|
+| `headers` | `dict[str, str]` | 注入 HTTP 请求头 |
+| `query` | `dict[str, Any]` | 注入 URL 查询参数 |
+| `body` | `dict[str, Any]` | 合并到请求体字段 |
+
+其余键保持原有透传逻辑。三个特殊键不存在时，行为与历史完全一致。详见
+[Types 模块](./types.md#extra_params-http-层特殊键)。
 
 **使用示例：**
 

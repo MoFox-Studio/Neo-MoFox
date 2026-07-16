@@ -157,7 +157,12 @@ class ModelInfoSection(SectionBase):
     )
     extra_params: dict[str, Any] = Field(
         default_factory=dict,
-        description="额外参数（用于 API 调用时的额外配置）",
+        description=(
+            "额外参数（用于 API 调用时的额外配置）。"
+            "支持三个特殊键：headers（注入 HTTP 请求头，dict[str,str]）、"
+            "query（注入 URL 查询参数，dict）、body（合并到请求体字段，dict）；"
+            "其余键按原透传逻辑处理"
+        ),
     )
     anti_truncation: bool = Field(
         default=False,

@@ -284,6 +284,27 @@ A: 在 kernel 启动时调用 `await init_llm_stats(db_path="data/llm_stats/llm_
 
 A: 当 token 计数超过 `model.max_context * context_reserve_ratio`（默认为 0.95）时触发裁剪；可通过 `extra_params.context_reserve_ratio` 和 `extra_params.context_reserve_tokens` 调整。
 
+### Q: 如何为模型请求注入 HTTP 头、URL 查询参数和请求体字段？
+
+A: 在 `extra_params` 中使用三个特殊键：`headers`、`query`、`body`。三者会被独立
+提取并透传给底层 SDK（OpenAI/Anthropic 都原生支持 `extra_headers`/`extra_query`/`extra_body`）：
+
+```toml
+[[models]]
+model_identifier = "custom-model-v1"
+name = "custom-model"
+api_provider = "custom"
+
+extra_params = {headers = {"X-API-Version" = "2024-06", "X-Priority" = "high"}, query = {version = "2024-01-01"}, body = {metadata = {source = "maibot"}}, enable_thinking = false}
+```
+
+- `headers`：`dict[str, str]`，注入到 HTTP 请求头。
+- `query`：`dict[str, Any]`，注入到 URL 查询参数。
+- `body`：`dict[str, Any]`，合并到请求体字段（可嵌套）。
+
+若不包含这三个特殊键，`extra_params` 的行为与历史完全一致（非标准参数会自动归并到请求体）。
+详见 [Types 模块 - extra_params HTTP 层特殊键](./types.md#extra_params-http-层特殊键)。
+
 ### Q: 指标收集是否有性能开销？
 
 A: 内存级指标可以通过 `enable_metrics=False` 关闭。持久化统计仅在显式调用 `init_llm_stats` 后生效。
