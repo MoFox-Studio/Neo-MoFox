@@ -397,7 +397,7 @@ async def get_message_detail(
 
 async def get_record_detail(
     file: str,
-    file_id: str | None = None,
+    file_id: str  = "",
     *,
     adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
