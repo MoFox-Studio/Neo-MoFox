@@ -695,9 +695,15 @@ class MessageConverter:
                     voice_to_recognize.append((i, media))
             
             # 早退策略：没有待识别媒体就直接返回原结果
+            # 但对被 VLM 跳过的图片/表情包，仍需落盘+入库（不识别），
+            # 确保 image_id 能从 Images 表回查到文件路径
             if not media_to_recognize and not voice_to_recognize:
+                await self._persist_skipped_media(manager, result.media, stream_id)
                 return result
             
+            # 对被 VLM 跳过的媒体，先落盘+入库（不识别）
+            await self._persist_skipped_media(manager, result.media, stream_id)
+
             # 批量识别图片/表情包，并缓存描述
             descriptions = []
             for idx, media in media_to_recognize:
@@ -758,6 +764,39 @@ class MessageConverter:
             logger.error(f"MediaManager 识别失败: {e}", exc_info=True)
         
         return result
+
+    async def _persist_skipped_media(
+        self,
+        manager: Any,
+        media_list: list[dict[str, Any]],
+        stream_id: str,
+    ) -> None:
+        """对被 VLM 跳过的图片/表情包执行落盘+入库（不识别）。
+
+        当 ``should_skip_vlm`` 返回 True 时，``_recognize_media_with_manager``
+        不会将对应媒体传给 ``recognize_media``，导致图片既不落盘也不写入
+        Images 表。本方法遍历 ``media_list``，对被跳过的 image/emoji 调用
+        ``MediaManager.persist_media``，确保 ``image_id`` 始终能从 Images 表
+        回查到文件路径。
+
+        Args:
+            manager: MediaManager 实例
+            media_list: 解析结果中的媒体项列表
+            stream_id: 聊天流 ID，用于判断是否被跳过
+        """
+        for media in media_list:
+            media_type = media.get("type", "")
+            if media_type not in ("image", "emoji"):
+                continue
+            if not manager.should_skip_vlm(stream_id, media_type):
+                continue
+            data = media.get("data")
+            if not isinstance(data, str) or not data:
+                continue
+            try:
+                await manager.persist_media(data, media_type)
+            except Exception as e:
+                logger.warning(f"持久化被跳过的{media_type}失败: {e}")
 
     @staticmethod
     def _build_content(result: _ParseResult, message_type: MessageType) -> str | Any:

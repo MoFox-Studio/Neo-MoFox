@@ -556,6 +556,67 @@ class MediaManager:
             logger.error(f"识别{media_type}失败: {e}", exc_info=True)
             return None
 
+    async def persist_media(
+        self,
+        base64_data: str,
+        media_type: str,
+    ) -> str | None:
+        """持久化媒体文件到磁盘并写入数据库，但不执行 VLM/ASR 识别。
+
+        当 VLM 识别被跳过（``skip_vlm_for_stream``）时，图片/表情包仍需落盘
+        并写入 Images 表，确保 ``image_id``（哈希）能从 Images 表回查到文件路径。
+
+        流程：计算哈希 → 查 Images 表是否已存在 → 落盘 pending →
+        移动到分类目录 → ``save_media_info``（``vlm_processed=False``）。
+
+        Args:
+            base64_data: base64 编码的媒体数据
+            media_type: 媒体类型，``image`` 或 ``emoji``
+
+        Returns:
+            媒体哈希值（即 image_id），失败返回 None
+        """
+        try:
+            media_hash = self._compute_hash(base64_data)
+
+            # 已存在则跳过
+            existing = await self.get_media_info(media_hash)
+            if existing and existing.get("path"):
+                return media_hash
+
+            # 落盘到 pending
+            pending_path = await self._save_to_pending(
+                base64_data, media_hash, media_type
+            )
+
+            # 移动到分类目录
+            await self._move_to_category_folder(
+                pending_path, media_type, media_hash
+            )
+
+            # 构造移动后的目标路径（与 _move_to_category_folder 内部逻辑一致）
+            if media_type == "image":
+                target_folder = self.images_folder
+            elif media_type == "voice":
+                target_folder = self.voices_folder
+            else:
+                target_folder = self.emojis_folder
+            target_path = target_folder / pending_path.name
+
+            await self.save_media_info(
+                media_hash=media_hash,
+                media_type=media_type,
+                file_path=str(target_path),
+                description=None,
+                vlm_processed=False,
+            )
+            logger.debug(f"已持久化{media_type}（跳过VLM）: {media_hash[:8]}... → {target_path}")
+            return media_hash
+
+        except Exception as e:
+            logger.error(f"持久化{media_type}失败: {e}", exc_info=True)
+            return None
+
     async def recognize_batch(
         self,
         media_list: list[tuple[str, str]],
@@ -656,7 +717,7 @@ class MediaManager:
             媒体信息字典，不存在返回 None
         """
         try:
-            media = await (
+            media: Any = await (
                 QueryBuilder(Images)
                 .filter(image_id=media_hash)
                 .order_by("-timestamp")
@@ -748,7 +809,7 @@ class MediaManager:
             语音信息字典，不存在返回 None
         """
         try:
-            voice = await (
+            voice: Any = await (
                 QueryBuilder(Voices)
                 .filter(voice_id=voice_hash)
                 .order_by("-timestamp")
@@ -894,7 +955,7 @@ class MediaManager:
             缓存的描述，不存在返回 None
         """
         try:
-            desc = await (
+            desc: Any = await (
                 QueryBuilder(ImageDescriptions)
                 .filter(image_description_hash=media_hash, type=media_type)
                 .order_by("-timestamp")
@@ -967,7 +1028,7 @@ class MediaManager:
             缓存的描述，不存在返回 None
         """
         try:
-            desc = await (
+            desc: Any = await (
                 QueryBuilder(VoiceDescriptions)
                 .filter(voice_description_hash=voice_hash, type="voice")
                 .order_by("-timestamp")
