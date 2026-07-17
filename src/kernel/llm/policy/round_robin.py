@@ -8,7 +8,7 @@ import itertools
 import threading
 from typing import Any
 
-from .backoff import normalize_max_retry, retry_delay
+from .utils import normalize_max_retry, retry_delay
 from .base import ModelStep, Policy, PolicySession
 
 

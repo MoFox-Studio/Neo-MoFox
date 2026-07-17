@@ -266,7 +266,7 @@ class TestRoundRobinSession:
 
     def test_next_after_error_same_model_retry(self, mock_model_set: list[dict], monkeypatch) -> None:
         """Test retrying same model on error."""
-        monkeypatch.setattr("src.kernel.llm.policy.backoff.random.uniform", lambda low, high: high)
+        monkeypatch.setattr("src.kernel.llm.policy.utils.random.uniform", lambda low, high: high)
         session = _RoundRobinSession(model_set=mock_model_set, start_index=0)
 
         # First attempt

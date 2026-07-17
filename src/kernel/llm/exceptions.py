@@ -91,7 +91,16 @@ class LLMAPIError(LLMError):
 
 
 def decide_retry(error: BaseException) -> RetryDecision:
-    """根据标准化异常判断初始请求是否应交给框架重试。"""
+    """判断标准化异常是否应交由现有策略重试。
+
+    Args:
+        error: 经 :func:`classify_exception` 标准化后的请求异常。
+
+    Returns:
+        包含是否可重试及决策原因的 :class:`RetryDecision`。认证、配置、
+        Token 超限、内容过滤及不可恢复的 API 请求错误不会重试；限流、
+        超时、连接错误、HTTP 408、HTTP 429 和 5xx 错误允许重试。
+    """
     if isinstance(error, LLMAuthenticationError):
         return RetryDecision(False, "authentication_error")
     if isinstance(error, LLMTokenLimitError):
@@ -141,6 +150,18 @@ def _get_header(headers: Any, name: str) -> object | None:
 
 
 def _extract_retry_after(error: BaseException) -> float | None:
+    """从 SDK 异常中提取服务端建议的重试等待时间。
+
+    按 ``retry-after-ms``、``Retry-After`` 数值秒、``Retry-After``
+    HTTP-date、异常 ``retry_after`` 属性的顺序解析。无效、负数或非有限值
+    会被忽略，已过期的 HTTP-date 返回 ``0.0``。
+
+    Args:
+        error: 可能携带 HTTP 响应头或 ``retry_after`` 属性的 SDK 异常。
+
+    Returns:
+        解析后的非负等待秒数；没有合法值时返回 ``None``。
+    """
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None)
     if headers is not None:

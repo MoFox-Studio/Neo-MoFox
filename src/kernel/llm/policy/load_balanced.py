@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 from typing import Any, NamedTuple
 
-from .backoff import normalize_max_retry, retry_delay
+from .utils import normalize_max_retry, retry_delay
 from .base import ModelStep, Policy, PolicySession
 
 

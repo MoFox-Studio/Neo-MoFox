@@ -138,7 +138,7 @@ def test_round_robin_exhausted_all_attempts():
 
 def test_round_robin_applies_backoff_to_retry_and_switch(monkeypatch):
     monkeypatch.setattr(
-        "src.kernel.llm.policy.backoff.random.uniform", lambda low, high: high
+        "src.kernel.llm.policy.utils.random.uniform", lambda low, high: high
     )
     models = [
         {"model_identifier": "a", "max_retry": 1, "retry_interval": 2},
