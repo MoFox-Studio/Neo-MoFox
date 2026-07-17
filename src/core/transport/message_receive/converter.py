@@ -637,6 +637,31 @@ class MessageConverter:
 
         return type_mapping.get(first_media_type, MessageType.UNKNOWN)
 
+    def _enrich_media_image_ids(self, media_list: list[dict[str, Any]]) -> None:
+        """为二进制媒体项注入 image_id（哈希），与 MediaManager 识别流程一致。
+
+        对 type ∈ {image, emoji, voice} 且 data 为字符串、尚未带 image_id 的媒体项，
+        计算 SHA256 哈希写入 ``image_id`` 字段。后续入库剔除 ``data`` 后 ``image_id``
+        仍保留，可据此从 Images 表回查图片描述/文件路径。
+
+        Args:
+            media_list: 解析得到的媒体项列表，原地修改
+        """
+        try:
+            from src.core.managers.media_manager import MediaManager
+
+            for media in media_list:
+                if media.get("type") not in ("image", "emoji", "voice"):
+                    continue
+                if "image_id" in media:
+                    continue
+                data = media.get("data")
+                if not isinstance(data, str):
+                    continue
+                media["image_id"] = MediaManager.compute_media_hash(data)
+        except Exception:
+            logger.warning("媒体 image_id 注入失败", exc_info=True)
+
     async def _recognize_media_with_manager(
         self,
         result: _ParseResult,
