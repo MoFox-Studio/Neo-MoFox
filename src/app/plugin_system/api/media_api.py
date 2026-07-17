@@ -2,6 +2,10 @@
 Media API 模块。
 
 提供媒体识别、批量识别与媒体信息查询能力。
+
+支持三类媒体，统一通过 ``media_type`` 路由：
+- ``image`` / ``emoji``：通过 VLM 识别，写入 ``Images`` / ``ImageDescriptions`` 表
+- ``voice``：通过 ASR 识别，写入 ``Voices`` / ``VoiceDescriptions`` 表，并落盘到 voices 目录
 """
 
 from __future__ import annotations
@@ -46,8 +50,8 @@ def _validate_media_type(media_type: str) -> None:
     Returns:
         None
     """
-    if media_type not in {"image", "emoji"}:
-        raise ValueError("media_type 必须是 'image' 或 'emoji'")
+    if media_type not in {"image", "emoji", "voice"}:
+        raise ValueError("media_type 必须是 'image'、'emoji' 或 'voice'")
 
 
 async def recognize_media(
@@ -55,11 +59,15 @@ async def recognize_media(
     media_type: str,
     use_cache: bool = True,
 ) -> str | None:
-    """识别媒体内容（图片或表情包）。
+    """识别媒体内容（图片、表情包或语音）。
+
+    按 ``media_type`` 路由到 MediaManager 的对应识别引擎：
+    - ``image`` / ``emoji``：VLM 识别
+    - ``voice``：ASR 识别，识别后音频文件落盘到 voices 目录
 
     Args:
-        base64_data: Base64 编码的媒体内容
-        media_type: 媒体类型
+        base64_data: Base64 编码的媒体内容（语音为 WAV）
+        media_type: 媒体类型，``image`` / ``emoji`` / ``voice``
         use_cache: 是否使用缓存
 
     Returns:
@@ -79,6 +87,9 @@ async def recognize_batch(
     use_cache: bool = True,
 ) -> list[tuple[int, str | None]]:
     """批量识别媒体。
+
+    支持混合类型，``media_type`` 为 ``image`` / ``emoji`` / ``voice``。
+    直接委托给 MediaManager，由统一的 :meth:`recognize_media` 处理路由。
 
     Args:
         media_list: (base64_data, media_type) 列表
@@ -109,12 +120,16 @@ async def save_media_info(
 ) -> None:
     """保存媒体信息到数据库。
 
+    按 ``media_type`` 路由：
+    - ``image`` / ``emoji``：写入 ``Images`` 表，``vlm_processed`` 标记 VLM 识别状态
+    - ``voice``：写入 ``Voices`` 表，``vlm_processed`` 映射为 ``asr_processed``
+
     Args:
-        media_hash: 媒体哈希
+        media_hash: 媒体哈希（语音时即 voice_hash）
         media_type: 媒体类型
         file_path: 文件路径，可选
-        description: 媒体描述，可选
-        vlm_processed: 是否已完成 VLM 识别
+        description: 媒体描述（语音时为 ASR 文本），可选
+        vlm_processed: 是否已完成识别（语音时映射为 asr_processed）
 
     Returns:
         None
@@ -123,7 +138,15 @@ async def save_media_info(
     _validate_media_type(media_type)
     if file_path is not None:
         _validate_non_empty(file_path, "file_path")
-    return await _get_media_manager().save_media_info(
+    manager = _get_media_manager()
+    if media_type == "voice":
+        return await manager.save_voice_info(
+            voice_hash=media_hash,
+            file_path=file_path,
+            description=description,
+            asr_processed=vlm_processed,
+        )
+    return await manager.save_media_info(
         media_hash=media_hash,
         media_type=media_type,
         file_path=file_path,
@@ -135,6 +158,8 @@ async def save_media_info(
 async def get_media_info(media_hash: str) -> dict[str, Any] | None:
     """根据哈希值或路径获取媒体信息。
 
+    依次查询 ``Images`` 与 ``Voices`` 表，命中即返回。
+
     Args:
         media_hash: 媒体哈希或文件路径
 
@@ -145,7 +170,7 @@ async def get_media_info(media_hash: str) -> dict[str, Any] | None:
     info = await _get_media_manager().get_media_info(media_hash)
     if info is not None:
         return info
-    from src.core.models.sql_alchemy import Images
+    from src.core.models.sql_alchemy import Images, Voices
     from src.kernel.db import QueryBuilder
 
     media = await QueryBuilder(Images).filter(image_id=media_hash).first()
@@ -159,6 +184,19 @@ async def get_media_info(media_hash: str) -> dict[str, Any] | None:
             "count": media.count,
             "timestamp": media.timestamp,
             "vlm_processed": media.vlm_processed,
+        }
+
+    voice = await QueryBuilder(Voices).filter(voice_id=media_hash).first()
+    if voice:
+        return {
+            "id": voice.id,
+            "voice_id": voice.voice_id,
+            "path": voice.path,
+            "type": voice.type,
+            "description": voice.description,
+            "count": voice.count,
+            "timestamp": voice.timestamp,
+            "asr_processed": voice.asr_processed,
         }
     return None
 

@@ -34,7 +34,7 @@ from src.core.utils.base64_helper import base64_decode_to_bytes
 from src.kernel.scheduler import get_unified_scheduler, TriggerType
 from src.kernel.db import QueryBuilder, invalidate_model_cache
 from src.kernel.db.core.session import get_db_session
-from src.core.models.sql_alchemy import Images, ImageDescriptions
+from src.core.models.sql_alchemy import Images, ImageDescriptions, Voices, VoiceDescriptions
 from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
 
 logger = get_logger("media_manager")
@@ -138,9 +138,15 @@ class MediaManager:
             self.pending_folder = self.media_root / "pending"  # 待识别
             self.images_folder = self.media_root / "images"    # 识别完成的图片
             self.emojis_folder = self.media_root / "emojis"    # 识别完成的表情包
+            self.voices_folder = self.media_root / "voices"    # 识别完成的语音
 
             # 创建所有必要的文件夹
-            for folder in [self.pending_folder, self.images_folder, self.emojis_folder]:
+            for folder in [
+                self.pending_folder,
+                self.images_folder,
+                self.emojis_folder,
+                self.voices_folder,
+            ]:
                 folder.mkdir(parents=True, exist_ok=True)
 
             logger.info(f"媒体文件夹已初始化: {self.media_root}")
@@ -274,15 +280,16 @@ class MediaManager:
             logger.error(f"清理待识别文件夹失败: {e}")
 
     async def _cleanup_media_files(self) -> None:
-        """清理 images/emojis 目录中的已识别媒体文件。
+        """清理 images/emojis/voices 目录中的已识别媒体文件。
 
-        整合 images 与 emojis 两个分类目录的清理，
+        整合 images、emojis 与 voices 三个分类目录的清理，
         各目录按文件年龄和总容量两个维度清理：
         1. 删除超过 ``media_file_max_age_days`` 的文件
         2. 若总容量超过 ``media_file_max_total_size_mb``，从最旧文件开始删除直到达标
         """
         await self._cleanup_category_folder(self.images_folder)
         await self._cleanup_category_folder(self.emojis_folder)
+        await self._cleanup_category_folder(self.voices_folder)
 
     async def _cleanup_category_folder(self, folder: Path) -> None:
         """清理已识别媒体分类文件夹中的陈旧文件。
@@ -440,33 +447,53 @@ class MediaManager:
         media_type: str,
         use_cache: bool = True
     ) -> str | None:
-        """识别媒体内容（图片或表情包）。
+        """识别媒体内容（图片、表情包或语音）。
+
+        按 ``media_type`` 路由到对应识别引擎：
+        - ``image`` / ``emoji``：调用 VLM 识别，缓存写入 ``ImageDescriptions``，
+          媒体信息写入 ``Images`` 表，文件落盘到 images/emojis 目录
+        - ``voice``：调用 ASR 识别，缓存写入 ``VoiceDescriptions``，
+          语音信息写入 ``Voices`` 表，文件落盘到 voices 目录
+
+        统一流程：计算哈希 → 查缓存 → 检查引擎可用性 → 落盘 pending →
+        调用识别引擎 → 回写缓存 → 移动到分类目录 → 保存媒体信息。
         
         Args:
-            base64_data: base64 编码的媒体数据
-            media_type: 媒体类型，"image" 或 "emoji"
+            base64_data: base64 编码的媒体数据（语音为 WAV）
+            media_type: 媒体类型，"image"、"emoji" 或 "voice"
             use_cache: 是否使用缓存（默认 True）
             
         Returns:
             媒体的文字描述，识别失败返回 None
         """
         try:
+            is_voice = media_type == "voice"
+
             # 计算哈希值
             media_hash = self._compute_hash(base64_data)
             
             # 尝试从缓存读取
             if use_cache:
-                cached_description = await self._get_cached_description(
-                    media_hash, 
-                    media_type
-                )
+                if is_voice:
+                    cached_description = await self._get_cached_voice_description(media_hash)
+                else:
+                    cached_description = await self._get_cached_description(
+                        media_hash, 
+                        media_type
+                    )
                 if cached_description:
                     logger.debug(f"从缓存获取{media_type}描述: {media_hash[:8]}...")
                     return cached_description
 
-            if not self._vlm_model_set:
-                logger.debug(f"VLM 模型不可用，跳过{media_type}识别")
-                return None
+            # 检查识别引擎可用性
+            if is_voice:
+                if not self._asr_available or not self._asr_model_set:
+                    logger.debug("ASR 模型不可用，跳过语音识别")
+                    return None
+            else:
+                if not self._vlm_model_set:
+                    logger.debug(f"VLM 模型不可用，跳过{media_type}识别")
+                    return None
             
             # 保存到待识别文件夹
             pending_file_path = await self._save_to_pending(
@@ -475,16 +502,22 @@ class MediaManager:
                 media_type
             )
             
-            # VLM 识别
-            description = await self._recognize_with_vlm(base64_data, media_type)
+            # 调用识别引擎
+            if is_voice:
+                description = await self._recognize_with_asr(base64_data)
+            else:
+                description = await self._recognize_with_vlm(base64_data, media_type)
             
             if description:
                 # 保存到缓存
-                await self._save_description_cache(
-                    media_hash,
-                    media_type,
-                    description
-                )
+                if is_voice:
+                    await self._save_voice_description_cache(media_hash, description)
+                else:
+                    await self._save_description_cache(
+                        media_hash,
+                        media_type,
+                        description
+                    )
                 logger.info(f"成功识别{media_type}: {description[:50]}...")
                 
                 # 移动到对应的分类文件夹
@@ -495,15 +528,24 @@ class MediaManager:
                 )
                 
                 # 保存媒体信息到数据库
-                target_folder = self.images_folder if media_type == "image" else self.emojis_folder
-                target_file_path = target_folder / pending_file_path.name
-                await self.save_media_info(
-                    media_hash=media_hash,
-                    media_type=media_type,
-                    file_path=str(target_file_path),
-                    description=description,
-                    vlm_processed=True
-                )
+                if is_voice:
+                    target_file_path = self.voices_folder / pending_file_path.name
+                    await self.save_voice_info(
+                        voice_hash=media_hash,
+                        file_path=str(target_file_path),
+                        description=description,
+                        asr_processed=True
+                    )
+                else:
+                    target_folder = self.images_folder if media_type == "image" else self.emojis_folder
+                    target_file_path = target_folder / pending_file_path.name
+                    await self.save_media_info(
+                        media_hash=media_hash,
+                        media_type=media_type,
+                        file_path=str(target_file_path),
+                        description=description,
+                        vlm_processed=True
+                    )
             else:
                 # 识别失败，保持在待识别文件夹，等待定时清理
                 logger.warning(f"识别失败，文件保留在待识别文件夹: {pending_file_path.name}")
@@ -512,24 +554,6 @@ class MediaManager:
             
         except Exception as e:
             logger.error(f"识别{media_type}失败: {e}", exc_info=True)
-            return None
-
-    async def recognize_voice(self, audio_base64: str) -> str | None:
-        """使用 ASR 识别语音内容。
-
-        Args:
-            audio_base64: base64 编码的 WAV 音频数据。
-
-        Returns:
-            识别出的文字，失败返回 None。
-        """
-        try:
-            if not self._asr_available or not self._asr_model_set:
-                logger.debug("ASR 模型不可用")
-                return None
-            return await self._recognize_with_asr(audio_base64)
-        except Exception as e:
-            logger.error(f"语音识别失败: {e}", exc_info=True)
             return None
 
     async def recognize_batch(
@@ -653,6 +677,98 @@ class MediaManager:
 
         except Exception as e:
             logger.error(f"查询媒体信息失败: {e}", exc_info=True)
+            return None
+
+    async def save_voice_info(
+        self,
+        voice_hash: str,
+        file_path: str | None = None,
+        description: str | None = None,
+        asr_processed: bool = False,
+    ) -> None:
+        """保存语音信息到数据库。
+
+        镜像 :meth:`save_media_info` 的语义，但写入 ``Voices`` 表。
+        哈希值相同则累加计数并更新描述/识别状态，否则插入新记录。
+
+        Args:
+            voice_hash: 语音哈希值（作为唯一标识）
+            file_path: 语音文件路径（可选）
+            description: ASR 识别文本（可选）
+            asr_processed: 是否已经过 ASR 识别
+        """
+        try:
+            changed = False
+            async with get_db_session() as session:
+                stmt = (
+                    select(Voices)
+                    .where(Voices.voice_id == voice_hash)
+                    .order_by(Voices.timestamp.desc())
+                    .limit(1)
+                )
+                result = await session.execute(stmt)
+                existing = result.scalars().first()
+
+                if existing:
+                    existing.count += 1
+                    if description:
+                        existing.description = description
+                    if asr_processed:
+                        existing.asr_processed = True
+                    changed = True
+                    logger.debug(f"更新语音记录: {voice_hash[:8]}... count={existing.count}")
+                else:
+                    new_voice = Voices(
+                        voice_id=voice_hash,
+                        path=file_path or voice_hash,
+                        type="voice",
+                        description=description,
+                        timestamp=time.time(),
+                        asr_processed=asr_processed,
+                        count=1,
+                    )
+                    session.add(new_voice)
+                    changed = True
+                    logger.debug(f"创建新语音记录: {voice_hash[:8]}...")
+
+                await session.commit()
+            if changed:
+                invalidate_model_cache(Voices)
+
+        except Exception as e:
+            logger.error(f"保存语音信息失败: {e}", exc_info=True)
+
+    async def get_voice_info(self, voice_hash: str) -> dict[str, Any] | None:
+        """根据哈希值获取语音信息。
+
+        Args:
+            voice_hash: 语音哈希值
+
+        Returns:
+            语音信息字典，不存在返回 None
+        """
+        try:
+            voice = await (
+                QueryBuilder(Voices)
+                .filter(voice_id=voice_hash)
+                .order_by("-timestamp")
+                .first()
+            )
+            if voice is not None:
+                return {
+                    "id": voice.id,
+                    "voice_id": voice.voice_id,
+                    "path": voice.path,
+                    "type": voice.type,
+                    "description": voice.description,
+                    "count": voice.count,
+                    "timestamp": voice.timestamp,
+                    "asr_processed": voice.asr_processed,
+                }
+            return None
+
+        except Exception as e:
+            logger.error(f"查询语音信息失败: {e}", exc_info=True)
             return None
 
     # ──────────────────────────────────────────
@@ -838,6 +954,77 @@ class MediaManager:
         except Exception as e:
             logger.error(f"保存描述缓存失败: {e}", exc_info=True)
 
+    async def _get_cached_voice_description(self, voice_hash: str) -> str | None:
+        """从数据库缓存获取语音识别结果。
+
+        镜像 :meth:`_get_cached_description` 的语义，但查询 ``VoiceDescriptions`` 表。
+        type 固定为 ``voice``。
+
+        Args:
+            voice_hash: 语音哈希值
+
+        Returns:
+            缓存的描述，不存在返回 None
+        """
+        try:
+            desc = await (
+                QueryBuilder(VoiceDescriptions)
+                .filter(voice_description_hash=voice_hash, type="voice")
+                .order_by("-timestamp")
+                .first()
+            )
+            return desc.description if desc else None
+
+        except Exception as e:
+            logger.debug(f"查询语音缓存失败: {e}")
+            return None
+
+    async def _save_voice_description_cache(
+        self,
+        voice_hash: str,
+        description: str,
+    ) -> None:
+        """保存语音识别结果到缓存。
+
+        镜像 :meth:`_save_description_cache` 的语义，但写入 ``VoiceDescriptions`` 表。
+        type 固定为 ``voice``。
+
+        Args:
+            voice_hash: 语音哈希值
+            description: ASR 识别文本
+        """
+        try:
+            created = False
+            async with get_db_session() as session:
+                stmt = (
+                    select(VoiceDescriptions)
+                    .where(
+                        VoiceDescriptions.voice_description_hash == voice_hash,
+                        VoiceDescriptions.type == "voice",
+                    )
+                    .order_by(VoiceDescriptions.timestamp.desc())
+                    .limit(1)
+                )
+                result = await session.execute(stmt)
+                existing = result.scalars().first()
+
+                if not existing:
+                    new_desc = VoiceDescriptions(
+                        voice_description_hash=voice_hash,
+                        type="voice",
+                        description=description,
+                        timestamp=time.time(),
+                    )
+                    session.add(new_desc)
+                    created = True
+                    await session.commit()
+                    logger.debug(f"保存语音描述缓存: {voice_hash[:8]}...")
+            if created:
+                invalidate_model_cache(VoiceDescriptions)
+
+        except Exception as e:
+            logger.error(f"保存语音描述缓存失败: {e}", exc_info=True)
+
     @staticmethod
     def _extract_clean_base64(data: str) -> str:
         """提取纯净的 base64 数据（移除前缀和多余字符）。
@@ -897,7 +1084,12 @@ class MediaManager:
             )
             
             # 根据类型确定文件扩展名
-            ext = ".jpg" if media_type == "image" else ".png"
+            if media_type == "image":
+                ext = ".jpg"
+            elif media_type == "voice":
+                ext = ".wav"
+            else:
+                ext = ".png"
             
             # 生成文件名（哈希值前16位 + 类型标记 + 扩展名）
             filename = f"{media_hash[:16]}_{media_type}{ext}"
@@ -932,7 +1124,12 @@ class MediaManager:
                 return
             
             # 确定目标文件夹
-            target_folder = self.images_folder if media_type == "image" else self.emojis_folder
+            if media_type == "image":
+                target_folder = self.images_folder
+            elif media_type == "voice":
+                target_folder = self.voices_folder
+            else:
+                target_folder = self.emojis_folder
             
             # 确定目标文件名
             target_path = target_folder / source_path.name

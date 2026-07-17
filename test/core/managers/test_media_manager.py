@@ -373,7 +373,7 @@ class TestMediaManagerEdgeCases:
 
 
 class TestMediaManagerRecognizeVoice:
-    """测试语音识别（ASR）功能。"""
+    """测试语音识别（ASR）功能（通过统一 recognize_media 入口，media_type='voice'）。"""
 
     @pytest.mark.asyncio
     async def test_recognize_voice_asr_not_available(self) -> None:
@@ -384,7 +384,7 @@ class TestMediaManagerRecognizeVoice:
             manager = MediaManager()
             audio_b64 = base64.b64encode(b"fake_wav_data").decode()
 
-            result = await manager.recognize_voice(audio_b64)
+            result = await manager.recognize_media(audio_b64, "voice")
 
             assert result is None
 
@@ -406,7 +406,7 @@ class TestMediaManagerRecognizeVoice:
             with patch.object(manager, '_recognize_with_asr', new_callable=AsyncMock) as mock_asr:
                 mock_asr.return_value = "你好，世界"
 
-                result = await manager.recognize_voice(audio_b64)
+                result = await manager.recognize_media(audio_b64, "voice")
 
                 assert result == "你好，世界"
                 mock_asr.assert_called_once_with(audio_b64)
@@ -428,7 +428,7 @@ class TestMediaManagerRecognizeVoice:
             with patch.object(manager, '_recognize_with_asr', new_callable=AsyncMock) as mock_asr:
                 mock_asr.return_value = None
 
-                result = await manager.recognize_voice(audio_b64)
+                result = await manager.recognize_media(audio_b64, "voice")
 
                 assert result is None
 
@@ -449,7 +449,7 @@ class TestMediaManagerRecognizeVoice:
             with patch.object(manager, '_recognize_with_asr', new_callable=AsyncMock) as mock_asr:
                 mock_asr.side_effect = RuntimeError("ASR 连接失败")
 
-                result = await manager.recognize_voice(audio_b64)
+                result = await manager.recognize_media(audio_b64, "voice")
 
                 assert result is None
 

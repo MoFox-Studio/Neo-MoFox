@@ -15,6 +15,8 @@ from .sql_alchemy import (
     PermissionNodes,
     PersonInfo,
     UserPermissions,
+    VoiceDescriptions,
+    Voices,
 )
 from .stream import ChatStream, StreamContext
 
@@ -36,4 +38,6 @@ __all__ = [
     "PermissionNodes",
     "PersonInfo",
     "UserPermissions",
+    "Voices",
+    "VoiceDescriptions",
 ]

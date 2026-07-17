@@ -716,7 +716,7 @@ class MessageConverter:
             voice_texts = []
             for idx, media in voice_to_recognize:
                 try:
-                    text = await manager.recognize_voice(media["data"])
+                    text = await manager.recognize_media(media["data"], "voice")
                     voice_texts.append((idx, text))
                 except Exception as e:
                     logger.warning(f"识别语音失败: {e}")

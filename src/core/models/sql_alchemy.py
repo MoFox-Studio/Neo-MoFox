@@ -307,6 +307,42 @@ class ImageDescriptions(Base):
     )
 
 
+class Voices(Base):
+    """语音信息模型 - 镜像 Images 表结构，用于记录语音 ID、文件路径与 ASR 识别结果"""
+
+    __tablename__ = "voices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    voice_id: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="语音哈希值（唯一标识）")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="ASR 识别文字")
+    path: Mapped[str] = mapped_column(get_string_field(500), nullable=False, unique=True, comment="语音文件路径")
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="出现次数")
+    timestamp: Mapped[float] = mapped_column(Float, nullable=False, comment="记录时间戳")
+    type: Mapped[str] = mapped_column(Text, nullable=False, comment="媒体类型，固定为 voice")
+    asr_processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否已通过 ASR 识别")
+
+    __table_args__ = (
+        Index("idx_voices_path", "path"),
+    )
+
+
+class VoiceDescriptions(Base):
+    """语音描述信息模型 - 镜像 ImageDescriptions 表结构，缓存 ASR 识别结果避免重复识别"""
+
+    __tablename__ = "voice_descriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    type: Mapped[str] = mapped_column(Text, nullable=False, comment="媒体类型，固定为 voice")
+    voice_description_hash: Mapped[str] = mapped_column(get_string_field(64), nullable=False, index=True, comment="语音哈希值")
+    description: Mapped[str] = mapped_column(Text, nullable=False, comment="ASR 识别文字")
+    timestamp: Mapped[float] = mapped_column(Float, nullable=False, comment="记录时间戳")
+
+    __table_args__ = (
+        Index("idx_voicedesc_hash", "voice_description_hash"),
+        UniqueConstraint("voice_description_hash", "type", name="uq_voicedesc_hash_type"),
+    )
+
+
 class OnlineTime(Base):
     """在线时长记录模型"""
 
