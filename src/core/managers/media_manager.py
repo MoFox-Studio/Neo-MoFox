@@ -964,6 +964,22 @@ class MediaManager:
         clean_data = MediaManager._extract_clean_base64(data)
         return hashlib.sha256(clean_data.encode()).hexdigest()
 
+    @staticmethod
+    def compute_media_hash(data: str) -> str:
+        """计算媒体数据的哈希值（即 Images 表的 image_id）。
+
+        与内部识别流程使用相同的哈希算法，确保哈希值可在 Images 表中回查。
+        供外部模块（如 StreamManager 序列化入库时）在剔除 base64 ``data`` 前
+        计算并保留 image_id，避免 data 被丢弃后无法按哈希找回图片信息。
+
+        Args:
+            data: 待哈希的数据（base64 字符串）
+
+        Returns:
+            十六进制哈希字符串
+        """
+        return MediaManager._compute_hash(data)
+
 
 # ──────────────────────────────────────────
 # 单例访问

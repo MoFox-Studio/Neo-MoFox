@@ -156,7 +156,12 @@ class MessageConverter:
 
         # 递归解析段列表
         result = self._parse_segments(segments, depth=0)
-        
+
+        # 为二进制媒体项注入 image_id（哈希），便于后续按哈希从 Images 表回查图片信息。
+        # 必须在 _recognize_media_with_manager 之前执行，保证 VLM 跳过/早退时 image_id 仍注入。
+        if result.media:
+            self._enrich_media_image_ids(result.media)
+
         # 如果解析过程中发现有媒体资源，则后续需要考虑是否运行视觉语言模型识别
         if result.media:
             # 提前提取 stream_id 以供逐项过滤 VLM
