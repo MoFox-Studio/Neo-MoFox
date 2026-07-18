@@ -25,7 +25,9 @@ from .types import (
     ComponentState,
     ComponentType,
     EventType,
+    MediaEngine,
     PermissionLevel,
+    RecognitionMode,
 )
 
 __all__ = [
@@ -55,6 +57,8 @@ __all__ = [
     "ComponentState",
     "ComponentType",
     "EventType",
+    "MediaEngine",
     "PermissionLevel",
+    "RecognitionMode",
     "PluginManifest",
 ]

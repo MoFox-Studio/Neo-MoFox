@@ -670,9 +670,10 @@ class MessageConverter:
         """使用 MediaManager 识别媒体内容（图片、表情包、语音）并更新文本描述。
 
         遍历所有媒体项，对每个项调用 ``recognize_media``：
-        - image/emoji：查询 ``should_skip_vlm``，skip=True 时仅落盘+入库，
-          不调 VLM，不改写文本占位符
-        - voice：走正常 ASR 流程，不受 ``skip_vlm_for_stream`` 影响
+        - image/emoji：查询 ``should_skip_vlm``，skip=True 时传
+          ``RecognitionMode.DISABLED``（仅落盘+入库，不识别），
+          否则传 ``DEFAULT``（走事件链，默认 VLM + 第三方可拦截）
+        - voice：永远传 ``DEFAULT``，走正常 ASR 流程
 
         Args:
             result: 解析结果
@@ -682,6 +683,7 @@ class MessageConverter:
             更新后的解析结果
         """
         try:
+            from src.core.components import RecognitionMode
             from src.core.managers.media_manager import get_media_manager
 
             manager = get_media_manager()
@@ -698,16 +700,22 @@ class MessageConverter:
                 try:
                     if media_type in ("image", "emoji"):
                         skip = manager.should_skip_vlm(stream_id, media_type)
+                        mode = RecognitionMode.DISABLED if skip else RecognitionMode.DEFAULT
                         description = await manager.recognize_media(
                             data,
                             media_type,
                             use_cache=True,
-                            skip_recognition=skip,
+                            stream_id=stream_id,
+                            recognition_mode=mode,
                         )
                         descriptions.append((i, description))
                     elif media_type == "voice":
-                        # voice 走正常 ASR，不受 skip_vlm 影响
-                        text = await manager.recognize_media(data, "voice")
+                        text = await manager.recognize_media(
+                            data,
+                            "voice",
+                            stream_id=stream_id,
+                            recognition_mode=RecognitionMode.DEFAULT,
+                        )
                         voice_texts.append((i, text))
                 except Exception as e:
                     logger.warning(f"识别{media_type}失败: {e}")

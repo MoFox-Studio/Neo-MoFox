@@ -85,7 +85,39 @@ class EventType(str, Enum):
     AFTER_COMMAND_EXECUTE = "after_command_execute"
     ON_COMMAND_EXECUTE_FAILED = "on_command_execute_failed"
 
+    # 媒体识别事件（落盘入库后触发，处理器可回写 description）
+    ON_MEDIA_RECOGNIZE = "on_media_recognize"
+
     CUSTOM = "custom"  # 用于自定义事件
+
+
+class RecognitionMode(str, Enum):
+    """媒体识别模式。
+
+    控制 ``recognize_media`` 在落盘入库后是否走事件链识别引擎。
+
+    Attributes:
+        DEFAULT: 走事件链（默认引擎处理器 + 第三方可拦截改写）
+        DISABLED: 仅落盘入库，不识别（返回 None）
+    """
+
+    DEFAULT = "default"
+    DISABLED = "disabled"
+
+
+class MediaEngine(str, Enum):
+    """媒体识别引擎类型。
+
+    用于 ``ON_MEDIA_RECOGNIZE`` 事件的 ``engine`` 字段，
+    供处理器判断应调用 VLM 还是 ASR。
+
+    Attributes:
+        VLM: 图片/表情包视觉识别引擎
+        ASR: 语音转文字引擎
+    """
+
+    VLM = "vlm"
+    ASR = "asr"
 
 
 class ComponentState(Enum):
