@@ -52,8 +52,6 @@ class CommandParser:
         self._console_input = ConsoleInput()
         self._input_queue: queue.Queue[str | BaseException] = queue.Queue()
         self._input_stop_event = threading.Event()
-        self._command_completed = threading.Event()
-        self._command_completed.set()
         self._input_thread = threading.Thread(
             target=self._input_worker,
             name="command_input_reader",
@@ -66,26 +64,24 @@ class CommandParser:
 
     def _input_worker(self) -> None:
         """后台读取标准输入并写入队列。"""
-        while not self._input_stop_event.is_set():
-            try:
-                line = self._console_input.prompt()
-                self._command_completed.clear()
-                self._input_queue.put(line)
-                self._command_completed.wait()
-            except EOFError as exc:
-                self._input_queue.put(exc)
-                break
-            except KeyboardInterrupt:
-                # 在 Windows 上 Ctrl+C 通常由主线程处理，此处忽略并继续等待。
-                continue
-            except Exception as exc:
-                self._input_queue.put(exc)
-                break
+        with self._console_input.patch_output():
+            while not self._input_stop_event.is_set():
+                try:
+                    line = self._console_input.prompt()
+                    self._input_queue.put(line)
+                except EOFError as exc:
+                    self._input_queue.put(exc)
+                    break
+                except KeyboardInterrupt:
+                    # 在 Windows 上 Ctrl+C 通常由主线程处理，此处忽略并继续等待。
+                    continue
+                except Exception as exc:
+                    self._input_queue.put(exc)
+                    break
 
     def close(self) -> None:
         """关闭命令解析器资源。"""
         self._input_stop_event.set()
-        self._command_completed.set()
 
     async def _get_next_input(
         self, timeout: float = 0.2
@@ -129,12 +125,10 @@ class CommandParser:
         Raises:
             CommandExecutionError: 命令执行失败
         """
-        input_received = False
         try:
             input_item = await self._get_next_input()
             if input_item is None:
                 return True
-            input_received = True
 
             if isinstance(input_item, BaseException):
                 if isinstance(input_item, EOFError):
@@ -192,9 +186,6 @@ class CommandParser:
             raise CommandExecutionError(
                 f"Failed to execute command: {e}"
             ) from e
-        finally:
-            if input_received:
-                self._command_completed.set()
 
     async def cmd_help(self, args: list[str]) -> None:
         """显示帮助信息

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import sys
-from contextlib import redirect_stderr
+from contextlib import contextmanager
+from typing import Iterator
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
@@ -17,7 +17,7 @@ class ConsoleInput:
         self._session: PromptSession[str] = PromptSession()
 
     def prompt(self, message: str = "") -> str:
-        """读取一行输入，并在后台输出后重新绘制输入行。
+        """读取一行输入。
 
         Args:
             message: 显示在输入行前的提示文本
@@ -25,11 +25,13 @@ class ConsoleInput:
         Returns:
             str: 用户提交的输入内容
         """
+        return self._session.prompt(message)
+
+    @contextmanager
+    def patch_output(self) -> Iterator[None]:
+        """代理会话期间的标准输出，使其显示在当前输入行上方。"""
         with patch_stdout(raw=True):
-            # Logger 的 Rich Console 使用 stderr；统一交给 prompt-toolkit
-            # 代理后，日志会显示在输入行上方且不会改变日志内容。
-            with redirect_stderr(sys.stdout):
-                return self._session.prompt(message)
+            yield
 
 
 def prompt_console_input(message: str = "") -> str:
@@ -41,4 +43,6 @@ def prompt_console_input(message: str = "") -> str:
     Returns:
         str: 用户提交的输入内容
     """
-    return ConsoleInput().prompt(message)
+    console_input = ConsoleInput()
+    with console_input.patch_output():
+        return console_input.prompt(message)
