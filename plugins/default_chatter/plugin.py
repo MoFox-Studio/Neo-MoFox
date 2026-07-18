@@ -41,7 +41,10 @@ from src.kernel.logger import Logger
 from .config import DefaultChatterConfig
 from .decision_agent import decide_should_respond
 from .interest_calculator import InterestCalculator, InterestConfig
-from .multimodal import build_multimodal_content, extract_images_from_messages
+from .multimodal import (
+    extract_images_from_messages,
+    inline_images_into_text,
+)
 from .prompt_builder import DefaultChatterPromptBuilder
 from .service import DefaultChatterService
 from .sub_agent_collaboration import (
@@ -918,13 +921,18 @@ class DefaultChatter(BaseChatter):
         native_multimodal: bool = False,
         logger_override: Logger | None = None,
     ) -> None:
-        """在未发送前合并未读消息到最后一个 USER payload。"""
+        """在未发送前合并未读消息到最后一个 USER payload。
+
+        当 ``native_multimodal`` 启用时，图片以 ``Image`` 对象内联到
+        ``formatted_text`` 中 ``[图片]`` 占位符的位置，使 LLM 能精确
+        将每张图片与其所属消息上下文对应。
+        """
         content_list: list[Content | LLMUsable]
         if native_multimodal and unread_msgs:
             images = extract_images_from_messages(unread_msgs)
-            content_list = build_multimodal_content(formatted_text, images)
+            content_list = inline_images_into_text(formatted_text, images)
             if images:
-                (logger_override or logger).debug(f"已提取 {len(images)} 张图片")
+                (logger_override or logger).debug(f"已内联 {len(images)} 张图片到占位符位置")
         else:
             content_list = [Text(formatted_text)]
         response.add_payload(LLMPayload(ROLE.USER, content_list))

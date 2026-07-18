@@ -15,6 +15,8 @@ from src.core.models.message import Message
 from src.kernel.llm import Content, Image, Text
 from src.kernel.llm.payload.tooling import LLMUsable
 
+_IMAGE_PLACEHOLDER = "[图片]"
+
 
 def get_image_media_list(msg: Message) -> list[dict[str, Any]]:
     """从 ``Message`` 中提取仅包含 ``image`` 类型的媒体列表。
@@ -66,6 +68,56 @@ def build_multimodal_content(
     content_list: list[Content | LLMUsable] = [Text(text)]
     for item in media_items:
         content_list.append(Image(str(item["data"])))
+    return content_list
+
+
+def inline_images_into_text(
+    text: str,
+    media_items: list[dict[str, Any]],
+) -> list[Content | LLMUsable]:
+    """将图片内联到文本中 ``[图片]`` 占位符的位置。
+
+    按 ``media_items`` 中 ``type == "image"`` 的顺序，依次替换 ``text``
+    里出现的 ``[图片]`` 占位符，生成 Text/Image 交替的 content 列表。
+
+    当占位符数量与图片数量不匹配时：
+    - 图片用完但仍有占位符：保留 ``[图片]`` 文本
+    - 占位符用完但仍有图片：追加到末尾
+
+    Args:
+        text: 包含 ``[图片]`` 占位符的完整文本
+        media_items: 按消息时序排列的图片媒体字典列表
+
+    Returns:
+        ``[Text, Image, Text, Image, ...]`` 交替排列的 content 列表
+    """
+    images = [item for item in media_items if item.get("type") == "image" and item.get("data")]
+    if not images or not text:
+        return [Text(text)]
+
+    content_list: list[Content | LLMUsable] = []
+    remaining = text
+    img_idx = 0
+
+    while remaining:
+        pos = remaining.find(_IMAGE_PLACEHOLDER)
+        if pos < 0 or img_idx >= len(images):
+            break
+
+        if pos > 0:
+            content_list.append(Text(remaining[:pos]))
+        content_list.append(Image(str(images[img_idx]["data"])))
+        img_idx += 1
+        remaining = remaining[pos + len(_IMAGE_PLACEHOLDER):]
+
+    if remaining:
+        content_list.append(Text(remaining))
+
+    # 多余的图片追加到末尾
+    while img_idx < len(images):
+        content_list.append(Image(str(images[img_idx]["data"])))
+        img_idx += 1
+
     return content_list
 
 
