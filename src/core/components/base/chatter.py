@@ -9,8 +9,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import asyncio
 from datetime import datetime
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Literal, cast
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, cast
 
 from src.core.components.types import ChatType
 from src.core.components.base.action import BaseAction
@@ -48,12 +48,24 @@ class Wait:
 
 @dataclass(frozen=True)
 class WaitResumeEvent:
-    """Wait/Stop 结束后由框架送回生成器的恢复事件。"""
+    """Wait/Stop 结束后由框架送回生成器的恢复事件。
 
-    source: Literal["message", "timer", "sub_agent", "internal_context"]
+    框架内置 source 约定值（不是硬性限制）：
+    - ``"message"`` 新消息唤醒
+    - ``"timer"`` 定时器到期
+    - ``"sub_agent"`` 子代理完成
+    - ``"internal_context"`` 内部上下文到达
+
+    外部插件可以通过 ``trigger_external_resume()`` 注入任意 source 的事件，
+    通过 ``extra`` 字段传递自定义数据。
+    对未知 source 的处理由各 Chatter 自行决定。
+    """
+
+    source: str
     wait_time: float | int | None = None
     unread_count: int = 0
     context_key: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
