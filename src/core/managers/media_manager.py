@@ -601,6 +601,99 @@ class MediaManager:
             return None
         return await self._recognize_with_vlm(base64_data, media_type)
 
+    async def _on_media_recognize_vlm(
+        self,
+        event_name: str,
+        params: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        """ON_MEDIA_RECOGNIZE 事件的默认 VLM 处理回调。
+
+        当 ``engine == "vlm"`` 且未被前序处理器处理时，调用内置 VLM 引擎
+        识别图片/表情包，回写 ``description`` 和 ``engine_processed``。
+
+        Args:
+            event_name: 事件名称
+            params: 事件参数
+
+        Returns:
+            (EventDecision, params)
+        """
+        from src.kernel.event import EventDecision
+
+        if params.get("engine") != MediaEngine.VLM.value:
+            return EventDecision.PASS, params
+        if params.get("engine_processed") or params.get("skip_engine"):
+            return EventDecision.PASS, params
+
+        base64_data = params.get("base64_data")
+        media_type = params.get("media_type", "image")
+        if not isinstance(base64_data, str) or not base64_data:
+            return EventDecision.PASS, params
+
+        description = await self._recognize_with_vlm(base64_data, media_type)
+        if description:
+            params["description"] = description
+            params["engine_processed"] = True
+            logger.debug(
+                f"默认VLM识别成功: {params.get('media_hash', '')[:8]}... "
+                f"→ {description[:50]}..."
+            )
+            return EventDecision.SUCCESS, params
+
+        return EventDecision.PASS, params
+
+    async def _on_media_recognize_asr(
+        self,
+        event_name: str,
+        params: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        """ON_MEDIA_RECOGNIZE 事件的默认 ASR 处理回调。
+
+        当 ``engine == "asr"`` 且未被前序处理器处理时，调用内置 ASR 引擎
+        识别语音，回写 ``description`` 和 ``engine_processed``。
+
+        Args:
+            event_name: 事件名称
+            params: 事件参数
+
+        Returns:
+            (EventDecision, params)
+        """
+        from src.kernel.event import EventDecision
+
+        if params.get("engine") != MediaEngine.ASR.value:
+            return EventDecision.PASS, params
+        if params.get("engine_processed") or params.get("skip_engine"):
+            return EventDecision.PASS, params
+
+        base64_data = params.get("base64_data")
+        if not isinstance(base64_data, str) or not base64_data:
+            return EventDecision.PASS, params
+
+        description = await self._recognize_with_asr(base64_data)
+        if description:
+            params["description"] = description
+            params["engine_processed"] = True
+            logger.debug(
+                f"默认ASR识别成功: {params.get('media_hash', '')[:8]}... "
+                f"→ {description[:50]}..."
+            )
+            return EventDecision.SUCCESS, params
+
+        return EventDecision.PASS, params
+
+    def register_default_recognition_handlers(self) -> None:
+        """注册默认 VLM/ASR 识别回调到 EventBus。
+
+        使用 ``priority=0``（最低优先级），第三方插件用更高 priority
+        即可先拦截。应在 EventManager 构建订阅映射后调用。
+        """
+        bus = get_event_bus()
+        event_name = EventType.ON_MEDIA_RECOGNIZE.value
+        bus.subscribe(event_name, self._on_media_recognize_vlm, priority=0)
+        bus.subscribe(event_name, self._on_media_recognize_asr, priority=0)
+        logger.debug("已注册默认媒体识别回调: vlm, asr")
+
     def _category_folder_for(self, media_type: str) -> Path:
         """返回媒体类型对应的分类目录。
 

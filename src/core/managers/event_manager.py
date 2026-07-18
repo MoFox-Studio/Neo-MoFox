@@ -573,30 +573,13 @@ async def _register_builtin_handlers(manager: "EventManager") -> None:
     在无第三方插件拦截时仍有兜底逻辑。
 
     内置处理器使用 ``priority=0``，第三方插件用更高 priority 即可覆盖。
-    直接通过 ``EventBus.subscribe`` 注册，与 distributor 等框架内置订阅风格一致。
 
     Args:
         manager: 事件管理器实例（未直接使用，仅用于确保 EventManager 已初始化）
     """
-    from src.core.components.builtin import DefaultAsrHandler, DefaultVlmHandler
-    from src.core.components.types import EventType
+    from src.core.managers.media_manager import get_media_manager
 
-    bus = get_event_bus()
-    vlm_handler = DefaultVlmHandler(plugin=None)
-    asr_handler = DefaultAsrHandler(plugin=None)
-
-    # 内置处理器直接订阅 EventBus，priority=0 确保在插件处理器之后执行
-    bus.subscribe(
-        EventType.ON_MEDIA_RECOGNIZE.value,
-        vlm_handler._make_bus_callback(),
-        priority=0,
-    )
-    bus.subscribe(
-        EventType.ON_MEDIA_RECOGNIZE.value,
-        asr_handler._make_bus_callback(),
-        priority=0,
-    )
-    logger.debug("已注册内置事件处理器: default_vlm_handler, default_asr_handler")
+    get_media_manager().register_default_recognition_handlers()
 
 
 async def on_all_plugins_loaded(
