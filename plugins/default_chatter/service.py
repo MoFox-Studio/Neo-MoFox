@@ -92,20 +92,24 @@ class DefaultChatterService(BaseService):
             native_multimodal=bool(config.plugin.native_multimodal),
             theme_guide=theme_guide,
             negative_behavior_reinforcement=bool(config.plugin.reinforce_negative_behaviors),
+            filter_mode=str(getattr(config.plugin, "filter_mode", "sub_only") or "sub_only"),
+            enable_sub_agent_context=bool(getattr(config.plugin, "enable_sub_agent_context", True)),
+            sub_agent_context_history_limit=int(getattr(config.plugin, "sub_agent_context_history_limit", 10)),
+            sub_agent_decision_history_limit=int(getattr(config.plugin, "sub_agent_decision_history_limit", 3)),
         )
 
     @staticmethod
     def _build_default_adapters(runtime: "BaseChatter") -> DefaultChatterSessionAdapters:
         return DefaultChatterSessionAdapters(
-            request_adapter=runtime,
-            prompt_adapter=runtime,
-            unread_adapter=runtime,
-            usable_adapter=runtime,
-            tool_execution_adapter=runtime,
-            sub_agent_adapter=runtime,
+            request_adapter=runtime,  # type: ignore[arg-type]
+            prompt_adapter=runtime,  # type: ignore[arg-type]
+            unread_adapter=runtime,  # type: ignore[arg-type]
+            usable_adapter=runtime,  # type: ignore[arg-type]
+            tool_execution_adapter=runtime,  # type: ignore[arg-type]
+            sub_agent_adapter=runtime,  # type: ignore[arg-type]
             logger_adapter=logger,
             plain_text_adapter=(
-                runtime
+                runtime  # type: ignore[arg-type]
                 if hasattr(runtime, "handle_plain_text_response")
                 else None
             ),

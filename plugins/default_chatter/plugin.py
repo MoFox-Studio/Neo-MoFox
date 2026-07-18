@@ -40,6 +40,7 @@ from src.kernel.logger import Logger
 
 from .config import DefaultChatterConfig
 from .decision_agent import decide_should_respond
+from .interest_calculator import InterestCalculator, InterestConfig
 from .multimodal import build_multimodal_content, extract_images_from_messages
 from .prompt_builder import DefaultChatterPromptBuilder
 from .service import DefaultChatterService
@@ -50,6 +51,7 @@ from .sub_agent_collaboration import (
 )
 from .type_defs import (
     DefaultChatterSessionOptions,
+    FilterMode,
     LLMConversationState,
     LLMResponseLike,
     SubAgentDecision,
@@ -225,11 +227,17 @@ user_prompt = """你当前正在名为"{stream_name}"的对话中。
 """
 
 sub_agent_system_prompt = """你是一个聊天意图识别助手。
-你的任务是分析新收到的聊天消息，结合历史上下文，判断主机器人是否有必要进行响应。
+你的任务是分析新收到的聊天消息，结合历史上下文和之前的决策记录，判断主机器人是否有必要进行响应。
 
 # 关于主机器人
 主机器人的名字是 {nickname}。
 {bot_id_section}{personality_core_section}{personality_side_section}
+# 上下文感知
+你会收到历史消息摘要和之前的决策记录。请利用这些信息判断话题是否在继续：
+- 如果之前已经决定回复，且当前消息与之前的话题连续，则更倾向于继续回复。
+- 如果之前连续多次决定不回复，且当前消息没有明确提及或话题关联，则更倾向于不回复。
+- 注意话题的自然延续和转换：新的话题开始时，需要重新评估是否应该介入。
+
 # 判定准则
 你应该在以下情况判定为 "需要回复" (should_respond = true)：
 1. 明确提及：
@@ -277,7 +285,13 @@ class SendTextAction(BaseAction):
 
     def _mark_sub_agent_bonus_on_success(self, success: bool) -> None:
         """发送成功后提高下一次 tick 的 sub-agent 直通概率。"""
-        if success and self._is_programmatic_controller_enabled():
+        if not success:
+            return
+
+        # 标记回复成功，供兴趣值计算器在下一次决策时重置 boost
+        setattr(self.chat_stream.context, "_interest_reply_sent", True)
+
+        if self._is_programmatic_controller_enabled():
             plugin_config = cast(DefaultChatterConfig, self.plugin.config)
             bonus = plugin_config.plugin.programmatic_probability.next_tick_reply_bonus
             _set_next_tick_sub_agent_bonus(
@@ -689,6 +703,7 @@ class DefaultChatter(BaseChatter):
     ) -> tuple[float, str]:
         """计算本地概率直通 sub-agent 的放行概率。"""
         nickname, alias_names = self._get_sub_agent_identity_names(chat_stream)
+        bot_id = chat_stream.bot_id or ""
 
         prob_cfg = cast(
             DefaultChatterConfig, self.plugin.config
@@ -702,13 +717,16 @@ class DefaultChatter(BaseChatter):
         probability = base_prob
         reasons = [f"基础概率 {base_prob:.2f}"]
 
-        if nickname and self._messages_contain_any_name(unread_msgs, [nickname]):
+        # 强提及加成：被 @ 或 被回复 (应用 name_mention_bonus)
+        if bot_id and self._messages_contain_strong_mention(unread_msgs, bot_id):
             probability += name_bonus
-            reasons.append(f"命中名字 +{name_bonus:.2f}")
-
-        if self._messages_contain_any_name(unread_msgs, alias_names):
-            probability += alias_bonus
-            reasons.append(f"命中别名 +{alias_bonus:.2f}")
+            reasons.append(f"强提及(at/回复) +{name_bonus:.2f}")
+        # 弱提及加成：文本命中全名或别名 (应用 alias_mention_bonus)
+        elif nickname or alias_names:
+            search_names = ([nickname] if nickname else []) + alias_names
+            if self._messages_contain_any_name(unread_msgs, search_names):
+                probability += alias_bonus
+                reasons.append(f"弱提及(名字/别名) +{alias_bonus:.2f}")
 
         unread_bonus = len(unread_msgs) * unread_per_msg_bonus
         if unread_bonus > 0:
@@ -727,6 +745,43 @@ class DefaultChatter(BaseChatter):
             reasons.append("封顶 1.00")
 
         return capped_probability, "，".join(reasons)
+
+    @staticmethod
+    def _messages_contain_strong_mention(unread_msgs: list[Message], bot_id: str) -> bool:
+        """判断是否有未读消息强提及了 bot (被 @ 或 被回复)。
+
+        Args:
+            unread_msgs: 未读消息列表
+            bot_id: 机器人 ID
+
+        Returns:
+            True 如果有消息强提及了 bot
+        """
+        for msg in unread_msgs:
+            # 1. 检查 @ 列表
+            extra = msg.extra or {}
+            at_users = extra.get("at_users")
+            if isinstance(at_users, list):
+                for user in at_users:
+                    if isinstance(user, dict) and str(user.get("user_id", "")) == bot_id:
+                        return True
+                    if isinstance(user, str) and user == bot_id:
+                        return True
+
+            # 2. 检查文本中的 @ 标记
+            text = msg.processed_plain_text or ""
+            if isinstance(text, str) and f":{bot_id}>" in text:
+                return True
+
+            # 3. 检查是否回复了 Bot 的消息
+            reply_to = getattr(msg, "reply_to", None)
+            if reply_to:
+                # 如果回复的消息发送者 ID 等于 Bot ID
+                target_sender = getattr(reply_to, "sender_id", None)
+                if str(target_sender) == bot_id:
+                    return True
+
+        return False
 
     def _is_programmatic_controller_enabled(self) -> bool:
         """读取程序化控制器开关。"""
@@ -879,15 +934,22 @@ class DefaultChatter(BaseChatter):
         unreads_text: str,
         unread_msgs: list[Message],
         chat_stream: ChatStream,
+        history_text: str = "",
+        decision_history: list[SubAgentDecision] | None = None,
     ) -> SubAgentDecision:
         """子代理决策：判断是否需要响应未读消息。
 
-        独立构建上下文，只包含历史消息摘要与未读消息，
+        支持三种过滤模式：
+        - sub_only: 沿用现有 sub-agent 逻辑（程序化概率门 + LLM 决策）
+        - interest_only: 纯兴趣值判断，达标则直接放行
+        - interest_then_sub: 先兴趣值初筛，达标后通过 sub-agent 判断
 
         Args:
             unreads_text: 格式化后的未读消息文本
             unread_msgs: 未读消息对象列表
             chat_stream: 当前会话流，用于读取历史消息
+            history_text: 历史消息摘要文本（供 sub-agent 上下文感知）
+            decision_history: 之前的决策记录列表
 
         Returns:
             dict: 包含 should_respond (bool) 和 reason (str)
@@ -898,6 +960,18 @@ class DefaultChatter(BaseChatter):
                 "should_respond": True,
             }
 
+        # 检查上次是否有回复发送成功，如果有则重置兴趣值 boost 状态
+        if getattr(chat_stream.context, "_interest_reply_sent", False):
+            setattr(chat_stream.context, "_interest_reply_sent", False)
+            calculator = await self._get_interest_calculator()
+            if calculator is not None:
+                calculator.on_message_processed(chat_stream.stream_id, replied=True)
+                logger.debug("[兴趣值] 检测到上次回复成功，已重置 boost 状态")
+
+        filter_mode = self._get_filter_mode()
+        decision: SubAgentDecision
+
+        # 程序化概率门：所有模式共用的第一道快速过滤
         if self._is_programmatic_controller_enabled():
             bypass_probability, bypass_reason = self._compute_sub_agent_bypass_probability(
                 unread_msgs,
@@ -907,7 +981,261 @@ class DefaultChatter(BaseChatter):
                 return {
                     "reason": f"概率直通响应：{bypass_reason}",
                     "should_respond": True,
+                    "source": "probability",
                 }
+
+        if filter_mode == FilterMode.INTEREST_ONLY:
+            decision = await self._interest_only_decision(unread_msgs, chat_stream)
+        elif filter_mode == FilterMode.INTEREST_THEN_SUB:
+            interest_result, stats = await self._interest_filter(unread_msgs, chat_stream)
+            if not interest_result:
+                decision = {
+                    "reason": f"兴趣值未达标，{stats}",
+                    "should_respond": False,
+                    "source": "interest",
+                }
+            else:
+                logger.info(f"[cyan]兴趣值过滤[/]: 兴趣值达标，{stats} → 进入子代理决策")
+                decision = await self._sub_agent_with_context(
+                    unreads_text, chat_stream, history_text, decision_history
+                )
+        else:
+            # sub_only 模式（默认）
+            decision = await self._sub_agent_with_context(
+                unreads_text, chat_stream, history_text, decision_history
+            )
+
+        # 仅在不回复时更新兴趣值状态（消耗 boost）
+        # 回复后的 boost 重置在 send_text 成功时触发，避免过早重置被后续 False 消耗
+        if not decision.get("should_respond", False):
+            calculator = await self._get_interest_calculator()
+            if calculator is not None:
+                calculator.on_message_processed(
+                    chat_stream.stream_id,
+                    replied=False,
+                )
+
+        return decision
+
+    def _get_filter_mode(self) -> FilterMode:
+        """读取当前过滤模式配置。"""
+        plugin_config = getattr(self.plugin, "config", None)
+        if not isinstance(plugin_config, DefaultChatterConfig):
+            return FilterMode.SUB_ONLY
+        mode_str = str(getattr(plugin_config.plugin, "filter_mode", "sub_only") or "sub_only")
+        try:
+            return FilterMode(mode_str)
+        except ValueError:
+            return FilterMode.SUB_ONLY
+
+    async def _interest_only_decision(
+        self,
+        unread_msgs: list[Message],
+        chat_stream: ChatStream,
+    ) -> SubAgentDecision:
+        """兴趣值模式：纯兴趣值判断。
+
+        Args:
+            unread_msgs: 未读消息列表
+            chat_stream: 当前会话流
+
+        Returns:
+            决策结果
+        """
+        interest_result, stats = await self._interest_filter(unread_msgs, chat_stream)
+        if interest_result:
+            return {
+                "reason": f"达标({stats})",
+                "should_respond": True,
+                "source": "interest",
+            }
+        return {
+            "reason": f"兴趣值未达标，{stats}",
+            "should_respond": False,
+            "source": "interest",
+        }
+
+    async def _interest_filter(
+        self,
+        unread_msgs: list[Message],
+        chat_stream: ChatStream,
+    ) -> tuple[Any | None, str]:
+        """兴趣值初筛：检查是否有消息达到回复阈值。
+
+        Args:
+            unread_msgs: 未读消息列表
+            chat_stream: 当前会话流
+
+        Returns:
+            (达标的 InterestResult 或 None, 批次统计摘要字符串)
+        """
+        calculator = await self._get_interest_calculator()
+        if calculator is None:
+            logger.debug("[兴趣值] 计算器未初始化，跳过兴趣值筛选")
+            return None, ""
+
+        # 批次内只计算一次阈值调整，避免每条消息重复调用
+        thresholds = calculator._apply_threshold_adjustment(chat_stream.stream_id)
+
+        max_result: Any | None = None
+        all_results: list[Any] = []
+        for msg in unread_msgs:
+            try:
+                result = await calculator.calculate(
+                    msg, chat_stream, precomputed_thresholds=thresholds
+                )
+                logger.debug(
+                    f"[兴趣值] 消息 {msg.message_id}: {result.interest_value:.3f} "
+                    f"(语义={result.semantic_score:.3f} 提及={result.mentioned_score:.3f} "
+                    f"阈值={result.should_reply})"
+                )
+                all_results.append(result)
+                if max_result is None or result.interest_value > max_result.interest_value:
+                    max_result = result
+                if result.should_reply:
+                    stats = self._build_interest_stats(
+                        all_results, max_result, thresholds[0]
+                    )
+                    return result, stats
+            except Exception as e:
+                logger.warning(f"[兴趣值] 计算异常: {e}")
+
+        stats = self._build_interest_stats(
+            all_results, max_result, thresholds[0]
+        )
+
+        if max_result is not None:
+            logger.debug(f"[cyan]兴趣值批次汇总[/] {stats}")
+
+        return None, stats
+
+    @staticmethod
+    def _build_interest_stats(
+        results: list[Any],
+        max_result: Any | None,
+        reply_threshold: float,
+    ) -> str:
+        """构建兴趣值批次统计摘要字符串。
+
+        Args:
+            results: 本批所有计算结果
+            max_result: 最高兴趣值结果
+            reply_threshold: 回复阈值
+
+        Returns:
+            统计摘要字符串
+        """
+        if not results:
+            return "无有效消息"
+
+        avg_value = sum(r.interest_value for r in results) / len(results)
+
+        if max_result is not None:
+            return (
+                f"{len(results)}条 "
+                f"max={max_result.interest_value:.2f}"
+                f"(语义={max_result.semantic_score:.2f} 提及={max_result.mentioned_score:.2f}) "
+                f"avg={avg_value:.2f} "
+                f"阈值={reply_threshold:.2f}"
+            )
+
+        return f"{len(results)}条 avg={avg_value:.2f} 阈值={reply_threshold:.2f}"
+
+    async def _get_interest_calculator(self) -> InterestCalculator | None:
+        """获取兴趣值计算器实例（惰性初始化，异步加载语义评分器）。"""
+        if hasattr(self, "_interest_calculator_instance"):
+            cached = self._interest_calculator_instance
+            if cached is not None:
+                if cached._semantic_scorer is not None:
+                    return cached
+                # 评分器未加载，检查模型是否已由后台训练生成
+                from pathlib import Path
+
+                model_path = Path(
+                    "data/semantic_interest/models/semantic_interest_latest.pkl"
+                )
+                if not model_path.exists():
+                    return cached
+                logger.info("[兴趣值] 检测到模型文件已生成，重新加载语义评分器")
+            # cached is None 或模型已出现，继续重新初始化
+
+        plugin_config = getattr(self.plugin, "config", None)
+        if not isinstance(plugin_config, DefaultChatterConfig):
+            self._interest_calculator_instance = None
+            return None
+
+        interest_cfg = plugin_config.plugin.interest
+        config = InterestConfig(
+            reply_threshold=interest_cfg.reply_threshold,
+            action_threshold=interest_cfg.action_threshold,
+            semantic_weight=interest_cfg.semantic_weight,
+            mentioned_weight=interest_cfg.mentioned_weight,
+            strong_mention_score=interest_cfg.strong_mention_score,
+            weak_mention_score=interest_cfg.weak_mention_score,
+            no_reply_threshold_adjustment=interest_cfg.no_reply_threshold_adjustment,
+            max_no_reply_count=interest_cfg.max_no_reply_count,
+            reply_cooldown_reduction=interest_cfg.reply_cooldown_reduction,
+            enable_post_reply_boost=interest_cfg.enable_post_reply_boost,
+            post_reply_threshold_reduction=interest_cfg.post_reply_threshold_reduction,
+            post_reply_boost_max_count=interest_cfg.post_reply_boost_max_count,
+            post_reply_boost_decay_rate=interest_cfg.post_reply_boost_decay_rate,
+        )
+
+        semantic_scorer = await self._try_load_semantic_scorer()
+
+        self._interest_calculator_instance = InterestCalculator(
+            config=config,
+            semantic_scorer=semantic_scorer,
+        )
+        return self._interest_calculator_instance
+
+    async def _try_load_semantic_scorer(self) -> Any | None:
+        """异步加载语义兴趣度评分器。
+
+        当模型文件存在时通过全局单例异步加载；不存在时返回 None，
+        由插件级后台训练任务负责生成模型。
+        """
+        try:
+            from pathlib import Path
+            from .semantic_interest.runtime_scorer import get_semantic_scorer
+
+            model_dir = Path("data/semantic_interest/models")
+            latest = model_dir / "semantic_interest_latest.pkl"
+            if latest.exists():
+                scorer = await get_semantic_scorer(latest)
+                logger.info("[语义评分] 模型异步加载完成")
+                return scorer
+            logger.info("[语义评分] 未找到模型文件，语义评分将返回 0.0")
+            return None
+        except Exception as e:
+            logger.warning(f"[语义评分] 加载失败: {e}")
+            return None
+
+    async def _sub_agent_with_context(
+        self,
+        unreads_text: str,
+        chat_stream: ChatStream,
+        history_text: str = "",
+        decision_history: list[SubAgentDecision] | None = None,
+    ) -> SubAgentDecision:
+        """执行带上下文的 LLM sub-agent 决策。
+
+        Args:
+            unreads_text: 未读消息文本
+            chat_stream: 当前会话流
+            history_text: 历史消息摘要
+            decision_history: 决策历史
+
+        Returns:
+            决策结果
+        """
+        plugin_config = getattr(self.plugin, "config", None)
+        enable_context = True
+        if isinstance(plugin_config, DefaultChatterConfig):
+            enable_context = bool(getattr(plugin_config.plugin, "enable_sub_agent_context", True))
+
+        effective_history = history_text if enable_context else ""
+        effective_decisions = decision_history if enable_context else None
 
         return await decide_should_respond(
             chatter=self,
@@ -915,6 +1243,8 @@ class DefaultChatter(BaseChatter):
             unreads_text=unreads_text,
             chat_stream=chat_stream,
             fallback_prompt=sub_agent_system_prompt,
+            history_text=effective_history,
+            decision_history=effective_decisions,
         )
 
     async def execute(
@@ -1157,7 +1487,7 @@ class DefaultChatterPlugin(BasePlugin):
     """默认聊天插件"""
 
     plugin_name = "default_chatter"
-    plugin_version = "1.1.0-alpha"
+    plugin_version = "1.2.0-alpha"
     plugin_author = "MoFox Team"
     plugin_description = "默认聊天组件，提供基础的消息处理和回复功能"
     configs = [DefaultChatterConfig]
@@ -1238,6 +1568,83 @@ class DefaultChatterPlugin(BasePlugin):
                 .then(wrap("# 额外信息\n", "\n- （以上为额外信息，你可以适当参考）")),
             },
         )
+
+        # 启动语义模型自动训练后台任务（仅兴趣值相关模式）
+        await self._maybe_start_semantic_training()
+
+    async def _maybe_start_semantic_training(self) -> None:
+        """根据过滤模式启动语义模型自动训练后台任务。
+
+        仅当 filter_mode 为 interest_only 或 interest_then_sub 时触发，
+        sub_only 模式下跳过以避免不必要的 LLM 调用。
+        """
+        plugin_config = getattr(self, "config", None)
+        if isinstance(plugin_config, DefaultChatterConfig):
+            mode_str = str(
+                getattr(plugin_config.plugin, "filter_mode", "sub_only") or "sub_only"
+            )
+            if mode_str == "sub_only":
+                logger.debug("[语义训练] 当前为 sub_only 模式，跳过自动训练")
+                return
+
+        try:
+            from src.kernel.concurrency import get_task_manager
+
+            personality = get_core_config().personality
+            persona_info: dict[str, Any] = {
+                "name": personality.nickname,
+                "personality_core": personality.personality_core,
+                "personality_side": personality.personality_side,
+                "identity": personality.identity,
+            }
+
+            task_manager = get_task_manager()
+            task_manager.create_task(
+                self._background_auto_train(persona_info),
+                name="semantic_interest_auto_train",
+            )
+            logger.info("[语义训练] 已启动后台自动训练任务")
+        except Exception as e:
+            logger.warning(f"[语义训练] 启动后台训练失败: {e}")
+
+    async def _background_auto_train(self, persona_info: dict[str, Any]) -> None:
+        """后台自动训练语义兴趣度模型。
+
+        训练完成后模型文件写入 data/semantic_interest/models/，
+        各 DefaultChatter 实例会在下次 _get_interest_calculator() 调用时
+        通过缓存失效逻辑自动加载新模型。
+        """
+        try:
+            from .semantic_interest.auto_trainer import get_auto_trainer
+
+            plugin_config = getattr(self, "config", None)
+            train_cfg = None
+            if isinstance(plugin_config, DefaultChatterConfig):
+                train_cfg = getattr(plugin_config.plugin, "semantic_training", None)
+
+            days = getattr(train_cfg, "training_days", 7) if train_cfg else 7
+            max_samples = getattr(train_cfg, "training_max_samples", 1000) if train_cfg else 1000
+            model_name = getattr(train_cfg, "training_model_name", None) if train_cfg else None
+            batch_size = getattr(train_cfg, "training_batch_size", 50) if train_cfg else 50
+            keyword_iters = getattr(train_cfg, "keyword_iterations", 3) if train_cfg else 3
+            min_interval = getattr(train_cfg, "min_train_interval_hours", 720) if train_cfg else 720
+
+            trainer = get_auto_trainer(min_train_interval_hours=min_interval)
+            trained, model_path = await trainer.auto_train_if_needed(
+                persona_info=persona_info,
+                days=days,
+                max_samples=max_samples,
+                llm_model_name=model_name,
+                max_samples_per_batch=batch_size,
+                keyword_iterations=keyword_iters,
+            )
+
+            if trained and model_path:
+                logger.info(f"[语义训练] 训练完成，模型: {model_path.name}")
+            else:
+                logger.debug("[语义训练] 无需训练或训练未完成")
+        except Exception as e:
+            logger.error(f"[语义训练] 后台训练失败: {e}")
 
     def get_components(self) -> list[type]:
         """获取插件内所有组件类

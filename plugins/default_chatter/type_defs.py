@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Generator
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Protocol, TypedDict, TypeAlias
+from enum import Enum
+from typing import Any, Callable, Literal, NotRequired, Protocol, TypedDict, TypeAlias
 
 from src.core.components.base import Failure, Stop, Success, Wait, WaitResumeEvent
 from src.core.models.message import Message
@@ -13,11 +14,20 @@ from src.kernel.llm import LLMPayload, LLMRequest, StreamEvent, ToolCall, ToolRe
 from src.kernel.logger import Logger
 
 
+class FilterMode(str, Enum):
+    """消息过滤模式枚举。"""
+
+    SUB_ONLY = "sub_only"
+    INTEREST_ONLY = "interest_only"
+    INTEREST_THEN_SUB = "interest_then_sub"
+
+
 class SubAgentDecision(TypedDict):
     """Sub-agent 返回的决策结果。"""
 
     reason: str
     should_respond: bool
+    source: NotRequired[str]
 
 
 class LLMResponseLike(Protocol):
@@ -152,6 +162,8 @@ class SubAgentAdapter(Protocol):
         unreads_text: str,
         unread_msgs: list[Message],
         chat_stream: ChatStream,
+        history_text: str = "",
+        decision_history: list[SubAgentDecision] | None = None,
     ) -> SubAgentDecision:
         ...
 
@@ -230,6 +242,10 @@ class DefaultChatterSessionOptions:
     theme_guide: dict[str, str] = field(default_factory=dict)
     negative_behavior_reinforcement: bool = True
     enable_llm_stream: bool = False
+    filter_mode: str = "sub_only"
+    enable_sub_agent_context: bool = True
+    sub_agent_context_history_limit: int = 10
+    sub_agent_decision_history_limit: int = 3
 
 
 DefaultChatterResult: TypeAlias = Wait | Success | Failure | Stop
