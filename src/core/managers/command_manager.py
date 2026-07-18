@@ -7,6 +7,7 @@ Command 组件使用 Trie 树进行命令匹配，支持多级命令和参数解
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
@@ -22,6 +23,25 @@ if TYPE_CHECKING:
 
 
 logger = get_logger("command_manager")
+
+# 需要从消息文本开头剥离的"噪声"前缀（引用预览、媒体占位符），
+# 剥离后才能识别用户实际输入的命令。
+_LEADING_NOISE_RE = re.compile(
+    r"^\s*"
+    r"(?:"
+    r"\[回复<[^\>]*>：.*?\]，说："  # 适配器格式: [回复<name(id)>：content]，说：
+    r"|\[回复:[^\]]*\]"            # converter: [回复:msg_id]
+    r"|\[回复\]"                    # converter: [回复]
+    r"|「回复：[^」]*」"             # converter: 「回复：text」
+    r"|\[(?:图片|表情包|语音|文件)(?::[^\]]*)?\]"  # 媒体占位符
+    r")"
+)
+
+# 兜底：匹配 [xxx] 这种格式的未知占位符
+_LEADING_BRACKET_RE = re.compile(r"^\s*\[[^\]]*\]")
+
+# 匹配 @<nickname:user_id> 格式的 @ 占位符
+_LEADING_AT_RE = re.compile(r"^\s*@<[^\>]+:\d+>\s*")
 
 
 class CommandManager:
@@ -55,6 +75,36 @@ class CommandManager:
         """
         self._command_prefixes = prefixes
         logger.info(f"设置命令前缀: {prefixes}")
+
+    @staticmethod
+    def _strip_leading_noise(text: str) -> str:
+        """剥离消息文本开头的引用预览和媒体占位符。
+
+        适配器格式的引用预览、converter 生成的回复前缀和媒体占位符
+        会干扰命令识别。此方法反复剥离这些前缀，直到文本以用户
+        实际输入内容开头。
+
+        Args:
+            text: 消息文本
+
+        Returns:
+            str: 剥离噪声前缀后的文本
+
+        Examples:
+            >>> CommandManager._strip_leading_noise("[回复:abc]/help")
+            '/help'
+            >>> CommandManager._strip_leading_noise("[图片]/help")
+            '/help'
+        """
+        prev = None
+        while prev != text:
+            prev = text
+            text = _LEADING_NOISE_RE.sub("", text, count=1)
+            if text == prev:
+                text = _LEADING_BRACKET_RE.sub("", text, count=1)
+            if text == prev:
+                text = _LEADING_AT_RE.sub("", text, count=1)
+        return text
 
     def get_all_commands(self) -> dict[str, type[BaseCommand]]:
         """获取所有已注册的 Command 组件。
@@ -118,8 +168,7 @@ class CommandManager:
         if not text:
             return False
 
-        stripped = text.strip()
-        return any(stripped.startswith(prefix) for prefix in self._command_prefixes)
+        return any(text.startswith(prefix) for prefix in self._command_prefixes)
 
     def match_command(
         self, text: str
@@ -127,9 +176,10 @@ class CommandManager:
         """匹配命令。
 
         解析文本并查找匹配的 Command 组件。
+        自动剥离引用预览和媒体占位符前缀。
 
         Args:
-            text: 命令文本
+            text: 命令文本（可包含引用/媒体前缀）
 
         Returns:
             tuple[str, type[BaseCommand] | None, list[str]]: (命令路径, Command 类, 参数列表)
@@ -138,10 +188,10 @@ class CommandManager:
             >>> command_path, command_cls, args = manager.match_command("/set seconds 30")
             >>> ("/set", SetCommand, ["seconds", "30"])
         """
-        if not self.is_command(text):
-            return "", None, []
+        stripped = self._strip_leading_noise(text.strip())
 
-        stripped = text.strip()
+        if not self.is_command(stripped):
+            return "", None, []
 
         # 移除命令前缀
         for prefix in self._command_prefixes:
