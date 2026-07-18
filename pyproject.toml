@@ -17,6 +17,7 @@ dependencies = [
     "mofox-wire>=0.1.7",
     "openai>=2.16.0",
     "packaging>=26.0",
+    "prompt-toolkit>=3.0.52",
     "pybase64>=1.4.3",
     "pydantic>=2.12.5",
     "pyfiglet>=1.0.4",
