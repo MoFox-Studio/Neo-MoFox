@@ -10,6 +10,8 @@ import queue
 import threading
 from typing import TYPE_CHECKING, Any, Callable
 
+from .console_input import ConsoleInput
+
 if TYPE_CHECKING:
     from .bot import Bot
 
@@ -47,6 +49,7 @@ class CommandParser:
         self.bot = bot
         self.commands: dict[str, Callable[[list[str]], Any]] = {}
         self._help_texts: dict[str, str] = {}
+        self._console_input = ConsoleInput()
         self._input_queue: queue.Queue[str | BaseException] = queue.Queue()
         self._input_stop_event = threading.Event()
         self._input_thread = threading.Thread(
@@ -63,7 +66,7 @@ class CommandParser:
         """后台读取标准输入并写入队列。"""
         while not self._input_stop_event.is_set():
             try:
-                line = input("")
+                line = self._console_input.prompt()
                 self._input_queue.put(line)
             except EOFError as exc:
                 self._input_queue.put(exc)

@@ -577,7 +577,9 @@ class Bot:
             self.logger.warning("")
             self.logger.warning("=" * 80)
             self.logger.warning("")
-            input("输入回车来继续:")
+            from .console_input import prompt_console_input
+
+            prompt_console_input("输入回车来继续:")
 
             # 同时在 UI 中显示警告状态
             self.ui.update_phase_status("HTTP服务器", "⚠️ 不安全配置")
