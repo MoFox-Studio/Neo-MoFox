@@ -1,3 +1,4 @@
+
 """媒体管理器。
 
 负责图片和表情包的识别、存储和管理。
@@ -69,6 +70,7 @@ class MediaManager:
         self._skip_recognition_streams: dict[str, frozenset[str] | None] = {}
         self._initialize_vlm()
         self._initialize_asr()
+        self._register_default_recognition_handlers()
         self._register_prompts()
         self._setup_media_folders()
         self._load_cleanup_config()
@@ -682,7 +684,7 @@ class MediaManager:
 
         return EventDecision.PASS, params
 
-    def register_default_recognition_handlers(self) -> None:
+    def _register_default_recognition_handlers(self) -> None:
         """注册默认 VLM/ASR 识别回调到 EventBus。
 
         使用 ``priority=0``（最低优先级），第三方插件用更高 priority
@@ -690,9 +692,12 @@ class MediaManager:
         """
         bus = get_event_bus()
         event_name = EventType.ON_MEDIA_RECOGNIZE.value
-        bus.subscribe(event_name, self._on_media_recognize_vlm, priority=0)
-        bus.subscribe(event_name, self._on_media_recognize_asr, priority=0)
-        logger.debug("已注册默认媒体识别回调: vlm, asr")
+        try:
+            bus.subscribe(event_name, self._on_media_recognize_vlm, priority=0)
+            bus.subscribe(event_name, self._on_media_recognize_asr, priority=0)
+            logger.debug("已注册默认媒体识别回调: vlm, asr")
+        except Exception as e:
+            logger.error(f"默认媒体识别回调注册失败:{e}")
 
     def _category_folder_for(self, media_type: str) -> Path:
         """返回媒体类型对应的分类目录。

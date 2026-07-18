@@ -564,24 +564,6 @@ def initialize_event_manager() -> None:
     """
     get_event_manager()
 
-
-async def _register_builtin_handlers(manager: "EventManager") -> None:
-    """注册框架内置事件处理器。
-
-    在插件事件处理器注册之后，补充注册框架自带的默认处理器
-    （如默认 VLM/ASR 识别处理器），确保 ``ON_MEDIA_RECOGNIZE`` 等事件
-    在无第三方插件拦截时仍有兜底逻辑。
-
-    内置处理器使用 ``priority=0``，第三方插件用更高 priority 即可覆盖。
-
-    Args:
-        manager: 事件管理器实例（未直接使用，仅用于确保 EventManager 已初始化）
-    """
-    from src.core.managers.media_manager import get_media_manager
-
-    get_media_manager().register_default_recognition_handlers()
-
-
 async def on_all_plugins_loaded(
     _: str, params: Dict[str, Any]
 ) -> Tuple[EventDecision, Dict[str, Any]]:
@@ -604,12 +586,5 @@ async def on_all_plugins_loaded(
     except Exception as e:
         logger.error(f"❌ 构建事件订阅映射时发生异常: {e}")
         return (EventDecision.PASS, params)
-
-    # 注册框架内置事件处理器（如默认 VLM/ASR 识别处理器）
-    try:
-        await _register_builtin_handlers(manager)
-        logger.info("✅ 内置事件处理器注册完成")
-    except Exception as e:
-        logger.warning(f"⚠️  内置事件处理器注册失败: {e}")
 
     return (EventDecision.SUCCESS, params)
