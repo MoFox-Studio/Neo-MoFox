@@ -442,43 +442,44 @@ class MediaManager:
     # ──────────────────────────────────────────
 
     async def recognize_media(
-        self, 
-        base64_data: str, 
+        self,
+        base64_data: str,
         media_type: str,
-        use_cache: bool = True
+        use_cache: bool = True,
+        skip_recognition: bool = False,
     ) -> str | None:
-        """识别媒体内容（图片、表情包或语音）。
+        """识别媒体内容（图片、表情包或语音），并落盘入库。
 
-        按 ``media_type`` 路由到对应识别引擎：
-        - ``image`` / ``emoji``：调用 VLM 识别，缓存写入 ``ImageDescriptions``，
-          媒体信息写入 ``Images`` 表，文件落盘到 images/emojis 目录
-        - ``voice``：调用 ASR 识别，缓存写入 ``VoiceDescriptions``，
-          语音信息写入 ``Voices`` 表，文件落盘到 voices 目录
+        按 ``media_type`` 路由到对应识别引擎（VLM 或 ASR），识别成功后
+        缓存描述、落盘并写入 Images/Voices 表。
 
-        统一流程：计算哈希 → 查缓存 → 检查引擎可用性 → 落盘 pending →
-        调用识别引擎 → 回写缓存 → 移动到分类目录 → 保存媒体信息。
-        
         Args:
             base64_data: base64 编码的媒体数据（语音为 WAV）
             media_type: 媒体类型，"image"、"emoji" 或 "voice"
             use_cache: 是否使用缓存（默认 True）
-            
+            skip_recognition: 仅对 image/emoji 生效；为 True 时跳过 VLM，
+                仅落盘+入库（``vlm_processed=False``），返回 None。
+                对 voice 传入 True 会被忽略，ASR 流程不受影响。
+
         Returns:
-            媒体的文字描述，识别失败返回 None
+            媒体的文字描述；``skip_recognition=True`` 或识别失败时返回 None
         """
         try:
             is_voice = media_type == "voice"
-
-            # 计算哈希值
             media_hash = self._compute_hash(base64_data)
-            
+
+            # skip_recognition 仅对 VLM (image/emoji) 生效；voice 永远走正常 ASR 流程
+            if skip_recognition and not is_voice:
+                await self._persist_skipped_media(base64_data, media_hash, media_type)
+                return None
+
             # 尝试从缓存读取
             if use_cache:
                 if is_voice:
                     cached_description = await self._get_cached_voice_description(media_hash)
                 else:
                     cached_description = await self._get_cached_description(
-                        media_hash, 
+                        media_hash,
                         media_type
                     )
                 if cached_description:
@@ -494,20 +495,20 @@ class MediaManager:
                 if not self._vlm_model_set:
                     logger.debug(f"VLM 模型不可用，跳过{media_type}识别")
                     return None
-            
+
             # 保存到待识别文件夹
             pending_file_path = await self._save_to_pending(
                 base64_data,
                 media_hash,
                 media_type
             )
-            
+
             # 调用识别引擎
             if is_voice:
                 description = await self._recognize_with_asr(base64_data)
             else:
                 description = await self._recognize_with_vlm(base64_data, media_type)
-            
+
             if description:
                 # 保存到缓存
                 if is_voice:
@@ -519,17 +520,17 @@ class MediaManager:
                         description
                     )
                 logger.info(f"成功识别{media_type}: {description[:50]}...")
-                
+
                 # 移动到对应的分类文件夹
                 await self._move_to_category_folder(
                     pending_file_path,
                     media_type,
                     media_hash
                 )
-                
+
                 # 保存媒体信息到数据库
+                target_file_path = self._category_folder_for(media_type) / pending_file_path.name
                 if is_voice:
-                    target_file_path = self.voices_folder / pending_file_path.name
                     await self.save_voice_info(
                         voice_hash=media_hash,
                         file_path=str(target_file_path),
@@ -537,8 +538,6 @@ class MediaManager:
                         asr_processed=True
                     )
                 else:
-                    target_folder = self.images_folder if media_type == "image" else self.emojis_folder
-                    target_file_path = target_folder / pending_file_path.name
                     await self.save_media_info(
                         media_hash=media_hash,
                         media_type=media_type,
@@ -549,73 +548,60 @@ class MediaManager:
             else:
                 # 识别失败，保持在待识别文件夹，等待定时清理
                 logger.warning(f"识别失败，文件保留在待识别文件夹: {pending_file_path.name}")
-            
+
             return description
-            
+
         except Exception as e:
             logger.error(f"识别{media_type}失败: {e}", exc_info=True)
             return None
 
-    async def persist_media(
+    def _category_folder_for(self, media_type: str) -> Path:
+        """返回媒体类型对应的分类目录。
+
+        Args:
+            media_type: "image"、"emoji" 或 "voice"
+
+        Returns:
+            对应的分类目录路径
+        """
+        if media_type == "image":
+            return self.images_folder
+        if media_type == "voice":
+            return self.voices_folder
+        return self.emojis_folder
+
+    async def _persist_skipped_media(
         self,
         base64_data: str,
+        media_hash: str,
         media_type: str,
-    ) -> str | None:
-        """持久化媒体文件到磁盘并写入数据库，但不执行 VLM/ASR 识别。
+    ) -> None:
+        """跳过识别时的落盘+入库（仅 image/emoji 使用）。
 
-        当 VLM 识别被跳过（``skip_vlm_for_stream``）时，图片/表情包仍需落盘
-        并写入 Images 表，确保 ``image_id``（哈希）能从 Images 表回查到文件路径。
-
-        流程：计算哈希 → 查 Images 表是否已存在 → 落盘 pending →
-        移动到分类目录 → ``save_media_info``（``vlm_processed=False``）。
+        已存在记录时直接返回；否则落盘到 pending、移动到分类目录，
+        并以 ``vlm_processed=False``、``description=None`` 写入 Images 表。
 
         Args:
             base64_data: base64 编码的媒体数据
-            media_type: 媒体类型，``image`` 或 ``emoji``
-
-        Returns:
-            媒体哈希值（即 image_id），失败返回 None
+            media_hash: 媒体哈希值
+            media_type: "image" 或 "emoji"
         """
-        try:
-            media_hash = self._compute_hash(base64_data)
+        existing = await self.get_media_info(media_hash)
+        if existing and existing.get("path"):
+            return
 
-            # 已存在则跳过
-            existing = await self.get_media_info(media_hash)
-            if existing and existing.get("path"):
-                return media_hash
+        pending_path = await self._save_to_pending(base64_data, media_hash, media_type)
+        await self._move_to_category_folder(pending_path, media_type, media_hash)
+        target_path = self._category_folder_for(media_type) / pending_path.name
 
-            # 落盘到 pending
-            pending_path = await self._save_to_pending(
-                base64_data, media_hash, media_type
-            )
-
-            # 移动到分类目录
-            await self._move_to_category_folder(
-                pending_path, media_type, media_hash
-            )
-
-            # 构造移动后的目标路径（与 _move_to_category_folder 内部逻辑一致）
-            if media_type == "image":
-                target_folder = self.images_folder
-            elif media_type == "voice":
-                target_folder = self.voices_folder
-            else:
-                target_folder = self.emojis_folder
-            target_path = target_folder / pending_path.name
-
-            await self.save_media_info(
-                media_hash=media_hash,
-                media_type=media_type,
-                file_path=str(target_path),
-                description=None,
-                vlm_processed=False,
-            )
-            logger.debug(f"已持久化{media_type}（跳过VLM）: {media_hash[:8]}... → {target_path}")
-            return media_hash
-
-        except Exception as e:
-            logger.error(f"持久化{media_type}失败: {e}", exc_info=True)
-            return None
+        await self.save_media_info(
+            media_hash=media_hash,
+            media_type=media_type,
+            file_path=str(target_path),
+            description=None,
+            vlm_processed=False,
+        )
+        logger.debug(f"已持久化{media_type}（跳过VLM）: {media_hash[:8]}... → {target_path}")
 
     async def recognize_batch(
         self,
