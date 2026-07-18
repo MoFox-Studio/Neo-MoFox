@@ -71,9 +71,9 @@ class CommandParser:
             except EOFError as exc:
                 self._input_queue.put(exc)
                 break
-            except KeyboardInterrupt as exc:
-                self._input_queue.put(exc)
-                break
+            except KeyboardInterrupt:
+                # 在 Windows 上 Ctrl+C 通常由主线程处理，此处忽略并继续等待。
+                continue
             except Exception as exc:
                 self._input_queue.put(exc)
                 break
