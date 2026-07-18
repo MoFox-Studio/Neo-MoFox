@@ -91,20 +91,6 @@ class EventType(str, Enum):
     CUSTOM = "custom"  # 用于自定义事件
 
 
-class RecognitionMode(str, Enum):
-    """媒体识别模式。
-
-    控制 ``recognize_media`` 在落盘入库后是否走事件链识别引擎。
-
-    Attributes:
-        DEFAULT: 走事件链（默认引擎处理器 + 第三方可拦截改写）
-        DISABLED: 仅落盘入库，不识别（返回 None）
-    """
-
-    DEFAULT = "default"
-    DISABLED = "disabled"
-
-
 class MediaEngine(str, Enum):
     """媒体识别引擎类型。
 

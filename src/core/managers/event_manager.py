@@ -572,28 +572,31 @@ async def _register_builtin_handlers(manager: "EventManager") -> None:
     （如默认 VLM/ASR 识别处理器），确保 ``ON_MEDIA_RECOGNIZE`` 等事件
     在无第三方插件拦截时仍有兜底逻辑。
 
-    内置处理器使用 ``weight=0``，第三方插件用更高 weight 即可覆盖。
+    内置处理器使用 ``priority=0``，第三方插件用更高 priority 即可覆盖。
+    直接通过 ``EventBus.subscribe`` 注册，与 distributor 等框架内置订阅风格一致。
 
     Args:
-        manager: 事件管理器实例
+        manager: 事件管理器实例（未直接使用，仅用于确保 EventManager 已初始化）
     """
     from src.core.components.builtin import DefaultAsrHandler, DefaultVlmHandler
+    from src.core.components.types import EventType
 
-    # 使用虚拟 plugin 实例实例化内置处理器（不需要 BasePlugin 的完整生命周期）
-    builtin_handlers: list[tuple[str, type[BaseEventHandler]]] = [
-        ("__builtin__:event_handler:default_vlm", DefaultVlmHandler),
-        ("__builtin__:event_handler:default_asr", DefaultAsrHandler),
-    ]
+    bus = get_event_bus()
+    vlm_handler = DefaultVlmHandler(plugin=None)
+    asr_handler = DefaultAsrHandler(plugin=None)
 
-    for signature, handler_cls in builtin_handlers:
-        try:
-            # 内置处理器不需要真实 plugin 实例，传 None 并由 __init__ 接受
-            handler = handler_cls(plugin=None)  # type: ignore[arg-type]
-            handler.signature = signature  # type: ignore[attr-defined]
-            await manager.register_handler(signature, handler)
-            logger.debug(f"已注册内置事件处理器: {signature}")
-        except Exception as e:
-            logger.warning(f"注册内置事件处理器 {signature} 失败: {e}")
+    # 内置处理器直接订阅 EventBus，priority=0 确保在插件处理器之后执行
+    bus.subscribe(
+        EventType.ON_MEDIA_RECOGNIZE.value,
+        vlm_handler._make_bus_callback(),
+        priority=0,
+    )
+    bus.subscribe(
+        EventType.ON_MEDIA_RECOGNIZE.value,
+        asr_handler._make_bus_callback(),
+        priority=0,
+    )
+    logger.debug("已注册内置事件处理器: default_vlm_handler, default_asr_handler")
 
 
 async def on_all_plugins_loaded(

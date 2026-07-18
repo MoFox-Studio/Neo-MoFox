@@ -27,7 +27,6 @@ from .types import (
     EventType,
     MediaEngine,
     PermissionLevel,
-    RecognitionMode,
 )
 
 __all__ = [

@@ -670,20 +670,18 @@ class MessageConverter:
         """使用 MediaManager 识别媒体内容（图片、表情包、语音）并更新文本描述。
 
         遍历所有媒体项，对每个项调用 ``recognize_media``：
-        - image/emoji：查询 ``should_skip_vlm``，skip=True 时传
-          ``RecognitionMode.DISABLED``（仅落盘+入库，不识别），
-          否则传 ``DEFAULT``（走事件链，默认 VLM + 第三方可拦截）
-        - voice：永远传 ``DEFAULT``，走正常 ASR 流程
+        - image/emoji/voice：统一查询 ``should_skip_recognition``，
+          skip=True 时仅落盘+入库，不识别；
+          否则走事件链（默认引擎处理器 + 第三方可拦截）
 
         Args:
             result: 解析结果
-            stream_id: 聊天流 ID，用于逐项查询 ``should_skip_vlm`` 跳过选定类型的 VLM 识别
+            stream_id: 聊天流 ID，用于逐项查询 ``should_skip_recognition`` 跳过选定类型的识别
 
         Returns:
             更新后的解析结果
         """
         try:
-            from src.core.components import RecognitionMode
             from src.core.managers.media_manager import get_media_manager
 
             manager = get_media_manager()
@@ -699,22 +697,22 @@ class MessageConverter:
 
                 try:
                     if media_type in ("image", "emoji"):
-                        skip = manager.should_skip_vlm(stream_id, media_type)
-                        mode = RecognitionMode.DISABLED if skip else RecognitionMode.DEFAULT
+                        skip = manager.should_skip_recognition(stream_id, media_type)
                         description = await manager.recognize_media(
                             data,
                             media_type,
                             use_cache=True,
                             stream_id=stream_id,
-                            recognition_mode=mode,
+                            skip_recognition=skip,
                         )
                         descriptions.append((i, description))
                     elif media_type == "voice":
+                        skip = manager.should_skip_recognition(stream_id, "voice")
                         text = await manager.recognize_media(
                             data,
                             "voice",
                             stream_id=stream_id,
-                            recognition_mode=RecognitionMode.DEFAULT,
+                            skip_recognition=skip,
                         )
                         voice_texts.append((i, text))
                 except Exception as e:

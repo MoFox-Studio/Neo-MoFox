@@ -34,9 +34,9 @@ from src.core.utils.base64_helper import base64_decode_to_bytes
 from src.kernel.scheduler import get_unified_scheduler, TriggerType
 from src.kernel.db import QueryBuilder, invalidate_model_cache
 from src.kernel.db.core.session import get_db_session
-from src.core.components.types import EventType, MediaEngine, RecognitionMode
+from src.core.components.types import EventType, MediaEngine
 from src.core.models.sql_alchemy import Images, ImageDescriptions, Voices, VoiceDescriptions
-from src.kernel.event import EventDecision, get_event_bus
+from src.kernel.event import get_event_bus
 from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
 
 logger = get_logger("media_manager")
@@ -66,7 +66,7 @@ class MediaManager:
         """初始化媒体管理器。"""
         self._vlm_model_set = None
         # stream_id -> 跳过的媒体类型集合；值为 None 表示跳过所有类型
-        self._skip_vlm_streams: dict[str, frozenset[str] | None] = {}
+        self._skip_recognition_streams: dict[str, frozenset[str] | None] = {}
         self._initialize_vlm()
         self._initialize_asr()
         self._register_prompts()
@@ -377,50 +377,50 @@ class MediaManager:
             return 0
 
     # ──────────────────────────────────────────
-    # 公共 API：VLM 识别控制
+    # 公共 API：媒体识别控制
     # ──────────────────────────────────────────
 
-    def skip_vlm_for_stream(
+    def skip_recognition_for_stream(
         self,
         stream_id: str,
         media_types: Iterable[str] | None = None,
     ) -> None:
-        """注册指定聊天流跳过 VLM 识别。
+        """注册指定聊天流跳过媒体识别。
 
         调用后，该 stream_id 的消息在 MessageConverter 中将不再触发
-        VLM 图片/表情包识别，媒体数据仅保留原始 base64。
+        VLM/ASR 识别，媒体数据仅落盘+入库，不改写文本描述。
         适用于聊天流程自行处理多模态内容的场景。
 
         Args:
-            stream_id: 要跳过 VLM 识别的聊天流 ID
+            stream_id: 要跳过识别的聊天流 ID
             media_types: 要跳过的媒体类型集合（如 ``("image",)``）。为 ``None``
-                时表示跳过所有类型，保持与旧调用兼容。
+                时表示跳过所有类型。
         """
         if media_types is None:
-            self._skip_vlm_streams[stream_id] = None
-            logger.debug(f"已注册跳过 VLM 识别: stream_id={stream_id[:8]} (全部类型)")
+            self._skip_recognition_streams[stream_id] = None
+            logger.debug(f"已注册跳过识别: stream_id={stream_id[:8]} (全部类型)")
             return
         types = frozenset(media_types)
-        self._skip_vlm_streams[stream_id] = types
+        self._skip_recognition_streams[stream_id] = types
         logger.debug(
-            f"已注册跳过 VLM 识别: stream_id={stream_id[:8]} (类型={sorted(types)})"
+            f"已注册跳过识别: stream_id={stream_id[:8]} (类型={sorted(types)})"
         )
 
-    def unskip_vlm_for_stream(self, stream_id: str) -> None:
-        """取消指定聊天流的 VLM 识别跳过。
+    def unskip_recognition_for_stream(self, stream_id: str) -> None:
+        """取消指定聊天流的媒体识别跳过。
 
         Args:
-            stream_id: 要恢复 VLM 识别的聊天流 ID
+            stream_id: 要恢复识别的聊天流 ID
         """
-        self._skip_vlm_streams.pop(stream_id, None)
-        logger.debug(f"已取消跳过 VLM 识别: stream_id={stream_id[:8]}")
+        self._skip_recognition_streams.pop(stream_id, None)
+        logger.debug(f"已取消跳过识别: stream_id={stream_id[:8]}")
 
-    def should_skip_vlm(
+    def should_skip_recognition(
         self,
         stream_id: str,
         media_type: str | None = None,
     ) -> bool:
-        """查询指定聊天流是否应跳过 VLM 识别。
+        """查询指定聊天流是否应跳过媒体识别。
 
         Args:
             stream_id: 聊天流 ID
@@ -428,11 +428,11 @@ class MediaManager:
                 ""该流是否对任意类型注册了跳过""，用于保留旧的整流粒度语义。
 
         Returns:
-            True 表示该聊天流（针对给定媒体类型）应跳过 VLM 识别
+            True 表示该聊天流（针对给定媒体类型）应跳过识别
         """
-        if stream_id not in self._skip_vlm_streams:
+        if stream_id not in self._skip_recognition_streams:
             return False
-        types = self._skip_vlm_streams[stream_id]
+        types = self._skip_recognition_streams[stream_id]
         if types is None:
             return True
         if media_type is None:
@@ -449,7 +449,7 @@ class MediaManager:
         media_type: str,
         use_cache: bool = True,
         stream_id: str = "",
-        recognition_mode: RecognitionMode = RecognitionMode.DEFAULT,
+        skip_recognition: bool = False,
     ) -> str | None:
         """识别媒体内容（图片、表情包或语音），并落盘入库。
 
@@ -462,10 +462,11 @@ class MediaManager:
             media_type: 媒体类型，"image"、"emoji" 或 "voice"
             use_cache: 是否使用缓存（默认 True）
             stream_id: 聊天流 ID，传入事件供处理器按流决策
-            recognition_mode: 识别模式；``DISABLED`` 时仅落盘入库不识别
+            skip_recognition: 为 True 时仅落盘入库，不识别（默认 False）。
+                对 image/emoji/voice 均生效。
 
         Returns:
-            媒体的文字描述；``DISABLED`` 模式或识别失败时返回 None
+            媒体的文字描述；``skip_recognition=True`` 或识别失败时返回 None
         """
         try:
             is_voice = media_type == "voice"
@@ -493,9 +494,9 @@ class MediaManager:
                 description=None, processed=False,
             )
 
-            # DISABLED 模式：仅入库，不识别
-            if recognition_mode == RecognitionMode.DISABLED:
-                logger.debug(f"已持久化{media_type}（DISABLED）: {media_hash[:8]}...")
+            # skip_recognition：仅入库，不识别
+            if skip_recognition:
+                logger.debug(f"已持久化{media_type}（跳过识别）: {media_hash[:8]}...")
                 return None
 
             # 发事件让处理器链识别（默认 VLM/ASR 处理器 + 第三方可拦截）
@@ -544,8 +545,6 @@ class MediaManager:
         Returns:
             识别出的文字描述，无处理器或识别失败时返回 None
         """
-        from src.core.managers.event_manager import get_event_manager
-
         params: dict[str, Any] = {
             "media_hash": media_hash,
             "media_type": media_type,
@@ -558,9 +557,8 @@ class MediaManager:
         }
 
         try:
-            manager = get_event_manager()
-            result = await manager.publish_event(EventType.ON_MEDIA_RECOGNIZE, params)
-            final_params: dict[str, Any] = result.get("params", params)
+            bus = get_event_bus()
+            _, final_params = await bus.publish(EventType.ON_MEDIA_RECOGNIZE.value, params)
         except Exception as e:
             logger.warning(f"发布媒体识别事件失败，回退内置引擎: {e}")
             final_params = params

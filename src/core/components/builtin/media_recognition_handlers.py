@@ -50,6 +50,18 @@ class DefaultVlmHandler(BaseEventHandler):
         for event in self.init_subscribe:
             self.subscribe(event)
 
+    def _make_bus_callback(self) -> Any:
+        """创建符合 EventBus 协议的 async 回调。
+
+        Returns:
+            async callable，签名 (event_name, params) -> (EventDecision, params)
+        """
+
+        async def _callback(event_name: str, params: dict[str, Any]) -> tuple[EventDecision, dict[str, Any]]:
+            return await self.execute(event_name, params)
+
+        return _callback
+
     async def execute(
         self,
         event_name: str,
@@ -126,6 +138,18 @@ class DefaultAsrHandler(BaseEventHandler):
         self.signature = ""
         for event in self.init_subscribe:
             self.subscribe(event)
+
+    def _make_bus_callback(self) -> Any:
+        """创建符合 EventBus 协议的 async 回调。
+
+        Returns:
+            async callable，签名 (event_name, params) -> (EventDecision, params)
+        """
+
+        async def _callback(event_name: str, params: dict[str, Any]) -> tuple[EventDecision, dict[str, Any]]:
+            return await self.execute(event_name, params)
+
+        return _callback
 
     async def execute(
         self,
