@@ -172,9 +172,8 @@ async def test_inject_usables_hides_deferred_mcp_and_exposes_management_tools(
     monkeypatch.setattr(chatter, "get_llm_usables", _fake_get_llm_usables)
     monkeypatch.setattr(chatter, "modify_llm_usables", _fake_modify_llm_usables)
     monkeypatch.setattr(
-        chatter,
-        "_get_deferred_mcp_usable_classes",
-        staticmethod(lambda: {_MCPTool}),
+        "plugins.default_chatter.usable_resolver.get_deferred_mcp_usable_classes",
+        lambda: {_MCPTool},
     )
 
     registry = await chatter.inject_usables(request)
@@ -210,9 +209,8 @@ async def test_inject_usables_keeps_non_deferred_mcp_visible(
     monkeypatch.setattr(chatter, "get_llm_usables", _fake_get_llm_usables)
     monkeypatch.setattr(chatter, "modify_llm_usables", _fake_modify_llm_usables)
     monkeypatch.setattr(
-        chatter,
-        "_get_deferred_mcp_usable_classes",
-        staticmethod(set),
+        "plugins.default_chatter.usable_resolver.get_deferred_mcp_usable_classes",
+        lambda: set(),
     )
 
     registry = await chatter.inject_usables(request)

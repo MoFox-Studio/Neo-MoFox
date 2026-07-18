@@ -368,9 +368,9 @@ class DefaultChatterSession:
         if self.options.native_multimodal:
             from src.core.managers.media_manager import get_media_manager
 
-            get_media_manager().skip_vlm_for_stream(chat_stream.stream_id, ["image"])
+            get_media_manager().skip_recognition_for_stream(chat_stream.stream_id, ["image"])
             self.logger.debug(
-                f"Skipped VLM image recognition for stream {chat_stream.stream_id[:8]}"
+                f"Skipped image recognition for stream {chat_stream.stream_id[:8]}"
             )
 
         try:

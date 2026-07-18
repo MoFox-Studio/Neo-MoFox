@@ -8,11 +8,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from plugins.default_chatter.actions.send_text import SendTextAction
 from plugins.default_chatter.config import DefaultChatterConfig
 from plugins.default_chatter.plugin import (
     DefaultChatter,
     DefaultChatterPlugin,
-    SendTextAction,
+)
+from plugins.default_chatter.probability_gate import (
     _SEND_TEXT_TYPING_DELAY_MAX_SECONDS,
     _SEND_TEXT_TYPING_DELAY_PER_CHAR,
 )
@@ -48,7 +50,7 @@ async def test_sub_agent_is_disabled_in_private_chat(monkeypatch: pytest.MonkeyP
         called["value"] = True
         return {"reason": "should not be called", "should_respond": False}
 
-    monkeypatch.setattr("plugins.default_chatter.plugin.decide_should_respond", _fake_decide)
+    monkeypatch.setattr("plugins.default_chatter.interest_gate.decide_should_respond", _fake_decide)
 
     result = await chatter.sub_agent("hello", [], stream)
 
@@ -71,8 +73,8 @@ async def test_sub_agent_keeps_decision_flow_in_group_chat(
         captured.update(kwargs)
         return {"reason": "group decision", "should_respond": False}
 
-    monkeypatch.setattr("plugins.default_chatter.plugin.decide_should_respond", _fake_decide)
-    monkeypatch.setattr("plugins.default_chatter.plugin.random.random", lambda: 0.99)
+    monkeypatch.setattr("plugins.default_chatter.interest_gate.decide_should_respond", _fake_decide)
+    monkeypatch.setattr("plugins.default_chatter.probability_gate.random.random", lambda: 0.99)
 
     result = await chatter.sub_agent("group-msg", [], stream)
 
@@ -110,7 +112,7 @@ async def test_sub_agent_bypasses_llm_when_probability_hits(
         return {"reason": "should not be called", "should_respond": False}
 
     monkeypatch.setattr(
-        "plugins.default_chatter.plugin.get_core_config",
+        "plugins.default_chatter.probability_gate.get_core_config",
         lambda: SimpleNamespace(
             personality=SimpleNamespace(
                 nickname="Neo",
@@ -118,8 +120,8 @@ async def test_sub_agent_bypasses_llm_when_probability_hits(
             )
         ),
     )
-    monkeypatch.setattr("plugins.default_chatter.plugin.decide_should_respond", _fake_decide)
-    monkeypatch.setattr("plugins.default_chatter.plugin.random.random", lambda: 0.99)
+    monkeypatch.setattr("plugins.default_chatter.interest_gate.decide_should_respond", _fake_decide)
+    monkeypatch.setattr("plugins.default_chatter.probability_gate.random.random", lambda: 0.99)
 
     result = await chatter.sub_agent("group-msg", unread_msgs, stream)
 
@@ -327,7 +329,7 @@ async def test_sub_agent_skips_programmatic_controller_when_disabled(
         return {"reason": "llm only", "should_respond": False}
 
     monkeypatch.setattr(
-        "plugins.default_chatter.plugin.get_core_config",
+        "plugins.default_chatter.probability_gate.get_core_config",
         lambda: SimpleNamespace(
             personality=SimpleNamespace(
                 nickname="Neo",
@@ -335,8 +337,8 @@ async def test_sub_agent_skips_programmatic_controller_when_disabled(
             )
         ),
     )
-    monkeypatch.setattr("plugins.default_chatter.plugin.decide_should_respond", _fake_decide)
-    monkeypatch.setattr("plugins.default_chatter.plugin.random.random", lambda: 0.0)
+    monkeypatch.setattr("plugins.default_chatter.interest_gate.decide_should_respond", _fake_decide)
+    monkeypatch.setattr("plugins.default_chatter.probability_gate.random.random", lambda: 0.0)
 
     result = await chatter.sub_agent("group-msg", unread_msgs, stream)
 
