@@ -21,11 +21,9 @@ from src.kernel.logger import get_logger
 from src.kernel.llm.payload.tooling import LLMUsable
 
 from .exceptions import (
-    LLMAPIError,
     LLMConfigurationError,
-    LLMRateLimitError,
-    LLMTimeoutError,
     classify_exception,
+    decide_retry,
 )
 from .payload import LLMPayload, ReasoningText, Text, ToolCall, ToolResult
 from .roles import ROLE
@@ -353,10 +351,12 @@ async def execute_request(
 
             classified_error = classify_exception(exc, model=model_identifier)
             last_error = classified_error
+            retry_decision = decide_retry(classified_error)
             _log_request_error(
                 model_identifier=model_identifier,
                 request_name=request.request_name,
                 error=classified_error,
+                retryable=retry_decision.retryable,
             )
 
             if request.enable_metrics:
@@ -373,6 +373,9 @@ async def execute_request(
                     model_index=step.meta.get("model_index", 0) if step.meta else 0,
                     error=classified_error,
                 )
+
+            if not retry_decision.retryable:
+                raise classified_error
 
             retry_count += 1
             next_step = session.next_after_error(classified_error)
@@ -438,24 +441,15 @@ def _log_request_error(
     model_identifier: str,
     request_name: str,
     error: BaseException,
+    retryable: bool,
 ) -> None:
-    """根据错误是否可能重试，按不同严重级别记录日志。"""
+    """根据重试决策，按不同严重级别记录日志。"""
     error_type = type(error).__name__
-    status_code: int | None = None
-    if isinstance(error, LLMAPIError):
-        raw_status = error.status_code
-        if isinstance(raw_status, int) and raw_status >= 500:
-            status_code = raw_status
-    if (
-        isinstance(error, (LLMTimeoutError, LLMRateLimitError, TimeoutError))
-        or status_code is not None
-        or (isinstance(error, LLMAPIError) and error.status_code is None)
-    ):
-        status_hint = f", status_code={status_code}" if status_code is not None else ""
+    if retryable:
         logger.warning(
             f"LLM 请求暂时失败：model={model_identifier}, "
             f"request={request_name or '__default__'}, "
-            f"error_type={error_type}{status_hint}, reason={str(error)}",
+            f"error_type={error_type}, reason={str(error)}",
         )
         logger.debug(
             f"LLM 请求暂时失败（详情）：model={model_identifier}, "
