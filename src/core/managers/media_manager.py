@@ -34,7 +34,9 @@ from src.core.utils.base64_helper import base64_decode_to_bytes
 from src.kernel.scheduler import get_unified_scheduler, TriggerType
 from src.kernel.db import QueryBuilder, invalidate_model_cache
 from src.kernel.db.core.session import get_db_session
+from src.core.components.types import EventType, MediaEngine
 from src.core.models.sql_alchemy import Images, ImageDescriptions, Voices, VoiceDescriptions
+from src.kernel.event import get_event_bus
 from src.kernel.llm import LLMContextManager, LLMPayload, ROLE, Text, Image
 
 logger = get_logger("media_manager")
@@ -64,7 +66,7 @@ class MediaManager:
         """初始化媒体管理器。"""
         self._vlm_model_set = None
         # stream_id -> 跳过的媒体类型集合；值为 None 表示跳过所有类型
-        self._skip_vlm_streams: dict[str, frozenset[str] | None] = {}
+        self._skip_recognition_streams: dict[str, frozenset[str] | None] = {}
         self._initialize_vlm()
         self._initialize_asr()
         self._register_prompts()
@@ -375,50 +377,50 @@ class MediaManager:
             return 0
 
     # ──────────────────────────────────────────
-    # 公共 API：VLM 识别控制
+    # 公共 API：媒体识别控制
     # ──────────────────────────────────────────
 
-    def skip_vlm_for_stream(
+    def skip_recognition_for_stream(
         self,
         stream_id: str,
         media_types: Iterable[str] | None = None,
     ) -> None:
-        """注册指定聊天流跳过 VLM 识别。
+        """注册指定聊天流跳过媒体识别。
 
         调用后，该 stream_id 的消息在 MessageConverter 中将不再触发
-        VLM 图片/表情包识别，媒体数据仅保留原始 base64。
+        VLM/ASR 识别，媒体数据仅落盘+入库，不改写文本描述。
         适用于聊天流程自行处理多模态内容的场景。
 
         Args:
-            stream_id: 要跳过 VLM 识别的聊天流 ID
+            stream_id: 要跳过识别的聊天流 ID
             media_types: 要跳过的媒体类型集合（如 ``("image",)``）。为 ``None``
-                时表示跳过所有类型，保持与旧调用兼容。
+                时表示跳过所有类型。
         """
         if media_types is None:
-            self._skip_vlm_streams[stream_id] = None
-            logger.debug(f"已注册跳过 VLM 识别: stream_id={stream_id[:8]} (全部类型)")
+            self._skip_recognition_streams[stream_id] = None
+            logger.debug(f"已注册跳过识别: stream_id={stream_id[:8]} (全部类型)")
             return
         types = frozenset(media_types)
-        self._skip_vlm_streams[stream_id] = types
+        self._skip_recognition_streams[stream_id] = types
         logger.debug(
-            f"已注册跳过 VLM 识别: stream_id={stream_id[:8]} (类型={sorted(types)})"
+            f"已注册跳过识别: stream_id={stream_id[:8]} (类型={sorted(types)})"
         )
 
-    def unskip_vlm_for_stream(self, stream_id: str) -> None:
-        """取消指定聊天流的 VLM 识别跳过。
+    def unskip_recognition_for_stream(self, stream_id: str) -> None:
+        """取消指定聊天流的媒体识别跳过。
 
         Args:
-            stream_id: 要恢复 VLM 识别的聊天流 ID
+            stream_id: 要恢复识别的聊天流 ID
         """
-        self._skip_vlm_streams.pop(stream_id, None)
-        logger.debug(f"已取消跳过 VLM 识别: stream_id={stream_id[:8]}")
+        self._skip_recognition_streams.pop(stream_id, None)
+        logger.debug(f"已取消跳过识别: stream_id={stream_id[:8]}")
 
-    def should_skip_vlm(
+    def should_skip_recognition(
         self,
         stream_id: str,
         media_type: str | None = None,
     ) -> bool:
-        """查询指定聊天流是否应跳过 VLM 识别。
+        """查询指定聊天流是否应跳过媒体识别。
 
         Args:
             stream_id: 聊天流 ID
@@ -426,11 +428,11 @@ class MediaManager:
                 ""该流是否对任意类型注册了跳过""，用于保留旧的整流粒度语义。
 
         Returns:
-            True 表示该聊天流（针对给定媒体类型）应跳过 VLM 识别
+            True 表示该聊天流（针对给定媒体类型）应跳过识别
         """
-        if stream_id not in self._skip_vlm_streams:
+        if stream_id not in self._skip_recognition_streams:
             return False
-        types = self._skip_vlm_streams[stream_id]
+        types = self._skip_recognition_streams[stream_id]
         if types is None:
             return True
         if media_type is None:
@@ -442,119 +444,328 @@ class MediaManager:
     # ──────────────────────────────────────────
 
     async def recognize_media(
-        self, 
-        base64_data: str, 
+        self,
+        base64_data: str,
         media_type: str,
-        use_cache: bool = True
+        use_cache: bool = True,
+        stream_id: str = "",
+        skip_recognition: bool = False,
     ) -> str | None:
-        """识别媒体内容（图片、表情包或语音）。
+        """识别媒体内容（图片、表情包或语音），并落盘入库。
 
-        按 ``media_type`` 路由到对应识别引擎：
-        - ``image`` / ``emoji``：调用 VLM 识别，缓存写入 ``ImageDescriptions``，
-          媒体信息写入 ``Images`` 表，文件落盘到 images/emojis 目录
-        - ``voice``：调用 ASR 识别，缓存写入 ``VoiceDescriptions``，
-          语音信息写入 ``Voices`` 表，文件落盘到 voices 目录
+        统一流程：计算哈希 → 查缓存 → 落盘入库 → 发事件让处理器识别 →
+        回写 description。VLM/ASR 作为默认处理器通过事件链调用，
+        第三方插件可订阅 ``ON_MEDIA_RECOGNIZE`` 拦截改写。
 
-        统一流程：计算哈希 → 查缓存 → 检查引擎可用性 → 落盘 pending →
-        调用识别引擎 → 回写缓存 → 移动到分类目录 → 保存媒体信息。
-        
         Args:
             base64_data: base64 编码的媒体数据（语音为 WAV）
             media_type: 媒体类型，"image"、"emoji" 或 "voice"
             use_cache: 是否使用缓存（默认 True）
-            
+            stream_id: 聊天流 ID，传入事件供处理器按流决策
+            skip_recognition: 为 True 时仅落盘入库，不识别（默认 False）。
+                对 image/emoji/voice 均生效。
+
         Returns:
-            媒体的文字描述，识别失败返回 None
+            媒体的文字描述；``skip_recognition=True`` 或识别失败时返回 None
         """
         try:
             is_voice = media_type == "voice"
-
-            # 计算哈希值
             media_hash = self._compute_hash(base64_data)
-            
+
             # 尝试从缓存读取
             if use_cache:
-                if is_voice:
-                    cached_description = await self._get_cached_voice_description(media_hash)
-                else:
-                    cached_description = await self._get_cached_description(
-                        media_hash, 
-                        media_type
-                    )
-                if cached_description:
-                    logger.debug(f"从缓存获取{media_type}描述: {media_hash[:8]}...")
-                    return cached_description
-
-            # 检查识别引擎可用性
-            if is_voice:
-                if not self._asr_available or not self._asr_model_set:
-                    logger.debug("ASR 模型不可用，跳过语音识别")
-                    return None
-            else:
-                if not self._vlm_model_set:
-                    logger.debug(f"VLM 模型不可用，跳过{media_type}识别")
-                    return None
-            
-            # 保存到待识别文件夹
-            pending_file_path = await self._save_to_pending(
-                base64_data,
-                media_hash,
-                media_type
-            )
-            
-            # 调用识别引擎
-            if is_voice:
-                description = await self._recognize_with_asr(base64_data)
-            else:
-                description = await self._recognize_with_vlm(base64_data, media_type)
-            
-            if description:
-                # 保存到缓存
-                if is_voice:
-                    await self._save_voice_description_cache(media_hash, description)
-                else:
-                    await self._save_description_cache(
-                        media_hash,
-                        media_type,
-                        description
-                    )
-                logger.info(f"成功识别{media_type}: {description[:50]}...")
-                
-                # 移动到对应的分类文件夹
-                await self._move_to_category_folder(
-                    pending_file_path,
-                    media_type,
-                    media_hash
+                cached = await (
+                    self._get_cached_voice_description(media_hash)
+                    if is_voice else
+                    self._get_cached_description(media_hash, media_type)
                 )
-                
-                # 保存媒体信息到数据库
-                if is_voice:
-                    target_file_path = self.voices_folder / pending_file_path.name
-                    await self.save_voice_info(
-                        voice_hash=media_hash,
-                        file_path=str(target_file_path),
-                        description=description,
-                        asr_processed=True
-                    )
-                else:
-                    target_folder = self.images_folder if media_type == "image" else self.emojis_folder
-                    target_file_path = target_folder / pending_file_path.name
-                    await self.save_media_info(
-                        media_hash=media_hash,
-                        media_type=media_type,
-                        file_path=str(target_file_path),
-                        description=description,
-                        vlm_processed=True
-                    )
-            else:
-                # 识别失败，保持在待识别文件夹，等待定时清理
-                logger.warning(f"识别失败，文件保留在待识别文件夹: {pending_file_path.name}")
-            
+                if cached:
+                    logger.debug(f"从缓存获取{media_type}描述: {media_hash[:8]}...")
+                    return cached
+
+            # 落盘 pending + 移动到分类目录
+            pending_path = await self._save_to_pending(base64_data, media_hash, media_type)
+            await self._move_to_category_folder(pending_path, media_type, media_hash)
+            target_path = self._category_folder_for(media_type) / pending_path.name
+
+            # 先入库（engine_processed=False），确保 image_id 可回查
+            await self._save_recognized_media(
+                media_hash, media_type, str(target_path),
+                description=None, processed=False,
+            )
+
+            # skip_recognition：仅入库，不识别
+            if skip_recognition:
+                logger.debug(f"已持久化{media_type}（跳过识别）: {media_hash[:8]}...")
+                return None
+
+            # 发事件让处理器链识别（默认 VLM/ASR 处理器 + 第三方可拦截）
+            engine = MediaEngine.ASR if is_voice else MediaEngine.VLM
+            description = await self._dispatch_recognition_event(
+                base64_data=base64_data,
+                media_hash=media_hash,
+                media_type=media_type,
+                engine=engine,
+                stream_id=stream_id,
+            )
+
+            if description:
+                # 回写缓存 + 更新入库（engine_processed=True）
+                await self._save_cache_and_update_media(
+                    media_hash, media_type, description, str(target_path),
+                )
+                logger.info(f"成功识别{media_type}: {description[:50]}...")
+
             return description
-            
+
         except Exception as e:
             logger.error(f"识别{media_type}失败: {e}", exc_info=True)
             return None
+
+    async def _dispatch_recognition_event(
+        self,
+        base64_data: str,
+        media_hash: str,
+        media_type: str,
+        engine: MediaEngine,
+        stream_id: str,
+    ) -> str | None:
+        """发布 ON_MEDIA_RECOGNIZE 事件，返回处理器链最终回写的 description。
+
+        事件 params 的 key 集合在链中不可变，处理器只能修改已有字段的值。
+        如果没有任何处理器订阅，回退到内置引擎调用。
+
+        Args:
+            base64_data: base64 编码的媒体数据
+            media_hash: 媒体哈希值
+            media_type: "image"、"emoji" 或 "voice"
+            engine: 引擎类型（VLM 或 ASR）
+            stream_id: 聊天流 ID
+
+        Returns:
+            识别出的文字描述，无处理器或识别失败时返回 None
+        """
+        params: dict[str, Any] = {
+            "media_hash": media_hash,
+            "media_type": media_type,
+            "engine": engine.value,
+            "base64_data": base64_data,
+            "stream_id": stream_id,
+            "description": None,
+            "engine_processed": False,
+            "skip_engine": False,
+        }
+
+        try:
+            bus = get_event_bus()
+            _, final_params = await bus.publish(EventType.ON_MEDIA_RECOGNIZE.value, params)
+        except Exception as e:
+            logger.warning(f"发布媒体识别事件失败，回退内置引擎: {e}")
+            final_params = params
+
+        # 处理器链已回写 description
+        description = final_params.get("description")
+        if isinstance(description, str) and description:
+            return description
+
+        # 处理器设了 skip_engine 或无处理器订阅 → 回退内置引擎
+        if final_params.get("skip_engine"):
+            return None
+
+        return await self._call_builtin_engine(base64_data, media_type, engine)
+
+    async def _call_builtin_engine(
+        self,
+        base64_data: str,
+        media_type: str,
+        engine: MediaEngine,
+    ) -> str | None:
+        """调用内置识别引擎（VLM 或 ASR），作为事件链无处理器时的兜底。
+
+        Args:
+            base64_data: base64 编码的媒体数据
+            media_type: "image"、"emoji" 或 "voice"
+            engine: 引擎类型
+
+        Returns:
+            识别结果文本，失败返回 None
+        """
+        if engine == MediaEngine.ASR:
+            if not self._asr_available or not self._asr_model_set:
+                logger.debug("ASR 模型不可用，跳过语音识别")
+                return None
+            return await self._recognize_with_asr(base64_data)
+
+        if not self._vlm_model_set:
+            logger.debug(f"VLM 模型不可用，跳过{media_type}识别")
+            return None
+        return await self._recognize_with_vlm(base64_data, media_type)
+
+    async def _on_media_recognize_vlm(
+        self,
+        event_name: str,
+        params: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        """ON_MEDIA_RECOGNIZE 事件的默认 VLM 处理回调。
+
+        当 ``engine == "vlm"`` 且未被前序处理器处理时，调用内置 VLM 引擎
+        识别图片/表情包，回写 ``description`` 和 ``engine_processed``。
+
+        Args:
+            event_name: 事件名称
+            params: 事件参数
+
+        Returns:
+            (EventDecision, params)
+        """
+        from src.kernel.event import EventDecision
+
+        if params.get("engine") != MediaEngine.VLM.value:
+            return EventDecision.PASS, params
+        if params.get("engine_processed") or params.get("skip_engine"):
+            return EventDecision.PASS, params
+
+        base64_data = params.get("base64_data")
+        media_type = params.get("media_type", "image")
+        if not isinstance(base64_data, str) or not base64_data:
+            return EventDecision.PASS, params
+
+        description = await self._recognize_with_vlm(base64_data, media_type)
+        if description:
+            params["description"] = description
+            params["engine_processed"] = True
+            logger.debug(
+                f"默认VLM识别成功: {params.get('media_hash', '')[:8]}... "
+                f"→ {description[:50]}..."
+            )
+            return EventDecision.SUCCESS, params
+
+        return EventDecision.PASS, params
+
+    async def _on_media_recognize_asr(
+        self,
+        event_name: str,
+        params: dict[str, Any],
+    ) -> tuple[Any, dict[str, Any]]:
+        """ON_MEDIA_RECOGNIZE 事件的默认 ASR 处理回调。
+
+        当 ``engine == "asr"`` 且未被前序处理器处理时，调用内置 ASR 引擎
+        识别语音，回写 ``description`` 和 ``engine_processed``。
+
+        Args:
+            event_name: 事件名称
+            params: 事件参数
+
+        Returns:
+            (EventDecision, params)
+        """
+        from src.kernel.event import EventDecision
+
+        if params.get("engine") != MediaEngine.ASR.value:
+            return EventDecision.PASS, params
+        if params.get("engine_processed") or params.get("skip_engine"):
+            return EventDecision.PASS, params
+
+        base64_data = params.get("base64_data")
+        if not isinstance(base64_data, str) or not base64_data:
+            return EventDecision.PASS, params
+
+        description = await self._recognize_with_asr(base64_data)
+        if description:
+            params["description"] = description
+            params["engine_processed"] = True
+            logger.debug(
+                f"默认ASR识别成功: {params.get('media_hash', '')[:8]}... "
+                f"→ {description[:50]}..."
+            )
+            return EventDecision.SUCCESS, params
+
+        return EventDecision.PASS, params
+
+    def register_default_recognition_handlers(self) -> None:
+        """注册默认 VLM/ASR 识别回调到 EventBus。
+
+        使用 ``priority=0``（最低优先级），第三方插件用更高 priority
+        即可先拦截。应在 EventManager 构建订阅映射后调用。
+        """
+        bus = get_event_bus()
+        event_name = EventType.ON_MEDIA_RECOGNIZE.value
+        bus.subscribe(event_name, self._on_media_recognize_vlm, priority=0)
+        bus.subscribe(event_name, self._on_media_recognize_asr, priority=0)
+        logger.debug("已注册默认媒体识别回调: vlm, asr")
+
+    def _category_folder_for(self, media_type: str) -> Path:
+        """返回媒体类型对应的分类目录。
+
+        Args:
+            media_type: "image"、"emoji" 或 "voice"
+
+        Returns:
+            对应的分类目录路径
+        """
+        if media_type == "image":
+            return self.images_folder
+        if media_type == "voice":
+            return self.voices_folder
+        return self.emojis_folder
+
+    async def _save_recognized_media(
+        self,
+        media_hash: str,
+        media_type: str,
+        file_path: str,
+        description: str | None,
+        processed: bool,
+    ) -> None:
+        """统一入库入口，按 media_type 写 Images 或 Voices 表。
+
+        Args:
+            media_hash: 媒体哈希值
+            media_type: "image"、"emoji" 或 "voice"
+            file_path: 文件路径
+            description: 描述文本（可 None）
+            processed: 是否已经过引擎识别
+        """
+        if media_type == "voice":
+            await self.save_voice_info(
+                voice_hash=media_hash,
+                file_path=file_path,
+                description=description,
+                asr_processed=processed,
+            )
+        else:
+            await self.save_media_info(
+                media_hash=media_hash,
+                media_type=media_type,
+                file_path=file_path,
+                description=description,
+                vlm_processed=processed,
+            )
+
+    async def _save_cache_and_update_media(
+        self,
+        media_hash: str,
+        media_type: str,
+        description: str,
+        file_path: str,
+    ) -> None:
+        """识别成功后写缓存并更新入库记录为 processed。
+
+        Args:
+            media_hash: 媒体哈希值
+            media_type: "image"、"emoji" 或 "voice"
+            description: 识别结果文本
+            file_path: 文件路径
+        """
+        if media_type == "voice":
+            await self._save_voice_description_cache(media_hash, description)
+        else:
+            await self._save_description_cache(media_hash, media_type, description)
+
+        await self._save_recognized_media(
+            media_hash, media_type, file_path,
+            description=description, processed=True,
+        )
 
     async def recognize_batch(
         self,
@@ -656,7 +867,7 @@ class MediaManager:
             媒体信息字典，不存在返回 None
         """
         try:
-            media = await (
+            media: Any = await (
                 QueryBuilder(Images)
                 .filter(image_id=media_hash)
                 .order_by("-timestamp")
@@ -748,7 +959,7 @@ class MediaManager:
             语音信息字典，不存在返回 None
         """
         try:
-            voice = await (
+            voice: Any = await (
                 QueryBuilder(Voices)
                 .filter(voice_id=voice_hash)
                 .order_by("-timestamp")
@@ -894,7 +1105,7 @@ class MediaManager:
             缓存的描述，不存在返回 None
         """
         try:
-            desc = await (
+            desc: Any = await (
                 QueryBuilder(ImageDescriptions)
                 .filter(image_description_hash=media_hash, type=media_type)
                 .order_by("-timestamp")
@@ -967,7 +1178,7 @@ class MediaManager:
             缓存的描述，不存在返回 None
         """
         try:
-            desc = await (
+            desc: Any = await (
                 QueryBuilder(VoiceDescriptions)
                 .filter(voice_description_hash=voice_hash, type="voice")
                 .order_by("-timestamp")

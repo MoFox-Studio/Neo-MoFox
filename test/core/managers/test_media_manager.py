@@ -70,72 +70,72 @@ class TestMediaManagerInit:
             assert manager1 is manager2
 
 
-class TestMediaManagerSkipVLM:
-    """测试 VLM 跳过功能。"""
+class TestMediaManagerSkipRecognition:
+    """测试识别跳过功能。"""
     
-    def test_skip_vlm_for_stream(self) -> None:
-        """测试为特定流跳过 VLM。"""
+    def test_skip_recognition_for_stream(self) -> None:
+        """测试为特定流跳过识别。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
             
-            manager.skip_vlm_for_stream("stream_123")
+            manager.skip_recognition_for_stream("stream_123")
             
-            assert manager.should_skip_vlm("stream_123") is True
+            assert manager.should_skip_recognition("stream_123") is True
     
-    def test_unskip_vlm_for_stream(self) -> None:
-        """测试恢复特定流的 VLM。"""
+    def test_unskip_recognition_for_stream(self) -> None:
+        """测试恢复特定流的识别。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
             
-            manager.skip_vlm_for_stream("stream_123")
-            assert manager.should_skip_vlm("stream_123") is True
+            manager.skip_recognition_for_stream("stream_123")
+            assert manager.should_skip_recognition("stream_123") is True
             
-            manager.unskip_vlm_for_stream("stream_123")
-            assert manager.should_skip_vlm("stream_123") is False
+            manager.unskip_recognition_for_stream("stream_123")
+            assert manager.should_skip_recognition("stream_123") is False
     
-    def test_should_skip_vlm_not_in_list(self) -> None:
+    def test_should_skip_recognition_not_in_list(self) -> None:
         """测试未跳过的流。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
             
-            assert manager.should_skip_vlm("stream_456") is False
+            assert manager.should_skip_recognition("stream_456") is False
 
-    def test_skip_vlm_for_stream_with_media_types(self) -> None:
-        """指定 media_types 时只对该类型生效，其余类型仍走 VLM。"""
+    def test_skip_recognition_for_stream_with_media_types(self) -> None:
+        """指定 media_types 时只对该类型生效，其余类型仍走识别。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
 
-            manager.skip_vlm_for_stream("stream_dfc", media_types=("image",))
+            manager.skip_recognition_for_stream("stream_dfc", media_types=("image",))
 
             # 整流粒度查询：只要注册过任意类型，都视为跳过
-            assert manager.should_skip_vlm("stream_dfc") is True
+            assert manager.should_skip_recognition("stream_dfc") is True
             # 类型粒度查询
-            assert manager.should_skip_vlm("stream_dfc", "image") is True
-            assert manager.should_skip_vlm("stream_dfc", "emoji") is False
-            assert manager.should_skip_vlm("stream_dfc", "voice") is False
+            assert manager.should_skip_recognition("stream_dfc", "image") is True
+            assert manager.should_skip_recognition("stream_dfc", "emoji") is False
+            assert manager.should_skip_recognition("stream_dfc", "voice") is False
 
-    def test_skip_vlm_for_stream_default_skips_all_types(self) -> None:
+    def test_skip_recognition_for_stream_default_skips_all_types(self) -> None:
         """不指定 media_types 时跳过所有媒体类型，保持向后兼容。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
 
-            manager.skip_vlm_for_stream("stream_kfc")
+            manager.skip_recognition_for_stream("stream_kfc")
 
-            assert manager.should_skip_vlm("stream_kfc") is True
-            assert manager.should_skip_vlm("stream_kfc", "image") is True
-            assert manager.should_skip_vlm("stream_kfc", "emoji") is True
-            assert manager.should_skip_vlm("stream_kfc", "voice") is True
+            assert manager.should_skip_recognition("stream_kfc") is True
+            assert manager.should_skip_recognition("stream_kfc", "image") is True
+            assert manager.should_skip_recognition("stream_kfc", "emoji") is True
+            assert manager.should_skip_recognition("stream_kfc", "voice") is True
 
-    def test_unskip_vlm_clears_typed_skip(self) -> None:
+    def test_unskip_recognition_clears_typed_skip(self) -> None:
         """unskip 必须同时清掉按类型注册的跳过。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
 
-            manager.skip_vlm_for_stream("stream_dfc", media_types=("image",))
-            manager.unskip_vlm_for_stream("stream_dfc")
+            manager.skip_recognition_for_stream("stream_dfc", media_types=("image",))
+            manager.unskip_recognition_for_stream("stream_dfc")
 
-            assert manager.should_skip_vlm("stream_dfc") is False
-            assert manager.should_skip_vlm("stream_dfc", "image") is False
+            assert manager.should_skip_recognition("stream_dfc") is False
+            assert manager.should_skip_recognition("stream_dfc", "image") is False
 
 
 class TestMediaManagerRecognizeMedia:
@@ -209,10 +209,10 @@ class TestMediaManagerRecognizeMedia:
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
             
-            manager.skip_vlm_for_stream("stream_123")
+            manager.skip_recognition_for_stream("stream_123")
             test_data = base64.b64encode(b"test_image_data").decode()
             
-            # 跳过 VLM 识别的流使用缓存
+            # 跳过识别 识别的流使用缓存
             with patch.object(manager, '_get_cached_description', new_callable=AsyncMock) as mock_cache:
                 mock_cache.return_value = None
                 

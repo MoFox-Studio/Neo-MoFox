@@ -669,59 +669,59 @@ class MessageConverter:
     ) -> _ParseResult:
         """使用 MediaManager 识别媒体内容（图片、表情包、语音）并更新文本描述。
 
+        遍历所有媒体项，对每个项调用 ``recognize_media``：
+        - image/emoji/voice：统一查询 ``should_skip_recognition``，
+          skip=True 时仅落盘+入库，不识别；
+          否则走事件链（默认引擎处理器 + 第三方可拦截）
+
         Args:
             result: 解析结果
-            stream_id: 聊天流 ID，用于逐项查询 ``should_skip_vlm`` 跳过选定类型的 VLM 识别
+            stream_id: 聊天流 ID，用于逐项查询 ``should_skip_recognition`` 跳过选定类型的识别
 
         Returns:
             更新后的解析结果
         """
         try:
-            # 延迟导入避免循环依赖
             from src.core.managers.media_manager import get_media_manager
 
             manager = get_media_manager()
 
-            # 收集需要识别的媒体（图片、表情包、语音），逐项过滤已注册跳过的类型
-            media_to_recognize = []
-            voice_to_recognize = []
+            descriptions: list[tuple[int, str | None]] = []
+            voice_texts: list[tuple[int, str | None]] = []
+
             for i, media in enumerate(result.media):
                 media_type = media["type"]
-                if media_type in ("image", "emoji"):
-                    if manager.should_skip_vlm(stream_id, media_type):
-                        continue
-                    media_to_recognize.append((i, media))
-                elif media_type == "voice":
-                    voice_to_recognize.append((i, media))
-            
-            # 早退策略：没有待识别媒体就直接返回原结果
-            if not media_to_recognize and not voice_to_recognize:
-                return result
-            
-            # 批量识别图片/表情包，并缓存描述
-            descriptions = []
-            for idx, media in media_to_recognize:
+                data = media.get("data")
+                if not isinstance(data, str) or not data:
+                    continue
+
                 try:
-                    description = await manager.recognize_media(
-                        media["data"],
-                        media["type"],
-                        use_cache=True
-                    )
-                    descriptions.append((idx, description))
+                    if media_type in ("image", "emoji"):
+                        skip = manager.should_skip_recognition(stream_id, media_type)
+                        description = await manager.recognize_media(
+                            data,
+                            media_type,
+                            use_cache=True,
+                            stream_id=stream_id,
+                            skip_recognition=skip,
+                        )
+                        descriptions.append((i, description))
+                    elif media_type == "voice":
+                        skip = manager.should_skip_recognition(stream_id, "voice")
+                        text = await manager.recognize_media(
+                            data,
+                            "voice",
+                            stream_id=stream_id,
+                            skip_recognition=skip,
+                        )
+                        voice_texts.append((i, text))
                 except Exception as e:
-                    logger.warning(f"识别{media['type']}失败: {e}")
-                    descriptions.append((idx, None))
-            
-            # 识别语音
-            voice_texts = []
-            for idx, media in voice_to_recognize:
-                try:
-                    text = await manager.recognize_media(media["data"], "voice")
-                    voice_texts.append((idx, text))
-                except Exception as e:
-                    logger.warning(f"识别语音失败: {e}")
-                    voice_texts.append((idx, None))
-            
+                    logger.warning(f"识别{media_type}失败: {e}")
+                    if media_type in ("image", "emoji"):
+                        descriptions.append((i, None))
+                    elif media_type == "voice":
+                        voice_texts.append((i, None))
+
             # 将识别结果应用回 text_parts，替换占位符
             new_text_parts = []
             media_idx = 0
@@ -730,33 +730,33 @@ class MessageConverter:
                 if part in ("[图片]", "[表情包]"):
                     if media_idx < len(descriptions):
                         _, description = descriptions[media_idx]
+                        media_idx += 1
                         if description:
-                            media_type = "图片" if part == "[图片]" else "表情包"
-                            new_text_parts.append(f"[{media_type}:{description}]")
+                            label = "图片" if part == "[图片]" else "表情包"
+                            new_text_parts.append(f"[{label}:{description}]")
                         else:
                             new_text_parts.append(part)
-                        media_idx += 1
                     else:
                         new_text_parts.append(part)
                 elif part == "[语音]":
                     if voice_idx < len(voice_texts):
                         _, text = voice_texts[voice_idx]
+                        voice_idx += 1
                         if text:
                             new_text_parts.append(f"[语音:{text}]")
                         else:
                             new_text_parts.append(part)
-                        voice_idx += 1
                     else:
                         new_text_parts.append(part)
                 else:
                     new_text_parts.append(part)
-            
+
             result.text_parts = new_text_parts
-            
+
         except Exception as e:
             # 如果整个识别流程失败，不应阻止消息继续处理，仅记录错误
             logger.error(f"MediaManager 识别失败: {e}", exc_info=True)
-        
+
         return result
 
     @staticmethod
