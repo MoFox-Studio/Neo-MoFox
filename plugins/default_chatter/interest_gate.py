@@ -12,12 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
+from src.app.plugin_system.types import ChatStream, Message
 
 from .config import DefaultChatterConfig
 from .decision_agent import decide_should_respond
-from .interest_calculator import InterestCalculator, InterestConfig
+from .interest_calculator import InterestCalculator, InterestConfig, InterestResult
 from .prompts import sub_agent_system_prompt
 from .probability_gate import should_bypass_via_probability
 from .type_defs import FilterMode, SubAgentDecision, SupportsRequestCreation
@@ -26,22 +25,22 @@ logger = get_logger("default_chatter")
 
 
 class InterestGate:
-    """兴趣值决策门，封装 sub_agent 的完整决策流程。
+    """根据配置执行概率、兴趣值和 LLM 响应决策。"""
 
-    持有 InterestCalculator 惰性缓存，支持三种过滤模式的分流。
-    """
-
-    def __init__(self, plugin: Any) -> None:
-        """初始化兴趣值决策门。
+    def __init__(
+        self,
+        plugin: Any,
+        request_runtime: SupportsRequestCreation,
+    ) -> None:
+        """初始化响应决策组件。
 
         Args:
-            plugin: 插件实例，用于读取配置
+            plugin: 插件实例
+            request_runtime: LLM 请求创建接口
         """
         self._plugin = plugin
+        self._request_runtime = request_runtime
         self._interest_calculator_instance: InterestCalculator | None = None
-        self._chatter: SupportsRequestCreation | None = None
-
-    # ── 公开入口 ──────────────────────────────────────────────
 
     async def decide(
         self,
@@ -51,12 +50,12 @@ class InterestGate:
         history_text: str = "",
         decision_history: list[SubAgentDecision] | None = None,
     ) -> SubAgentDecision:
-        """子代理决策：判断是否需要响应未读消息。
+        """判断当前未读消息是否需要响应。
 
         支持三种过滤模式：
-        - sub_only: 沿用现有 sub-agent 逻辑（程序化概率门 + LLM 决策）
-        - interest_only: 纯兴趣值判断，达标则直接放行
-        - interest_then_sub: 先兴趣值初筛，达标后通过 sub-agent 判断
+        - sub_only: 程序化概率门和 LLM 决策
+        - interest_only: 兴趣值判断
+        - interest_then_sub: 兴趣值初筛后执行 LLM 决策
 
         Args:
             unreads_text: 格式化后的未读消息文本
@@ -74,7 +73,6 @@ class InterestGate:
                 "should_respond": True,
             }
 
-        # 检查上次是否有回复发送成功，如果有则重置兴趣值 boost 状态
         if getattr(chat_stream.context, "_interest_reply_sent", False):
             setattr(chat_stream.context, "_interest_reply_sent", False)
             calculator = await self._get_interest_calculator()
@@ -85,11 +83,15 @@ class InterestGate:
         filter_mode = self._get_filter_mode()
         decision: SubAgentDecision
 
-        # 程序化概率门：所有模式共用的第一道快速过滤
         plugin_config = self._get_plugin_config()
-        if self._is_programmatic_controller_enabled():
+        if (
+            plugin_config is not None
+            and plugin_config.plugin.enable_programmatic_controller
+        ):
             bypassed, bypass_reason = should_bypass_via_probability(
-                unread_msgs, chat_stream, plugin_config
+                unread_msgs,
+                chat_stream,
+                plugin_config,
             )
             if bypassed:
                 return {
@@ -114,13 +116,10 @@ class InterestGate:
                     unreads_text, chat_stream, history_text, decision_history
                 )
         else:
-            # sub_only 模式（默认）
             decision = await self._sub_agent_with_context(
                 unreads_text, chat_stream, history_text, decision_history
             )
 
-        # 仅在不回复时更新兴趣值状态（消耗 boost）
-        # 回复后的 boost 重置在 send_text 成功时触发，避免过早重置被后续 False 消耗
         if not decision.get("should_respond", False):
             calculator = await self._get_interest_calculator()
             if calculator is not None:
@@ -130,8 +129,6 @@ class InterestGate:
                 )
 
         return decision
-
-    # ── 配置读取 ──────────────────────────────────────────────
 
     def _get_plugin_config(self) -> DefaultChatterConfig | None:
         """获取插件配置，类型不匹配时返回 None。"""
@@ -151,21 +148,12 @@ class InterestGate:
         except ValueError:
             return FilterMode.SUB_ONLY
 
-    def _is_programmatic_controller_enabled(self) -> bool:
-        """读取程序化控制器开关。"""
-        plugin_config = getattr(self._plugin, "config", None)
-        return not isinstance(plugin_config, DefaultChatterConfig) or bool(
-            plugin_config.plugin.enable_programmatic_controller
-        )
-
     def _is_sub_agent_context_enabled(self) -> bool:
         """读取 sub-agent 上下文感知开关。"""
         plugin_config = self._get_plugin_config()
         if plugin_config is None:
             return True
         return bool(getattr(plugin_config.plugin, "enable_sub_agent_context", True))
-
-    # ── 兴趣值判定 ────────────────────────────────────────────
 
     async def _interest_only_decision(
         self,
@@ -198,7 +186,7 @@ class InterestGate:
         self,
         unread_msgs: list[Message],
         chat_stream: ChatStream,
-    ) -> tuple[Any | None, str]:
+    ) -> tuple[InterestResult | None, str]:
         """兴趣值初筛：检查是否有消息达到回复阈值。
 
         Args:
@@ -213,11 +201,10 @@ class InterestGate:
             logger.debug("[兴趣值] 计算器未初始化，跳过兴趣值筛选")
             return None, ""
 
-        # 批次内只计算一次阈值调整，避免每条消息重复调用
-        thresholds = calculator._apply_threshold_adjustment(chat_stream.stream_id)
+        thresholds = calculator.get_adjusted_thresholds(chat_stream.stream_id)
 
-        max_result: Any | None = None
-        all_results: list[Any] = []
+        max_result: InterestResult | None = None
+        all_results: list[InterestResult] = []
         for msg in unread_msgs:
             try:
                 result = await calculator.calculate(
@@ -250,8 +237,8 @@ class InterestGate:
 
     @staticmethod
     def _build_interest_stats(
-        results: list[Any],
-        max_result: Any | None,
+        results: list[InterestResult],
+        max_result: InterestResult | None,
         reply_threshold: float,
     ) -> str:
         """构建兴趣值批次统计摘要字符串。
@@ -280,23 +267,18 @@ class InterestGate:
 
         return f"{len(results)}条 avg={avg_value:.2f} 阈值={reply_threshold:.2f}"
 
-    # ── 兴趣值计算器管理 ──────────────────────────────────────
-
     async def _get_interest_calculator(self) -> InterestCalculator | None:
         """获取兴趣值计算器实例（惰性初始化，异步加载语义评分器）。"""
-        if hasattr(self, "_interest_calculator_instance"):
-            cached = self._interest_calculator_instance
-            if cached is not None:
-                if cached._semantic_scorer is not None:
-                    return cached
-                # 评分器未加载，检查模型是否已由后台训练生成
-                model_path = Path(
-                    "data/semantic_interest/models/semantic_interest_latest.pkl"
-                )
-                if not model_path.exists():
-                    return cached
-                logger.info("[兴趣值] 检测到模型文件已生成，重新加载语义评分器")
-            # cached is None 或模型已出现，继续重新初始化
+        cached = self._interest_calculator_instance
+        if cached is not None:
+            if cached.has_semantic_scorer:
+                return cached
+            model_path = Path(
+                "data/semantic_interest/models/semantic_interest_latest.pkl"
+            )
+            if not model_path.exists():
+                return cached
+            logger.info("[兴趣值] 检测到模型文件已生成，重新加载语义评分器")
 
         plugin_config = self._get_plugin_config()
         if plugin_config is None:
@@ -349,8 +331,6 @@ class InterestGate:
             logger.warning(f"[语义评分] 加载失败: {e}")
             return None
 
-    # ── LLM sub-agent 决策 ────────────────────────────────────
-
     async def _sub_agent_with_context(
         self,
         unreads_text: str,
@@ -374,10 +354,8 @@ class InterestGate:
         effective_history = history_text if enable_context else ""
         effective_decisions = decision_history if enable_context else None
 
-        # chatter 引用由调用方（DefaultChatter）在初始化时注入
-        assert self._chatter is not None, "InterestGate._chatter 未注入"
         return await decide_should_respond(
-            chatter=self._chatter,
+            chatter=self._request_runtime,
             logger=logger,
             unreads_text=unreads_text,
             chat_stream=chat_stream,

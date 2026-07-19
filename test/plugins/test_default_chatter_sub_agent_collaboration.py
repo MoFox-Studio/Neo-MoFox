@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 from unittest.mock import AsyncMock
 
 import pytest
 
+from plugins.default_chatter.config import DefaultChatterConfig
 from plugins.default_chatter.plugin import DefaultChatter
 from plugins.default_chatter.sub_agent_collaboration import (
     FIXED_SUB_AGENT_SYSTEM_PROMPT,
@@ -16,10 +17,11 @@ from plugins.default_chatter.sub_agent_collaboration import (
     SubAgentSession,
     _print_sub_agent_decision_panel,
 )
+from plugins.default_chatter.sub_agent_management import CreateAgentUsable
 from plugins.default_chatter.tool_flow import ToolCallOutcome
 from src.core.components.base.tool import BaseTool
 from src.core.prompt import get_system_reminder_store, reset_system_reminder_store
-from src.kernel.llm import ROLE
+from src.kernel.llm import LLMRequest, ROLE
 
 
 @pytest.fixture(autouse=True)
@@ -157,8 +159,8 @@ async def test_inject_usables_hides_deferred_mcp_and_exposes_management_tools(
 ) -> None:
     """启用子代理协作后，仅 defer_loading 的 MCP 工具不应直接暴露。"""
     plugin = MagicMock()
-    plugin.config = SimpleNamespace(
-        plugin=SimpleNamespace(enable_sub_agent_collaboration=True)
+    plugin.config = DefaultChatterConfig.from_dict(
+        {"plugin": {"enable_sub_agent_collaboration": True}}
     )
     chatter = DefaultChatter("stream-1", plugin)
     request = _FakeRequest()
@@ -172,11 +174,11 @@ async def test_inject_usables_hides_deferred_mcp_and_exposes_management_tools(
     monkeypatch.setattr(chatter, "get_llm_usables", _fake_get_llm_usables)
     monkeypatch.setattr(chatter, "modify_llm_usables", _fake_modify_llm_usables)
     monkeypatch.setattr(
-        "plugins.default_chatter.usable_resolver.get_deferred_mcp_usable_classes",
+        "plugins.default_chatter.sub_agent_management.get_deferred_mcp_usable_classes",
         lambda: {_MCPTool},
     )
 
-    registry = await chatter.inject_usables(request)
+    registry = await chatter.inject_usables(cast(LLMRequest, request))
     tool_names = sorted(registry.get_all_names())
     payload = request.payloads[0]
 
@@ -194,8 +196,8 @@ async def test_inject_usables_keeps_non_deferred_mcp_visible(
 ) -> None:
     """未标记 defer_loading 的 MCP 工具应继续直接暴露给主 actor。"""
     plugin = MagicMock()
-    plugin.config = SimpleNamespace(
-        plugin=SimpleNamespace(enable_sub_agent_collaboration=True)
+    plugin.config = DefaultChatterConfig.from_dict(
+        {"plugin": {"enable_sub_agent_collaboration": True}}
     )
     chatter = DefaultChatter("stream-1", plugin)
     request = _FakeRequest()
@@ -209,11 +211,11 @@ async def test_inject_usables_keeps_non_deferred_mcp_visible(
     monkeypatch.setattr(chatter, "get_llm_usables", _fake_get_llm_usables)
     monkeypatch.setattr(chatter, "modify_llm_usables", _fake_modify_llm_usables)
     monkeypatch.setattr(
-        "plugins.default_chatter.usable_resolver.get_deferred_mcp_usable_classes",
+        "plugins.default_chatter.sub_agent_management.get_deferred_mcp_usable_classes",
         lambda: set(),
     )
 
-    registry = await chatter.inject_usables(request)
+    registry = await chatter.inject_usables(cast(LLMRequest, request))
 
     assert "tool-mcp-demo-lookup" in sorted(registry.get_all_names())
 
@@ -287,10 +289,62 @@ def test_sub_agent_manager_uses_configured_task_name() -> None:
         allowed_mcp_names=[],
         allow_create_sub_agent=False,
         enable_action_suspend=True,
+        task_name="sub_agent_actor",
     )
 
     assert create_request_calls[0][0][0] == "sub_agent_actor"
     assert create_request_calls[0][1]["request_name"] == "sub_agent:worker"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_usable_fails_without_active_chatter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """会话流没有活跃 Chatter 时返回明确错误。"""
+    monkeypatch.setattr(
+        "plugins.default_chatter.sub_agent_management.get_chatter_by_stream",
+        lambda _stream_id: None,
+    )
+    usable = CreateAgentUsable("stream-1", MagicMock())
+
+    success, detail = await usable.execute(name="worker", system_prompt="处理任务")
+
+    assert success is False
+    assert detail == {
+        "error": "当前会话流没有活跃的 default_chatter",
+        "name": "worker",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_agent_usable_uses_active_chatter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """子代理管理组件使用当前会话流的活跃 Chatter。"""
+    plugin = MagicMock()
+    chatter = DefaultChatter("stream-1", plugin)
+    create_mock = AsyncMock(return_value=(True, {"name": "worker"}))
+    monkeypatch.setattr(
+        "plugins.default_chatter.sub_agent_management.get_chatter_by_stream",
+        lambda stream_id: chatter if stream_id == "stream-1" else None,
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.sub_agent_management.create_managed_sub_agent",
+        create_mock,
+    )
+
+    usable = CreateAgentUsable("stream-1", plugin)
+    result = await usable.execute(name="worker", system_prompt="处理任务")
+
+    assert result == (True, {"name": "worker"})
+    create_mock.assert_awaited_once_with(
+        chatter,
+        name="worker",
+        system_prompt="处理任务",
+        tools=[],
+        mcp=[],
+        allow_create_sub_agent=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -379,7 +433,10 @@ async def test_sub_agent_manager_get_agent_runs_one_round(
         "user",
         "assistant",
     ]
-    reminder_text = get_system_reminder_store().get("actor", ["sub_agent_activity"])
+    reminder_text = get_system_reminder_store().get(
+        f"stream:{chatter.stream_id}:actor",
+        ["sub_agent_activity"],
+    )
     assert reminder_text == ""
     completed_events = manager.drain_completed_events("stream-1")
     assert [event["content"] for event in completed_events][-2:] == [
@@ -535,10 +592,10 @@ async def test_sub_agent_tool_calls_use_synthetic_trigger_message_when_stream_ha
 
 
 @pytest.mark.asyncio
-async def test_sub_agent_follow_up_is_no_longer_capped_at_twelve_rounds(
+async def test_sub_agent_follow_up_continues_until_completion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """子代理连续 follow-up 超过 12 轮后仍应继续，直到真实完成。"""
+    """子代理持续处理工具结果，直到返回无工具调用的完成响应。"""
     plugin = MagicMock()
     plugin.config = SimpleNamespace(
         plugin=SimpleNamespace(enable_sub_agent_collaboration=True)

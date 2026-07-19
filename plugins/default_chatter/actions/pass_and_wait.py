@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.core.components.base.action import BaseAction
+from src.app.plugin_system.base import BaseAction
 
 
 class PassAndWaitAction(BaseAction):

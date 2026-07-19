@@ -8,20 +8,13 @@
 from __future__ import annotations
 
 import random
-from typing import cast
 
+from src.app.plugin_system.types import ChatStream, Message
 from src.core.config import get_core_config
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
 
 from .config import DefaultChatterConfig
 
-# chat_stream.context 属性名，存储下一次 sub-agent 判定的概率加成
 _SUB_AGENT_NEXT_TICK_BONUS_ATTR = "_default_chatter_next_tick_bonus"
-
-# 打字延迟参数（供 SendTextAction 使用）
-_SEND_TEXT_TYPING_DELAY_PER_CHAR = 0.5
-_SEND_TEXT_TYPING_DELAY_MAX_SECONDS = 10.0
 
 
 def set_next_tick_sub_agent_bonus(chat_stream: ChatStream, bonus: float) -> None:
@@ -166,14 +159,14 @@ def messages_contain_strong_mention(unread_msgs: list[Message], bot_id: str) -> 
 def compute_sub_agent_bypass_probability(
     unread_msgs: list[Message],
     chat_stream: ChatStream,
-    plugin_config: DefaultChatterConfig | None,
+    plugin_config: DefaultChatterConfig,
 ) -> tuple[float, str]:
     """计算本地概率直通 sub-agent 的放行概率。
 
     Args:
         unread_msgs: 未读消息列表
         chat_stream: 当前聊天流
-        plugin_config: 插件配置，为 None 时使用默认值
+        plugin_config: 插件配置
 
     Returns:
         (概率值 0~1, 概率构成描述)
@@ -181,9 +174,7 @@ def compute_sub_agent_bypass_probability(
     nickname, alias_names = get_sub_agent_identity_names(chat_stream)
     bot_id = chat_stream.bot_id or ""
 
-    prob_cfg = cast(
-        DefaultChatterConfig, plugin_config
-    ).plugin.programmatic_probability
+    prob_cfg = plugin_config.plugin.programmatic_probability
 
     base_prob = prob_cfg.base_bypass_probability
     name_bonus = prob_cfg.name_mention_bonus
@@ -226,7 +217,7 @@ def compute_sub_agent_bypass_probability(
 def should_bypass_via_probability(
     unread_msgs: list[Message],
     chat_stream: ChatStream,
-    plugin_config: DefaultChatterConfig | None,
+    plugin_config: DefaultChatterConfig,
 ) -> tuple[bool, str]:
     """概率门判定：是否直接放行（跳过 sub-agent LLM 决策）。
 

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json_repair
 
+from src.app.plugin_system.api.llm_api import LLMRequest
+from src.app.plugin_system.api.log_api import Logger
+from src.app.plugin_system.types import ChatStream, LLMPayload, ROLE, Text
 from src.core.config import get_core_config
-from src.core.models.stream import ChatStream
 from src.core.prompt import get_prompt_manager
-from src.kernel.logger import Logger
-from src.kernel.llm import LLMPayload, ROLE, Text
-from src.kernel.llm import LLMRequest
 from src.kernel.llm.token_counter import count_text_tokens
 
 from .type_defs import SubAgentDecision, SupportsRequestCreation

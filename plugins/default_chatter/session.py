@@ -7,10 +7,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, TypeGuard
 
-from src.core.components.base import Failure, Stop, Wait, WaitResumeEvent
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
-from src.kernel.llm import LLMPayload, ROLE, Text
+from src.app.plugin_system.api import event_api, stream_api
+from src.app.plugin_system.base import Failure, Stop, Wait, WaitResumeEvent
+from src.app.plugin_system.types import ChatStream, EventType, LLMPayload, Message, ROLE, Text
 
 from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
 from .type_defs import (
@@ -133,10 +132,7 @@ async def _request_internal_context(
     event: WaitResumeEvent,
 ) -> tuple[str, list[str]]:
     """从事件总线请求插件提供的内部上下文。"""
-    from src.core.components.types import EventType
-    from src.core.managers.event_manager import get_event_manager
-
-    result = await get_event_manager().publish_event(
+    result = await event_api.publish_event(
         EventType.ON_INTERNAL_CONTEXT_REQUESTED,
         {
             "stream_id": stream_id,
@@ -312,7 +308,7 @@ def _transition(
 
 @dataclass(slots=True)
 class DefaultChatterSession:
-    """Default Chatter 会话核心，封装了一个聊天会话的完整运行时状态和执行逻辑。通过组合不同的适配器和配置选项，可以支持多种聊天场景和定制化需求。"""
+    """维护单次聊天会话状态并执行消息、模型和工具控制流。"""
 
     stream_id: str
     options: DefaultChatterSessionOptions
@@ -338,9 +334,8 @@ class DefaultChatterSession:
         )
 
     async def execute(self) -> AsyncGenerator[DefaultChatterResult, DefaultChatterResumeEvent]:
-        from src.core.managers.stream_manager import get_stream_manager
-
-        chat_stream = await get_stream_manager().activate_stream(self.stream_id)
+        """激活聊天流并执行会话控制流。"""
+        chat_stream = await stream_api.activate_stream(self.stream_id)
         if chat_stream is None:
             self.logger.error(f"无法激活聊天流: {self.stream_id}")
             yield Failure("无法激活聊天流")

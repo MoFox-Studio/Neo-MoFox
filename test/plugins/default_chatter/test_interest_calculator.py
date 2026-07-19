@@ -13,7 +13,6 @@ from src.core.models.stream import ChatStream
 from plugins.default_chatter.interest_calculator import (
     InterestCalculator,
     InterestConfig,
-    InterestResult,
     StreamInterestState,
 )
 

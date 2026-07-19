@@ -14,9 +14,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.app.plugin_system.api.log_api import get_logger
+from src.app.plugin_system.types import ChatStream, Message
 from src.core.config import get_core_config
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
 
 from .semantic_interest.runtime_scorer import SemanticInterestScorer
 
@@ -96,6 +95,22 @@ class InterestCalculator:
             f"权重=语义{self.config.semantic_weight:.1f}+提及{self.config.mentioned_weight:.1f}, "
             f"回复阈值={self.config.reply_threshold}"
         )
+
+    @property
+    def has_semantic_scorer(self) -> bool:
+        """返回语义评分器是否已加载。"""
+        return self._semantic_scorer is not None
+
+    def get_adjusted_thresholds(self, stream_id: str) -> tuple[float, float]:
+        """返回指定会话流当前使用的回复阈值和动作阈值。
+
+        Args:
+            stream_id: 会话流 ID
+
+        Returns:
+            调整后的回复阈值和动作阈值
+        """
+        return self._apply_threshold_adjustment(stream_id)
 
     def get_stream_state(self, stream_id: str) -> StreamInterestState:
         """获取指定 stream 的兴趣值状态。

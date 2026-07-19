@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
+from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_section
 
 
 class DefaultChatterConfig(BaseConfig):
@@ -63,7 +63,7 @@ class DefaultChatterConfig(BaseConfig):
             description="是否启用 sub-agent 的程序化控制器。开启后会先按本地概率规则判断是否直接响应，关闭后始终交由 LLM sub-agent 决策。",
             label="启用程序化控制器",
             tag="ai",
-            hint="关闭后群聊消息将始终经过 LLM sub-agent 过滤，不再使用本地概率直通逻辑"
+            hint="关闭后群聊消息始终经过 LLM sub-agent 过滤"
         )
         enable_action_suspend: bool = Field(
             default=True,
@@ -89,10 +89,10 @@ class DefaultChatterConfig(BaseConfig):
 
         filter_mode: str = Field(
             default="sub_only",
-            description="消息过滤模式：sub_only=仅 sub-agent（现有逻辑），interest_only=仅兴趣值，interest_then_sub=兴趣值+sub-agent",
+            description="消息过滤模式：sub_only=仅 sub-agent，interest_only=仅兴趣值，interest_then_sub=兴趣值初筛后执行 sub-agent",
             label="过滤模式",
             tag="ai",
-            hint="sub_only 保持现有行为不变；interest_only 纯兴趣值判断；interest_then_sub 先兴趣值初筛再 sub-agent"
+            hint="选择群聊消息的响应决策流程"
         )
         enable_sub_agent_context: bool = Field(
             default=True,

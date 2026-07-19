@@ -1,28 +1,16 @@
-"""DefaultChatter 原生多模态辅助模块。
-
-提供与 KFC 多模态相同语义的图片提取与 LLM 内容拼装能力，但默认仅
-处理 ``image`` 类型；表情包仍交由框架的 VLM 走文字描述路径，以利用
-其哈希缓存。
-
-模块保持纯函数形态，不依赖运行时单例，便于单测覆盖。
-"""
+"""Default Chatter 图片提取与多模态内容构建函数。"""
 
 from __future__ import annotations
 
 from typing import Any
 
-from src.core.models.message import Message
-from src.kernel.llm import Content, Image, Text
-from src.kernel.llm.payload.tooling import LLMUsable
+from src.app.plugin_system.types import Content, Image, LLMUsable, Message, Text
 
 _IMAGE_PLACEHOLDER = "[图片]"
 
 
 def get_image_media_list(msg: Message) -> list[dict[str, Any]]:
-    """从 ``Message`` 中提取仅包含 ``image`` 类型的媒体列表。
-
-    DFC 多模态模式下，表情包继续走 VLM 文字描述（受益于哈希缓存），
-    因此这里显式过滤掉 ``emoji`` / ``voice`` 等非图片类型。
+    """从消息中提取包含原始数据的图片媒体。
 
     Args:
         msg: 消息对象
@@ -113,17 +101,11 @@ def inline_images_into_text(
     if remaining:
         content_list.append(Text(remaining))
 
-    # 多余的图片追加到末尾
     while img_idx < len(images):
         content_list.append(Image(str(images[img_idx]["data"])))
         img_idx += 1
 
     return content_list
-
-
-# ──────────────────────────────────────────
-# 内部辅助
-# ──────────────────────────────────────────
 
 
 def _extract_dict_list(raw: Any) -> list[dict[str, Any]] | None:
@@ -134,16 +116,7 @@ def _extract_dict_list(raw: Any) -> list[dict[str, Any]] | None:
 
 
 def _read_raw_media(msg: Message) -> list[dict[str, Any]]:
-    """读取消息中尚未被剥离 base64 的原始 media 列表。
-
-    按优先级依次检查三个候选位置：
-    1. ``msg.content["media"]`` — 要求至少一项含 ``data`` 字段（完整媒体）
-    2. ``msg.extra["media"]`` — 非空列表即可
-    3. ``msg.media`` 属性 — 非空列表即可
-
-    stream_manager 持久化时会剔除超大 ``data``，此处仅在 Chatter 运行期
-    内使用，因此能拿到完整字节。
-    """
+    """按 content、extra 的顺序读取消息原始媒体列表。"""
     content = msg.content
     if isinstance(content, dict):
         items = _extract_dict_list(content.get("media"))

@@ -1,25 +1,24 @@
-"""Service 工作流，提供创建可重用聊天核心会话的工厂方法。"""
+"""Default Chatter 会话工厂。"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.core.components.base.service import BaseService
+from src.app.plugin_system.base import BaseService
 
 from .config import DefaultChatterConfig
 from .session import DefaultChatterSession
 from .type_defs import DefaultChatterSessionAdapters, DefaultChatterSessionOptions
 
 if TYPE_CHECKING:
-    from src.core.components.base.chatter import BaseChatter
-    from src.core.components.base.plugin import BasePlugin
+    from src.app.plugin_system.base import BaseChatter, BasePlugin
 
 logger = get_logger("default_chatter")
 
 
 class DefaultChatterService(BaseService):
-    """Default Chatter Service 提供创建可重用聊天核心会话的工厂方法，允许插件开发者轻松集成和定制聊天核心功能。"""
+    """创建使用默认运行时或自定义适配器的聊天会话。"""
 
     service_name = "chat_core"
     service_description = "Default Chatter 会话工厂和可重用聊天核心"
@@ -32,7 +31,7 @@ class DefaultChatterService(BaseService):
         options: DefaultChatterSessionOptions | None = None,
         adapters: DefaultChatterSessionAdapters | None = None,
     ) -> DefaultChatterSession:
-        """创建一个会话，可以使用自定义适配器或默认框架适配器。"""
+        """创建聊天会话；未提供适配器时使用默认运行时适配器。"""
         resolved_options = options or self._build_default_options(self.plugin)
         if adapters is None:
             return self.create_default_session(
@@ -56,7 +55,7 @@ class DefaultChatterService(BaseService):
         chatter: "BaseChatter | None" = None,
         options: DefaultChatterSessionOptions | None = None,
     ) -> DefaultChatterSession:
-        """创建一个由框架默认 chatter 运行时支持的会话。"""
+        """创建由 DefaultChatter 运行时提供适配器的会话。"""
         runtime = chatter
         if runtime is None:
             from .plugin import DefaultChatter

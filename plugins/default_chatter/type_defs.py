@@ -7,11 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Literal, NotRequired, Protocol, TypedDict, TypeAlias
 
-from src.core.components.base import Failure, Stop, Success, Wait, WaitResumeEvent
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
-from src.kernel.llm import LLMPayload, LLMRequest, StreamEvent, ToolCall, ToolRegistry
-from src.kernel.logger import Logger
+from src.app.plugin_system.api.llm_api import LLMRequest
+from src.app.plugin_system.api.log_api import Logger
+from src.app.plugin_system.base import Failure, Stop, Success, Wait, WaitResumeEvent
+from src.app.plugin_system.types import ChatStream, LLMPayload, Message, ToolCall, ToolRegistry
+from src.kernel.llm import StreamEvent
 
 
 class FilterMode(str, Enum):
@@ -70,7 +70,7 @@ LLMConversationState: TypeAlias = LLMRequest | LLMResponseLike
 
 
 class SupportsRequestCreation(Protocol):
-    """提供创建 LLM 请求的能力，允许会话核心在需要时构建请求对象。"""
+    """定义会话创建 LLM 请求所需的接口。"""
 
     def create_request(
         self,
@@ -83,7 +83,7 @@ class SupportsRequestCreation(Protocol):
 
 
 class PromptAdapter(Protocol):
-    """Prompt 相关的钩子，用于会话核心。"""
+    """定义会话提示词构建接口。"""
 
     async def _build_system_prompt(self, chat_stream: ChatStream) -> str:
         ...
@@ -105,7 +105,7 @@ class PromptAdapter(Protocol):
 
 
 class UnreadAdapter(Protocol):
-    """未读消息相关的钩子，用于会话核心处理未读消息的获取、格式化和状态更新。"""
+    """定义未读消息读取、格式化、合并和提交接口。"""
 
     async def fetch_unreads(
         self,
@@ -135,14 +135,14 @@ class UnreadAdapter(Protocol):
 
 
 class UsableAdapter(Protocol):
-    """Tool registry 注入钩子，用于会话核心。"""
+    """定义可调用组件注入接口。"""
 
     async def inject_usables(self, request: LLMRequest) -> ToolRegistry:
         ...
 
 
 class ToolExecutionAdapter(Protocol):
-    """工具调用执行钩子，用于会话核心处理工具调用的执行逻辑。"""
+    """定义工具调用批量执行接口。"""
 
     async def run_tool_call(
         self,
@@ -155,7 +155,7 @@ class ToolExecutionAdapter(Protocol):
 
 
 class SubAgentAdapter(Protocol):
-    """Sub-agent gate 钩子，用于会话核心处理子代理的决策逻辑。"""
+    """定义未读消息响应决策接口。"""
 
     async def sub_agent(
         self,
@@ -169,7 +169,7 @@ class SubAgentAdapter(Protocol):
 
 
 class LoggerAdapter(Protocol):
-    """日志适配器，提供日志记录和面板展示的能力，供会话核心使用。"""
+    """定义会话日志和决策面板输出接口。"""
 
     def info(self, *args: Any, **kwargs: Any) -> None:
         ...
@@ -200,7 +200,7 @@ class PlainTextResponseHandling(TypedDict):
 
 
 class PlainTextResponseAdapter(Protocol):
-    """纯文本输出补救钩子。"""
+    """定义模型直接输出纯文本时的处理接口。"""
 
     def handle_plain_text_response(
         self,
@@ -214,7 +214,7 @@ class PlainTextResponseAdapter(Protocol):
 
 @dataclass(slots=True)
 class DefaultChatterSessionAdapters:
-    """可重用聊天核心公开的显式接口。"""
+    """会话依赖的运行时适配器集合。"""
 
     request_adapter: SupportsRequestCreation
     prompt_adapter: PromptAdapter
@@ -226,9 +226,10 @@ class DefaultChatterSessionAdapters:
     plain_text_adapter: PlainTextResponseAdapter | None = None
     stream_event_observer: Callable[..., Awaitable[None]] | None = None
 
+
 @dataclass(slots=True)
 class DefaultChatterSessionOptions:
-    """可重用聊天核心公开的配置选项。"""
+    """会话执行选项。"""
 
     actor_task_name: str = "actor"
     sub_actor_task_name: str = "actor"

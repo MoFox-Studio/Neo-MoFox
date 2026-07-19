@@ -1,37 +1,35 @@
-"""DefaultChatter 插件。
-
-提供默认的聊天对话逻辑，包含三个核心 Action：
-- send_text: 发送文本消息给用户
-- pass_and_wait: 跳过本次动作，等待新消息
-- stop_conversation: 结束当前对话轮次，设置冷却时间
-
-使用 personality 配置动态构建系统提示词。
-"""
+"""默认聊天组件和插件生命周期实现。"""
 
 from __future__ import annotations
 
 from typing import Any, AsyncGenerator
 
-from src.core.components.types import ChatType
-from src.app.plugin_system.api.log_api import get_logger
-from src.core.components.base import (
+from src.app.plugin_system.api.llm_api import LLMRequest
+from src.app.plugin_system.api.log_api import Logger, get_logger
+from src.app.plugin_system.base import (
     BaseChatter,
     BasePlugin,
-    Wait,
-    WaitResumeEvent,
-    Success,
     Failure,
     Stop,
+    Success,
+    Wait,
+    WaitResumeEvent,
+    register_plugin,
 )
-from src.core.models.stream import ChatStream
-from src.core.components.loader import register_plugin
+from src.app.plugin_system.types import (
+    ChatStream,
+    ChatType,
+    Content,
+    LLMPayload,
+    LLMUsable,
+    Message,
+    ROLE,
+    Text,
+    ToolCall,
+    ToolRegistry,
+)
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
-from src.core.models.message import Message
-from src.kernel.llm import LLMPayload, ROLE, Text
-from src.kernel.llm.payload.content import Content
-from src.kernel.llm.payload.tooling import LLMUsable
-from src.kernel.logger import Logger
 
 from .actions import (
     PassAndWaitAction,
@@ -53,35 +51,17 @@ from .type_defs import (
     LLMResponseLike,
     SubAgentDecision,
 )
-from .usable_resolver import (
-    build_sub_agent_collaboration_system_extra,
-    create_managed_sub_agent as _create_managed_sub_agent,
+from .sub_agent_management import (
+    build_collaboration_system_extra,
     inject_collaboration_usables,
-    kill_managed_sub_agent as _kill_managed_sub_agent,
-    query_managed_sub_agent as _query_managed_sub_agent,
+    is_collaboration_enabled,
 )
 
 logger = get_logger("default_chatter")
 
-# 控制流标记名称，与 BaseAction.to_schema() 生成的 name 保持一致（含 action- 前缀）
-_PASS_AND_WAIT = "action-pass_and_wait"
-_STOP_CONVERSATION = "action-stop_conversation"
-
-# SUSPEND 占位符：当 LLM 本轮全部调用的都是 action 时，注入此占位防止上下文缺少 assistant 轮次
-_SUSPEND_TEXT = "__SUSPEND__"
-
 
 class DefaultChatter(BaseChatter):
-    """默认聊天组件。
-
-    实现完整的对话循环：
-    1. 构建 LLM 上下文（系统提示 + 历史消息 + 当前未读消息）
-    2. 注册所有可用的 LLMUsable 工具
-    3. 循环调用 LLM 并执行其返回的 tool calls
-    4. 根据 pass_and_wait / stop_conversation 控制对话流程
-
-    概率门和兴趣值决策分别委托给 probability_gate 和 interest_gate 模块。
-    """
+    """配置并驱动默认聊天会话。"""
 
     chatter_name: str = "default_chatter"
     chatter_description: str = "默认聊天组件，提供基础的消息处理和回复功能"
@@ -99,47 +79,16 @@ class DefaultChatter(BaseChatter):
             plugin: 插件实例
         """
         super().__init__(stream_id, plugin)
-        self._interest_gate = InterestGate(plugin)
-        self._interest_gate._chatter = self
-
-    # ── 会话选项与配置读取 ────────────────────────────────────
+        self._interest_gate = InterestGate(plugin, self)
 
     def _build_session_options(self) -> DefaultChatterSessionOptions:
-        """构造DefaultChatterSessionOptions，供会话使用。"""
+        """构建默认会话配置。"""
         return DefaultChatterService._build_default_options(self.plugin)
 
-    def _is_action_suspend_enabled(self) -> bool:
-        """读取纯 Action 回合的 SUSPEND 开关。"""
-        plugin_config = getattr(self.plugin, "config", None)
-        return not isinstance(plugin_config, DefaultChatterConfig) or bool(
-            plugin_config.plugin.enable_action_suspend
-        )
-
     def _build_negative_behaviors_extra(self) -> str:
-        """若配置启用，构建用于 user extra 板块的负面行为再次强调文本。
-
-        Returns:
-            str: 强调文本；未启用或无负面行为条目时返回空字符串
-        """
+        """构建负面行为约束文本；未启用或无内容时返回空字符串。"""
         plugin_config = getattr(self.plugin, "config", None)
         return DefaultChatterPromptBuilder.build_negative_behaviors_extra(plugin_config)
-
-    def _is_sub_agent_collaboration_enabled(self) -> bool:
-        """读取子代理协作模式开关。"""
-        plugin_config = getattr(self.plugin, "config", None)
-        plugin_section = getattr(plugin_config, "plugin", None)
-        return bool(
-            getattr(plugin_section, "enable_sub_agent_collaboration", False)
-        )
-
-    def _get_sub_agent_task_name(self) -> str:
-        """读取协作子代理使用的模型任务名。"""
-        plugin_config = getattr(self.plugin, "config", None)
-        plugin_section = getattr(plugin_config, "plugin", None)
-        task_name = str(getattr(plugin_section, "sub_agent_task_name", "actor") or "").strip()
-        return task_name or "actor"
-
-    # ── 提示词构建 ────────────────────────────────────────────
 
     async def _build_system_prompt(self, chat_stream: ChatStream) -> str:
         """构建系统提示词。"""
@@ -147,7 +96,7 @@ class DefaultChatter(BaseChatter):
         return await DefaultChatterPromptBuilder.build_system_prompt(
             plugin_config if isinstance(plugin_config, DefaultChatterConfig) else None,
             chat_stream,
-            extra=self._build_sub_agent_collaboration_system_extra(),
+            extra=build_collaboration_system_extra(self.plugin),
         )
 
     def _build_enhanced_history_text(self, chat_stream: ChatStream) -> str:
@@ -206,8 +155,6 @@ class DefaultChatter(BaseChatter):
             content_list = [Text(formatted_text)]
         response.add_payload(LLMPayload(ROLE.USER, content_list))
 
-    # ── sub-agent 决策（委托 InterestGate）──────────────────
-
     async def sub_agent(
         self,
         unreads_text: str,
@@ -216,10 +163,7 @@ class DefaultChatter(BaseChatter):
         history_text: str = "",
         decision_history: list[SubAgentDecision] | None = None,
     ) -> SubAgentDecision:
-        """子代理决策：判断是否需要响应未读消息。
-
-        委托给 InterestGate 处理三种过滤模式（sub_only / interest_only / interest_then_sub），
-        内含概率门快速过滤 + 兴趣值判定 + LLM sub-agent 决策。
+        """判断当前未读消息是否需要响应。
 
         Args:
             unreads_text: 格式化后的未读消息文本
@@ -229,7 +173,7 @@ class DefaultChatter(BaseChatter):
             decision_history: 之前的决策记录列表
 
         Returns:
-            dict: 包含 should_respond (bool) 和 reason (str)
+            响应决策
         """
         return await self._interest_gate.decide(
             unreads_text=unreads_text,
@@ -239,20 +183,10 @@ class DefaultChatter(BaseChatter):
             decision_history=decision_history,
         )
 
-    # ── 执行入口 ──────────────────────────────────────────────
-
     async def execute(
         self,
     ) -> AsyncGenerator[Wait | Success | Failure | Stop, WaitResumeEvent | None]:
-        """执行聊天器的对话循环。
-
-        一轮对话包含完整的上下文消息（系统提示 + 历史 + 未读 + LLM call history）。
-        新的 LLM 交互记录会不断追加到上下文中。当 stop_conversation 被调用后，
-        本轮对话结束，下次触发将使用全新的上下文。
-
-        Yields:
-            Wait | Success | Failure | Stop: 执行结果
-        """
+        """创建会话并转发其等待、成功、失败和停止结果。"""
         service = DefaultChatterService(self.plugin)
         session = service.create_default_session(
             stream_id=self.stream_id,
@@ -272,9 +206,9 @@ class DefaultChatter(BaseChatter):
 
     async def run_tool_call(
         self,
-        calls,
+        calls: list[ToolCall],
         response: LLMResponseLike,
-        usable_map,
+        usable_map: ToolRegistry,
         trigger_msg: Message | None,
     ) -> list[tuple[bool, bool]]:
         """执行一次响应中的一批普通工具调用并写回响应上下文。
@@ -291,58 +225,11 @@ class DefaultChatter(BaseChatter):
         """
         return await super().run_tool_call(calls, response, usable_map, trigger_msg)
 
-    # ── 子代理协作模式（委托 usable_resolver）──────────────────
-
-    def _build_sub_agent_collaboration_system_extra(self) -> str:
-        """构建子代理协作模式下追加到系统提示词的额外说明。"""
-        return build_sub_agent_collaboration_system_extra(self)
-
-    async def inject_usables(self, request) -> Any:
-        """按模式注入可用工具；子代理协作开启时隐藏 defer_loading 的 MCP 工具。"""
-        if not self._is_sub_agent_collaboration_enabled():
+    async def inject_usables(self, request: LLMRequest) -> ToolRegistry:
+        """向请求注入当前模式允许使用的组件。"""
+        if not is_collaboration_enabled(self.plugin):
             return await super().inject_usables(request)
         return await inject_collaboration_usables(self, request)
-
-    async def create_managed_sub_agent(
-        self,
-        *,
-        name: str,
-        system_prompt: str,
-        tools: list[str],
-        mcp: list[str],
-        allow_create_sub_agent: bool,
-    ) -> tuple[bool, dict[str, Any]]:
-        """创建一个受管子代理。"""
-        return await _create_managed_sub_agent(
-            self,
-            name=name,
-            system_prompt=system_prompt,
-            tools=tools,
-            mcp=mcp,
-            allow_create_sub_agent=allow_create_sub_agent,
-        )
-
-    async def query_managed_sub_agent(
-        self,
-        *,
-        name: str,
-        message_limit: int,
-        question: str,
-    ) -> tuple[bool, dict[str, Any]]:
-        """查询或驱动一个受管子代理。"""
-        return await _query_managed_sub_agent(
-            self,
-            name=name,
-            message_limit=message_limit,
-            question=question,
-        )
-
-    async def kill_managed_sub_agent(self, *, name: str) -> tuple[bool, dict[str, Any]]:
-        """销毁一个受管子代理。"""
-        return _kill_managed_sub_agent(self, name=name)
-
-
-# ─── Plugin ─────────────────────────────────────────────────
 
 
 @register_plugin
@@ -433,7 +320,6 @@ class DefaultChatterPlugin(BasePlugin):
             },
         )
 
-        # 启动语义模型自动训练后台任务（仅兴趣值相关模式）
         await self._maybe_start_semantic_training()
 
     async def _maybe_start_semantic_training(self) -> None:
@@ -511,11 +397,7 @@ class DefaultChatterPlugin(BasePlugin):
             logger.error(f"[语义训练] 后台训练失败: {e}")
 
     def get_components(self) -> list[type]:
-        """获取插件内所有组件类。
-
-        Returns:
-            list[type]: 插件内所有组件类的列表
-        """
+        """返回插件注册的组件类。"""
         return [
             DefaultChatter,
             DefaultChatterService,
