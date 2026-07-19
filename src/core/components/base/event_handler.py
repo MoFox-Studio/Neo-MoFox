@@ -4,9 +4,10 @@
 EventHandler 订阅系统事件并做出响应，支持权重排序和消息拦截。
 """
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from src.core.components.base.component import BaseComponent
 from src.core.components.types import EventType
 from src.kernel.event import EventDecision
 
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
 
 
-class BaseEventHandler(ABC):
+class BaseEventHandler(BaseComponent):
     """事件处理器组件基类。
 
     EventHandler 订阅系统事件并在事件触发时执行响应逻辑。
@@ -22,15 +23,15 @@ class BaseEventHandler(ABC):
 
     Class Attributes:
         plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
-        handler_name: 处理器名称
-        handler_description: 处理器描述
+        name: 处理器名称
+        description: 处理器描述
         weight: 处理器权重（影响执行顺序，数值越大优先级越高）
         intercept_message: 是否拦截消息（拦截后消息不再传递给后续处理器）
         init_subscribe: 初始订阅的事件类型列表
 
     Examples:
         >>> class MyEventHandler(BaseEventHandler):
-        ...     handler_name = "my_handler"
+        ...     name = "my_handler"
         ...     weight = 10
         ...     intercept_message = False
         ...     init_subscribe = [EventType.MESSAGE_RECEIVED, EventType.USER_JOIN]
@@ -44,9 +45,11 @@ class BaseEventHandler(ABC):
     _plugin_: str
     _signature_: str
 
+    component_type = "event_handler"
+
     # 处理器元数据
-    handler_name: str = ""
-    handler_description: str = ""
+    name: str = ""
+    description: str = ""
 
     weight: int = 0
     intercept_message: bool = False
@@ -69,23 +72,6 @@ class BaseEventHandler(ABC):
         for event in self.init_subscribe:
             self.subscribe(event)
 
-    @classmethod
-    def get_signature(cls) -> str | None:
-        """获取事件处理器组件的唯一签名。
-
-        Returns:
-            str | None: 组件签名，格式为 "plugin_name:event_handler:handler_name"，如果还未注入插件名称则返回 None
-
-        Examples:
-            >>> signature = MyEventHandler.get_signature()
-            >>> "my_plugin:event_handler:my_handler"
-        """
-        if hasattr(cls, "_signature_") and cls._signature_:
-            return cls._signature_
-        if hasattr(cls, "_plugin_") and cls._plugin_ and cls.handler_name:
-            return f"{cls._plugin_}:event_handler:{cls.handler_name}"
-        return None
-    
     @abstractmethod
     async def execute(
         self, event_name: str, params: dict[str, Any]

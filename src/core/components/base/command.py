@@ -6,10 +6,10 @@ Command 使用 Trie 树路由系统，支持多级命令和类型提示参数解
 
 import inspect
 import shlex
-from abc import ABC
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
+from src.core.components.base.component import BaseComponent
 from src.core.components.types import ChatType, PermissionLevel
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ class CommandNode:
     description: str = ""
 
 
-class BaseCommand(ABC):
+class BaseCommand(BaseComponent):
     """命令组件基类。
 
     Command 使用 Trie 树路由系统，支持多级命令和类型提示参数解析。
@@ -42,8 +42,8 @@ class BaseCommand(ABC):
 
     Class Attributes:
         plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
-        command_name: 命令名称
-        command_description: 命令描述
+        name: 命令名称
+        description: 命令描述
         permission_level: 权限级别（默认 USER）
         associated_platforms: 关联的平台列表
         chat_type: 支持的聊天类型
@@ -51,7 +51,7 @@ class BaseCommand(ABC):
 
     Examples:
         >>> class MyCommand(BaseCommand):
-        ...     command_name = "my_command"
+        ...     name = "my_command"
         ...     command_prefix = "/"
         ...
         ...     @cmd_route("set", "seconds")
@@ -65,9 +65,11 @@ class BaseCommand(ABC):
     _plugin_: str
     _signature_: str
 
+    component_type = "command"
+
     # 命令元数据
-    command_name: str = ""
-    command_description: str = ""
+    name: str = ""
+    description: str = ""
 
     # 权限级别（默认为 USER）
     permission_level: PermissionLevel = PermissionLevel.USER
@@ -96,23 +98,6 @@ class BaseCommand(ABC):
         self._build_command_tree()
 
     @classmethod
-    def get_signature(cls) -> str | None:
-        """获取命令组件的唯一签名。
-
-        Returns:
-            str | None: 组件签名，格式为 "plugin_name:command:command_name"，如果还未注入插件名称则返回 None
-
-        Examples:
-            >>> signature = MyCommand.get_signature()
-            >>> "my_plugin:command:my_command"
-        """
-        if hasattr(cls, "_signature_") and cls._signature_:
-            return cls._signature_
-        if hasattr(cls, "_plugin_") and cls._plugin_ and cls.command_name:
-            return f"{cls._plugin_}:command:{cls.command_name}"
-        return None
-
-    @classmethod
     def match(cls, parts: list[str]) -> int:
         """匹配命令。
 
@@ -127,17 +112,17 @@ class BaseCommand(ABC):
 
         Examples:
             >>> class TimeCommand(BaseCommand):
-            ...     command_name = "time"
+            ...     name = "time"
             >>> TimeCommand.match(["time", "set"])
             1
             >>> TimeCommand.match(["other", "command"])
             0
         """
-        if not parts or not cls.command_name:
+        if not parts or not cls.name:
             return 0
 
-        # 检查第一个片段是否匹配 command_name
-        if parts[0] == cls.command_name:
+        # 检查第一个片段是否匹配 name
+        if parts[0] == cls.name:
             return 1
 
         return 0
@@ -177,7 +162,7 @@ class BaseCommand(ABC):
 
         Args:
             message_text: 已完成归一化的子路由文本。
-                该文本必须已经移除命令前缀和 command_name，例如 "set seconds 30"。
+                该文本必须已经移除命令前缀和 name，例如 "set seconds 30"。
 
         Returns:
             tuple[bool, str]: (是否成功, 返回结果/错误信息)
@@ -188,8 +173,8 @@ class BaseCommand(ABC):
             return False, "命令文本格式错误：BaseCommand.execute 只接受去掉前缀后的子路由文本"
 
         parts = message_text.split(maxsplit=1)
-        if parts and parts[0] == self.command_name:
-            return False, "命令文本格式错误：BaseCommand.execute 只接受去掉 command_name 后的子路由文本"
+        if parts and parts[0] == self.name:
+            return False, "命令文本格式错误：BaseCommand.execute 只接受去掉 name 后的子路由文本"
 
         return await self._route_and_execute(message_text)
 
@@ -358,7 +343,7 @@ class BaseCommand(ABC):
         Returns:
             tuple[bool, str]: (是否成功, 帮助文档)
         """
-        help_lines = [f"命令: {self.command_name}", f"描述: {self.command_description}"]
+        help_lines = [f"命令: {self.name}", f"描述: {self.description}"]
 
         if node.handler:
             help_lines.append(f"\n当前命令: {'/'.join(self._get_path_to_node(node))}")

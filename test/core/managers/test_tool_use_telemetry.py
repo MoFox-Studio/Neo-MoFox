@@ -21,7 +21,7 @@ from src.kernel.telemetry import (
 class _TelemetryTool(BaseTool):
     """测试用成功工具。"""
 
-    tool_name = "telemetry_tool"
+    name = "telemetry_tool"
     tool_description = "telemetry tool"
 
     async def execute(self, query: str) -> tuple[bool, str]:
@@ -32,7 +32,7 @@ class _TelemetryTool(BaseTool):
 class _FailingTool(BaseTool):
     """测试用失败工具。"""
 
-    tool_name = "failing_tool"
+    name = "failing_tool"
     tool_description = "failing tool"
 
     async def execute(self, query: str) -> tuple[bool, str]:

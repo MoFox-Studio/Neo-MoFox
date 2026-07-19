@@ -12,13 +12,14 @@ from typing import TYPE_CHECKING, Any
 from mofox_wire import AdapterBase
 from mofox_wire import CoreSink, MessageEnvelope
 
+from src.core.components.base.component import BaseComponent
 from src.kernel.concurrency import get_task_manager
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
 
 
-class BaseAdapter(AdapterBase):
+class BaseAdapter(BaseComponent, AdapterBase):
     """适配器组件基类。
 
     Adapter 负责与外部平台通信，是 Bot 与平台之间的桥梁。
@@ -29,14 +30,14 @@ class BaseAdapter(AdapterBase):
 
     Class Attributes:
         plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
-        adapter_name: 适配器名称
+        name: 适配器名称
         adapter_version: 适配器版本
-        adapter_description: 适配器描述
+        description: 适配器描述
         platform: 平台标识（如 "qq", "telegram", "discord"）
 
     Examples:
         >>> class MyAdapter(BaseAdapter):
-        ...     adapter_name = "my_adapter"
+        ...     name = "my_adapter"
         ...     adapter_version = "1.0.0"
         ...     platform = "test"
         ...
@@ -47,10 +48,12 @@ class BaseAdapter(AdapterBase):
     _plugin_: str
     _signature_: str
 
+    component_type = "adapter"
+
     # 适配器元数据
-    adapter_name: str = "unknown_adapter"
+    name: str = "unknown_adapter"
     adapter_version: str = "0.0.1"
-    adapter_description: str = "无描述"
+    description: str = "无描述"
 
     platform: str = ""
 
@@ -75,23 +78,6 @@ class BaseAdapter(AdapterBase):
         self._health_check_task_info: Any | None = None
         self._running = False
 
-    @classmethod
-    def get_signature(cls) -> str | None:
-        """获取适配器组件的唯一签名。
-
-        Returns:
-            str | None: 组件签名，格式为 "plugin_name:adapter:adapter_name"，如果还未注入插件名称则返回 None
-
-        Examples:
-            >>> signature = MyAdapter.get_signature()
-            >>> "my_plugin:adapter:my_adapter"
-        """
-        if hasattr(cls, "_signature_") and cls._signature_:
-            return cls._signature_
-        if hasattr(cls, "_plugin_") and cls._plugin_ and cls.adapter_name:
-            return f"{cls._plugin_}:adapter:{cls.adapter_name}"
-        return None
-
     async def start(self) -> None:
         """启动适配器。
 
@@ -113,7 +99,7 @@ class BaseAdapter(AdapterBase):
         tm = get_task_manager()
         self._health_check_task_info = tm.create_task(
             self._health_check_loop(),
-            name=f"{self.adapter_name}_health_check",
+            name=f"{self.name}_health_check",
             daemon=True,
         )
 
@@ -272,7 +258,7 @@ class BaseAdapter(AdapterBase):
             await super()._send_platform_message(envelope)  # type: ignore
         else:
             raise NotImplementedError(
-                f"适配器 {self.adapter_name} 未配置自动传输，必须重写 _send_platform_message 方法"
+                f"适配器 {self.name} 未配置自动传输，必须重写 _send_platform_message 方法"
             )
 
     @abstractmethod

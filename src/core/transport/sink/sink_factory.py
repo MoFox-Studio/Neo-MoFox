@@ -43,11 +43,11 @@ def create_sink_for_adapter(
     """
     if getattr(adapter, "run_in_subprocess", False):
         raise NotImplementedError(
-            f"适配器 {adapter.adapter_name} 声明 run_in_subprocess=True，但该能力已移除；"
+            f"适配器 {adapter.name} 声明 run_in_subprocess=True，但该能力已移除；"
             "请改为进程内运行或将适配器拆分为独立进程/服务。"
         )
 
-    logger.debug(f"为适配器 {adapter.adapter_name} 创建进程内 CoreSink")
+    logger.debug(f"为适配器 {adapter.name} 创建进程内 CoreSink")
     return InProcessCoreSinkImpl(message_callback)
 
 

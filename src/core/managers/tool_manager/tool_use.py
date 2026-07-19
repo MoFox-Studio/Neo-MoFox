@@ -145,7 +145,7 @@ class ToolUse:
         if self._cache_enabled:
             args_dict = kwargs.copy()
             cached_result = self._tool_history.get_cached(
-                tool_instance.tool_name,
+                tool_instance.name,
                 args_dict
             )
 
@@ -153,7 +153,7 @@ class ToolUse:
                 # 记录缓存的调用
                 execution_time = time.time() - start_time
                 self._tool_history.add_call(
-                    tool_name=tool_instance.tool_name,
+                    tool_name=tool_instance.name,
                     args=args_dict,
                     result=cached_result,
                     execution_time=execution_time,
@@ -161,14 +161,14 @@ class ToolUse:
                 )
                 await _record_tool_telemetry_event(
                     signature=signature,
-                    tool_name=tool_instance.tool_name,
+                    tool_name=tool_instance.name,
                     execution_time=execution_time,
                     cache_hit=True,
                     status="success",
                     arg_count=len(args_dict),
                     auto_reason_stripped=False,
                 )
-                logger.debug(f"工具执行缓存命中: {tool_instance.tool_name}")
+                logger.debug(f"工具执行缓存命中: {tool_instance.name}")
                 return True, cached_result
 
         # 执行 Tool
@@ -179,7 +179,7 @@ class ToolUse:
                 stripped_auto_reason = True
 
             # 记录开始执行
-            logger.debug(f"开始执行工具: {tool_instance.tool_name}, 参数: {kwargs}")
+            logger.debug(f"开始执行工具: {tool_instance.name}, 参数: {kwargs}")
 
             # 触发工具调用执行前事件
             try:
@@ -192,9 +192,9 @@ class ToolUse:
                         EventType.BEFORE_TOOL_CALL,
                         {
                             "signature": signature,
-                            "tool_name": tool_instance.tool_name,
+                            "tool_name": tool_instance.name,
                             "tool_description": getattr(
-                                tool_instance, "tool_description", ""
+                                tool_instance, "description", ""
                             ),
                             "args": dict(kwargs),
                             "message": message,
@@ -229,7 +229,7 @@ class ToolUse:
 
             # 记录到历史
             self._tool_history.add_call(
-                tool_name=tool_instance.tool_name,
+                tool_name=tool_instance.name,
                 args={k: v for k, v in kwargs.items()},
                 result=formatted_result,
                 status="success" if success else "error",
@@ -241,19 +241,19 @@ class ToolUse:
             # 如果成功且开启了缓存，则缓存结果
             if success and self._cache_enabled:
                 self._tool_history.cache_result(
-                    tool_name=tool_instance.tool_name,
+                    tool_name=tool_instance.name,
                     args={k: v for k, v in kwargs.items()},
                     result=formatted_result
                 )
-                logger.debug(f"工具结果已缓存: {tool_instance.tool_name}")
+                logger.debug(f"工具结果已缓存: {tool_instance.name}")
 
             # 记录执行完成
             status_emoji = "✅" if success else "❌"
-            logger.info(f"{status_emoji} 工具执行完成: {tool_instance.tool_name}, 耗时: {execution_time:.2f}s")
+            logger.info(f"{status_emoji} 工具执行完成: {tool_instance.name}, 耗时: {execution_time:.2f}s")
 
             await _record_tool_telemetry_event(
                 signature=signature,
-                tool_name=tool_instance.tool_name,
+                tool_name=tool_instance.name,
                 execution_time=execution_time,
                 cache_hit=False,
                 status="success" if success else "error",
@@ -273,9 +273,9 @@ class ToolUse:
                         EventType.AFTER_TOOL_CALL,
                         {
                             "signature": signature,
-                            "tool_name": tool_instance.tool_name,
+                            "tool_name": tool_instance.name,
                             "tool_description": getattr(
-                                tool_instance, "tool_description", ""
+                                tool_instance, "description", ""
                             ),
                             "args": dict(kwargs),
                             "result": result,
@@ -301,7 +301,7 @@ class ToolUse:
             error_result = {"content": f"工具执行失败: {str(e)}"}
 
             self._tool_history.add_call(
-                tool_name=tool_instance.tool_name,
+                tool_name=tool_instance.name,
                 args={k: v for k, v in kwargs.items()},
                 result=error_result,
                 status="error",
@@ -312,7 +312,7 @@ class ToolUse:
 
             await _record_tool_telemetry_event(
                 signature=signature,
-                tool_name=tool_instance.tool_name,
+                tool_name=tool_instance.name,
                 execution_time=execution_time,
                 cache_hit=False,
                 status="error",
@@ -332,9 +332,9 @@ class ToolUse:
                         EventType.ON_TOOL_CALL_FAILED,
                         {
                             "signature": signature,
-                            "tool_name": tool_instance.tool_name,
+                            "tool_name": tool_instance.name,
                             "tool_description": getattr(
-                                tool_instance, "tool_description", ""
+                                tool_instance, "description", ""
                             ),
                             "args": dict(kwargs),
                             "error": e,
@@ -348,7 +348,7 @@ class ToolUse:
                 # 事件触发失败不中断异常传播，静默降级
                 pass
 
-            logger.error(f"工具执行失败 ({tool_instance.tool_name}): {e}")
+            logger.error(f"工具执行失败 ({tool_instance.name}): {e}")
             raise RuntimeError(f"Tool 执行失败: {e}") from e
 
     def get_tool_history(self) -> "ToolHistory":

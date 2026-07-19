@@ -34,7 +34,7 @@ async def test_plugin_event_handler_receives_on_all_plugin_loaded(
     received_events: list[tuple[str, dict[str, str]]] = []
 
     class StartupHandler(BaseEventHandler):
-        handler_name = "startup"
+        name = "startup"
         init_subscribe = [EventType.ON_ALL_PLUGIN_LOADED]
 
         async def execute(
@@ -86,7 +86,7 @@ async def test_unload_plugin_removes_event_handler_subscriptions(
     call_count = 0
 
     class ShutdownHandler(BaseEventHandler):
-        handler_name = "shutdown"
+        name = "shutdown"
         init_subscribe = [EventType.ON_ALL_PLUGIN_LOADED]
 
         async def execute(

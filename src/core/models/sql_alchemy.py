@@ -233,7 +233,7 @@ class ActionRecords(Base):
     )
 
     # 动作内容
-    action_name: Mapped[str] = mapped_column(
+    name: Mapped[str] = mapped_column(
         Text,
         nullable=False,
         comment="动作名称"

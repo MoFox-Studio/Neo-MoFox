@@ -985,16 +985,16 @@ class PluginManager:
             ComponentType,
             tuple[type, str],
         ] = {
-            ComponentType.ACTION: (BaseAction, "action_name"),
-            ComponentType.AGENT: (BaseAgent, "agent_name"),
-            ComponentType.TOOL: (BaseTool, "tool_name"),
-            ComponentType.ADAPTER: (BaseAdapter, "adapter_name"),
-            ComponentType.CHATTER: (BaseChatter, "chatter_name"),
-            ComponentType.COMMAND: (BaseCommand, "command_name"),
-            ComponentType.CONFIG: (BaseConfig, "config_name"),
-            ComponentType.EVENT_HANDLER: (BaseEventHandler, "handler_name"),
-            ComponentType.SERVICE: (BaseService, "service_name"),
-            ComponentType.ROUTER: (BaseRouter, "router_name"),
+            ComponentType.ACTION: (BaseAction, "name"),
+            ComponentType.AGENT: (BaseAgent, "name"),
+            ComponentType.TOOL: (BaseTool, "name"),
+            ComponentType.ADAPTER: (BaseAdapter, "name"),
+            ComponentType.CHATTER: (BaseChatter, "name"),
+            ComponentType.COMMAND: (BaseCommand, "name"),
+            ComponentType.CONFIG: (BaseConfig, "name"),
+            ComponentType.EVENT_HANDLER: (BaseEventHandler, "name"),
+            ComponentType.SERVICE: (BaseService, "name"),
+            ComponentType.ROUTER: (BaseRouter, "name"),
         }
 
         # 检查组件类型

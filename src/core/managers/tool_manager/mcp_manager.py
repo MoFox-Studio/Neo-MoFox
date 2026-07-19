@@ -346,8 +346,8 @@ class MCPManager:
             
             for tool in result.tools:
                 adapter = MCPToolAdapter(server_name, tool, self)
-                self._adapters[adapter.tool_name] = adapter
-                logger.debug(f"发现 MCP 工具: {adapter.tool_name}")
+                self._adapters[adapter.name] = adapter
+                logger.debug(f"发现 MCP 工具: {adapter.name}")
                 
                 # 动态创建 Tool 类
                 # 使用闭包或类属性绑定 adapter
@@ -355,7 +355,7 @@ class MCPManager:
                 class DynamicMCPTool(BaseTool):
                     """动态生成的 MCP 工具代理类"""
                     plugin_name = "mcp_provider"
-                    tool_name = adapter.tool_name
+                    tool_name = adapter.name
                     tool_description = adapter.description
                     
                     # 绑定特定的 adapter 实例
@@ -375,11 +375,11 @@ class MCPManager:
                         return cls._adapter.get_schema()
 
                 # 设置类名
-                DynamicMCPTool.__name__ = f"MCPTool_{adapter.tool_name}"
+                DynamicMCPTool.__name__ = f"MCPTool_{adapter.name}"
                 
                 # 注册到全局注册表
                 # 签名格式: mcp_provider:tool:mcp-{server}-{tool}
-                signature = f"mcp_provider:{ComponentType.TOOL.value}:{adapter.tool_name}"
+                signature = f"mcp_provider:{ComponentType.TOOL.value}:{adapter.name}"
                 DynamicMCPTool._plugin_ = "mcp_provider"
                 DynamicMCPTool._signature_ = signature
                 

@@ -7,10 +7,11 @@ Agent 只能调用自身 usables 中声明的组件，不可访问全局组件�
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 import asyncio
 from typing import Annotated, Any, Callable, TYPE_CHECKING, cast
 
+from src.core.components.base.component import BaseComponent
 from src.core.components.types import ChatType
 from src.core.components.utils import (
     parse_function_signature,
@@ -56,7 +57,7 @@ def _strip_usable_prefix(name: str) -> str:
     return name
 
 
-class BaseAgent(ABC, LLMUsable):
+class BaseAgent(BaseComponent, LLMUsable):
     """Agent 组件基类。
 
     Agent 是 Chatter 的任务协助者，具备更强的任务执行能力。
@@ -64,8 +65,8 @@ class BaseAgent(ABC, LLMUsable):
     但其可调用范围严格限制为类属性 usables 中声明的组件。
 
     Class Attributes:
-        agent_name: Agent 名称
-        agent_description: Agent 描述
+        name: Agent 名称
+        description: Agent 描述
         chatter_allow: 允许调用的 Chatter 名称列表
         chat_type: 支持的聊天类型
         associated_platforms: 关联的平台列表
@@ -77,8 +78,10 @@ class BaseAgent(ABC, LLMUsable):
     _plugin_: str
     _signature_: str
 
-    agent_name: str = ""
-    agent_description: str = ""
+    component_type = "agent"
+
+    name: str = ""
+    description: str = ""
 
     chatter_allow: list[str] = []
     chat_type: ChatType = ChatType.ALL
@@ -100,26 +103,13 @@ class BaseAgent(ABC, LLMUsable):
         self.plugin = plugin
 
     @classmethod
-    def get_signature(cls) -> str | None:
-        """获取 Agent 组件的唯一签名。
-
-        Returns:
-            str | None: 组件签名，格式为 "plugin_name:agent:agent_name"
-        """
-        if hasattr(cls, "_signature_") and cls._signature_:
-            return cls._signature_
-        if hasattr(cls, "_plugin_") and cls._plugin_ and cls.agent_name:
-            return f"{cls._plugin_}:agent:{cls.agent_name}"
-        return None
-
-    @classmethod
     def validate_associated_types(cls) -> list[str]:
         """校验 Agent 组件声明的 associated_types。"""
 
         return validate_associated_types(
             cls,
             component_kind="Agent",
-            component_name_attr="agent_name",
+            component_name_attr="name",
         )
 
     @abstractmethod
@@ -148,7 +138,7 @@ class BaseAgent(ABC, LLMUsable):
     @classmethod
     def to_schema(cls) -> dict[str, Any]:
         """生成 LLM Tool Schema。"""
-        return parse_function_signature(cls.execute, f"agent-{cls.agent_name}", cls.agent_description)
+        return parse_function_signature(cls.execute, f"agent-{cls.name}", cls.description)
 
     async def go_activate(self) -> bool:
         """Agent 激活判定函数。"""
@@ -175,13 +165,13 @@ class BaseAgent(ABC, LLMUsable):
                 component_cls = registry.get(usable_ref)
                 if component_cls is None:
                     logger.warning(
-                        f"Agent '{cls.agent_name}' 引用的组件签名 '{usable_ref}' "
+                        f"Agent '{cls.name}' 引用的组件签名 '{usable_ref}' "
                         f"未在注册表中找到，跳过该 usable"
                     )
                     continue
                 if not issubclass(component_cls, LLMUsable):
                     logger.warning(
-                        f"Agent '{cls.agent_name}' 引用的组件 '{usable_ref}' "
+                        f"Agent '{cls.name}' 引用的组件 '{usable_ref}' "
                         f"不是 LLMUsable 子类，跳过该 usable"
                     )
                     continue

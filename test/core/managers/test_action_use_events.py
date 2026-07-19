@@ -20,7 +20,7 @@ from src.kernel.event import EventDecision, get_event_bus
 class _SuccessAction(BaseAction):
     """测试用成功动作。"""
 
-    action_name = "success_action"
+    name = "success_action"
     action_description = "成功动作"
 
     async def execute(self, text: str) -> tuple[bool, str]:
@@ -31,7 +31,7 @@ class _SuccessAction(BaseAction):
 class _FailingAction(BaseAction):
     """测试用失败动作。"""
 
-    action_name = "failing_action"
+    name = "failing_action"
     action_description = "失败动作"
 
     async def execute(self, text: str) -> tuple[bool, str]:
@@ -67,17 +67,17 @@ def _patch_action_manager(
 
     class _FakeRegistry:
         def get(self, signature: str) -> type[BaseAction] | None:
-            if signature == f"demo:action:{action_cls.action_name}":
+            if signature == f"demo:action:{action_cls.name}":
                 return action_cls
             return None
 
         def get_by_type(self, component_type: Any) -> dict[str, type[BaseAction]]:
-            return {f"demo:action:{action_cls.action_name}": action_cls}
+            return {f"demo:action:{action_cls.name}": action_cls}
 
         def get_by_plugin_and_type(
             self, plugin_name: str, component_type: Any
         ) -> dict[str, type[BaseAction]]:
-            return {f"demo:action:{action_cls.action_name}": action_cls}
+            return {f"demo:action:{action_cls.name}": action_cls}
 
     monkeypatch.setattr(
         "src.core.managers.action_manager.get_global_registry",

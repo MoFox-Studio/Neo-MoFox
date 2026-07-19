@@ -52,16 +52,16 @@ class _FakeRequest:
 
 
 class _RegularTool(BaseTool):
-    tool_name = "lookup"
-    tool_description = "lookup"
+    name = "lookup"
+    description = "lookup"
 
     async def execute(self, query: str) -> tuple[bool, str]:
         return True, query
 
 
 class _MCPTool(BaseTool):
-    tool_name = "mcp-demo-lookup"
-    tool_description = "mcp"
+    name = "mcp-demo-lookup"
+    description = "mcp"
     _signature_ = "mcp_provider:tool:mcp-demo-lookup"
 
     async def execute(self, query: str) -> tuple[bool, str]:

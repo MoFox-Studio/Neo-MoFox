@@ -9,11 +9,12 @@ from abc import ABC
 from pathlib import Path
 from typing import ClassVar, Self
 
+from src.core.components.base.component import BaseComponent
 from src.kernel.config import ConfigBase
 from src.kernel.config.core import config_section, Field, SectionBase
 
 
-class BaseConfig(ABC, ConfigBase):
+class BaseConfig(BaseComponent, ConfigBase):
     """插件配置基类。
 
     扩展 ConfigBase，提供插件特定的配置管理。
@@ -21,15 +22,15 @@ class BaseConfig(ABC, ConfigBase):
 
     Class Attributes:
         plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
-        config_name: 配置文件名称（不含 .toml 扩展名）
-        config_description: 配置的人类可读描述
+        name: 配置文件名称（不含 .toml 扩展名）
+        description: 配置的人类可读描述
 
     Examples:
         >>> from src.core.components.base.config import BaseConfig, config_section, Field, SectionBase
         >>>
         >>> class MyPluginConfig(BaseConfig):
-        ...     config_name: str = "config"
-        ...     config_description: str = "我的插件配置"
+        ...     name: str = "config"
+        ...     description: str = "我的插件配置"
         ...
         ...     @config_section("inner")
         ...     class InnerSection(SectionBase):
@@ -41,9 +42,11 @@ class BaseConfig(ABC, ConfigBase):
     _plugin_: ClassVar[str]
     _signature_: ClassVar[str]
 
+    component_type: ClassVar[str] = "config"
+
     # 这些属性应由子类覆盖，使用 ClassVar 避免被 Pydantic 当作字段处理
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = ""
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = ""
 
     @classmethod
     def get_default_path(cls) -> Path | None:
@@ -62,26 +65,8 @@ class BaseConfig(ABC, ConfigBase):
         # Check for _plugin_ (set by plugin manager) or plugin_name (class attribute)
         plugin_name = getattr(cls, "_plugin_", None)
         if plugin_name:
-            return Path("config") / "plugins" / plugin_name / f"{cls.config_name}.toml"
+            return Path("config") / "plugins" / plugin_name / f"{cls.name}.toml"
         return None
-
-    @classmethod
-    def get_signature(cls) -> str | None:
-        """获取配置组件的唯一签名。
-
-        Returns:
-            str | None: 组件签名，格式为 "plugin_name:config:config_name"，如果还未注入插件名称则返回 None
-
-        Examples:
-            >>> signature = MyPluginConfig.get_signature()
-            >>> "my_plugin:config:config"
-        """
-        if hasattr(cls, "_signature_") and cls._signature_:
-            return cls._signature_
-        if hasattr(cls, "_plugin_") and cls._plugin_ and cls.config_name:
-            return f"{cls._plugin_}:config:{cls.config_name}"
-        return None
-    
 
     @classmethod
     def generate_default(cls, path: str | Path | None = None) -> None:
@@ -95,7 +80,7 @@ class BaseConfig(ABC, ConfigBase):
 
         Raises:
             OSError: 如果无法写入文件
-            RuntimeError: 如果未设置 config_name
+            RuntimeError: 如果未设置 name
 
         Examples:
             >>> MyPluginConfig.generate_default()
@@ -104,8 +89,8 @@ class BaseConfig(ABC, ConfigBase):
             >>> MyPluginConfig.generate_default("custom/path/config.toml")
             >>> # 创建：custom/path/config.toml
         """
-        if not cls.config_name:
-            raise RuntimeError(f"{cls.__name__} 必须定义 config_name")
+        if not cls.name:
+            raise RuntimeError(f"{cls.__name__} 必须定义 name")
 
         if path is None:
             path = cls.get_default_path()
@@ -152,7 +137,7 @@ class BaseConfig(ABC, ConfigBase):
             >>> print(config.inner.enabled)
         """
         # 构造路径
-        config_path = Path("config") / "plugins" / plugin_name / f"{cls.config_name}.toml"
+        config_path = Path("config") / "plugins" / plugin_name / f"{cls.name}.toml"
 
         # 检查文件是否存在
         if not config_path.exists():

@@ -20,7 +20,7 @@ from src.kernel.event import EventDecision, get_event_bus
 class _SuccessTool(BaseTool):
     """测试用成功工具。"""
 
-    tool_name = "success_tool"
+    name = "success_tool"
     tool_description = "成功工具"
 
     async def execute(self, text: str) -> tuple[bool, str]:
@@ -31,7 +31,7 @@ class _SuccessTool(BaseTool):
 class _FailingTool(BaseTool):
     """测试用失败工具。"""
 
-    tool_name = "failing_tool"
+    name = "failing_tool"
     tool_description = "失败工具"
 
     async def execute(self, text: str) -> tuple[bool, str]:
@@ -65,7 +65,7 @@ def _patch_registry(monkeypatch: pytest.MonkeyPatch, tool_cls: type[BaseTool]) -
 
     class _FakeRegistry:
         def get(self, signature: str) -> type[BaseTool] | None:
-            if signature == f"demo:tool:{tool_cls.tool_name}":
+            if signature == f"demo:tool:{tool_cls.name}":
                 return tool_cls
             return None
 

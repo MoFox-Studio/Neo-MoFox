@@ -10,8 +10,8 @@ from src.core.components.types import ChatType
 class ConcreteTool(BaseTool):
     """具体的 Tool 实现用于测试。"""
 
-    tool_name = "test_tool"
-    tool_description = "A test tool"
+    name = "test_tool"
+    description = "A test tool"
     chatter_allow = []
     chat_type = ChatType.ALL
     associated_platforms = []
@@ -34,14 +34,14 @@ class TestBaseTool:
         if original_plugin_name:
             ConcreteTool._plugin_ = original_plugin_name
         elif hasattr(ConcreteTool, "_plugin_"):
-            delattr(ConcreteTool, "_plugin_")
+            ConcreteTool._plugin_ = ""
 
     def test_tool_initialization(self, mock_plugin):
         """测试 Tool 初始化。"""
         tool = ConcreteTool(mock_plugin)
         assert tool.plugin == mock_plugin
-        assert tool.tool_name == "test_tool"
-        assert tool.tool_description == "A test tool"
+        assert tool.name == "test_tool"
+        assert tool.description == "A test tool"
 
     def test_get_signature(self, mock_plugin):
         """测试获取签名。"""
@@ -68,8 +68,8 @@ class TestBaseTool:
         import asyncio
 
         class DictTool(BaseTool):
-            tool_name = "dict_tool"
-            tool_description = "Tool returning dict"
+            name = "dict_tool"
+            description = "Tool returning dict"
 
             async def execute(self, key: str) -> tuple[bool, dict]:
                 return True, {"result": f"value_for_{key}"}
@@ -85,7 +85,7 @@ class TestBaseTool:
         schema = tool.to_schema()
 
         assert schema["type"] == "function"
-        assert schema["function"]["name"] == "tool:test_tool"
+        assert schema["function"]["name"] == "tool-test_tool"
         assert schema["function"]["description"] == "A test tool"
         assert "parameters" in schema["function"]
         assert schema["function"]["parameters"]["type"] == "object"
@@ -97,8 +97,8 @@ class TestBaseTool:
         from typing import Annotated
 
         class ComplexTool(BaseTool):
-            tool_name = "complex_tool"
-            tool_description = "Tool with complex parameters"
+            name = "complex_tool"
+            description = "Tool with complex parameters"
 
             async def execute(
                 self,
@@ -128,8 +128,8 @@ class TestToolAttributes:
         from src.core.components.types import ChatType
 
         class CustomTool(BaseTool):
-            tool_name = "custom_tool"
-            tool_description = "Custom tool description"
+            name = "custom_tool"
+            description = "Custom tool description"
             chatter_allow = ["chatter1"]
             chat_type = ChatType.PRIVATE
             associated_platforms = ["telegram"]
@@ -139,8 +139,8 @@ class TestToolAttributes:
                 return True, "done"
 
         tool = CustomTool(mock_plugin)
-        assert tool.tool_name == "custom_tool"
-        assert tool.tool_description == "Custom tool description"
+        assert tool.name == "custom_tool"
+        assert tool.description == "Custom tool description"
         assert tool.chatter_allow == ["chatter1"]
         assert tool.chat_type == ChatType.PRIVATE
         assert tool.associated_platforms == ["telegram"]
@@ -152,28 +152,28 @@ class TestToolAttributes:
 
         # 分别测试每种聊天类型
         class PrivateTool(BaseTool):
-            tool_name = "tool_private"
+            name = "tool_private"
             chat_type = ChatType.PRIVATE
 
             async def execute(self) -> tuple[bool, str]:
                 return True, "done"
 
         class GroupTool(BaseTool):
-            tool_name = "tool_group"
+            name = "tool_group"
             chat_type = ChatType.GROUP
 
             async def execute(self) -> tuple[bool, str]:
                 return True, "done"
 
         class DiscussTool(BaseTool):
-            tool_name = "tool_discuss"
+            name = "tool_discuss"
             chat_type = ChatType.DISCUSS
 
             async def execute(self) -> tuple[bool, str]:
                 return True, "done"
 
         class AllTool(BaseTool):
-            tool_name = "tool_all"
+            name = "tool_all"
             chat_type = ChatType.ALL
 
             async def execute(self) -> tuple[bool, str]:

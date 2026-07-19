@@ -22,7 +22,7 @@ from src.core.managers.plugin_manager import PluginManager
 class _TestAction(BaseAction):
     """测试用的 Action 组件。"""
 
-    action_name = "test_action"
+    name = "test_action"
     associated_types = ["text"]
 
     async def execute(self, *args, **kwargs):

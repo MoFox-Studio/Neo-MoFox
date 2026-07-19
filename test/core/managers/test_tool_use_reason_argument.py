@@ -13,7 +13,7 @@ from src.core.managers.tool_manager.tool_use import ToolUse
 class ReasonAwareTool(BaseTool):
     """显式声明 reason 参数的测试工具。"""
 
-    tool_name = "reason_aware"
+    name = "reason_aware"
     tool_description = "reason-aware tool"
 
     async def execute(self, query: str, reason: str) -> tuple[bool, str]:
@@ -24,7 +24,7 @@ class ReasonAwareTool(BaseTool):
 class PlainTool(BaseTool):
     """不声明 reason 参数的测试工具。"""
 
-    tool_name = "plain_tool"
+    name = "plain_tool"
     tool_description = "plain tool"
 
     async def execute(self, query: str) -> tuple[bool, str]:
