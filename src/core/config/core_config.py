@@ -9,6 +9,7 @@ from typing import Literal
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
 
 CORE_VERSION = "1.2.0-rc.2"
+PLUGIN_API_VERSION = "1.0.0"
 
 class CoreConfig(ConfigBase):
     """Core 层配置类

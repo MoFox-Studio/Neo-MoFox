@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-from src.core.config import CORE_VERSION
+from src.core.config import CORE_VERSION, PLUGIN_API_VERSION
 from src.kernel.logger import get_logger
 
 logger = get_logger("plugin_loader")
@@ -46,7 +46,9 @@ def _split_plugin_dependency_ref(ref: str) -> tuple[str, str | None]:
         return "", None
 
     name, separator, remainder = value.partition(":")
-    if separator and remainder.lstrip().startswith(("===", "==", "!=", "~=", ">=", "<=", ">", "<")):
+    if separator and remainder.lstrip().startswith(
+        ("===", "==", "!=", "~=", ">=", "<=", ">", "<")
+    ):
         return name.strip(), remainder.strip() or None
 
     match = _PLUGIN_DEPENDENCY_PATTERN.match(value)
@@ -96,6 +98,7 @@ def _get_zip_root_prefix(zf: zipfile.ZipFile) -> str:
             return prefix
     return ""
 
+
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
     from src.core.managers import PluginManager
@@ -129,9 +132,7 @@ def register_plugin(cls: type["BasePlugin"]) -> type["BasePlugin"]:
     """
     # 检查是否定义了 plugin_name
     if not hasattr(cls, "plugin_name") or not cls.plugin_name:
-        raise ValueError(
-            f"插件类 '{cls.__name__}' 必须定义 'plugin_name' 属性"
-        )
+        raise ValueError(f"插件类 '{cls.__name__}' 必须定义 'plugin_name' 属性")
 
     plugin_name = cls.plugin_name
 
@@ -238,6 +239,7 @@ def get_registry_count() -> int:
     """
     return len(_plugin_registry)
 
+
 @dataclass
 class ComponentInclude:
     """组件包含声明。
@@ -271,7 +273,8 @@ class PluginManifest:
         dependencies: 包含 'plugins' 和 'components' 列表的字典
         include: 插件包含的组件列表及组件级依赖
         entry_point: 相对于插件根目录的 Python 入口点文件
-        min_core_version: 所需的最低核心版本
+        api_version: 插件要求的插件 API 版本（x.y.z 语义化版本），优先于 min_core_version
+        min_core_version: 所需的最低核心版本（已弃用，建议迁移到 api_version）
         python_dependencies: 插件所需的 Python 包列表（pip requirement 格式，如 "requests>=2.28"）
         dependencies_required: 若为 True，Python 依赖安装失败时跳过该插件；
             若为 False，仅发出警告，仍尝试加载
@@ -287,6 +290,7 @@ class PluginManifest:
     )
     include: list[ComponentInclude] = field(default_factory=list)
     entry_point: str = "plugin.py"
+    api_version: str = ""
     min_core_version: str = "1.0.0"
     python_dependencies: list[str] = field(default_factory=list)
     dependencies_required: bool = True
@@ -324,7 +328,9 @@ async def load_manifest(plugin_path: str) -> PluginManifest | None:
         ]
         for field_name in required_fields:
             if field_name not in manifest_data:
-                logger.error(f"manifest.json 缺少必需字段: {field_name} ({plugin_path})")
+                logger.error(
+                    f"manifest.json 缺少必需字段: {field_name} ({plugin_path})"
+                )
                 return None
 
         include_list: list[ComponentInclude] = []
@@ -346,13 +352,18 @@ async def load_manifest(plugin_path: str) -> PluginManifest | None:
             version=manifest_data["version"],
             description=manifest_data.get("description", ""),
             author=manifest_data.get("author", ""),
-            dependencies=manifest_data.get("dependencies", {"plugins": [], "components": []})
+            dependencies=manifest_data.get(
+                "dependencies", {"plugins": [], "components": []}
+            )
             or {"plugins": [], "components": []},
             include=include_list,
             entry_point=manifest_data.get("entry_point", "plugin.py"),
+            api_version=manifest_data.get("api_version", ""),
             min_core_version=manifest_data.get("min_core_version", "3.0.0"),
             python_dependencies=manifest_data.get("python_dependencies", []) or [],
-            dependencies_required=bool(manifest_data.get("dependencies_required", True)),
+            dependencies_required=bool(
+                manifest_data.get("dependencies_required", True)
+            ),
             _source_path=plugin_path,
         )
 
@@ -384,7 +395,11 @@ class PluginLoader:
             return discovered
 
         for item in sorted(plugins_path.iterdir(), key=lambda path: path.name.lower()):
-            if item.is_dir() and not item.name.startswith(".") and not item.name.startswith("__"):
+            if (
+                item.is_dir()
+                and not item.name.startswith(".")
+                and not item.name.startswith("__")
+            ):
                 manifest_path = item / "manifest.json"
                 if manifest_path.exists():
                     discovered.append(str(item))
@@ -401,43 +416,106 @@ class PluginLoader:
         logger.info(f"在 {plugins_dir} 中发现 {len(discovered)} 个插件")
         return discovered
 
-    def _check_version_compatibility(self, manifest: PluginManifest) -> bool:
-        """检查核心版本兼容性（宏观层面）。
+    def _check_version_compatibility(
+        self, manifest: PluginManifest
+    ) -> tuple[bool, str]:
+        """检查插件版本兼容性。
 
-        使用语义化版本比较，判断当前核心版本是否满足插件要求的最低版本。
-
-        Args:
-            manifest: 插件清单对象
+        优先级：
+        1. api_version（推荐）：基于 PLUGIN_API_VERSION 做语义化版本兼容检查
+        2. min_core_version（已弃用）：基于 CORE_VERSION 做简单 >= 比较
+        3. 两者均未声明：允许加载但发出警告
 
         Returns:
-            bool: 如果当前核心版本 >= 插件要求的最低版本，返回 True；否则返回 False
+            (is_compatible, reason): 兼容性结果与原因说明
         """
+        if manifest.api_version:
+            return self._check_api_version_compatibility(manifest)
+
+        if manifest.min_core_version:
+            return self._check_core_version_compatibility(manifest)
+
+        logger.warning(
+            f"插件 '{manifest.name}' 未声明 api_version 或 min_core_version，"
+            "无法保证兼容性，将尝试加载"
+        )
+        return True, "未声明版本要求，已尝试加载"
+
+    def _check_api_version_compatibility(
+        self, manifest: PluginManifest
+    ) -> tuple[bool, str]:
+        """基于 PLUGIN_API_VERSION 的语义化版本兼容检查。"""
+        try:
+            plugin_req = Version(manifest.api_version)
+            core_api = Version(PLUGIN_API_VERSION)
+        except InvalidVersion as e:
+            reason = (
+                f"版本号格式无效：api_version='{manifest.api_version}'，"
+                f"PLUGIN_API_VERSION='{PLUGIN_API_VERSION}' - {e}"
+            )
+            logger.error(f"插件 '{manifest.name}' {reason}")
+            return False, reason
+
+        if core_api.major != plugin_req.major:
+            reason = (
+                f"插件 API 主版本 ({plugin_req.major}) 与核心 API 主版本 ({core_api.major}) "
+                f"不一致，存在破坏性变更"
+            )
+            logger.warning(f"插件 '{manifest.name}' {reason}")
+            return False, reason
+
+        if core_api.minor < plugin_req.minor or (
+            core_api.minor == plugin_req.minor and core_api.micro < plugin_req.micro
+        ):
+            reason = (
+                f"核心 API 版本 {PLUGIN_API_VERSION} 低于插件要求的 "
+                f"{manifest.api_version}"
+            )
+            logger.warning(f"插件 '{manifest.name}' {reason}")
+            return False, reason
+
+        if core_api.minor > plugin_req.minor:
+            logger.warning(
+                f"插件 '{manifest.name}'：核心 API 版本 ({PLUGIN_API_VERSION}) "
+                f"高于插件要求的版本 ({manifest.api_version})，"
+                "次版本号不一致，可能存在非兼容变更"
+            )
+            return True, "次版本号不一致，可能存在非兼容变更"
+
+        return True, "兼容"
+
+    def _check_core_version_compatibility(
+        self, manifest: PluginManifest
+    ) -> tuple[bool, str]:
+        """基于 CORE_VERSION 的旧版兼容检查（已弃用，用于向后兼容）。"""
+        logger.warning(
+            f"插件 '{manifest.name}' 使用了已弃用的 min_core_version 字段，"
+            "建议迁移到 api_version"
+        )
+
         try:
             current_version = Version(CORE_VERSION)
             required_version = Version(manifest.min_core_version)
             is_compatible = current_version >= required_version
-
-            if not is_compatible:
-                logger.warning(
-                    f"插件 '{manifest.name}' 版本不兼容："
-                    f"需要核心版本 >= {manifest.min_core_version}，"
-                    f"当前核心版本为 {CORE_VERSION}"
-                )
-
-            return is_compatible
         except InvalidVersion as e:
-            logger.error(
-                f"插件 '{manifest.name}' 版本号格式无效："
-                f"min_core_version='{manifest.min_core_version}'，"
+            reason = (
+                f"版本号格式无效：min_core_version='{manifest.min_core_version}'，"
                 f"CORE_VERSION='{CORE_VERSION}' - {e}"
             )
-            # 版本格式无效时，保守策略：拒绝加载
-            return False
+            logger.error(f"插件 '{manifest.name}' {reason}")
+            return False, reason
+
+        if not is_compatible:
+            return (False, f"核心版本不兼容，需要 {manifest.min_core_version}")
+
+        return True, "兼容（基于已弃用的 min_core_version）"
 
     def _parse_plugin_ref(self, ref: str) -> str:
         return _split_plugin_dependency_ref(ref)[0]
 
-    def _matches_plugin_dependency(self, dependency_version: str, version_spec: str | None) -> bool:
+    def _matches_plugin_dependency(
+        self, dependency_version: str, version_spec: str | None
+    ) -> bool:
         """检查插件依赖版本是否满足约束。
 
         Args:
@@ -467,8 +545,9 @@ class PluginLoader:
         # 版本兼容性先筛一轮
         for name in list(loadable.keys()):
             manifest = loadable[name]
-            if not self._check_version_compatibility(manifest):
-                self._failed_plugins[name] = f"核心版本不兼容，需要 {manifest.min_core_version}"
+            compatible, reason = self._check_version_compatibility(manifest)
+            if not compatible:
+                self._failed_plugins[name] = reason
                 del loadable[name]
 
         changed = True
@@ -491,14 +570,20 @@ class PluginLoader:
                     if dependency_manifest is None:
                         missing.append(dep_name)
                         continue
-                    if not self._matches_plugin_dependency(dependency_manifest.version, version_spec):
-                        incompatible.append(f"{dep_name}{version_spec or ''} (当前 {dependency_manifest.version})")
+                    if not self._matches_plugin_dependency(
+                        dependency_manifest.version, version_spec
+                    ):
+                        incompatible.append(
+                            f"{dep_name}{version_spec or ''} (当前 {dependency_manifest.version})"
+                        )
 
                 if missing or incompatible or invalid:
                     # 依赖可能是“未发现”或“因不兼容/缺失被剔除”
                     reasons: list[str] = []
                     if missing:
-                        reasons.append("依赖插件不可用: " + ", ".join(sorted(set(missing))))
+                        reasons.append(
+                            "依赖插件不可用: " + ", ".join(sorted(set(missing)))
+                        )
                     if incompatible:
                         reasons.append("依赖插件版本不满足: " + ", ".join(incompatible))
                     if invalid:
@@ -509,7 +594,9 @@ class PluginLoader:
 
         return loadable
 
-    async def plan_plugins(self, plugins_dir: str) -> tuple[list[str], dict[str, PluginManifest]]:
+    async def plan_plugins(
+        self, plugins_dir: str
+    ) -> tuple[list[str], dict[str, PluginManifest]]:
         """构建加载计划：返回 (load_order, manifests_to_load)。"""
         self._failed_plugins.clear()
 

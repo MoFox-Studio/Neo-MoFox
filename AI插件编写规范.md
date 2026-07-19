@@ -283,7 +283,7 @@ class DemoConfig(BaseConfig):
     }
   ],
   "entry_point": "plugin.py",
-  "min_core_version": "1.0.0",
+  "api_version": "1.0.0",
   "python_dependencies": [],
   "dependencies_required": true
 }
@@ -297,6 +297,7 @@ class DemoConfig(BaseConfig):
 - `dependencies` 内的每一项都必须是完整组件签名。
 - `entry_point` 默认语义是插件根目录下的 `plugin.py`。
 - 如果声明了 `python_dependencies`，要确保运行环境可安装这些依赖。
+- `api_version` 声明插件要求的插件 API 版本，格式为 x.y.z（语义化版本）。推荐始终显式填写。
 
 ### 5.1 真实加载行为补充
 
@@ -322,12 +323,40 @@ class DemoConfig(BaseConfig):
 
 前提是该文件确实位于插件目录内部，并且相对导入关系是自洽的。
 
-#### 5.1.3 `min_core_version` 缺失时，当前 loader 的默认值不是文档示例值
+#### 5.1.3 版本兼容性声明
 
-当前 `loader.py` 在字段缺失时会回退到一个默认核心版本要求，而不是简单继承示例里的 `1.0.0`。因此：
+插件通过 `manifest.json` 中的字段声明对核心框架的版本要求。
 
-- **不要依赖缺省行为。**
-- 始终在 `manifest.json` 中显式写 `min_core_version`。
+**推荐：使用 `api_version`**
+
+`api_version` 声明插件需要的**插件 API 版本**（与 `CORE_VERSION` 独立）。格式为 `x.y.z`（语义化版本）：
+
+- **主版本号 （x）**：破坏性更新，API 签名或行为发生不可兼容的变更
+- **次版本号 （y）**：部分非兼容性更新，可能包含弃用、行为微调等
+- **小版本号 （z）**：可向下兼容的更新，仅新增可选 API 或修复问题
+
+兼容性检查规则：
+- 主版本号不一致 → **拒绝加载**（存在破坏性变更）
+- 核心 API 的次版本号低于插件要求 → **拒绝加载**（核心过旧）
+- 核心 API 的次版本号与小版本号均不低于插件要求 → **允许加载**（兼容或仅有可向下兼容的差异）
+- 核心 API 的次版本号高于插件要求 → **允许加载，但警告**（可能存在非兼容变更）
+
+```json
+"api_version": "1.0.0"
+```
+
+**已弃用：`min_core_version`**
+
+`min_core_version` 是旧字段，基于 `CORE_VERSION` 做简单的大于等于比较。由于 `CORE_VERSION` 与插件 API 版本无关，该字段已弃用。若 `api_version` 存在则优先使用；否则回退到 `min_core_version`。
+
+```json
+"min_core_version": "1.0.0"
+```
+
+**缺省行为**：
+
+- 两者均未声明时：允许加载，但输出警告，提示无法保证兼容性。
+- `min_core_version` 缺失时 loader 会回退到一个内部默认值，行为不稳定。**始终显式声明版本要求。**
 
 #### 5.1.4 `dependencies.plugins` 目前只用于插件级加载顺序
 
@@ -579,7 +608,7 @@ dependencies = ["other_plugin:service:storage"]
     }
   ],
   "entry_point": "plugin.py",
-  "min_core_version": "1.0.0",
+  "api_version": "1.0.0",
   "python_dependencies": [],
   "dependencies_required": true
 }
