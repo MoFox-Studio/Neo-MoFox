@@ -241,6 +241,24 @@ def _build_sub_agent_resume_prompt(_: WaitResumeEvent) -> str:
     )
 
 
+def _build_unknown_resume_prompt(event: WaitResumeEvent) -> str:
+    """未知 source 的通用恢复提示。
+
+    优先使用 ``extra["resume_prompt"]``，
+    否则返回基于 source 的默认文案。
+    """
+    custom = event.extra.get("resume_prompt")
+    if isinstance(custom, str) and custom.strip():
+        return custom
+    source_label = event.source or "未知来源"
+    return (
+        f"系统事件：收到来自 '{source_label}' 的恢复请求。"
+        "请基于已有上下文主动决定下一步。"
+        "如果现在无需继续处理，请调用 pass_and_wait；"
+        "如果需要继续回复、委派或执行动作，请直接使用相应工具。"
+    )
+
+
 def _build_sub_agent_result_user_prompt(events: list[dict[str, Any]]) -> str:
     lines = ["以下是子代理刚刚返回的结果，请基于这些结果继续处理："]
     for event in events:
@@ -510,6 +528,31 @@ class DefaultChatterSession:
                                 else "等待计时器到期"
                             )
                         ),
+                    )
+                    continue
+
+                if current_resume_event is not None:
+                    state.cross_round_seen_signatures.clear()
+                    state.plain_text_retry_count = 0
+                    state.used_tools_in_round.clear()
+                    state.unreads = []
+                    state.unread_msgs_to_flush = []
+
+                    reminder_text = _build_unknown_resume_prompt(current_resume_event)
+
+                    context_ids = current_resume_event.extra.get("context_ids", [])
+                    if context_ids:
+                        state.internal_context_ids.extend(context_ids)
+
+                    self.adapters.unread_adapter._upsert_pending_unread_payload(
+                        response=state.response,
+                        formatted_text=reminder_text,
+                    )
+                    _transition(
+                        state=state,
+                        to_phase=DefaultChatterSessionPhase.MODEL_TURN,
+                        session=self,
+                        reason=f"外部恢复事件: {current_resume_event.source}",
                     )
                     continue
 
