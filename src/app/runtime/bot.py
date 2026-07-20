@@ -338,8 +338,9 @@ class Bot:
         await self._preflight_llm_providers()
 
         # Step 3: Event Bus
-        from src.kernel.event import get_event_bus
+        from src.kernel.event import get_event_bus, set_event_handler_timeout
 
+        set_event_handler_timeout(self.config.advanced.event_handler_timeout)
         self.event_bus = get_event_bus()
         self.ui.update_phase_status("事件总线", "已初始化")
 
