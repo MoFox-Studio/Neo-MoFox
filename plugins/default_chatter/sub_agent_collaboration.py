@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.core.components.base.chatter import BaseChatter, WaitResumeEvent
+from src.core.components.base.chatter import BaseChatter
 from src.core.models.message import Message
 from src.core.models.stream import ChatStream
 from src.core.prompt import (
@@ -16,7 +16,6 @@ from src.core.prompt import (
     SystemReminderInsertType,
     get_system_reminder_store,
 )
-from src.core.transport.distribution.stream_loop_manager import get_stream_loop_manager
 from src.kernel.llm import LLMPayload, ROLE, Text, ToolRegistry
 from src.kernel.logger import get_logger
 
@@ -383,10 +382,9 @@ class SubAgentCollaborationManager:
 
     async def _resume_actor(self, *, stream_id: str) -> None:
         """向主 actor 注入一次恢复信号。"""
-        await get_stream_loop_manager().trigger_external_resume(
-            stream_id,
-            event=WaitResumeEvent(source="sub_agent"),
-        )
+        from src.core.managers.chatter_manager import get_chatter_manager
+
+        await get_chatter_manager().resume_chatter(stream_id, source="sub_agent")
 
     async def _drive_agent_once(
         self,
