@@ -57,6 +57,10 @@ class BaseService(BaseComponent):
     _signature_: str
 
     component_type = "service"
+    _legacy_name_attr = "service_name"
+    _legacy_desc_attr = "service_description"
+    service_name: str = ""
+    service_description: str = ""
 
     # 服务元数据
     name: str = ""

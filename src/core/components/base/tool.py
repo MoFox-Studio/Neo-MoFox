@@ -48,6 +48,10 @@ class BaseTool(BaseComponent, LLMUsable):
     _signature_: str
 
     component_type = "tool"
+    _legacy_name_attr = "tool_name"
+    _legacy_desc_attr = "tool_description"
+    tool_name: str = ""
+    tool_description: str = ""
 
     # 工具元数据
     name: str = ""

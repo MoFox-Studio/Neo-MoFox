@@ -49,6 +49,10 @@ class BaseAdapter(BaseComponent, AdapterBase):
     _signature_: str
 
     component_type = "adapter"
+    _legacy_name_attr = "adapter_name"
+    _legacy_desc_attr = "adapter_description"
+    adapter_name: str = "unknown_adapter"
+    adapter_description: str = "无描述"
 
     # 适配器元数据
     name: str = "unknown_adapter"

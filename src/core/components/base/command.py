@@ -66,6 +66,10 @@ class BaseCommand(BaseComponent):
     _signature_: str
 
     component_type = "command"
+    _legacy_name_attr = "command_name"
+    _legacy_desc_attr = "command_description"
+    command_name: str = ""
+    command_description: str = ""
 
     # 命令元数据
     name: str = ""

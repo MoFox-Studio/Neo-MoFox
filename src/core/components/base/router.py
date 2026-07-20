@@ -45,6 +45,10 @@ class BaseRouter(BaseComponent):
     _signature_: str
 
     component_type = "router"
+    _legacy_name_attr = "router_name"
+    _legacy_desc_attr = "router_description"
+    router_name: str = ""
+    router_description: str = ""
 
     # 路由元数据
     name: str = ""

@@ -150,6 +150,10 @@ class BaseChatter(BaseComponent):
     _signature_: str
 
     component_type = "chatter"
+    _legacy_name_attr = "chatter_name"
+    _legacy_desc_attr = "chatter_description"
+    chatter_name: str = ""
+    chatter_description: str = ""
 
     # 聊天器元数据
     name: str = ""

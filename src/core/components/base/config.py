@@ -43,6 +43,10 @@ class BaseConfig(BaseComponent, ConfigBase):
     _signature_: ClassVar[str]
 
     component_type: ClassVar[str] = "config"
+    _legacy_name_attr: ClassVar[str] = "config_name"
+    _legacy_desc_attr: ClassVar[str] = "config_description"
+    config_name: ClassVar[str] = "config"
+    config_description: ClassVar[str] = ""
 
     # 这些属性应由子类覆盖，使用 ClassVar 避免被 Pydantic 当作字段处理
     name: ClassVar[str] = "config"

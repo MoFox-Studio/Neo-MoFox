@@ -46,6 +46,10 @@ class BaseEventHandler(BaseComponent):
     _signature_: str
 
     component_type = "event_handler"
+    _legacy_name_attr = "handler_name"
+    _legacy_desc_attr = "handler_description"
+    handler_name: str = ""
+    handler_description: str = ""
 
     # 处理器元数据
     name: str = ""

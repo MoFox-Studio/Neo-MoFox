@@ -57,6 +57,10 @@ class BaseAction(BaseComponent, LLMUsable):
     _signature_: str
 
     component_type = "action"
+    _legacy_name_attr = "action_name"
+    _legacy_desc_attr = "action_description"
+    action_name: str = ""
+    action_description: str = ""
 
     # 动作元数据
     name: str = ""

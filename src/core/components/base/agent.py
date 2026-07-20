@@ -79,6 +79,10 @@ class BaseAgent(BaseComponent, LLMUsable):
     _signature_: str
 
     component_type = "agent"
+    _legacy_name_attr = "agent_name"
+    _legacy_desc_attr = "agent_description"
+    agent_name: str = ""
+    agent_description: str = ""
 
     name: str = ""
     description: str = ""
