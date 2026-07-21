@@ -9,6 +9,7 @@ from typing import Literal
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
 
 CORE_VERSION = "1.2.0-rc.2"
+PLUGIN_API_VERSION = "1.0.0"
 
 class CoreConfig(ConfigBase):
     """Core 层配置类
@@ -956,6 +957,16 @@ class CoreConfig(ConfigBase):
             tag="performance",
             input_type="number",
             hint="CPU 密集型任务的并发数",
+        )
+        event_handler_timeout: float = Field(
+            default=30.0,
+            description="EventBus 事件处理器超时时间（秒），单个事件处理器的最大执行时间，超时后跳过并继续后续处理器；设为 0 或负数可禁用超时保护",
+            label="事件处理器超时",
+            tag="performance",
+            input_type="number",
+            step=1.0,
+            ge=0,
+            hint="VLM 识图等耗时操作可能需要调大此值",
         )
 
     advanced: AdvancedSection = Field(default_factory=AdvancedSection)

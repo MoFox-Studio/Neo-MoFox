@@ -387,8 +387,8 @@ async def test_sub_agent_manager_get_agent_runs_one_round(
     )
     resume_mock = AsyncMock(return_value=True)
     monkeypatch.setattr(
-        "plugins.default_chatter.sub_agent_collaboration.get_stream_loop_manager",
-        lambda: SimpleNamespace(trigger_external_resume=resume_mock),
+        "src.core.managers.chatter_manager.get_chatter_manager",
+        lambda: SimpleNamespace(resume_chatter=resume_mock),
     )
 
     manager.create_agent(
@@ -492,8 +492,8 @@ async def test_sub_agent_question_allows_user_after_tool_result(
         lambda: SimpleNamespace(get_or_create_stream=AsyncMock(return_value=fake_stream)),
     )
     monkeypatch.setattr(
-        "plugins.default_chatter.sub_agent_collaboration.get_stream_loop_manager",
-        lambda: SimpleNamespace(trigger_external_resume=AsyncMock(return_value=True)),
+        "src.core.managers.chatter_manager.get_chatter_manager",
+        lambda: SimpleNamespace(resume_chatter=AsyncMock(return_value=True)),
     )
 
     await manager.get_agent(
@@ -568,8 +568,8 @@ async def test_sub_agent_tool_calls_use_synthetic_trigger_message_when_stream_ha
         lambda: SimpleNamespace(get_or_create_stream=AsyncMock(return_value=fake_stream)),
     )
     monkeypatch.setattr(
-        "plugins.default_chatter.sub_agent_collaboration.get_stream_loop_manager",
-        lambda: SimpleNamespace(trigger_external_resume=AsyncMock(return_value=True)),
+        "src.core.managers.chatter_manager.get_chatter_manager",
+        lambda: SimpleNamespace(resume_chatter=AsyncMock(return_value=True)),
     )
 
     await manager.get_agent(
@@ -649,8 +649,8 @@ async def test_sub_agent_follow_up_continues_until_completion(
         lambda: SimpleNamespace(get_or_create_stream=AsyncMock(return_value=fake_stream)),
     )
     monkeypatch.setattr(
-        "plugins.default_chatter.sub_agent_collaboration.get_stream_loop_manager",
-        lambda: SimpleNamespace(trigger_external_resume=AsyncMock(return_value=True)),
+        "src.core.managers.chatter_manager.get_chatter_manager",
+        lambda: SimpleNamespace(resume_chatter=AsyncMock(return_value=True)),
     )
 
     async def _fake_process_tool_calls(**_kwargs):

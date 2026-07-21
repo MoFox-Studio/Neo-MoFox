@@ -338,8 +338,9 @@ class Bot:
         await self._preflight_llm_providers()
 
         # Step 3: Event Bus
-        from src.kernel.event import get_event_bus
+        from src.kernel.event import get_event_bus, set_event_handler_timeout
 
+        set_event_handler_timeout(self.config.advanced.event_handler_timeout)
         self.event_bus = get_event_bus()
         self.ui.update_phase_status("事件总线", "已初始化")
 
@@ -577,7 +578,9 @@ class Bot:
             self.logger.warning("")
             self.logger.warning("=" * 80)
             self.logger.warning("")
-            input("输入回车来继续:")
+            from .console_input import prompt_console_input
+
+            prompt_console_input("输入回车来继续:")
 
             # 同时在 UI 中显示警告状态
             self.ui.update_phase_status("HTTP服务器", "⚠️ 不安全配置")

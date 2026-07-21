@@ -32,7 +32,14 @@ logger = get_logger(
     enable_event_broadcast=False,
 )
 
-EVENT_HANDLER_TIMEOUT_SECONDS = 10.0
+
+_event_handler_timeout_seconds = 30.0
+
+
+def set_event_handler_timeout(seconds: float) -> None:
+    """设置事件处理器超时时间（秒）。设为 0 或负数可禁用超时保护。"""
+    global _event_handler_timeout_seconds
+    _event_handler_timeout_seconds = float(seconds)
 
 EventParams = dict[str, Any]
 
@@ -336,10 +343,10 @@ class EventBus:
         """执行处理器并返回结果，支持同步和异步处理器。"""
         result = sub.handler(event_name, params)
         if inspect.isawaitable(result):
-            if EVENT_HANDLER_TIMEOUT_SECONDS > 0:
+            if _event_handler_timeout_seconds > 0:
                 return await asyncio.wait_for(
                     result,
-                    timeout=EVENT_HANDLER_TIMEOUT_SECONDS,
+                    timeout=_event_handler_timeout_seconds,
                 )
             return await result
         return result

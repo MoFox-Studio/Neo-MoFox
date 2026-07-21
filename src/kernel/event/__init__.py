@@ -15,7 +15,7 @@
     >>> await event_bus.publish("user_login", {"user_id": "12345"})
 """
 
-from src.kernel.event.core import EventBus, EventDecision
+from src.kernel.event.core import EventBus, EventDecision, set_event_handler_timeout
 
 _event_bus: EventBus | None = None
 
@@ -29,4 +29,4 @@ def get_event_bus() -> EventBus:
     return _event_bus
 
 
-__all__ = ["EventBus", "EventDecision", "get_event_bus"]
+__all__ = ["EventBus", "EventDecision", "get_event_bus", "set_event_handler_timeout"]

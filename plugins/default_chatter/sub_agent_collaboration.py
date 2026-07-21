@@ -10,7 +10,7 @@ from typing import Any
 
 from src.app.plugin_system.api import prompt_api
 from src.app.plugin_system.api.log_api import get_logger
-from src.app.plugin_system.base import BaseChatter, WaitResumeEvent
+from src.app.plugin_system.base import BaseChatter
 from src.app.plugin_system.types import (
     ChatStream,
     LLMPayload,
@@ -21,7 +21,6 @@ from src.app.plugin_system.types import (
     ToolRegistry,
 )
 from src.core.prompt import SystemReminderInsertType
-from src.core.transport.distribution.stream_loop_manager import get_stream_loop_manager
 
 from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
 
@@ -380,10 +379,9 @@ class SubAgentCollaborationManager:
 
     async def _resume_actor(self, *, stream_id: str) -> None:
         """向主 actor 注入一次恢复信号。"""
-        await get_stream_loop_manager().trigger_external_resume(
-            stream_id,
-            event=WaitResumeEvent(source="sub_agent"),
-        )
+        from src.core.managers.chatter_manager import get_chatter_manager
+
+        await get_chatter_manager().resume_chatter(stream_id, source="sub_agent")
 
     async def _drive_agent_once(
         self,
