@@ -7,12 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, TypeGuard
 
-from src.core.components.base import Failure, Stop, Wait, WaitResumeEvent
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
-from src.kernel.llm import LLMPayload, ROLE, Text
+from src.app.plugin_system.api import event_api, stream_api
+from src.app.plugin_system.base import Failure, Stop, Wait, WaitResumeEvent
+from src.app.plugin_system.types import ChatStream, EventType, LLMPayload, Message, ROLE, Text
 
-from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
+from .utils.tool_flow import append_suspend_payload_if_action_only, process_tool_calls
 from .type_defs import (
     DefaultChatterResumeEvent,
     DefaultChatterResult,
@@ -20,6 +19,7 @@ from .type_defs import (
     DefaultChatterSessionOptions,
     LLMConversationState,
     LLMResponseLike,
+    SubAgentDecision,
 )
 
 _AFTER_CHATTER_STEP_SCOPE = "actor_round"
@@ -47,6 +47,7 @@ class DefaultChatterSessionState:
     plain_text_retry_count: int = 0
     used_tools_in_round: set[str] = field(default_factory=set)
     tool_results_in_round: list[dict[str, object]] = field(default_factory=list)
+    decision_history: list[SubAgentDecision] = field(default_factory=list)
     internal_context_ids: list[str] = field(default_factory=list)
 
     def has_tool_result_tail(self) -> bool:
@@ -131,10 +132,7 @@ async def _request_internal_context(
     event: WaitResumeEvent,
 ) -> tuple[str, list[str]]:
     """从事件总线请求插件提供的内部上下文。"""
-    from src.core.components.types import EventType
-    from src.core.managers.event_manager import get_event_manager
-
-    result = await get_event_manager().publish_event(
+    result = await event_api.publish_event(
         EventType.ON_INTERNAL_CONTEXT_REQUESTED,
         {
             "stream_id": stream_id,
@@ -328,7 +326,7 @@ def _transition(
 
 @dataclass(slots=True)
 class DefaultChatterSession:
-    """Default Chatter 会话核心，封装了一个聊天会话的完整运行时状态和执行逻辑。通过组合不同的适配器和配置选项，可以支持多种聊天场景和定制化需求。"""
+    """维护单次聊天会话状态并执行消息、模型和工具控制流。"""
 
     stream_id: str
     options: DefaultChatterSessionOptions
@@ -354,9 +352,8 @@ class DefaultChatterSession:
         )
 
     async def execute(self) -> AsyncGenerator[DefaultChatterResult, DefaultChatterResumeEvent]:
-        from src.core.managers.stream_manager import get_stream_manager
-
-        chat_stream = await get_stream_manager().activate_stream(self.stream_id)
+        """激活聊天流并执行会话控制流。"""
+        chat_stream = await stream_api.activate_stream(self.stream_id)
         if chat_stream is None:
             self.logger.error(f"无法激活聊天流: {self.stream_id}")
             yield Failure("无法激活聊天流")
@@ -384,9 +381,9 @@ class DefaultChatterSession:
         if self.options.native_multimodal:
             from src.core.managers.media_manager import get_media_manager
 
-            get_media_manager().skip_vlm_for_stream(chat_stream.stream_id, ["image"])
+            get_media_manager().skip_recognition_for_stream(chat_stream.stream_id, ["image"])
             self.logger.debug(
-                f"Skipped VLM image recognition for stream {chat_stream.stream_id[:8]}"
+                f"Skipped image recognition for stream {chat_stream.stream_id[:8]}"
             )
 
         try:
@@ -445,10 +442,23 @@ class DefaultChatterSession:
                     unread_lines,
                     unread_msgs,
                     chat_stream,
+                    history_text=history_text if not state.history_merged else "",
+                    decision_history=state.decision_history[-self.options.sub_agent_decision_history_limit:] if state.decision_history else None,
                 )
+                decision_source = decision.get("source", "sub_agent")
+                if decision_source == "interest":
+                    decision_tag = "[cyan]兴趣值过滤[/]"
+                elif decision_source == "probability":
+                    decision_tag = "[green]概率直通[/]"
+                else:
+                    decision_tag = "[bright_cyan]子代理决策[/]"
                 self.logger.info(
-                    f"子代理决策: {decision['reason']} (respond={decision['should_respond']})"
+                    f"{decision_tag}: {decision['reason']} (respond={decision['should_respond']})"
+                    + ("" if decision["should_respond"] else " → 继续等待")
                 )
+                state.decision_history.append(decision)
+                if len(state.decision_history) > self.options.sub_agent_decision_history_limit:
+                    state.decision_history = state.decision_history[-self.options.sub_agent_decision_history_limit:]
 
                 if decision["should_respond"]:
                     unread_user_prompt = await self.adapters.prompt_adapter._build_user_prompt(
@@ -464,7 +474,7 @@ class DefaultChatterSession:
                         formatted_text=unread_user_prompt,
                         unread_msgs=unread_msgs,
                         native_multimodal=self.options.native_multimodal,
-                        logger_override=self.logger,
+                        logger_override=self.logger,  # type: ignore[arg-type]
                     )
                     state.unread_msgs_to_flush = unread_msgs
                     _transition(
@@ -580,13 +590,25 @@ class DefaultChatterSession:
                     unread_lines,
                     unread_msgs,
                     chat_stream,
+                    history_text=history_text if not state.history_merged else "",
+                    decision_history=state.decision_history[-self.options.sub_agent_decision_history_limit:] if state.decision_history else None,
                 )
+                decision_source = decision.get("source", "sub_agent")
+                if decision_source == "interest":
+                    decision_tag = "[cyan]兴趣值过滤[/]"
+                elif decision_source == "probability":
+                    decision_tag = "[green]概率直通[/]"
+                else:
+                    decision_tag = "[bright_cyan]子代理决策[/]"
                 self.logger.info(
-                    f"子代理决策: {decision['reason']} (respond={decision['should_respond']})"
+                    f"{decision_tag}: {decision['reason']} (respond={decision['should_respond']})"
+                    + ("" if decision["should_respond"] else " → 继续等待")
                 )
+                state.decision_history.append(decision)
+                if len(state.decision_history) > self.options.sub_agent_decision_history_limit:
+                    state.decision_history = state.decision_history[-self.options.sub_agent_decision_history_limit:]
 
                 if not decision["should_respond"]:
-                    self.logger.info("子代理决定暂不响应; 继续等待")
                     resume_event = yield Wait()
                     continue
 
@@ -595,7 +617,7 @@ class DefaultChatterSession:
                     formatted_text=unread_user_prompt,
                     unread_msgs=unread_msgs,
                     native_multimodal=self.options.native_multimodal,
-                    logger_override=self.logger,
+                    logger_override=self.logger,  # type: ignore[arg-type]
                 )
                 _transition(
                     state=state,
@@ -624,7 +646,7 @@ class DefaultChatterSession:
                         await state.response.stream_events_with_callback(stream_observer)
                         finalize = getattr(stream_observer, "finalize", None)
                         if callable(finalize):
-                            await finalize()
+                            await finalize()  # type: ignore[awaitable-not-object]
                     else:
                         await state.response
                     if state.phase == DefaultChatterSessionPhase.MODEL_TURN:
@@ -776,7 +798,7 @@ class DefaultChatterSession:
                     response=llm_response,
                     suspend_text=self.suspend_text,
                     enable_action_suspend=self.options.enable_action_suspend,
-                    logger=self.logger,
+                    logger=self.logger,  # type: ignore[arg-type]
                 )
 
                 if action_only_round and not call_outcome.should_wait:

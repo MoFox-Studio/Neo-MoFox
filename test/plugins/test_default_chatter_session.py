@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from plugins.default_chatter.plugin import DefaultChatter
-from plugins.default_chatter.service import DefaultChatterService
+from plugins.default_chatter.components.service import DefaultChatterService
 from plugins.default_chatter.session import (
     DefaultChatterSession,
     _build_actor_decision_panel,

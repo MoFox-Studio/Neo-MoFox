@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
+from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_section
 
 
 class DefaultChatterConfig(BaseConfig):
@@ -63,7 +63,7 @@ class DefaultChatterConfig(BaseConfig):
             description="是否启用 sub-agent 的程序化控制器。开启后会先按本地概率规则判断是否直接响应，关闭后始终交由 LLM sub-agent 决策。",
             label="启用程序化控制器",
             tag="ai",
-            hint="关闭后群聊消息将始终经过 LLM sub-agent 过滤，不再使用本地概率直通逻辑"
+            hint="关闭后群聊消息始终经过 LLM sub-agent 过滤"
         )
         enable_action_suspend: bool = Field(
             default=True,
@@ -87,6 +87,185 @@ class DefaultChatterConfig(BaseConfig):
             hint="留空时回退为 actor；可配置为单独的子代理模型任务，例如 sub_agent_actor"
         )
 
+        filter_mode: str = Field(
+            default="sub_only",
+            description="消息过滤模式：sub_only=仅 sub-agent，interest_only=仅兴趣值，interest_then_sub=兴趣值初筛后执行 sub-agent",
+            label="过滤模式",
+            tag="ai",
+            hint="选择群聊消息的响应决策流程"
+        )
+        enable_sub_agent_context: bool = Field(
+            default=True,
+            description="是否为 sub-agent 提供历史上下文和决策记录",
+            label="Sub-Agent 上下文",
+            tag="ai",
+            hint="开启后 sub-agent 能感知话题连续性，判断更准确"
+        )
+        sub_agent_context_history_limit: int = Field(
+            default=25,
+            description="sub-agent 上下文中包含的历史消息条数",
+            label="Sub-Agent 历史消息数",
+            tag="ai",
+            hint="传给 sub-agent 的历史消息条数上限"
+        )
+        sub_agent_decision_history_limit: int = Field(
+            default=3,
+            description="sub-agent 决策历史保留条数",
+            label="Sub-Agent 决策历史",
+            tag="ai",
+            hint="保留最近 N 次决策记录传给 sub-agent"
+        )
+
+        @config_section("interest", title="兴趣值配置", tag="ai")
+        class InterestSection(SectionBase):
+            """兴趣值计算参数。
+
+            控制二维加权兴趣值计算（语义 + 提及）的权重、阈值和动态调整。
+            """
+
+            reply_threshold: float = Field(
+                default=0.72,
+                description="回复动作兴趣阈值，兴趣值达到此值则触发回复",
+                label="回复阈值",
+                tag="ai",
+                hint="有效范围 0.0-1.0"
+            )
+            action_threshold: float = Field(
+                default=0.55,
+                description="非回复动作兴趣阈值，达到此值则执行非回复动作",
+                label="动作阈值",
+                tag="ai",
+                hint="有效范围 0.0-1.0"
+            )
+            semantic_weight: float = Field(
+                default=0.6,
+                description="语义兴趣度权重",
+                label="语义权重",
+                tag="ai",
+                hint="语义兴趣度在总分中的权重"
+            )
+            mentioned_weight: float = Field(
+                default=0.4,
+                description="提及分权重",
+                label="提及权重",
+                tag="ai",
+                hint="提及分在总分中的权重"
+            )
+            strong_mention_score: float = Field(
+                default=2.0,
+                description="强提及的兴趣分（被@、被回复、私聊）",
+                label="强提及分",
+                tag="ai",
+                hint="强提及时的提及分"
+            )
+            weak_mention_score: float = Field(
+                default=0.8,
+                description="弱提及的兴趣分（文本匹配名字/别名）",
+                label="弱提及分",
+                tag="ai",
+                hint="弱提及时的提及分"
+            )
+            no_reply_threshold_adjustment: float = Field(
+                default=0.02,
+                description="每次不回复降低的阈值",
+                label="不回复阈值降低",
+                tag="ai",
+                hint="连续不回复时每次降低的回复阈值"
+            )
+            max_no_reply_count: int = Field(
+                default=5,
+                description="最大不回复计数",
+                label="最大不回复计数",
+                tag="ai",
+                hint="不回复计数上限"
+            )
+            reply_cooldown_reduction: int = Field(
+                default=2,
+                description="回复后减少的不回复计数",
+                label="回复冷却减少",
+                tag="ai",
+                hint="回复后不回复计数的减少量"
+            )
+            enable_post_reply_boost: bool = Field(
+                default=True,
+                description="是否启用回复后阈值降低机制",
+                label="回复后阈值降低",
+                tag="ai",
+                hint="开启后回复后若干轮降低阈值，增强连续对话"
+            )
+            post_reply_threshold_reduction: float = Field(
+                default=0.2,
+                description="回复后初始阈值降低值",
+                label="回复后初始降低",
+                tag="ai",
+                hint="回复后第一轮降低的阈值"
+            )
+            post_reply_boost_max_count: int = Field(
+                default=5,
+                description="回复后阈值降低的最大持续次数",
+                label="回复后持续次数",
+                tag="ai",
+                hint="阈值降低持续的轮数"
+            )
+            post_reply_boost_decay_rate: float = Field(
+                default=0.8,
+                description="每次回复后阈值降低的衰减率",
+                label="回复后衰减率",
+                tag="ai",
+                hint="每轮衰减因子，1.0=不衰减，0.8=每轮衰减20%"
+            )
+
+        @config_section("semantic_training", title="语义模型训练配置", tag="ai")
+        class SemanticTrainingSection(SectionBase):
+            """语义兴趣度模型训练参数。
+
+            控制自动训练流程中的数据采样、LLM 标注和关键词生成参数。
+            仅在 filter_mode 非 sub_only 时生效。
+            """
+
+            training_model_name: str = Field(
+                default="utils",
+                description="训练阶段使用的 LLM 模型任务名，对应 config/model.toml 中的 task key",
+                label="训练模型任务名",
+                tag="ai",
+                hint="用更强的模型（如 actor）标注可提升训练数据质量"
+            )
+            training_days: int = Field(
+                default=7,
+                description="采样最近 N 天的消息用于训练",
+                label="采样天数",
+                tag="ai",
+                hint="越大覆盖越多历史话题，但训练时间增加"
+            )
+            training_max_samples: int = Field(
+                default=1000,
+                description="训练时从数据库采样的最大消息条数",
+                label="最大采样数",
+                tag="ai",
+                hint="2000-3000 性价比最高，越多标注 token 成本越高"
+            )
+            training_batch_size: int = Field(
+                default=50,
+                description="LLM 批量标注时每批的消息条数",
+                label="标注批次大小",
+                tag="ai",
+                hint="每批 50 条平衡速度和质量"
+            )
+            keyword_iterations: int = Field(
+                default=3,
+                description="关键词生成的迭代次数",
+                label="关键词迭代次数",
+                tag="ai",
+                hint="每次生成约 100 条关键词，多次迭代可增加覆盖"
+            )
+            min_train_interval_hours: int = Field(
+                default=720,
+                description="最小训练间隔（小时），避免频繁重训",
+                label="最小训练间隔",
+                tag="ai",
+                hint="默认 720 小时（30天），人设变化时不受此限制"
+            )
+
         @config_section("programmatic_probability", title="程序化概率配置", tag="ai")
         class ProgrammaticProbabilitySection(SectionBase):
             """程序化 sub-agent 直通概率参数。
@@ -103,18 +282,18 @@ class DefaultChatterConfig(BaseConfig):
                 hint="有效范围 0.0-1.0。值越大，群聊中越容易跳过 LLM sub-agent 直接响应。",
             )
             name_mention_bonus: float = Field(
-                default=0.7,
-                description="未读消息命中机器人昵称时叠加的放行概率加成。",
-                label="命中名字加成",
+                default=1.0,
+                description="未读消息存在强提及（被@或被回复）时叠加的放行概率加成。",
+                label="强提及加成",
                 tag="ai",
-                hint="有效范围 0.0-1.0。当未读消息包含机器人昵称时叠加到基础概率。",
+                hint="有效范围 0.0-1.0。当未读消息精准@机器人或回复机器人发言时触发。",
             )
             alias_mention_bonus: float = Field(
                 default=0.4,
-                description="未读消息命中机器人别名时叠加的放行概率加成。",
-                label="命中别名加成",
+                description="未读消息存在弱提及（文本命中全名或别名）时叠加的放行概率加成。",
+                label="弱提及加成",
                 tag="ai",
-                hint="有效范围 0.0-1.0。当未读消息包含任意别名时叠加到基础概率。",
+                hint="有效范围 0.0-1.0。当未读消息文本中包含机器人昵称或别名时触发。",
             )
             unread_message_bonus: float = Field(
                 default=0.05,
@@ -166,6 +345,16 @@ class DefaultChatterConfig(BaseConfig):
             default_factory=ThemeGuideSection,
             description="按聊天类型区分的额外提示词",
             label="场景引导配置"
+        )
+        interest: InterestSection = Field(
+            default_factory=InterestSection,
+            description="兴趣值计算参数",
+            label="兴趣值配置"
+        )
+        semantic_training: SemanticTrainingSection = Field(
+            default_factory=SemanticTrainingSection,
+            description="语义模型训练参数",
+            label="语义训练配置"
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)

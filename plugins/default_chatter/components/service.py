@@ -1,25 +1,29 @@
-"""Service 工作流，提供创建可重用聊天核心会话的工厂方法。"""
+"""Default Chatter 会话工厂。"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.core.components.base.service import BaseService
+from src.app.plugin_system.base import BaseService
 
 from .config import DefaultChatterConfig
-from .session import DefaultChatterSession
-from .type_defs import DefaultChatterSessionAdapters, DefaultChatterSessionOptions
+from ..session import DefaultChatterSession
+from ..type_defs import (
+    DefaultChatterRuntimeAdapter,
+    DefaultChatterSessionAdapters,
+    DefaultChatterSessionOptions,
+    PlainTextResponseAdapter,
+)
 
 if TYPE_CHECKING:
-    from src.core.components.base.chatter import BaseChatter
-    from src.core.components.base.plugin import BasePlugin
+    from src.app.plugin_system.base import BasePlugin
 
 logger = get_logger("default_chatter")
 
 
 class DefaultChatterService(BaseService):
-    """Default Chatter Service 提供创建可重用聊天核心会话的工厂方法，允许插件开发者轻松集成和定制聊天核心功能。"""
+    """创建使用默认运行时或自定义适配器的聊天会话。"""
 
     service_name = "chat_core"
     service_description = "Default Chatter 会话工厂和可重用聊天核心"
@@ -32,7 +36,7 @@ class DefaultChatterService(BaseService):
         options: DefaultChatterSessionOptions | None = None,
         adapters: DefaultChatterSessionAdapters | None = None,
     ) -> DefaultChatterSession:
-        """创建一个会话，可以使用自定义适配器或默认框架适配器。"""
+        """创建聊天会话；未提供适配器时使用默认运行时适配器。"""
         resolved_options = options or self._build_default_options(self.plugin)
         if adapters is None:
             return self.create_default_session(
@@ -53,13 +57,13 @@ class DefaultChatterService(BaseService):
         *,
         stream_id: str,
         plugin: "BasePlugin",
-        chatter: "BaseChatter | None" = None,
+        chatter: DefaultChatterRuntimeAdapter | None = None,
         options: DefaultChatterSessionOptions | None = None,
     ) -> DefaultChatterSession:
-        """创建一个由框架默认 chatter 运行时支持的会话。"""
+        """创建由 DefaultChatter 运行时提供适配器的会话。"""
         runtime = chatter
         if runtime is None:
-            from .plugin import DefaultChatter
+            from ..plugin import DefaultChatter
 
             runtime = DefaultChatter(stream_id=stream_id, plugin=plugin)
         resolved_options = options or self._build_default_options(plugin)
@@ -92,10 +96,21 @@ class DefaultChatterService(BaseService):
             native_multimodal=bool(config.plugin.native_multimodal),
             theme_guide=theme_guide,
             negative_behavior_reinforcement=bool(config.plugin.reinforce_negative_behaviors),
+            filter_mode=str(getattr(config.plugin, "filter_mode", "sub_only") or "sub_only"),
+            enable_sub_agent_context=bool(getattr(config.plugin, "enable_sub_agent_context", True)),
+            sub_agent_context_history_limit=int(getattr(config.plugin, "sub_agent_context_history_limit", 10)),
+            sub_agent_decision_history_limit=int(getattr(config.plugin, "sub_agent_decision_history_limit", 3)),
         )
 
     @staticmethod
-    def _build_default_adapters(runtime: "BaseChatter") -> DefaultChatterSessionAdapters:
+    def _build_default_adapters(runtime: object) -> DefaultChatterSessionAdapters:
+        """从具备完整会话能力的 Chatter 运行时构建默认适配器。"""
+        if not isinstance(runtime, DefaultChatterRuntimeAdapter):
+            raise TypeError("默认 Chatter 运行时未实现完整的会话适配器协议")
+
+        plain_text_adapter = (
+            runtime if isinstance(runtime, PlainTextResponseAdapter) else None
+        )
         return DefaultChatterSessionAdapters(
             request_adapter=runtime,
             prompt_adapter=runtime,
@@ -104,9 +119,5 @@ class DefaultChatterService(BaseService):
             tool_execution_adapter=runtime,
             sub_agent_adapter=runtime,
             logger_adapter=logger,
-            plain_text_adapter=(
-                runtime
-                if hasattr(runtime, "handle_plain_text_response")
-                else None
-            ),
+            plain_text_adapter=plain_text_adapter,
         )

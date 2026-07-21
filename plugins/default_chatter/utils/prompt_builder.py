@@ -6,13 +6,11 @@ import datetime
 from collections.abc import Callable
 from typing import Any
 
-from src.core.components.types import ChatType
+from src.app.plugin_system.types import ChatStream, ChatType, Message
 from src.core.config import get_core_config
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
 from src.core.prompt import get_prompt_manager
 
-from .config import DefaultChatterConfig
+from ..components.config import DefaultChatterConfig
 
 
 class DefaultChatterPromptBuilder:

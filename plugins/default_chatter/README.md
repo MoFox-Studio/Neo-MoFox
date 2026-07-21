@@ -29,7 +29,7 @@
 也就是说，下面这种写法对外部插件来说是错误示例：
 
 ```python
-from plugins.default_chatter.service import DefaultChatterService
+from plugins.default_chatter.components.service import DefaultChatterService
 from plugins.default_chatter.type_defs import DefaultChatterSessionOptions
 ```
 
@@ -48,6 +48,16 @@ service = get_service("default_chatter:service:chat_core")
 - 单元测试示例
 
 而不是跨插件调用方式。
+
+## 目录结构
+
+当前插件目录按职责划分为：
+
+- `components/`：配置、Service 和 Action 组件实现。
+- `utils/`：被聊天器、会话和组件复用的无状态决策、提示词、多模态、概率门与工具流逻辑。
+- `plugin.py`：插件注册和默认 Chatter 入口。
+- `session.py`：可恢复聊天会话状态机。
+- `type_defs.py`：会话适配器协议与公共类型定义。
 
 ## 组件清单
 
@@ -320,7 +330,7 @@ session = service.create_default_session(
 如果你已经有一个 `BaseChatter` 子类实例，希望直接复用它作为默认 adapters，可以显式传入 `chatter`：
 
 ```python
-from plugins.default_chatter.service import DefaultChatterService
+from plugins.default_chatter.components.service import DefaultChatterService
 
 service = DefaultChatterService(plugin)
 session = service.create_default_session(
@@ -346,7 +356,7 @@ session = service.create_default_session(
 当你不想依赖 `DefaultChatter` 本身，而是只想复用它的状态机和控制流时，可以自己提供 adapters。
 
 ```python
-from plugins.default_chatter.service import DefaultChatterService
+from plugins.default_chatter.components.service import DefaultChatterService
 from plugins.default_chatter.type_defs import (
     DefaultChatterSessionAdapters,
     DefaultChatterSessionOptions,

@@ -6,13 +6,19 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from src.core.models.message import Message
-from src.kernel.logger import Logger
-from src.kernel.llm import LLMPayload, ROLE, Text, ToolResult
-from src.kernel.llm import ToolCall, ToolRegistry
+from src.app.plugin_system.api.log_api import Logger
+from src.app.plugin_system.types import (
+    LLMPayload,
+    Message,
+    ROLE,
+    Text,
+    ToolCall,
+    ToolRegistry,
+    ToolResult,
+)
 from src.kernel.concurrency import get_watchdog
 
-from .type_defs import LLMResponseLike
+from ..type_defs import LLMResponseLike
 
 
 @dataclass
