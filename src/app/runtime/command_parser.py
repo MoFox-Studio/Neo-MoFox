@@ -72,9 +72,12 @@ class CommandParser:
                 except EOFError as exc:
                     self._input_queue.put(exc)
                     break
-                except KeyboardInterrupt:
-                    # 在 Windows 上 Ctrl+C 通常由主线程处理，此处忽略并继续等待。
-                    continue
+                except KeyboardInterrupt as exc:
+                    # prompt_toolkit 进入 raw 模式后，Ctrl+C 不会由终端生成 SIGINT，
+                    # 而是被 prompt_toolkit 读为按键并抛出 KeyboardInterrupt。
+                    # 把它交给主循环，让 Bot 走优雅关闭流程。
+                    self._input_queue.put(exc)
+                    break
                 except Exception as exc:
                     self._input_queue.put(exc)
                     break
