@@ -40,8 +40,9 @@ from .components.config import DefaultChatterConfig
 from .components.service import DefaultChatterService
 from .utils.interest_gate import InterestGate
 from .utils.multimodal import (
-    extract_images_from_messages,
-    inline_images_into_text,
+    get_image_media_list,
+    inline_message_images_into_text,
+    tokenize_message_scoped_image_placeholders,
 )
 from .utils.prompt_builder import DefaultChatterPromptBuilder
 from .utils.prompts import system_prompt, user_prompt, sub_agent_system_prompt
@@ -141,16 +142,24 @@ class DefaultChatter(BaseChatter):
     ) -> None:
         """在未发送前合并未读消息到最后一个 USER payload。
 
-        当 ``native_multimodal`` 启用时，图片以 ``Image`` 对象内联到
-        ``formatted_text`` 中 ``[图片]`` 占位符的位置，使 LLM 能精确
-        将每张图片与其所属消息上下文对应。
+        当 ``native_multimodal`` 启用时，先将占位符转换为带消息序号和
+        消息内图片序号的标记，再依据标记从对应 Message 取图，避免跨消息
+        按全局图片顺序配对。
         """
         content_list: list[Content | LLMUsable]
         if native_multimodal and unread_msgs:
-            images = extract_images_from_messages(unread_msgs)
-            content_list = inline_images_into_text(formatted_text, images)
-            if images:
-                (logger_override or logger).debug(f"已内联 {len(images)} 张图片到占位符位置")
+            scoped_text = tokenize_message_scoped_image_placeholders(
+                formatted_text,
+                unread_msgs,
+            )
+            content_list = inline_message_images_into_text(scoped_text, unread_msgs)
+            image_count = sum(
+                len(get_image_media_list(message)) for message in unread_msgs
+            )
+            if image_count:
+                (logger_override or logger).debug(
+                    f"已按消息边界内联 {image_count} 张图片"
+                )
         else:
             content_list = [Text(formatted_text)]
         response.add_payload(LLMPayload(ROLE.USER, content_list))
