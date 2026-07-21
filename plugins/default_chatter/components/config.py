@@ -92,7 +92,9 @@ class DefaultChatterConfig(BaseConfig):
             description="消息过滤模式：sub_only=仅 sub-agent，interest_only=仅兴趣值，interest_then_sub=兴趣值初筛后执行 sub-agent",
             label="过滤模式",
             tag="ai",
-            hint="选择群聊消息的响应决策流程"
+            hint="选择群聊消息的响应决策流程",
+            input_type="select",
+            choices=["sub_only", "interest_only", "interest_then_sub"],
         )
         enable_sub_agent_context: bool = Field(
             default=True,

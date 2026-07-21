@@ -434,3 +434,154 @@ async def test_send_text_does_not_mark_bonus_when_controller_disabled(
 
     assert success is True
     assert getattr(stream.context, "_default_chatter_next_tick_bonus", None) in (None, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_interest_only_skips_probability_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """interest_only 模式下不应触发概率直通，应走兴趣值判断。"""
+    chatter = _build_chatter_with_config(
+        {"filter_mode": "interest_only", "enable_programmatic_controller": True}
+    )
+    stream = ChatStream(
+        stream_id="s_group",
+        platform="qq",
+        chat_type="group",
+        bot_nickname="Neo",
+    )
+    setattr(stream.context, "_default_chatter_next_tick_bonus", 0.5)
+    unread_msgs = [Message(content="Neo 你在吗", processed_plain_text="Neo 你在吗")]
+
+    probability_called = {"value": False}
+
+    def _fail_bypass(*_args: Any, **_kwargs: Any) -> tuple[bool, str]:
+        probability_called["value"] = True
+        return False, "should not be consulted"
+
+    async def _no_decide(**_kwargs: Any) -> dict[str, object]:
+        raise AssertionError("decide_should_respond should not be called in interest_only")
+
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.probability_gate.get_core_config",
+        lambda: SimpleNamespace(
+            personality=SimpleNamespace(
+                nickname="Neo",
+                alias_names=["小狐狸"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.interest_gate.should_bypass_via_probability",
+        _fail_bypass,
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.interest_gate.decide_should_respond", _no_decide
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.probability_gate.random.random", lambda: 0.0
+    )
+
+    result = await chatter.sub_agent("group-msg", unread_msgs, stream)
+
+    assert probability_called["value"] is False
+    assert result.get("source") == "interest"
+    assert result["should_respond"] is False
+    assert getattr(stream.context, "_default_chatter_next_tick_bonus", None) == 0.5
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_interest_then_sub_skips_probability_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """interest_then_sub 模式下不应触发概率直通，应走兴趣值初筛。"""
+    chatter = _build_chatter_with_config(
+        {"filter_mode": "interest_then_sub", "enable_programmatic_controller": True}
+    )
+    stream = ChatStream(
+        stream_id="s_group",
+        platform="qq",
+        chat_type="group",
+        bot_nickname="Neo",
+    )
+    setattr(stream.context, "_default_chatter_next_tick_bonus", 0.5)
+    unread_msgs = [Message(content="hello", processed_plain_text="hello")]
+
+    probability_called = {"value": False}
+
+    def _fail_bypass(*_args: Any, **_kwargs: Any) -> tuple[bool, str]:
+        probability_called["value"] = True
+        return False, "should not be consulted"
+
+    async def _no_decide(**_kwargs: Any) -> dict[str, object]:
+        raise AssertionError("decide_should_respond should not be called when interest filter rejects")
+
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.probability_gate.get_core_config",
+        lambda: SimpleNamespace(
+            personality=SimpleNamespace(
+                nickname="Neo",
+                alias_names=["小狐狸"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.interest_gate.should_bypass_via_probability",
+        _fail_bypass,
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.interest_gate.decide_should_respond", _no_decide
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.probability_gate.random.random", lambda: 0.0
+    )
+
+    result = await chatter.sub_agent("group-msg", unread_msgs, stream)
+
+    assert probability_called["value"] is False
+    assert result.get("source") == "interest"
+    assert result["should_respond"] is False
+    assert getattr(stream.context, "_default_chatter_next_tick_bonus", None) == 0.5
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_sub_only_still_uses_probability_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sub_only 模式下概率直通仍应生效。"""
+    chatter = _build_chatter_with_config(
+        {"filter_mode": "sub_only", "enable_programmatic_controller": True}
+    )
+    stream = ChatStream(
+        stream_id="s_group",
+        platform="qq",
+        chat_type="group",
+        bot_nickname="Neo",
+    )
+    setattr(stream.context, "_default_chatter_next_tick_bonus", 0.5)
+    unread_msgs = [Message(content="Neo 你在吗", processed_plain_text="Neo 你在吗")]
+
+    async def _no_decide(**_kwargs: Any) -> dict[str, object]:
+        raise AssertionError("decide_should_respond should not be called when probability bypasses")
+
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.probability_gate.get_core_config",
+        lambda: SimpleNamespace(
+            personality=SimpleNamespace(
+                nickname="Neo",
+                alias_names=["小狐狸"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.interest_gate.decide_should_respond", _no_decide
+    )
+    monkeypatch.setattr(
+        "plugins.default_chatter.utils.probability_gate.random.random", lambda: 0.0
+    )
+
+    result = await chatter.sub_agent("group-msg", unread_msgs, stream)
+
+    assert result["should_respond"] is True
+    assert result.get("source") == "probability"
+    assert "概率直通响应" in result["reason"]

@@ -87,6 +87,7 @@ class InterestGate:
         if (
             plugin_config is not None
             and plugin_config.plugin.enable_programmatic_controller
+            and filter_mode == FilterMode.SUB_ONLY
         ):
             bypassed, bypass_reason = should_bypass_via_probability(
                 unread_msgs,
