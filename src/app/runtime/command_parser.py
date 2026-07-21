@@ -72,19 +72,48 @@ class CommandParser:
                 except EOFError as exc:
                     self._input_queue.put(exc)
                     break
-                except KeyboardInterrupt as exc:
-                    # prompt_toolkit 进入 raw 模式后，Ctrl+C 不会由终端生成 SIGINT，
-                    # 而是被 prompt_toolkit 读为按键并抛出 KeyboardInterrupt。
-                    # 把它交给主循环，让 Bot 走优雅关闭流程。
-                    self._input_queue.put(exc)
-                    break
+                except KeyboardInterrupt:
+                    # prompt_toolkit raw 模式下终端不再为 Ctrl+C 生成 SIGINT，
+                    # 而是读为 \x03 并抛出 KeyboardInterrupt。主动向进程发 SIGINT，
+                    # 让主线程的 SignalHandler 统一处理：
+                    #   - 第一次：请求优雅关闭（_running=False）
+                    #   - 3 秒内第二次：sys.exit(1) 强制退出（在主线程执行）
+                    # 不 break：保持 input worker 存活，shutdown 期间第二次
+                    # Ctrl+C 仍能被读取并再次发 SIGINT，统一走 OS 信号路径。
+                    # 用 os.kill 而非 signal.raise_signal：后者发给当前线程，
+                    # input worker 在 prompt_toolkit 的 C 代码中可能无法及时
+                    # 传递给主线程；os.kill 由内核选择可投递的线程（通常主线程）。
+                    import os as _os
+                    import signal as _signal
+
+                    try:
+                        _os.kill(_os.getpid(), _signal.SIGINT)
+                    except Exception:
+                        pass
+                    continue
                 except Exception as exc:
                     self._input_queue.put(exc)
                     break
 
     def close(self) -> None:
-        """关闭命令解析器资源。"""
+        """关闭命令解析器资源。
+
+        设停止事件，并尝试让正在阻塞的 prompt() 返回（通过 app.exit 注入
+        EOFError），避免终端残留 raw 模式。若 worker 此刻不在 prompt()，
+        这些操作也无害。
+        """
         self._input_stop_event.set()
+        try:
+            app = getattr(self._console_input._session, "app", None)
+            if app is not None and getattr(app, "is_running", False):
+                loop = getattr(app, "loop", None)
+                exit_fn = lambda: app.exit(exception=EOFError())
+                if loop is not None:
+                    loop.call_soon_threadsafe(exit_fn)
+                else:
+                    exit_fn()
+        except Exception:
+            pass
 
     async def _get_next_input(
         self, timeout: float = 0.2

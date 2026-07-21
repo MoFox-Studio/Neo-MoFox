@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     from src.kernel.storage import JSONStore
     from src.kernel.vector_db import VectorDBBase
 
+    from .command_parser import CommandParser
+
 class Bot:
     """Neo-MoFox Bot 主类
 
@@ -108,6 +110,15 @@ class Bot:
         # 由 run()/shutdown() 在调度器启停时调用）
         self._start_logger_cleanup: Callable[[], Awaitable[None]] | None = None
         self._stop_logger_cleanup: Callable[[], Awaitable[None]] | None = None
+
+        # 信号处理器引用（由 run() 中创建，shutdown() 完成后卸下）
+        # 保留到 shutdown 之后，让 shutdown 期间的第二次 Ctrl+C 仍能强制退出。
+        self._signal_handler: SignalHandler | None = None
+
+        # 命令解析器引用（由 run() 中创建，shutdown() 末尾关闭）
+        # 保留到 shutdown 之后，让 shutdown 期间第二次 Ctrl+C 仍能被
+        # input worker 读取并 raise_signal 触发强制退出。
+        self._command_parser: CommandParser | None = None
 
         # 统计数据
         self._stats: dict[str, int | bool | dict] = {
@@ -849,14 +860,17 @@ class Bot:
             if self.logger:
                 self.logger.warning(f"触发 ON_START 事件失败: {e}")
 
-        # 启动信号处理器
-        signal_handler = SignalHandler(self)
-        signal_handler.register_signals()
+        # 启动信号处理器（在 shutdown() 末尾统一卸下，保证关闭期间第二次
+        # Ctrl+C 仍能触发 SignalHandler 的强制退出分支）
+        self._signal_handler = SignalHandler(self)
+        self._signal_handler.register_signals()
 
-        # 创建交互式命令解析器
+        # 创建交互式命令解析器（保存为实例属性，shutdown() 末尾关闭，
+        # 让 shutdown 期间第二次 Ctrl+C 仍能被 input worker 读取并
+        # raise_signal 触发强制退出）
         from .command_parser import CommandParser
 
-        command_parser = CommandParser(self)
+        self._command_parser = CommandParser(self)
 
         self.logger.info("Neo-MoFox Bot 启动成功")
         self.logger.info("输入 /help 查看可用命令")
@@ -871,7 +885,7 @@ class Bot:
             while self._running:
                 try:
                     # 读取并执行命令（内部使用短超时轮询）
-                    should_continue = await command_parser.read_and_execute()
+                    should_continue = await self._command_parser.read_and_execute()
 
                     if not should_continue:
                         break
@@ -890,10 +904,9 @@ class Bot:
 
         finally:
             await self._record_runtime_snapshot(event_name="run_stopped")
-            command_parser.close()
-
-            # 恢复信号处理器
-            signal_handler.restore_handlers()
+            # 注意：不在这里关闭 command_parser 或卸下 SignalHandler。
+            # 两者都保留到 shutdown() 末尾，让 shutdown 期间第二次 Ctrl+C
+            # 仍能被 input worker 读取并 raise_signal 触发强制退出。
 
     def _install_telemetry_hooks(self) -> None:
         """安装遥测日志订阅。"""
@@ -1251,6 +1264,19 @@ class Bot:
             else:
                 print(f"关闭过程中出错: {e}")
             raise BotShutdownError(f"关闭失败: {e}") from e
+        finally:
+            # 关闭命令解析器：input worker 活到现在，shutdown 期间的第二次
+            # Ctrl+C 仍能被它读取并 raise_signal 触发强制退出。shutdown 完成
+            # 后才关闭，并通过 app.exit 注入 EOF 让阻塞中的 prompt() 返回，
+            # 避免终端残留 raw 模式。
+            if self._command_parser is not None:
+                self._command_parser.close()
+                self._command_parser = None
+            # 卸下信号处理器：shutdown 已完成（或失败），不再需要拦截 SIGINT。
+            # 此后 Ctrl+C 恢复为 asyncio/Python 默认行为。
+            if self._signal_handler is not None:
+                self._signal_handler.restore_handlers()
+                self._signal_handler = None
 
     async def start(self) -> None:
         """完整的启动流程（初始化 + 运行 + 关闭）
