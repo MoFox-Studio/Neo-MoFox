@@ -355,7 +355,7 @@ class MCPManager:
                 class DynamicMCPTool(BaseTool):
                     """动态生成的 MCP 工具代理类"""
                     plugin_name = "mcp_provider"
-                    tool_name = adapter.name
+                    name = adapter.name
                     tool_description = adapter.description
                     
                     # 绑定特定的 adapter 实例
