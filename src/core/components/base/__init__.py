@@ -1,5 +1,6 @@
 """Base component classes."""
 
+from .component import BaseComponent
 from .action import BaseAction
 from .agent import BaseAgent
 from .adapter import BaseAdapter
@@ -13,6 +14,7 @@ from .service import BaseService
 from .tool import BaseTool
 
 __all__ = [
+    "BaseComponent",
     "BaseAction",
     "BaseAgent",
     "BaseAdapter",

@@ -296,9 +296,9 @@ class CommandManager:
                         EventType.BEFORE_COMMAND_EXECUTE,
                         {
                             "signature": signature,
-                            "command_name": command_cls.command_name,
+                            "command_name": command_cls.name,
                             "command_description": getattr(
-                                command_cls, "command_description", ""
+                                command_cls, "description", ""
                             ),
                             "command_path": command_path,
                             "args": args,
@@ -341,9 +341,9 @@ class CommandManager:
                         EventType.AFTER_COMMAND_EXECUTE,
                         {
                             "signature": signature,
-                            "command_name": command_cls.command_name,
+                            "command_name": command_cls.name,
                             "command_description": getattr(
-                                command_cls, "command_description", ""
+                                command_cls, "description", ""
                             ),
                             "command_path": command_path,
                             "args": args,
@@ -380,9 +380,9 @@ class CommandManager:
                         EventType.ON_COMMAND_EXECUTE_FAILED,
                         {
                             "signature": signature,
-                            "command_name": command_cls.command_name,
+                            "command_name": command_cls.name,
                             "command_description": getattr(
-                                command_cls, "command_description", ""
+                                command_cls, "description", ""
                             ),
                             "command_path": command_path,
                             "args": args,
@@ -457,8 +457,8 @@ class CommandManager:
 
         # 生成帮助信息
         help_lines = [
-            f"命令: /{command_cls.command_name}",
-            f"描述: {command_cls.command_description}",
+            f"命令: /{command_cls.name}",
+            f"描述: {command_cls.description}",
         ]
 
         # 遍历命令树生成子命令列表
@@ -467,7 +467,7 @@ class CommandManager:
             for child_name, child_node in command_instance._root.children.items():
                 desc = child_node.description or "无描述"
                 help_lines.append(
-                    f"  /{command_cls.command_name} {child_name} - {desc}"
+                    f"  /{command_cls.name} {child_name} - {desc}"
                 )
 
         return "\n".join(help_lines)
@@ -506,7 +506,7 @@ class CommandManager:
             >>> ["/help", "/set", "/status"]
         """
         all_commands = self.get_all_commands()
-        return [f"/{cmd_cls.command_name}" for cmd_cls in all_commands.values()]
+        return [f"/{cmd_cls.name}" for cmd_cls in all_commands.values()]
 
 
 # 全局 Command 管理器实例

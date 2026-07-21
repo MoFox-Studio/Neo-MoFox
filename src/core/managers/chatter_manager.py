@@ -104,13 +104,13 @@ class ChatterManager:
             >>> manager.register_active_chatter("stream_1", chatter_instance)
         """
         self._active_chatters[stream_id] = chatter
-        logger.debug(f"注册活跃 Chatter: stream_id={stream_id}, chatter={chatter.chatter_name}")
+        logger.debug(f"注册活跃 Chatter: stream_id={stream_id}, chatter={chatter.name}")
 
     def bind_chatter_for_stream(self, stream_id: str, chatter: BaseChatter) -> None:
         """显式绑定 chatter 到指定 stream。"""
         self._active_chatters[stream_id] = chatter
         logger.info(
-            f"显式绑定 Chatter: stream_id={stream_id}, chatter={chatter.chatter_name}"
+            f"显式绑定 Chatter: stream_id={stream_id}, chatter={chatter.name}"
         )
 
     def restore_stream_to_default(self, stream_id: str) -> bool:
@@ -232,7 +232,7 @@ class ChatterManager:
         self.register_active_chatter(stream_id, chatter)
         logger.info(
             f"自动绑定 Chatter: stream_id={stream_id}, "
-            f"chatter={chatter.chatter_name}, chat_type={chat_type}, platform={platform}"
+            f"chatter={chatter.name}, chat_type={chat_type}, platform={platform}"
         )
         return chatter
 

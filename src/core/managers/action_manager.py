@@ -318,7 +318,7 @@ class ActionManager:
             execution_time = time.time() - start_time
             status_emoji = "✅" if result[0] else "❌"
             logger.info(
-                f"{status_emoji} 动作执行完成: {action_instance.action_name}, 耗时: {execution_time:.2f}s"
+                f"{status_emoji} 动作执行完成: {action_instance.name}, 耗时: {execution_time:.2f}s"
             )
 
             # 触发动作调用执行后事件
@@ -332,9 +332,9 @@ class ActionManager:
                         EventType.AFTER_ACTION_CALL,
                         {
                             "signature": signature,
-                            "action_name": action_instance.action_name,
+                            "action_name": action_instance.name,
                             "action_description": getattr(
-                                action_instance, "action_description", ""
+                                action_instance, "description", ""
                             ),
                             "args": dict(kwargs),
                             "result": result[1],
@@ -375,9 +375,9 @@ class ActionManager:
                         EventType.ON_ACTION_CALL_FAILED,
                         {
                             "signature": signature,
-                            "action_name": action_instance.action_name,
+                            "action_name": action_instance.name,
                             "action_description": getattr(
-                                action_instance, "action_description", ""
+                                action_instance, "description", ""
                             ),
                             "args": dict(kwargs),
                             "error": e,

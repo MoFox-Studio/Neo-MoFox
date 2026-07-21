@@ -162,7 +162,7 @@ class RouterManager:
         http_server.app.mount(
             path=route_path,
             app=router_instance.get_app(),
-            name=router_instance.router_name,
+            name=router_instance.name,
         )
 
         # 调用启动钩子
@@ -367,8 +367,8 @@ class RouterManager:
 
         return {
             "signature": signature,
-            "name": router_cls.router_name,
-            "description": router_cls.router_description,
+            "name": router_cls.name,
+            "description": router_cls.description,
             "route_path": router_instance.get_route_path() if router_instance else None,
             "mounted": is_mounted,
         }

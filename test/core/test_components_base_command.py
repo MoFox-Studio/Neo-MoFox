@@ -19,8 +19,8 @@ def cmd_route(*path: str):
 class ConcreteCommand(BaseCommand):
     """具体的 Command 实现用于测试。"""
 
-    command_name = "test"
-    command_description = "Test command"
+    name = "test"
+    description = "Test command"
     command_prefix = "/"
     permission_level = PermissionLevel.USER
     associated_platforms = []
@@ -80,7 +80,7 @@ class TestBaseCommand:
         """测试 Command 初始化。"""
         command = ConcreteCommand(mock_plugin, stream_id="")
         assert command.plugin == mock_plugin
-        assert command.command_name == "test"
+        assert command.name == "test"
         assert command.command_prefix == "/"
         assert command.permission_level == PermissionLevel.USER
         assert command._root.name == "root"
@@ -178,7 +178,7 @@ class TestBaseCommand:
         command = ConcreteCommand(mock_plugin, stream_id="")
         success, result = asyncio.run(command.execute("test set value 42"))
         assert success is False
-        assert "去掉 command_name 后" in result
+        assert "去掉 name 后" in result
 
     def test_execute_without_prefix(self, mock_plugin):
         """测试执行子路由文本。"""
@@ -210,7 +210,7 @@ class TestBaseCommand:
     def test_command_with_custom_prefix(self, mock_plugin):
         """测试自定义命令前缀。"""
         class CustomPrefixCommand(BaseCommand):
-            command_name = "custom"
+            name = "custom"
             command_prefix = "!"
 
             @cmd_route("test")
@@ -228,7 +228,7 @@ class TestBaseCommand:
         """测试不同权限级别。"""
         for level in [PermissionLevel.GUEST, PermissionLevel.USER, PermissionLevel.OPERATOR, PermissionLevel.OWNER]:
             class PermCommand(BaseCommand):
-                command_name = f"cmd_{level.value}"
+                name = f"cmd_{level.value}"
                 permission_level = level
 
                 @cmd_route("test")
@@ -247,8 +247,8 @@ class TestCommandAttributes:
         from src.core.components.types import ChatType
 
         class FullCommand(BaseCommand):
-            command_name = "full_command"
-            command_description = "Full command description"
+            name = "full_command"
+            description = "Full command description"
             command_prefix = "."
             permission_level = PermissionLevel.OPERATOR
             associated_platforms = ["telegram", "discord"]
@@ -260,8 +260,8 @@ class TestCommandAttributes:
                 return True, "ok"
 
         command = FullCommand(mock_plugin, stream_id="")
-        assert command.command_name == "full_command"
-        assert command.command_description == "Full command description"
+        assert command.name == "full_command"
+        assert command.description == "Full command description"
         assert command.command_prefix == "."
         assert command.permission_level == PermissionLevel.OPERATOR
         assert command.associated_platforms == ["telegram", "discord"]

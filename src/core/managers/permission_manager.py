@@ -284,7 +284,7 @@ class PermissionManager:
             command_level = command_class.permission_level
             logger.debug(
                 f"权限检查: user={person_id}({user_level}), "
-                f"command={command_class.command_name}({command_level})"
+                f"command={command_class.name}({command_level})"
             )
 
             # 3. 检查命令级权限覆盖（优先级最高）

@@ -6,12 +6,13 @@ Chatter 是 Bot 的智能核心，定义对话逻辑和流程。
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 import asyncio
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, cast
 
+from src.core.components.base.component import BaseComponent
 from src.core.components.types import ChatType
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
@@ -121,7 +122,7 @@ class Stop:
 ChatterResult = Wait | Success | Failure | Stop
 
 
-class BaseChatter(ABC):
+class BaseChatter(BaseComponent):
     """聊天器组件基类。
 
     Chatter 定义 Bot 的对话逻辑和流程。
@@ -129,15 +130,15 @@ class BaseChatter(ABC):
 
     Class Attributes:
         plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
-        chatter_name: 聊天器名称
-        chatter_description: 聊天器描述
+        name: 聊天器名称
+        description: 聊天器描述
         associated_platforms: 关联的平台列表
         chat_type: 支持的聊天类型
 
     Examples:
         >>> class MyChatter(BaseChatter):
-        ...     chatter_name = "my_chatter"
-        ...     chatter_description = "我的聊天器"
+        ...     name = "my_chatter"
+        ...     description = "我的聊天器"
         ...
         ...     async def execute(self, unreads: list[Message]) -> AsyncGenerator[ChatterResult, None]:
         ...         yield Wait("等待 LLM 响应")
@@ -148,9 +149,15 @@ class BaseChatter(ABC):
     _plugin_: str
     _signature_: str
 
-    # 聊天器元数据
+    component_type = "chatter"
+    _legacy_name_attr = "chatter_name"
+    _legacy_desc_attr = "chatter_description"
     chatter_name: str = ""
     chatter_description: str = ""
+
+    # 聊天器元数据
+    name: str = ""
+    description: str = ""
 
     associated_platforms: list[str] = []
     chat_type: ChatType = ChatType.ALL
@@ -189,23 +196,6 @@ class BaseChatter(ABC):
 
         if self.allow_message_buffer is not None:
             context.allow_message_buffer = bool(self.allow_message_buffer)
-
-    @classmethod
-    def get_signature(cls) -> str | None:
-        """获取聊天器组件的唯一签名。
-
-        Returns:
-            str | None: 组件签名，格式为 "plugin_name:chatter:chatter_name"，如果还未注入插件名称则返回 None
-
-        Examples:
-            >>> signature = MyChatter.get_signature()
-            >>> "my_plugin:chatter:my_chatter"
-        """
-        if hasattr(cls, "_signature_") and cls._signature_:
-            return cls._signature_
-        if hasattr(cls, "_plugin_") and cls._plugin_ and cls.chatter_name:
-            return f"{cls._plugin_}:chatter:{cls.chatter_name}"
-        return None
 
     @abstractmethod
     async def execute(
@@ -305,7 +295,7 @@ class BaseChatter(ABC):
             chatter_allow = getattr(usable_cls, "chatter_allow", [])
             if chatter_allow:
                 chatter_signature = self.get_signature()
-                allowed = self.chatter_name in chatter_allow
+                allowed = self.name in chatter_allow
                 if chatter_signature and not allowed:
                     allowed = chatter_signature in chatter_allow
 
@@ -492,7 +482,7 @@ class BaseChatter(ABC):
         """快速创建 LLM 请求，自动加载任务模型集与上下文管理器。
 
         封装了「获取模型集 → 创建上下文管理器 → 创建 LLMRequest」的固定样板。
-        request_name 默认取 chatter_name。
+         request_name 默认取 name。
 
         当 ``with_reminder`` 非空时，会自动为该 bucket 生成两个 reminder source：
 
@@ -505,7 +495,7 @@ class BaseChatter(ABC):
 
         Args:
             task: 模型任务名称（对应 config/model.toml 中的 task key），默认 "actor"
-            request_name: LLM 请求名称，默认使用 chatter_name
+            request_name: LLM 请求名称，默认使用 name
             with_reminder: 可选的 system reminder bucket 名称（也接受
                 :class:`SystemReminderBucket` 枚举值，因其继承 :class:`str`）。
                 传入后会自动登记全局 + 流私有两个 bucket 到上下文管理器。
@@ -555,7 +545,7 @@ class BaseChatter(ABC):
 
         request = LLMRequest(
             model_set=model_set,
-            request_name=request_name or self.chatter_name,
+            request_name=request_name or self.name,
             meta_data={"stream_id": self.stream_id},
             context_manager=context_manager,
         )
@@ -622,7 +612,7 @@ class BaseChatter(ABC):
             plugin=self.plugin,
             stream_id=self.stream_id,
             resolve_component_plugin=self._resolve_component_plugin,
-            display_name=self.chatter_name,
+            display_name=self.name,
             task_observer=task_observer,
         )
 
@@ -719,7 +709,7 @@ class BaseChatter(ABC):
 
         if not chat_stream:
             logger.warning(
-                f"[{self.chatter_name}] 无法获取聊天流: {self.stream_id[:8]}"
+                f"[{self.name}] 无法获取聊天流: {self.stream_id[:8]}"
             )
             return "", []
 
@@ -755,7 +745,7 @@ class BaseChatter(ABC):
 
         if not chat_stream:
             logger.warning(
-                f"[{self.chatter_name}] 无法获取聊天流: {self.stream_id[:8]}"
+                f"[{self.name}] 无法获取聊天流: {self.stream_id[:8]}"
             )
             return 0
 
@@ -779,7 +769,7 @@ class BaseChatter(ABC):
         context.unread_messages = remained_unreads
 
         logger.debug(
-            f"[{self.chatter_name}] flush 未读消息 {flushed_count} 条"
+            f"[{self.name}] flush 未读消息 {flushed_count} 条"
         )
 
         return flushed_count

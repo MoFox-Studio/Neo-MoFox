@@ -22,8 +22,8 @@ from src.kernel.llm import ROLE
 class PrivateTool(BaseTool):
     """用于测试 Agent 私有 usables 的 Tool。"""
 
-    tool_name = "private_lookup"
-    tool_description = "私有查询工具"
+    name = "private_lookup"
+    description = "私有查询工具"
 
     async def execute(self, query: str) -> tuple[bool, str]:
         """执行私有查询。"""
@@ -33,8 +33,8 @@ class PrivateTool(BaseTool):
 class PrivateReasonTool(BaseTool):
     """用于测试保留 reason 参数的 Tool。"""
 
-    tool_name = "private_reason_lookup"
-    tool_description = "私有 reason 查询工具"
+    name = "private_reason_lookup"
+    description = "私有 reason 查询工具"
 
     async def execute(self, query: str, reason: str) -> tuple[bool, str]:
         """执行包含 reason 的私有查询。"""
@@ -44,8 +44,8 @@ class PrivateReasonTool(BaseTool):
 class ConcreteAgent(BaseAgent):
     """用于测试的具体 Agent。"""
 
-    agent_name = "task_agent"
-    agent_description = "Task agent for tests"
+    name = "task_agent"
+    description = "Task agent for tests"
     chatter_allow = []
     chat_type = ChatType.ALL
     associated_platforms = []
@@ -83,7 +83,7 @@ class TestBaseAgent:
         agent = ConcreteAgent(stream_id="stream_123", plugin=mock_plugin)
         assert agent.stream_id == "stream_123"
         assert agent.plugin == mock_plugin
-        assert agent.agent_name == "task_agent"
+        assert agent.name == "task_agent"
 
     def test_get_signature(self, mock_plugin):
         """测试 Agent 签名。"""
@@ -287,8 +287,8 @@ class TestBaseAgent:
         from src.core.components.base.action import BaseAction
 
         class PrivateAction(BaseAction):
-            action_name = "private_action"
-            action_description = "private action"
+            name = "private_action"
+            description = "private action"
             associated_types = ["text"]
 
             async def execute(self, content: str) -> tuple[bool, str]:
@@ -316,8 +316,8 @@ class TestBaseAgent:
         """Agent 的 associated_types 为空时应抛出异常。"""
 
         class InvalidAgent(BaseAgent):
-            agent_name = "invalid_agent"
-            agent_description = "invalid"
+            name = "invalid_agent"
+            description = "invalid"
             associated_types = []
 
             async def execute(self, task: str) -> tuple[bool, str]:
@@ -331,8 +331,8 @@ class TestBaseAgent:
         from src.core.components.base.action import BaseAction
 
         class InvalidPrivateAction(BaseAction):
-            action_name = "invalid_private_action"
-            action_description = "invalid private action"
+            name = "invalid_private_action"
+            description = "invalid private action"
             associated_types = []
 
             async def execute(self, content: str) -> tuple[bool, str]:

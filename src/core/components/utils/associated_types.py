@@ -14,7 +14,7 @@ def validate_associated_types(
     Args:
         component_cls: 待校验的组件类。
         component_kind: 组件类型描述，用于错误提示。
-        component_name_attr: 组件名称属性名，如 ``action_name`` / ``agent_name``。
+        component_name_attr: 组件名称属性名，如 ``name``。
 
     Returns:
         list[str]: 规范化后的 associated_types 列表。

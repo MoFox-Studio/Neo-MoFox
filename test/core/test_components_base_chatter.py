@@ -25,8 +25,8 @@ from src.kernel.llm import LLMPayload, ROLE, Text
 class ConcreteChatter(BaseChatter):
     """具体的 Chatter 实现用于测试。"""
 
-    chatter_name = "test_chatter"
-    chatter_description = "Test chatter"
+    name = "test_chatter"
+    description = "Test chatter"
     associated_platforms = []
     chatter_allow = []
     chat_type = ChatType.ALL
@@ -87,8 +87,8 @@ class TestBaseChatter:
         chatter = ConcreteChatter("stream_123", mock_plugin)
         assert chatter.stream_id == "stream_123"
         assert chatter.plugin == mock_plugin
-        assert chatter.chatter_name == "test_chatter"
-        assert chatter.chatter_description == "Test chatter"
+        assert chatter.name == "test_chatter"
+        assert chatter.description == "Test chatter"
 
     def test_get_signature(self, mock_plugin):
         """测试获取签名。"""
@@ -240,8 +240,8 @@ class TestBaseChatter:
         """测试跨插件组件实例化时使用组件所属插件实例。"""
 
         class CrossPluginTool(BaseTool):
-            tool_name = "cross_tool"
-            tool_description = "cross tool"
+            name = "cross_tool"
+            description = "cross tool"
             _signature_ = "plugin_b:tool:cross_tool"
 
             def __init__(self, plugin):
@@ -253,7 +253,7 @@ class TestBaseChatter:
                 return True, "ok"
 
         class CrossPluginChatter(BaseChatter):
-            chatter_name = "cross_plugin_chatter"
+            name = "cross_plugin_chatter"
 
             async def execute(self):
                 if False:
@@ -287,24 +287,24 @@ class TestBaseChatter:
         """测试 modify_llm_usables 会按 chatter_allow 过滤组件。"""
 
         class AllowedTool(BaseTool):
-            tool_name = "allowed_tool"
-            tool_description = "allowed"
+            name = "allowed_tool"
+            description = "allowed"
             chatter_allow = ["test_chatter"]
 
             async def execute(self, *args, **kwargs):
                 return True, "ok"
 
         class RejectedTool(BaseTool):
-            tool_name = "rejected_tool"
-            tool_description = "rejected"
+            name = "rejected_tool"
+            description = "rejected"
             chatter_allow = ["other_chatter"]
 
             async def execute(self, *args, **kwargs):
                 return True, "ok"
 
         class OpenTool(BaseTool):
-            tool_name = "open_tool"
-            tool_description = "open"
+            name = "open_tool"
+            description = "open"
 
             async def execute(self, *args, **kwargs):
                 return True, "ok"
@@ -330,8 +330,8 @@ class TestBaseChatter:
         """当前流不支持的 Action 类型应被剔除。"""
 
         class EmojiAction(BaseAction):
-            action_name = "emoji_action"
-            action_description = "emoji"
+            name = "emoji_action"
+            description = "emoji"
             associated_types = ["emoji"]
 
             async def execute(self, content: str) -> tuple[bool, str]:
@@ -364,15 +364,15 @@ class TestBaseChatter:
         """测试执行跨插件 Tool 时向管理器传入所属插件实例。"""
 
         class CrossPluginTool(BaseTool):
-            tool_name = "cross_tool"
-            tool_description = "cross tool"
+            name = "cross_tool"
+            description = "cross tool"
             _signature_ = "plugin_b:tool:cross_tool"
 
             async def execute(self, *args, **kwargs):
                 return True, "ok"
 
         class CrossPluginChatter(BaseChatter):
-            chatter_name = "cross_plugin_chatter"
+            name = "cross_plugin_chatter"
 
             async def execute(self):
                 if False:
@@ -408,8 +408,8 @@ class TestBaseChatter:
         """测试执行 Agent 时不通过 Tool/Action 管理器。"""
 
         class LocalAgent(BaseAgent):
-            agent_name = "local_agent"
-            agent_description = "local agent"
+            name = "local_agent"
+            description = "local agent"
             _signature_ = "plugin_b:agent:local_agent"
             associated_types = ["text"]
 
@@ -417,7 +417,7 @@ class TestBaseChatter:
                 return True, f"agent:{query}"
 
         class CrossPluginChatter(BaseChatter):
-            chatter_name = "cross_plugin_chatter"
+            name = "cross_plugin_chatter"
 
             async def execute(self):
                 if False:
@@ -454,8 +454,8 @@ class TestChatterAttributes:
         from src.core.components.types import ChatType
 
         class FullChatter(BaseChatter):
-            chatter_name = "full_chatter"
-            chatter_description = "Full chatter description"
+            name = "full_chatter"
+            description = "Full chatter description"
             associated_platforms = ["telegram", "discord"]
             chatter_allow = ["chatter1", "chatter2"]
             chat_type = ChatType.GROUP
@@ -465,8 +465,8 @@ class TestChatterAttributes:
                 yield Success("done")
 
         chatter = FullChatter("stream_123", mock_plugin)
-        assert chatter.chatter_name == "full_chatter"
-        assert chatter.chatter_description == "Full chatter description"
+        assert chatter.name == "full_chatter"
+        assert chatter.description == "Full chatter description"
         assert chatter.associated_platforms == ["telegram", "discord"]
         assert chatter.chatter_allow == ["chatter1", "chatter2"]
         assert chatter.chat_type == ChatType.GROUP
@@ -476,28 +476,28 @@ class TestChatterAttributes:
         """测试不同聊天类型。"""
         # 分别测试每种聊天类型
         class PrivateChatter(BaseChatter):
-            chatter_name = "chatter_private"
+            name = "chatter_private"
             chat_type = ChatType.PRIVATE
 
             async def execute(self, unreads: list) -> AsyncGenerator[ChatterResult, None]:
                 yield Success("done")
 
         class GroupChatter(BaseChatter):
-            chatter_name = "chatter_group"
+            name = "chatter_group"
             chat_type = ChatType.GROUP
 
             async def execute(self, unreads: list) -> AsyncGenerator[ChatterResult, None]:
                 yield Success("done")
 
         class DiscussChatter(BaseChatter):
-            chatter_name = "chatter_discuss"
+            name = "chatter_discuss"
             chat_type = ChatType.DISCUSS
 
             async def execute(self, unreads: list) -> AsyncGenerator[ChatterResult, None]:
                 yield Success("done")
 
         class AllChatter(BaseChatter):
-            chatter_name = "chatter_all"
+            name = "chatter_all"
             chat_type = ChatType.ALL
 
             async def execute(self, unreads: list) -> AsyncGenerator[ChatterResult, None]:
@@ -517,7 +517,7 @@ class TestChatterExecutePatterns:
     async def test_multiple_waits(self, mock_plugin):
         """测试多个 Wait。"""
         class MultiWaitChatter(BaseChatter):
-            chatter_name = "multi_wait"
+            name = "multi_wait"
 
             async def execute(self, unreads: list) -> AsyncGenerator[ChatterResult, None]:
                 yield Wait(time=1.0)
@@ -542,7 +542,7 @@ class TestChatterExecutePatterns:
     async def test_immediate_success(self, mock_plugin):
         """测试立即成功。"""
         class ImmediateSuccessChatter(BaseChatter):
-            chatter_name = "immediate_success"
+            name = "immediate_success"
 
             async def execute(self, unreads: list) -> AsyncGenerator[ChatterResult, None]:
                 yield Success("立即完成")
@@ -561,7 +561,7 @@ class TestChatterExecutePatterns:
     async def test_immediate_failure(self, mock_plugin):
         """测试立即失败。"""
         class ImmediateFailureChatter(BaseChatter):
-            chatter_name = "immediate_failure"
+            name = "immediate_failure"
 
             async def execute(self, unreads: list) -> AsyncGenerator[ChatterResult, None]:
                 yield Failure("立即失败")
