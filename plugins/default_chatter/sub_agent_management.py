@@ -20,7 +20,7 @@ from .sub_agent_collaboration import (
 
 def get_plugin_config(plugin: Any) -> DefaultChatterConfig | None:
     """返回插件配置；配置类型不匹配时返回 None。"""
-    config = getattr(plugin, "config", None)
+    config = plugin.config
     return config if isinstance(config, DefaultChatterConfig) else None
 
 

@@ -39,7 +39,7 @@ class SendTextAction(BaseAction):
 
     def _get_plugin_config(self) -> DefaultChatterConfig | None:
         """返回插件配置；配置类型不匹配时返回 None。"""
-        config = getattr(self.plugin, "config", None)
+        config = self.plugin.config
         return config if isinstance(config, DefaultChatterConfig) else None
 
     def _mark_sub_agent_bonus_on_success(self, success: bool) -> None:
