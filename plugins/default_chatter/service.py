@@ -9,10 +9,15 @@ from src.app.plugin_system.base import BaseService
 
 from .config import DefaultChatterConfig
 from .session import DefaultChatterSession
-from .type_defs import DefaultChatterSessionAdapters, DefaultChatterSessionOptions
+from .type_defs import (
+    DefaultChatterRuntimeAdapter,
+    DefaultChatterSessionAdapters,
+    DefaultChatterSessionOptions,
+    PlainTextResponseAdapter,
+)
 
 if TYPE_CHECKING:
-    from src.app.plugin_system.base import BaseChatter, BasePlugin
+    from src.app.plugin_system.base import BasePlugin
 
 logger = get_logger("default_chatter")
 
@@ -52,7 +57,7 @@ class DefaultChatterService(BaseService):
         *,
         stream_id: str,
         plugin: "BasePlugin",
-        chatter: "BaseChatter | None" = None,
+        chatter: DefaultChatterRuntimeAdapter | None = None,
         options: DefaultChatterSessionOptions | None = None,
     ) -> DefaultChatterSession:
         """创建由 DefaultChatter 运行时提供适配器的会话。"""
@@ -98,18 +103,21 @@ class DefaultChatterService(BaseService):
         )
 
     @staticmethod
-    def _build_default_adapters(runtime: "BaseChatter") -> DefaultChatterSessionAdapters:
+    def _build_default_adapters(runtime: object) -> DefaultChatterSessionAdapters:
+        """从具备完整会话能力的 Chatter 运行时构建默认适配器。"""
+        if not isinstance(runtime, DefaultChatterRuntimeAdapter):
+            raise TypeError("默认 Chatter 运行时未实现完整的会话适配器协议")
+
+        plain_text_adapter = (
+            runtime if isinstance(runtime, PlainTextResponseAdapter) else None
+        )
         return DefaultChatterSessionAdapters(
-            request_adapter=runtime,  # type: ignore[arg-type]
-            prompt_adapter=runtime,  # type: ignore[arg-type]
-            unread_adapter=runtime,  # type: ignore[arg-type]
-            usable_adapter=runtime,  # type: ignore[arg-type]
-            tool_execution_adapter=runtime,  # type: ignore[arg-type]
-            sub_agent_adapter=runtime,  # type: ignore[arg-type]
+            request_adapter=runtime,
+            prompt_adapter=runtime,
+            unread_adapter=runtime,
+            usable_adapter=runtime,
+            tool_execution_adapter=runtime,
+            sub_agent_adapter=runtime,
             logger_adapter=logger,
-            plain_text_adapter=(
-                runtime  # type: ignore[arg-type]
-                if hasattr(runtime, "handle_plain_text_response")
-                else None
-            ),
+            plain_text_adapter=plain_text_adapter,
         )

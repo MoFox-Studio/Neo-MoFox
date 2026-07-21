@@ -5,7 +5,16 @@ from __future__ import annotations
 from collections.abc import Awaitable, Generator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Literal, NotRequired, Protocol, TypedDict, TypeAlias
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    NotRequired,
+    Protocol,
+    TypedDict,
+    TypeAlias,
+    runtime_checkable,
+)
 
 from src.app.plugin_system.api.llm_api import LLMRequest
 from src.app.plugin_system.api.log_api import Logger
@@ -199,6 +208,7 @@ class PlainTextResponseHandling(TypedDict):
     reminder_text: str
 
 
+@runtime_checkable
 class PlainTextResponseAdapter(Protocol):
     """定义模型直接输出纯文本时的处理接口。"""
 
@@ -210,6 +220,19 @@ class PlainTextResponseAdapter(Protocol):
         response: LLMResponseLike,
     ) -> PlainTextResponseHandling:
         ...
+
+
+@runtime_checkable
+class DefaultChatterRuntimeAdapter(
+    SupportsRequestCreation,
+    PromptAdapter,
+    UnreadAdapter,
+    UsableAdapter,
+    ToolExecutionAdapter,
+    SubAgentAdapter,
+    Protocol,
+):
+    """定义默认 Chatter 运行时必须同时提供的会话能力。"""
 
 
 @dataclass(slots=True)

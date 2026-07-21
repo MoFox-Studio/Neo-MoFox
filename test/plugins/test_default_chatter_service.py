@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from plugins.default_chatter.config import DefaultChatterConfig
 from plugins.default_chatter.service import DefaultChatterService
 from plugins.default_chatter.type_defs import (
@@ -12,8 +14,56 @@ from plugins.default_chatter.type_defs import (
 
 
 class _FakeRuntime:
+    """实现默认会话组合协议的测试运行时。"""
+
     def __init__(self, stream_id: str = "stream-1") -> None:
         self.stream_id = stream_id
+
+    def create_request(self, *args: Any, **kwargs: Any) -> Any:
+        _ = args, kwargs
+        return SimpleNamespace()
+
+    async def _build_system_prompt(self, *args: Any, **kwargs: Any) -> str:
+        _ = args, kwargs
+        return ""
+
+    def _build_enhanced_history_text(self, *args: Any, **kwargs: Any) -> str:
+        _ = args, kwargs
+        return ""
+
+    async def _build_user_prompt(self, *args: Any, **kwargs: Any) -> str:
+        _ = args, kwargs
+        return ""
+
+    def _build_negative_behaviors_extra(self) -> str:
+        return ""
+
+    async def fetch_unreads(self, *args: Any, **kwargs: Any) -> tuple[str, list[Any]]:
+        _ = args, kwargs
+        return "", []
+
+    def format_message_line(self, *args: Any, **kwargs: Any) -> str:
+        _ = args, kwargs
+        return ""
+
+    def _upsert_pending_unread_payload(self, *args: Any, **kwargs: Any) -> None:
+        _ = args, kwargs
+
+    async def flush_unreads(self, *args: Any, **kwargs: Any) -> int:
+        _ = args, kwargs
+        return 0
+
+    async def inject_usables(self, *args: Any, **kwargs: Any) -> Any:
+        _ = args, kwargs
+        return SimpleNamespace()
+
+    async def run_tool_call(self, *args: Any, **kwargs: Any) -> list[tuple[bool, bool]]:
+        _ = args, kwargs
+        return []
+
+    async def sub_agent(self, *args: Any, **kwargs: Any) -> Any:
+        _ = args, kwargs
+        return {"reason": "test", "should_respond": False}
 
 
 class _FakeLogger:
@@ -61,6 +111,14 @@ def test_create_session_returns_distinct_session_instances() -> None:
     assert first.adapters is adapters
     assert second.adapters is adapters
     assert first.options is not second.options
+
+
+def test_build_default_adapters_rejects_incomplete_runtime() -> None:
+    """默认适配器构建应拒绝未实现完整协议的运行时。"""
+    with pytest.raises(TypeError, match="未实现完整的会话适配器协议"):
+        DefaultChatterService._build_default_adapters(
+            SimpleNamespace(stream_id="stream-1")
+        )
 
 
 def test_create_default_session_maps_plugin_config_into_options() -> None:
