@@ -50,10 +50,10 @@ def _validate_bot_identity(config: OneBotAdapterConfig) -> None:
 class OneBotAdapter(BaseAdapter):
     """OneBot 适配器 - 完全基于 mofox-wire 架构"""
 
-    adapter_name = "onebot_adapter"
+    name = "onebot_adapter"
     adapter_version = "2.0.0"
     adapter_author = "MoFox Team"
-    adapter_description = "基于 MoFox-Bus 的 OneBot 11 适配器"
+    description = "基于 MoFox-Bus 的 OneBot 11 适配器"
     platform = "qq"
 
     run_in_subprocess = False

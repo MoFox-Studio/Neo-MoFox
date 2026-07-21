@@ -31,8 +31,8 @@ class ClearContextCommand(BaseCommand):
     支持清空当前流、指定群/私聊流、按类型批量清空或全量清空。
     """
 
-    command_name: str = "清空上下文"
-    command_description: str = "清空聊天流内存上下文（仅主人可用，不删除数据库记录）"
+    name: str = "清空上下文"
+    description: str = "清空聊天流内存上下文（仅主人可用，不删除数据库记录）"
     permission_level: PermissionLevel = PermissionLevel.OWNER
 
     @classmethod

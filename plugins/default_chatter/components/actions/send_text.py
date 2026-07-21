@@ -31,8 +31,8 @@ _LAST_SEND_TIME_ATTR = "_default_chatter_last_send_text_time"
 class SendTextAction(BaseAction):
     """发送文本消息。"""
 
-    action_name = "send_text"
-    action_description = "发送一段文本消息给用户。这是你唯一发送文本消息的方式。你可以一次调用多个 send_text 来分多段回复，但每次调用必须提供你想说的话的文本内容，不要添加任何标记或格式，只写纯文本即可。content 参数只能包含发送给用户的正文，严禁将行为理由、内心独白或格式说明混入 content。你也可以选择引用或回复之前某条消息作为背景，使用 reply_to 参数指定；若不引用消息，可用 at 参数指定要@的对象。注意：本工具无法发送表情包等非文本内容。所有@对象都应该通过at参数而不是直接写在文本里，以确保正确解析和发送。"
+    name = "send_text"
+    description = "发送一段文本消息给用户。这是你唯一发送文本消息的方式。你可以一次调用多个 send_text 来分多段回复，但每次调用必须提供你想说的话的文本内容，不要添加任何标记或格式，只写纯文本即可。content 参数只能包含发送给用户的正文，严禁将行为理由、内心独白或格式说明混入 content。你也可以选择引用或回复之前某条消息作为背景，使用 reply_to 参数指定；若不引用消息，可用 at 参数指定要@的对象。注意：本工具无法发送表情包等非文本内容。所有@对象都应该通过at参数而不是直接写在文本里，以确保正确解析和发送。"
 
     chatter_allow: list[str] = ["default_chatter"]
     associated_types = ["text"]
@@ -164,7 +164,7 @@ class SendTextAction(BaseAction):
                 extra["target_group_name"] = target_group_name
 
             message = Message(
-                message_id=f"action_{self.action_name}_{uuid4().hex}",
+                message_id=f"action_{self.name}_{uuid4().hex}",
                 content=content,
                 processed_plain_text=content,
                 message_type=MessageType.TEXT,
@@ -235,7 +235,7 @@ class SendTextAction(BaseAction):
                 extra["target_group_name"] = target_group_name
 
             message = Message(
-                message_id=f"action_{self.action_name}_{uuid4().hex}",
+                message_id=f"action_{self.name}_{uuid4().hex}",
                 content=content,
                 processed_plain_text=content,
                 message_type=MessageType.TEXT,

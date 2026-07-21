@@ -25,8 +25,8 @@ _EMOTION_TAG_DESC = (
 class SendEmojiMemeAction(BaseAction):
     """发送表情包动作。"""
 
-    action_name: str = "send_emoji_meme"
-    action_description: str = "根据目标描述与情感标签，检索并发送一张符合当前情景的表情包来生动地表达情绪。不要忘记在聊天时使用这个动作，比起简单的文字它往往更受欢迎。此动作可以单独使用也可以和发送文字一起使用，更符合日常聊天习惯。"
+    name: str = "send_emoji_meme"
+    description: str = "根据目标描述与情感标签，检索并发送一张符合当前情景的表情包来生动地表达情绪。不要忘记在聊天时使用这个动作，比起简单的文字它往往更受欢迎。此动作可以单独使用也可以和发送文字一起使用，更符合日常聊天习惯。"
     primary_action: bool = False
     associated_types = ["emoji"]
 

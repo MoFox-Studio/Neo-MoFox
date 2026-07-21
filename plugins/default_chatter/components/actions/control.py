@@ -8,8 +8,8 @@ from src.app.plugin_system.base import BaseAction
 class PassAndWaitAction(BaseAction):
     """跳过本次动作，等待新消息或定时继续。"""
 
-    action_name = "pass_and_wait"
-    action_description = "为当前对话登记一个等待点。你可以单独调用它，让本轮什么都不做直接等待；也可以在同一轮先调用其他 action（例如 send_text、发送表情等），再调用本工具，表示这些动作执行完成后进入等待。默认会等待用户新消息；如果传入 seconds 参数，则会在指定秒数到达后由框架主动恢复对话流程，即使期间没有收到新消息。适合需要回复后稍后主动继续、定时追问或延时确认的场景。"
+    name = "pass_and_wait"
+    description = "为当前对话登记一个等待点。你可以单独调用它，让本轮什么都不做直接等待；也可以在同一轮先调用其他 action（例如 send_text、发送表情等），再调用本工具，表示这些动作执行完成后进入等待。默认会等待用户新消息；如果传入 seconds 参数，则会在指定秒数到达后由框架主动恢复对话流程，即使期间没有收到新消息。适合需要回复后稍后主动继续、定时追问或延时确认的场景。"
 
     chatter_allow: list[str] = ["default_chatter"]
     associated_types = ["text"]
@@ -29,8 +29,8 @@ class PassAndWaitAction(BaseAction):
 class StopConversationAction(BaseAction):
     """结束当前对话轮次。"""
 
-    action_name = "stop_conversation"
-    action_description = "结束当前对话，过一段时间后再允许开启新对话。如果对话已经自然结束，或者你认为本轮对话可以告一段落，或者你暂时不想继续对话，使用本工具结束这轮对话。通常当你已经做出回应，且后续的消息很可能是新的话题时，使用本工具结束对话。你可以指定一个冷却时间（分钟），在此期间即使有新消息也不会触发新的对话，直到冷却时间结束后才会重新允许开启新对话。"
+    name = "stop_conversation"
+    description = "结束当前对话，过一段时间后再允许开启新对话。如果对话已经自然结束，或者你认为本轮对话可以告一段落，或者你暂时不想继续对话，使用本工具结束这轮对话。通常当你已经做出回应，且后续的消息很可能是新的话题时，使用本工具结束对话。你可以指定一个冷却时间（分钟），在此期间即使有新消息也不会触发新的对话，直到冷却时间结束后才会重新允许开启新对话。"
 
     chatter_allow: list[str] = ["default_chatter"]
     associated_types = ["text"]

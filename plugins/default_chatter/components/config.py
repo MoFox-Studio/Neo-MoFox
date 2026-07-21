@@ -10,8 +10,8 @@ from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_se
 class DefaultChatterConfig(BaseConfig):
     """DefaultChatter 配置。"""
 
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "DefaultChatter 配置"
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = "DefaultChatter 配置"
 
     @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):

@@ -625,8 +625,8 @@ async def sync_booku_knowledge_actor_reminder(plugin: Any) -> str:
 class BookuKnowledgeService(BaseService):
     """知识库服务，支持文档分块入库与语义检索。"""
 
-    service_name: str = "booku_knowledge"
-    service_description: str = "知识库服务，支持文档分块入库与语义检索"
+    name: str = "booku_knowledge"
+    description: str = "知识库服务，支持文档分块入库与语义检索"
     version: str = "1.0.0"
     dependencies: list[str] = []
     _memory_service: BookuMemoryService | None = None

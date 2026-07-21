@@ -63,8 +63,8 @@ logger = get_logger("default_chatter")
 class DefaultChatter(BaseChatter):
     """配置并驱动默认聊天会话。"""
 
-    chatter_name: str = "default_chatter"
-    chatter_description: str = "默认聊天组件，提供基础的消息处理和回复功能"
+    name: str = "default_chatter"
+    description: str = "默认聊天组件，提供基础的消息处理和回复功能"
 
     associated_platforms: list[str] = []
     chat_type: ChatType = ChatType.ALL

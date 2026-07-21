@@ -25,8 +25,8 @@ logger = get_logger("default_chatter")
 class DefaultChatterService(BaseService):
     """创建使用默认运行时或自定义适配器的聊天会话。"""
 
-    service_name = "chat_core"
-    service_description = "Default Chatter 会话工厂和可重用聊天核心"
+    name = "chat_core"
+    description = "Default Chatter 会话工厂和可重用聊天核心"
     version = "1.0.0"
 
     def create_session(

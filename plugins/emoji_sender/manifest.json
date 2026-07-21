@@ -23,7 +23,7 @@
     }
   ],
   "entry_point": "plugin.py",
-  "min_core_version": "1.0.0",
+  "api_version": "1.0.0",
   "python_dependencies": ["pillow"],
   "dependencies_required": true
 }

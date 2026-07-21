@@ -14,8 +14,8 @@ logger = get_logger("skill_manager.handler")
 class SkillManagerLoadHandler(BaseEventHandler):
     """在所有插件加载完成后刷新 skill 索引。"""
 
-    handler_name: str = "skill_manager_load_handler"
-    handler_description: str = "订阅 on_all_plugin_loaded 并刷新 skill 索引"
+    name: str = "skill_manager_load_handler"
+    description: str = "订阅 on_all_plugin_loaded 并刷新 skill 索引"
     weight: int = 0
     intercept_message: bool = False
     init_subscribe: list[EventType | str] = [EventType.ON_ALL_PLUGIN_LOADED]

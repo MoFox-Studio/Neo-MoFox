@@ -25,8 +25,8 @@ EXTERNAL_SCRIPT_KILL_GRACE_SECONDS = 3.0
 class SkillGetTool(BaseTool):
     """读取并注入 skill 主文档。"""
 
-    tool_name: str = "get_skill"
-    tool_description: str = "按 skill 名称读取 SKILL.md 原文，并标记为已注入。"
+    name: str = "get_skill"
+    description: str = "按 skill 名称读取 SKILL.md 原文，并标记为已注入。"
 
     async def execute(
         self,
@@ -55,8 +55,8 @@ class SkillGetTool(BaseTool):
 class SkillGetReferenceTool(BaseTool):
     """读取 skill 下的引用 markdown 文件。"""
 
-    tool_name: str = "get_reference"
-    tool_description: str = (
+    name: str = "get_reference"
+    description: str = (
         "在已通过 get_skill(name) 注入对应 skill 后，"
         "按相对路径读取该 skill 目录中的 markdown 引用文件。"
     )
@@ -94,8 +94,8 @@ class SkillGetReferenceTool(BaseTool):
 class SkillGetScriptTool(BaseTool):
     """直接执行 skill 下的脚本文件。"""
 
-    tool_name: str = "get_script"
-    tool_description: str = (
+    name: str = "get_script"
+    description: str = (
         "在已通过 get_skill(name) 注入对应 skill 后，"
         "按相对路径直接执行该 skill 目录下脚本文件（支持 .py/.ps1/.bat/.cmd/.sh）。"
         "可选通过 script_args 传入命令行参数。"

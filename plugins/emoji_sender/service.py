@@ -93,8 +93,8 @@ class EmojiSenderService(BaseService):
     - ingest_once：执行一次入库任务（对齐→抽取→VLM 决策→写入）
     """
 
-    service_name: str = "emoji_sender"
-    service_description: str = "表情包收藏、检索与发送服务"
+    name: str = "emoji_sender"
+    description: str = "表情包收藏、检索与发送服务"
     version: str = "1.0.0"
 
     def _selection_temperature(self) -> float:

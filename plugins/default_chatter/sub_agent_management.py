@@ -205,7 +205,7 @@ def require_active_runtime(stream_id: str) -> BaseChatter:
         ValueError: 会话流没有活跃的 default_chatter 实例
     """
     runtime = get_chatter_by_stream(stream_id)
-    if runtime is None or runtime.chatter_name != "default_chatter":
+    if runtime is None or runtime.name != "default_chatter":
         raise ValueError("当前会话流没有活跃的 default_chatter")
     return runtime
 
@@ -300,8 +300,8 @@ class _SubAgentManagementUsable(BaseAgent):
 class CreateAgentUsable(_SubAgentManagementUsable):
     """创建受管子代理。"""
 
-    agent_name = "create_agent"
-    agent_description = "创建子代理，并分配指定的普通工具和 MCP 服务器能力。"
+    name = "create_agent"
+    description = "创建子代理，并分配指定的普通工具和 MCP 服务器能力。"
 
     async def execute(
         self,
@@ -337,8 +337,8 @@ class CreateAgentUsable(_SubAgentManagementUsable):
 class GetAgentUsable(_SubAgentManagementUsable):
     """查询受管子代理或向其追加指令。"""
 
-    agent_name = "get_agent"
-    agent_description = "返回子代理状态和最近活动，并可追加一条问题或指令。"
+    name = "get_agent"
+    description = "返回子代理状态和最近活动，并可追加一条问题或指令。"
 
     async def execute(
         self,
@@ -368,8 +368,8 @@ class GetAgentUsable(_SubAgentManagementUsable):
 class KillAgentUsable(_SubAgentManagementUsable):
     """销毁受管子代理。"""
 
-    agent_name = "kill_agent"
-    agent_description = "销毁指定子代理及其后代。"
+    name = "kill_agent"
+    description = "销毁指定子代理及其后代。"
 
     async def execute(self, name: str) -> tuple[bool, dict[str, Any]]:
         """销毁子代理。

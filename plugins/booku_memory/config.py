@@ -10,8 +10,8 @@ from src.core.components.base.config import BaseConfig, Field, SectionBase, conf
 class BookuMemoryConfig(BaseConfig):
     """Booku Memory Agent 插件配置模型。"""
 
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "Booku Memory Agent 配置"
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = "Booku Memory Agent 配置"
 
     @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):

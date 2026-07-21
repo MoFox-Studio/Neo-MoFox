@@ -14,8 +14,8 @@ from src.core.components.base.config import BaseConfig, Field, SectionBase, conf
 class EmojiSenderConfig(BaseConfig):
     """emoji_sender 插件配置。"""
 
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "表情包收藏与发送插件配置"
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = "表情包收藏与发送插件配置"
 
     @config_section("scheduler")
     class SchedulerSection(SectionBase):

@@ -29,8 +29,8 @@ _USAGE = """/skill 用法：
 class SkillManagerCommand(BaseCommand):
     """SkillManager 管理命令。"""
 
-    command_name: str = "skill"
-    command_description: str = "管理 SkillManager 索引：列出、刷新技能"
+    name: str = "skill"
+    description: str = "管理 SkillManager 索引：列出、刷新技能"
     permission_level: PermissionLevel = PermissionLevel.OWNER
 
     @classmethod
