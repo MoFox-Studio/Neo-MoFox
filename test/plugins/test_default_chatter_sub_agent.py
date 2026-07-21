@@ -8,13 +8,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from plugins.default_chatter.actions.send_text import (
+from plugins.default_chatter.components.actions.send_text import (
     SendTextAction,
     _LAST_SEND_TIME_ATTR,
     _TYPING_DELAY_MAX_SECONDS,
     _TYPING_DELAY_PER_CHAR,
 )
-from plugins.default_chatter.config import DefaultChatterConfig
+from plugins.default_chatter.components.config import DefaultChatterConfig
 from plugins.default_chatter.plugin import (
     DefaultChatter,
     DefaultChatterPlugin,
@@ -51,7 +51,7 @@ async def test_sub_agent_is_disabled_in_private_chat(monkeypatch: pytest.MonkeyP
         called["value"] = True
         return {"reason": "should not be called", "should_respond": False}
 
-    monkeypatch.setattr("plugins.default_chatter.interest_gate.decide_should_respond", _fake_decide)
+    monkeypatch.setattr("plugins.default_chatter.utils.interest_gate.decide_should_respond", _fake_decide)
 
     result = await chatter.sub_agent("hello", [], stream)
 
@@ -74,8 +74,8 @@ async def test_sub_agent_keeps_decision_flow_in_group_chat(
         captured.update(kwargs)
         return {"reason": "group decision", "should_respond": False}
 
-    monkeypatch.setattr("plugins.default_chatter.interest_gate.decide_should_respond", _fake_decide)
-    monkeypatch.setattr("plugins.default_chatter.probability_gate.random.random", lambda: 0.99)
+    monkeypatch.setattr("plugins.default_chatter.utils.interest_gate.decide_should_respond", _fake_decide)
+    monkeypatch.setattr("plugins.default_chatter.utils.probability_gate.random.random", lambda: 0.99)
 
     result = await chatter.sub_agent("group-msg", [], stream)
 
@@ -99,7 +99,7 @@ async def test_sub_agent_with_invalid_config_uses_llm_decision(
         return_value={"reason": "llm decision", "should_respond": False}
     )
     monkeypatch.setattr(
-        "plugins.default_chatter.interest_gate.decide_should_respond",
+        "plugins.default_chatter.utils.interest_gate.decide_should_respond",
         decide_mock,
     )
 
@@ -135,7 +135,7 @@ async def test_sub_agent_bypasses_llm_when_probability_hits(
         return {"reason": "should not be called", "should_respond": False}
 
     monkeypatch.setattr(
-        "plugins.default_chatter.probability_gate.get_core_config",
+        "plugins.default_chatter.utils.probability_gate.get_core_config",
         lambda: SimpleNamespace(
             personality=SimpleNamespace(
                 nickname="Neo",
@@ -143,8 +143,8 @@ async def test_sub_agent_bypasses_llm_when_probability_hits(
             )
         ),
     )
-    monkeypatch.setattr("plugins.default_chatter.interest_gate.decide_should_respond", _fake_decide)
-    monkeypatch.setattr("plugins.default_chatter.probability_gate.random.random", lambda: 0.99)
+    monkeypatch.setattr("plugins.default_chatter.utils.interest_gate.decide_should_respond", _fake_decide)
+    monkeypatch.setattr("plugins.default_chatter.utils.probability_gate.random.random", lambda: 0.99)
 
     result = await chatter.sub_agent("group-msg", unread_msgs, stream)
 
@@ -219,7 +219,7 @@ async def test_send_text_first_message_does_not_wait(
         plugin=DefaultChatterPlugin(config=DefaultChatterConfig()),
     )
     sleep_mock = AsyncMock()
-    monkeypatch.setattr("plugins.default_chatter.actions.send_text.asyncio.sleep", sleep_mock)
+    monkeypatch.setattr("plugins.default_chatter.components.actions.send_text.asyncio.sleep", sleep_mock)
 
     await action._sleep_for_typing_delay("你好")
 
@@ -238,8 +238,8 @@ async def test_send_text_waits_only_for_remaining_typing_delay(
     )
     setattr(stream.context, _LAST_SEND_TIME_ATTR, 100.0)
     sleep_mock = AsyncMock()
-    monkeypatch.setattr("plugins.default_chatter.actions.send_text.time.monotonic", lambda: 100.5)
-    monkeypatch.setattr("plugins.default_chatter.actions.send_text.asyncio.sleep", sleep_mock)
+    monkeypatch.setattr("plugins.default_chatter.components.actions.send_text.time.monotonic", lambda: 100.5)
+    monkeypatch.setattr("plugins.default_chatter.components.actions.send_text.asyncio.sleep", sleep_mock)
 
     await action._sleep_for_typing_delay("你好")
 
@@ -258,8 +258,8 @@ async def test_send_text_skips_wait_when_typing_interval_has_elapsed(
     )
     setattr(stream.context, _LAST_SEND_TIME_ATTR, 100.0)
     sleep_mock = AsyncMock()
-    monkeypatch.setattr("plugins.default_chatter.actions.send_text.time.monotonic", lambda: 102.0)
-    monkeypatch.setattr("plugins.default_chatter.actions.send_text.asyncio.sleep", sleep_mock)
+    monkeypatch.setattr("plugins.default_chatter.components.actions.send_text.time.monotonic", lambda: 102.0)
+    monkeypatch.setattr("plugins.default_chatter.components.actions.send_text.asyncio.sleep", sleep_mock)
 
     await action._sleep_for_typing_delay("你好")
 
@@ -297,11 +297,11 @@ async def test_send_text_reply_to_uses_quoted_group_metadata(
     sent: dict[str, Message] = {}
     monkeypatch.setattr(SendTextAction, "_sleep_for_typing_delay", AsyncMock())
     monkeypatch.setattr(
-        "plugins.default_chatter.actions.send_text.get_bot_info_by_platform",
+        "plugins.default_chatter.components.actions.send_text.get_bot_info_by_platform",
         AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
     )
     monkeypatch.setattr(
-        "plugins.default_chatter.actions.send_text.send_message",
+        "plugins.default_chatter.components.actions.send_text.send_message",
         AsyncMock(
             side_effect=lambda message: (sent.__setitem__("message", message), True)[1]
         ),
@@ -350,11 +350,11 @@ async def test_send_text_reply_to_uses_quoted_private_user(
     sent: dict[str, Message] = {}
     monkeypatch.setattr(SendTextAction, "_sleep_for_typing_delay", AsyncMock())
     monkeypatch.setattr(
-        "plugins.default_chatter.actions.send_text.get_bot_info_by_platform",
+        "plugins.default_chatter.components.actions.send_text.get_bot_info_by_platform",
         AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
     )
     monkeypatch.setattr(
-        "plugins.default_chatter.actions.send_text.send_message",
+        "plugins.default_chatter.components.actions.send_text.send_message",
         AsyncMock(
             side_effect=lambda message: (sent.__setitem__("message", message), True)[1]
         ),
@@ -397,7 +397,7 @@ async def test_sub_agent_skips_programmatic_controller_when_disabled(
         return {"reason": "llm only", "should_respond": False}
 
     monkeypatch.setattr(
-        "plugins.default_chatter.probability_gate.get_core_config",
+        "plugins.default_chatter.utils.probability_gate.get_core_config",
         lambda: SimpleNamespace(
             personality=SimpleNamespace(
                 nickname="Neo",
@@ -405,8 +405,8 @@ async def test_sub_agent_skips_programmatic_controller_when_disabled(
             )
         ),
     )
-    monkeypatch.setattr("plugins.default_chatter.interest_gate.decide_should_respond", _fake_decide)
-    monkeypatch.setattr("plugins.default_chatter.probability_gate.random.random", lambda: 0.0)
+    monkeypatch.setattr("plugins.default_chatter.utils.interest_gate.decide_should_respond", _fake_decide)
+    monkeypatch.setattr("plugins.default_chatter.utils.probability_gate.random.random", lambda: 0.0)
 
     result = await chatter.sub_agent("group-msg", unread_msgs, stream)
 

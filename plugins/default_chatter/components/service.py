@@ -8,8 +8,8 @@ from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import BaseService
 
 from .config import DefaultChatterConfig
-from .session import DefaultChatterSession
-from .type_defs import (
+from ..session import DefaultChatterSession
+from ..type_defs import (
     DefaultChatterRuntimeAdapter,
     DefaultChatterSessionAdapters,
     DefaultChatterSessionOptions,
@@ -63,7 +63,7 @@ class DefaultChatterService(BaseService):
         """创建由 DefaultChatter 运行时提供适配器的会话。"""
         runtime = chatter
         if runtime is None:
-            from .plugin import DefaultChatter
+            from ..plugin import DefaultChatter
 
             runtime = DefaultChatter(stream_id=stream_id, plugin=plugin)
         resolved_options = options or self._build_default_options(plugin)

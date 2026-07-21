@@ -22,7 +22,7 @@ from src.app.plugin_system.types import (
 )
 from src.core.prompt import SystemReminderInsertType
 
-from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
+from .utils.tool_flow import append_suspend_payload_if_action_only, process_tool_calls
 
 logger = get_logger("default_chatter.sub_agent_collaboration")
 

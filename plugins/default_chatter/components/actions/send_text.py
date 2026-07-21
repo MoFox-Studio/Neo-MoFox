@@ -19,7 +19,7 @@ from src.app.plugin_system.base import BaseAction
 from src.app.plugin_system.types import Message, MessageType
 
 from ..config import DefaultChatterConfig
-from ..probability_gate import set_next_tick_sub_agent_bonus
+from ...utils.probability_gate import set_next_tick_sub_agent_bonus
 
 logger = get_logger("default_chatter")
 

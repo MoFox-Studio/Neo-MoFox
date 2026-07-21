@@ -17,7 +17,7 @@ from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.types import ChatStream, Message
 from src.core.config import get_core_config
 
-from .semantic_interest.runtime_scorer import SemanticInterestScorer
+from ..semantic_interest.runtime_scorer import SemanticInterestScorer
 
 logger = get_logger("default_chatter.interest")
 

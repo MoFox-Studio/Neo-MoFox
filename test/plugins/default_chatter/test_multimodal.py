@@ -7,7 +7,7 @@ from typing import Any
 
 from src.core.models.message import Message, MessageType
 
-from plugins.default_chatter.multimodal import (
+from plugins.default_chatter.utils.multimodal import (
     build_multimodal_content,
     extract_images_from_messages,
     get_image_media_list,

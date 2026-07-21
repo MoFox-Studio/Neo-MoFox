@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from plugins.default_chatter.config import DefaultChatterConfig
+from plugins.default_chatter.components.config import DefaultChatterConfig
 from plugins.default_chatter.plugin import DefaultChatter
 from plugins.default_chatter.sub_agent_collaboration import (
     FIXED_SUB_AGENT_SYSTEM_PROMPT,
@@ -18,7 +18,7 @@ from plugins.default_chatter.sub_agent_collaboration import (
     _print_sub_agent_decision_panel,
 )
 from plugins.default_chatter.sub_agent_management import CreateAgentUsable
-from plugins.default_chatter.tool_flow import ToolCallOutcome
+from plugins.default_chatter.utils.tool_flow import ToolCallOutcome
 from src.core.components.base.tool import BaseTool
 from src.core.prompt import get_system_reminder_store, reset_system_reminder_store
 from src.kernel.llm import LLMRequest, ROLE

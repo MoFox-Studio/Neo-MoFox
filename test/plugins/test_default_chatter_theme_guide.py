@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from plugins.default_chatter.config import DefaultChatterConfig
+from plugins.default_chatter.components.config import DefaultChatterConfig
 from plugins.default_chatter.plugin import DefaultChatter, DefaultChatterPlugin
 from src.core.models.stream import ChatStream
 from src.core.prompt import get_prompt_manager, reset_prompt_manager

@@ -9,8 +9,8 @@ from src.app.plugin_system.api.llm_api import LLMRequest
 from src.app.plugin_system.base import BaseAgent, BaseChatter
 from src.app.plugin_system.types import LLMPayload, LLMUsable, ROLE, ToolRegistry
 
-from .config import DefaultChatterConfig
-from .prompt_builder import DefaultChatterPromptBuilder
+from .components.config import DefaultChatterConfig
+from .utils.prompt_builder import DefaultChatterPromptBuilder
 from .sub_agent_collaboration import (
     FIXED_SUB_AGENT_SYSTEM_PROMPT,
     get_active_sub_agent_name,

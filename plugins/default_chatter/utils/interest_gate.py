@@ -14,12 +14,12 @@ from typing import Any
 from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.types import ChatStream, Message
 
-from .config import DefaultChatterConfig
+from ..components.config import DefaultChatterConfig
 from .decision_agent import decide_should_respond
 from .interest_calculator import InterestCalculator, InterestConfig, InterestResult
 from .prompts import sub_agent_system_prompt
 from .probability_gate import should_bypass_via_probability
-from .type_defs import FilterMode, SubAgentDecision, SupportsRequestCreation
+from ..type_defs import FilterMode, SubAgentDecision, SupportsRequestCreation
 
 logger = get_logger("default_chatter")
 
@@ -317,7 +317,7 @@ class InterestGate:
         由插件级后台训练任务负责生成模型。
         """
         try:
-            from .semantic_interest.runtime_scorer import get_semantic_scorer
+            from ..semantic_interest.runtime_scorer import get_semantic_scorer
 
             model_dir = Path("data/semantic_interest/models")
             latest = model_dir / "semantic_interest_latest.pkl"

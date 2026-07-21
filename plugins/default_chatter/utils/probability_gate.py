@@ -12,7 +12,7 @@ import random
 from src.app.plugin_system.types import ChatStream, Message
 from src.core.config import get_core_config
 
-from .config import DefaultChatterConfig
+from ..components.config import DefaultChatterConfig
 
 _SUB_AGENT_NEXT_TICK_BONUS_ATTR = "_default_chatter_next_tick_bonus"
 

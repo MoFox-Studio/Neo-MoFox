@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from plugins.default_chatter.decision_agent import (
+from plugins.default_chatter.utils.decision_agent import (
     _fit_unreads_to_sub_agent_budget,
     decide_should_respond,
 )
@@ -20,7 +20,7 @@ async def test_fit_unreads_keeps_text_when_within_budget(
     """当输入未超过预算时应保持原样。"""
 
     monkeypatch.setattr(
-        "plugins.default_chatter.decision_agent._safe_count_tokens",
+        "plugins.default_chatter.utils.decision_agent._safe_count_tokens",
         lambda text, _model_identifier: len(text),
     )
 
@@ -41,7 +41,7 @@ async def test_fit_unreads_trims_old_prefix_when_over_budget(
     """超过预算时应裁剪前缀，优先保留最新未读内容。"""
 
     monkeypatch.setattr(
-        "plugins.default_chatter.decision_agent._safe_count_tokens",
+        "plugins.default_chatter.utils.decision_agent._safe_count_tokens",
         lambda text, _model_identifier: len(text),
     )
 
@@ -93,11 +93,11 @@ async def test_decide_should_respond_requests_sub_actor_reminder(
             return _FakeResponse()
 
     monkeypatch.setattr(
-        "plugins.default_chatter.decision_agent.get_core_config",
+        "plugins.default_chatter.utils.decision_agent.get_core_config",
         lambda: SimpleNamespace(personality=SimpleNamespace(nickname="Neo")),
     )
     monkeypatch.setattr(
-        "plugins.default_chatter.decision_agent.get_prompt_manager",
+        "plugins.default_chatter.utils.decision_agent.get_prompt_manager",
         lambda: SimpleNamespace(get_template=lambda _name: None),
     )
 

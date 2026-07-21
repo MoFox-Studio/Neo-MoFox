@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from plugins.default_chatter.config import DefaultChatterConfig
-from plugins.default_chatter.service import DefaultChatterService
+from plugins.default_chatter.components.config import DefaultChatterConfig
+from plugins.default_chatter.components.service import DefaultChatterService
 from plugins.default_chatter.type_defs import (
     DefaultChatterSessionAdapters,
     DefaultChatterSessionOptions,

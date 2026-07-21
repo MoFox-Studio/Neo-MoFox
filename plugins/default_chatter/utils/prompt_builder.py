@@ -10,7 +10,7 @@ from src.app.plugin_system.types import ChatStream, ChatType, Message
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
 
-from .config import DefaultChatterConfig
+from ..components.config import DefaultChatterConfig
 
 
 class DefaultChatterPromptBuilder:

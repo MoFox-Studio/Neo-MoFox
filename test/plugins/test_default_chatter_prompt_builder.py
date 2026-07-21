@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from plugins.default_chatter.config import DefaultChatterConfig
-from plugins.default_chatter.prompt_builder import DefaultChatterPromptBuilder
+from plugins.default_chatter.components.config import DefaultChatterConfig
+from plugins.default_chatter.utils.prompt_builder import DefaultChatterPromptBuilder
 from src.core.models.stream import ChatStream
 
 
@@ -28,7 +28,7 @@ def test_build_negative_behaviors_extra_enabled_returns_text(
         {"plugin": {"reinforce_negative_behaviors": True}}
     )
     monkeypatch.setattr(
-        "plugins.default_chatter.prompt_builder.get_core_config",
+        "plugins.default_chatter.utils.prompt_builder.get_core_config",
         lambda: SimpleNamespace(
             personality=SimpleNamespace(negative_behaviors=["不要骂人", "不要编造"])
         ),
@@ -128,7 +128,7 @@ def test_build_system_prompt_uses_private_theme(
 
     fake_template = _FakeTemplate()
     monkeypatch.setattr(
-        "plugins.default_chatter.prompt_builder.get_prompt_manager",
+        "plugins.default_chatter.utils.prompt_builder.get_prompt_manager",
         lambda: SimpleNamespace(
             get_template=lambda _name: fake_template,
         ),
@@ -169,7 +169,7 @@ def test_build_user_prompt_prefers_bot_name_for_platform_name(
 
     fake_template = _FakeTemplate()
     monkeypatch.setattr(
-        "plugins.default_chatter.prompt_builder.get_prompt_manager",
+        "plugins.default_chatter.utils.prompt_builder.get_prompt_manager",
         lambda: SimpleNamespace(
             get_template=lambda _name: fake_template,
         ),
@@ -221,7 +221,7 @@ def test_build_user_prompt_falls_back_to_stream_values(
 
     fake_template = _FakeTemplate()
     monkeypatch.setattr(
-        "plugins.default_chatter.prompt_builder.get_prompt_manager",
+        "plugins.default_chatter.utils.prompt_builder.get_prompt_manager",
         lambda: SimpleNamespace(
             get_template=lambda _name: fake_template,
         ),

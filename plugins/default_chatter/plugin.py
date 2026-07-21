@@ -31,20 +31,20 @@ from src.app.plugin_system.types import (
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
 
-from .actions import (
+from .components.actions import (
     PassAndWaitAction,
     SendTextAction,
     StopConversationAction,
 )
-from .config import DefaultChatterConfig
-from .interest_gate import InterestGate
-from .multimodal import (
+from .components.config import DefaultChatterConfig
+from .components.service import DefaultChatterService
+from .utils.interest_gate import InterestGate
+from .utils.multimodal import (
     extract_images_from_messages,
     inline_images_into_text,
 )
-from .prompt_builder import DefaultChatterPromptBuilder
-from .prompts import system_prompt, user_prompt, sub_agent_system_prompt
-from .service import DefaultChatterService
+from .utils.prompt_builder import DefaultChatterPromptBuilder
+from .utils.prompts import system_prompt, user_prompt, sub_agent_system_prompt
 from .type_defs import (
     DefaultChatterSessionOptions,
     LLMConversationState,

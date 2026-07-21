@@ -11,7 +11,7 @@ from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager
 from src.kernel.llm.token_counter import count_text_tokens
 
-from .type_defs import SubAgentDecision, SupportsRequestCreation
+from ..type_defs import SubAgentDecision, SupportsRequestCreation
 
 
 def _safe_count_tokens(text: str, model_identifier: str) -> int:

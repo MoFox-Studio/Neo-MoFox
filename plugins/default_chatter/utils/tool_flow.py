@@ -18,7 +18,7 @@ from src.app.plugin_system.types import (
 )
 from src.kernel.concurrency import get_watchdog
 
-from .type_defs import LLMResponseLike
+from ..type_defs import LLMResponseLike
 
 
 @dataclass

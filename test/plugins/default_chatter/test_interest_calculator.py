@@ -10,7 +10,7 @@ import pytest
 from src.core.models.message import Message
 from src.core.models.stream import ChatStream
 
-from plugins.default_chatter.interest_calculator import (
+from plugins.default_chatter.utils.interest_calculator import (
     InterestCalculator,
     InterestConfig,
     StreamInterestState,

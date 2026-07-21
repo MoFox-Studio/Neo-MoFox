@@ -11,7 +11,7 @@ from src.app.plugin_system.api import event_api, stream_api
 from src.app.plugin_system.base import Failure, Stop, Wait, WaitResumeEvent
 from src.app.plugin_system.types import ChatStream, EventType, LLMPayload, Message, ROLE, Text
 
-from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
+from .utils.tool_flow import append_suspend_payload_if_action_only, process_tool_calls
 from .type_defs import (
     DefaultChatterResumeEvent,
     DefaultChatterResult,
