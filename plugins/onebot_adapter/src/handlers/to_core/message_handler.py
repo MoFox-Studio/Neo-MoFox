@@ -324,8 +324,14 @@ class MessageHandler:
                     reply_segments.append(reply_result)
 
         sender_info = message_detail.get("sender", {})
-        sender_nickname = sender_info.get("nickname") or "未知用户"
         sender_id = sender_info.get("user_id")
+        self_id = raw_message.get("self_id")
+
+        # 若被引用的是 bot 自己发的消息，昵称用 "你"，避免协议端不填昵称时回退成 "未知用户"
+        if sender_id and self_id and str(sender_id) == str(self_id):
+            sender_nickname = "你"
+        else:
+            sender_nickname = sender_info.get("nickname") or "未知用户"
 
         prefix_text = f"[回复<{sender_nickname}({sender_id})>：" if sender_id else f"[回复<{sender_nickname}>："
         suffix_text = "]，说："

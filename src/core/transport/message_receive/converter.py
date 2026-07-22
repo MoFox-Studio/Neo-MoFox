@@ -553,10 +553,12 @@ class MessageConverter:
         2. 嵌套段列表 — 回复内容的结构化表示
         """
         if isinstance(data, str):
-            # data 是消息 ID
+            # data 是消息 ID：仅记录 reply_to，不再追加 ``[回复:msg_id]`` 文本。
+            # 文本预览由适配器在 seglist 里以 ``[回复<...>：...]`` 形式提供；
+            # 这里再追加会和 seglist 内的前缀文本重复，并在命令前缀噪声剥离
+            # 之外造成冗余显示。
             if not result.reply_to:
                 result.reply_to = data
-            result.text_parts.append(f"[回复:{data}]")
         elif isinstance(data, list):
             # 嵌套段：递归解析
             inner = self._parse_segments(data, depth + 1)
