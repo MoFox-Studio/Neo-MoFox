@@ -224,18 +224,19 @@ class PluginManager:
         # 6. 注册组件到全局注册表
         await self._register_components(plugin_instance)
 
-        # 7. 调用生命周期钩子
+        # 7. 记录并更新状态（须在调用 on_plugin_loaded 之前完成，
+        #    以便插件自身的钩子能通过 get_plugin_path / get_plugin 查询到自己）
+        self._loaded_plugins[plugin_name] = plugin_instance
+        self._manifests[plugin_name] = manifest
+        self._plugin_paths[plugin_name] = plugin_path
+
+        # 8. 调用生命周期钩子
         try:
             await plugin_instance.on_plugin_loaded()
         except Exception as e:
             logger.error(
                 f"调用插件 '{plugin_name}' 的 on_plugin_loaded 钩子时出错: {e}"
             )
-
-        # 8. 记录并更新状态
-        self._loaded_plugins[plugin_name] = plugin_instance
-        self._manifests[plugin_name] = manifest
-        self._plugin_paths[plugin_name] = plugin_path
 
         from src.core.components.state_manager import get_global_state_manager
         from src.core.components.types import (
