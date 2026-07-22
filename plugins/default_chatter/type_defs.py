@@ -23,14 +23,6 @@ from src.app.plugin_system.types import ChatStream, LLMPayload, Message, ToolCal
 from src.kernel.llm import StreamEvent
 
 
-class FilterMode(str, Enum):
-    """消息过滤模式枚举。"""
-
-    SUB_ONLY = "sub_only"
-    INTEREST_ONLY = "interest_only"
-    INTEREST_THEN_SUB = "interest_then_sub"
-
-
 class SubAgentDecision(TypedDict):
     """Sub-agent 返回的决策结果。"""
 
@@ -266,7 +258,8 @@ class DefaultChatterSessionOptions:
     theme_guide: dict[str, str] = field(default_factory=dict)
     negative_behavior_reinforcement: bool = True
     enable_llm_stream: bool = False
-    filter_mode: str = "sub_only"
+    enable_sub_agent: bool = True
+    enable_interest_filter: bool = False
     enable_sub_agent_context: bool = True
     sub_agent_context_history_limit: int = 10
     sub_agent_decision_history_limit: int = 3

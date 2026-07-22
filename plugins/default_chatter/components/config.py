@@ -87,14 +87,19 @@ class DefaultChatterConfig(BaseConfig):
             hint="留空时回退为 actor；可配置为单独的子代理模型任务，例如 sub_agent_actor"
         )
 
-        filter_mode: str = Field(
-            default="sub_only",
-            description="消息过滤模式：sub_only=仅 sub-agent，interest_only=仅兴趣值，interest_then_sub=兴趣值初筛后执行 sub-agent",
-            label="过滤模式",
+        enable_sub_agent: bool = Field(
+            default=True,
+            description="是否启用 sub-agent 消息过滤。",
+            label="启用 Sub-Agent",
             tag="ai",
-            hint="选择群聊消息的响应决策流程",
-            input_type="select",
-            choices=["sub_only", "interest_only", "interest_then_sub"],
+            hint="关闭后不使用 sub-agent 判断消息是否需要回复。",
+        )
+        enable_interest_filter: bool = Field(
+            default=False,
+            description="是否启用兴趣值消息过滤。",
+            label="启用兴趣值过滤",
+            tag="ai",
+            hint="与 Sub-Agent 同时开启时，先通过兴趣值初筛，再交给 sub-agent 判断。",
         )
         enable_sub_agent_context: bool = Field(
             default=True,
@@ -222,7 +227,7 @@ class DefaultChatterConfig(BaseConfig):
             """语义兴趣度模型训练参数。
 
             控制自动训练流程中的数据采样、LLM 标注和关键词生成参数。
-            仅在 filter_mode 非 sub_only 时生效。
+            仅在启用兴趣值过滤时生效。
             """
 
             training_model_name: str = Field(

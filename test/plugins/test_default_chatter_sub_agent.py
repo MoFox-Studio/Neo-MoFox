@@ -442,7 +442,7 @@ async def test_sub_agent_interest_only_skips_probability_gate(
 ) -> None:
     """interest_only 模式下不应触发概率直通，应走兴趣值判断。"""
     chatter = _build_chatter_with_config(
-        {"filter_mode": "interest_only", "enable_programmatic_controller": True}
+        {"enable_sub_agent": False, "enable_interest_filter": True, "enable_programmatic_controller": True}
     )
     stream = ChatStream(
         stream_id="s_group",
@@ -496,7 +496,7 @@ async def test_sub_agent_interest_then_sub_skips_probability_gate(
 ) -> None:
     """interest_then_sub 模式下不应触发概率直通，应走兴趣值初筛。"""
     chatter = _build_chatter_with_config(
-        {"filter_mode": "interest_then_sub", "enable_programmatic_controller": True}
+        {"enable_sub_agent": True, "enable_interest_filter": True, "enable_programmatic_controller": True}
     )
     stream = ChatStream(
         stream_id="s_group",
@@ -550,7 +550,7 @@ async def test_sub_agent_sub_only_still_uses_probability_gate(
 ) -> None:
     """sub_only 模式下概率直通仍应生效。"""
     chatter = _build_chatter_with_config(
-        {"filter_mode": "sub_only", "enable_programmatic_controller": True}
+        {"enable_sub_agent": True, "enable_interest_filter": False, "enable_programmatic_controller": True}
     )
     stream = ChatStream(
         stream_id="s_group",

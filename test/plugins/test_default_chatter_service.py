@@ -151,6 +151,8 @@ def test_create_default_session_maps_plugin_config_into_options() -> None:
     assert session.options.enable_cooldown is False
     assert session.options.enable_action_suspend is False
     assert session.options.enable_programmatic_controller is False
+    assert session.options.enable_sub_agent is True
+    assert session.options.enable_interest_filter is False
     assert session.options.enable_sub_agent_collaboration is True
     assert session.options.enable_stop_direct_message_wake is True
     assert session.options.stop_direct_message_wake_probability == 0.25

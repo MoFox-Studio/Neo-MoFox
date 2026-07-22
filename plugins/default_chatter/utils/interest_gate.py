@@ -1,9 +1,7 @@
-"""Default Chatter 兴趣值决策门。
+"""Default Chatter 兴趣值与 sub-agent 决策门。
 
-封装三种过滤模式的决策逻辑：
-- sub_only: 程序化概率门 + LLM sub-agent 决策
-- interest_only: 纯兴趣值判断
-- interest_then_sub: 先兴趣值初筛，达标后进入 sub-agent 判断
+两个独立开关组合出四种流程：直接响应、仅 sub-agent、仅兴趣值，
+以及兴趣值初筛后进入 sub-agent。
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ from .decision_agent import decide_should_respond
 from .interest_calculator import InterestCalculator, InterestConfig, InterestResult
 from .prompts import sub_agent_system_prompt
 from .probability_gate import should_bypass_via_probability
-from ..type_defs import FilterMode, SubAgentDecision, SupportsRequestCreation
+from ..type_defs import SubAgentDecision, SupportsRequestCreation
 
 logger = get_logger("default_chatter")
 
@@ -52,10 +50,8 @@ class InterestGate:
     ) -> SubAgentDecision:
         """判断当前未读消息是否需要响应。
 
-        支持三种过滤模式：
-        - sub_only: 程序化概率门和 LLM 决策
-        - interest_only: 兴趣值判断
-        - interest_then_sub: 兴趣值初筛后执行 LLM 决策
+        根据两个开关决定流程：都关闭时直接响应，仅启用一个时使用对应过滤器，
+        两个都启用时先进行兴趣值初筛，再交给 sub-agent 判断。
 
         Args:
             unreads_text: 格式化后的未读消息文本
@@ -80,14 +76,18 @@ class InterestGate:
                 calculator.on_message_processed(chat_stream.stream_id, replied=True)
                 logger.debug("[兴趣值] 检测到上次回复成功，已重置 boost 状态")
 
-        filter_mode = self._get_filter_mode()
+        plugin_config = self._get_plugin_config()
+        enable_sub_agent = plugin_config is None or plugin_config.plugin.enable_sub_agent
+        enable_interest_filter = bool(
+            plugin_config is not None and plugin_config.plugin.enable_interest_filter
+        )
         decision: SubAgentDecision
 
-        plugin_config = self._get_plugin_config()
         if (
             plugin_config is not None
             and plugin_config.plugin.enable_programmatic_controller
-            and filter_mode == FilterMode.SUB_ONLY
+            and enable_sub_agent
+            and not enable_interest_filter
         ):
             bypassed, bypass_reason = should_bypass_via_probability(
                 unread_msgs,
@@ -101,9 +101,9 @@ class InterestGate:
                     "source": "probability",
                 }
 
-        if filter_mode == FilterMode.INTEREST_ONLY:
+        if enable_interest_filter and not enable_sub_agent:
             decision = await self._interest_only_decision(unread_msgs, chat_stream)
-        elif filter_mode == FilterMode.INTEREST_THEN_SUB:
+        elif enable_interest_filter and enable_sub_agent:
             interest_result, stats = await self._interest_filter(unread_msgs, chat_stream)
             if not interest_result:
                 decision = {
@@ -116,10 +116,15 @@ class InterestGate:
                 decision = await self._sub_agent_with_context(
                     unreads_text, chat_stream, history_text, decision_history
                 )
-        else:
+        elif enable_sub_agent:
             decision = await self._sub_agent_with_context(
                 unreads_text, chat_stream, history_text, decision_history
             )
+        else:
+            decision = {
+                "reason": "消息过滤均未启用，直接响应",
+                "should_respond": True,
+            }
 
         if not decision.get("should_respond", False):
             calculator = await self._get_interest_calculator()
@@ -133,28 +138,17 @@ class InterestGate:
 
     def _get_plugin_config(self) -> DefaultChatterConfig | None:
         """获取插件配置，类型不匹配时返回 None。"""
-        plugin_config = getattr(self._plugin, "config", None)
+        plugin_config = self._plugin.config
         if isinstance(plugin_config, DefaultChatterConfig):
             return plugin_config
         return None
-
-    def _get_filter_mode(self) -> FilterMode:
-        """读取当前过滤模式配置。"""
-        plugin_config = self._get_plugin_config()
-        if plugin_config is None:
-            return FilterMode.SUB_ONLY
-        mode_str = str(getattr(plugin_config.plugin, "filter_mode", "sub_only") or "sub_only")
-        try:
-            return FilterMode(mode_str)
-        except ValueError:
-            return FilterMode.SUB_ONLY
 
     def _is_sub_agent_context_enabled(self) -> bool:
         """读取 sub-agent 上下文感知开关。"""
         plugin_config = self._get_plugin_config()
         if plugin_config is None:
             return True
-        return bool(getattr(plugin_config.plugin, "enable_sub_agent_context", True))
+        return bool(plugin_config.plugin.enable_sub_agent_context)
 
     async def _interest_only_decision(
         self,

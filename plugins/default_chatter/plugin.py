@@ -87,8 +87,10 @@ class DefaultChatter(BaseChatter):
 
     def _build_negative_behaviors_extra(self) -> str:
         """构建负面行为约束文本；未启用或无内容时返回空字符串。"""
-        plugin_config = getattr(self.plugin, "config", None)
-        return DefaultChatterPromptBuilder.build_negative_behaviors_extra(plugin_config)
+        plugin_config = self.plugin.config
+        return DefaultChatterPromptBuilder.build_negative_behaviors_extra(
+            plugin_config if isinstance(plugin_config, DefaultChatterConfig) else None
+        )
 
     async def _build_system_prompt(self, chat_stream: ChatStream) -> str:
         """构建系统提示词。"""
@@ -323,19 +325,14 @@ class DefaultChatterPlugin(BasePlugin):
         await self._maybe_start_semantic_training()
 
     async def _maybe_start_semantic_training(self) -> None:
-        """根据过滤模式启动语义模型自动训练后台任务。
-
-        仅当 filter_mode 为 interest_only 或 interest_then_sub 时触发，
-        sub_only 模式下跳过以避免不必要的 LLM 调用。
-        """
-        plugin_config = getattr(self, "config", None)
-        if isinstance(plugin_config, DefaultChatterConfig):
-            mode_str = str(
-                getattr(plugin_config.plugin, "filter_mode", "sub_only") or "sub_only"
-            )
-            if mode_str == "sub_only":
-                logger.debug("[语义训练] 当前为 sub_only 模式，跳过自动训练")
-                return
+        """在启用兴趣值过滤时启动语义模型自动训练后台任务。"""
+        plugin_config = self.config
+        if not isinstance(plugin_config, DefaultChatterConfig):
+            logger.warning("[语义训练] 插件配置不可用，跳过自动训练")
+            return
+        if not plugin_config.plugin.enable_interest_filter:
+            logger.debug("[语义训练] 兴趣值过滤未启用，跳过自动训练")
+            return
 
         try:
             from src.kernel.concurrency import get_task_manager
@@ -367,17 +364,18 @@ class DefaultChatterPlugin(BasePlugin):
         try:
             from .semantic_interest.auto_trainer import get_auto_trainer
 
-            plugin_config = getattr(self, "config", None)
-            train_cfg = None
-            if isinstance(plugin_config, DefaultChatterConfig):
-                train_cfg = getattr(plugin_config.plugin, "semantic_training", None)
+            plugin_config = self.config
+            if not isinstance(plugin_config, DefaultChatterConfig):
+                logger.warning("[语义训练] 插件配置不可用，取消后台训练")
+                return
+            train_cfg = plugin_config.plugin.semantic_training
 
-            days = getattr(train_cfg, "training_days", 7) if train_cfg else 7
-            max_samples = getattr(train_cfg, "training_max_samples", 1000) if train_cfg else 1000
-            model_name = getattr(train_cfg, "training_model_name", None) if train_cfg else None
-            batch_size = getattr(train_cfg, "training_batch_size", 50) if train_cfg else 50
-            keyword_iters = getattr(train_cfg, "keyword_iterations", 3) if train_cfg else 3
-            min_interval = getattr(train_cfg, "min_train_interval_hours", 720) if train_cfg else 720
+            days = train_cfg.training_days
+            max_samples = train_cfg.training_max_samples
+            model_name = train_cfg.training_model_name
+            batch_size = train_cfg.training_batch_size
+            keyword_iters = train_cfg.keyword_iterations
+            min_interval = train_cfg.min_train_interval_hours
 
             trainer = get_auto_trainer(min_train_interval_hours=min_interval)
             trained, model_path = await trainer.auto_train_if_needed(

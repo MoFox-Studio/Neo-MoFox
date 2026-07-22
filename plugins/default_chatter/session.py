@@ -541,6 +541,9 @@ class DefaultChatterSession:
                     )
                     continue
 
+                if current_resume_event is not None and current_resume_event.source == "message":
+                    current_resume_event = None
+
                 if current_resume_event is not None:
                     state.cross_round_seen_signatures.clear()
                     state.plain_text_retry_count = 0
@@ -828,7 +831,7 @@ class DefaultChatterSession:
                         session=self,
                     )
                     resume_event = yield Wait(
-                        time=getattr(call_outcome, "wait_seconds", None),
+                        time=call_outcome.wait_seconds,
                         step_data=_consume_actor_round_step_data(state),
                     )
                 else:

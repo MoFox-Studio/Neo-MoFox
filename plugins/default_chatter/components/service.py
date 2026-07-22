@@ -76,7 +76,7 @@ class DefaultChatterService(BaseService):
 
     @staticmethod
     def _build_default_options(plugin: "BasePlugin") -> DefaultChatterSessionOptions:
-        config = getattr(plugin, "config", None)
+        config = plugin.config
         if not isinstance(config, DefaultChatterConfig):
             return DefaultChatterSessionOptions()
 
@@ -96,10 +96,11 @@ class DefaultChatterService(BaseService):
             native_multimodal=bool(config.plugin.native_multimodal),
             theme_guide=theme_guide,
             negative_behavior_reinforcement=bool(config.plugin.reinforce_negative_behaviors),
-            filter_mode=str(getattr(config.plugin, "filter_mode", "sub_only") or "sub_only"),
-            enable_sub_agent_context=bool(getattr(config.plugin, "enable_sub_agent_context", True)),
-            sub_agent_context_history_limit=int(getattr(config.plugin, "sub_agent_context_history_limit", 10)),
-            sub_agent_decision_history_limit=int(getattr(config.plugin, "sub_agent_decision_history_limit", 3)),
+            enable_sub_agent=bool(config.plugin.enable_sub_agent),
+            enable_interest_filter=bool(config.plugin.enable_interest_filter),
+            enable_sub_agent_context=bool(config.plugin.enable_sub_agent_context),
+            sub_agent_context_history_limit=int(config.plugin.sub_agent_context_history_limit),
+            sub_agent_decision_history_limit=int(config.plugin.sub_agent_decision_history_limit),
         )
 
     @staticmethod
