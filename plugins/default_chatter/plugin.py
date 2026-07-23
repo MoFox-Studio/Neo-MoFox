@@ -322,6 +322,18 @@ class DefaultChatterPlugin(BasePlugin):
             },
         )
 
+        # 原生多模态模式下，注册全局跳过图片 VLM 识别策略
+        # 使 MediaManager 在消息接收阶段就跳过图片识别，避免启动阶段空转
+        plugin_config = self.config
+        if isinstance(plugin_config, DefaultChatterConfig):
+            if plugin_config.plugin.native_multimodal:
+                from src.core.managers.media_manager import get_media_manager
+
+                get_media_manager().set_global_skip_media_types(["image"])
+                logger.info(
+                    "[原生多模态] 已注册全局跳过图片 VLM 识别策略"
+                )
+
         await self._maybe_start_semantic_training()
 
     async def _maybe_start_semantic_training(self) -> None:

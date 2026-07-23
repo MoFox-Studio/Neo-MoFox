@@ -13,10 +13,12 @@
 
 from __future__ import annotations
 
-import pytest
+import base64
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
-import base64
+
+import pytest
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -140,6 +142,99 @@ class TestMediaManagerSkipRecognition:
 
             assert manager.should_skip_recognition("stream_dfc") is False
             assert manager.should_skip_recognition("stream_dfc", "image") is False
+
+
+class TestMediaManagerGlobalSkipRecognition:
+    """测试全局默认跳过策略。"""
+
+    @pytest.fixture(autouse=True)
+    def _mock_core_config(self) -> Iterator[MagicMock]:
+        """为所有测试 mock get_core_config，避免初始化依赖。"""
+        with patch('src.core.managers.media_manager.get_core_config') as mock:
+            mock.return_value = MagicMock()
+            yield mock
+
+    def test_global_skip_takes_effect_when_no_stream_rule(self) -> None:
+        """全局策略生效：未注册 stream 级规则时，全局策略命中。"""
+        with patch('src.core.managers.media_manager.get_model_set_by_task'):
+            manager = MediaManager()
+
+            manager.set_global_skip_media_types(("image",))
+
+            # 未注册 stream 级规则的 stream，回退到全局策略
+            assert manager.should_skip_recognition("any_stream", "image") is True
+            assert manager.should_skip_recognition("any_stream", "emoji") is False
+            assert manager.should_skip_recognition("any_stream", "voice") is False
+
+    def test_global_skip_all_types(self) -> None:
+        """全局策略设为 None 时跳过所有媒体类型。"""
+        with patch('src.core.managers.media_manager.get_model_set_by_task'):
+            manager = MediaManager()
+
+            manager.set_global_skip_media_types(None)
+
+            assert manager.should_skip_recognition("any_stream", "image") is True
+            assert manager.should_skip_recognition("any_stream", "emoji") is True
+            assert manager.should_skip_recognition("any_stream", "voice") is True
+            # 整流粒度查询也返回 True
+            assert manager.should_skip_recognition("any_stream") is True
+
+    def test_global_skip_without_media_type_param(self) -> None:
+        """全局策略注册后，省略 media_type 也返回 True。"""
+        with patch('src.core.managers.media_manager.get_model_set_by_task'):
+            manager = MediaManager()
+
+            manager.set_global_skip_media_types(("image",))
+
+            # 整流粒度查询：只要全局注册过任意类型，都视为跳过
+            assert manager.should_skip_recognition("any_stream") is True
+
+    def test_stream_level_overrides_global(self) -> None:
+        """stream 级规则优先于全局策略，不回退全局。"""
+        with patch('src.core.managers.media_manager.get_model_set_by_task'):
+            manager = MediaManager()
+
+            # 全局跳过 image，stream 级跳过 voice
+            manager.set_global_skip_media_types(("image",))
+            manager.skip_recognition_for_stream("stream_42", ("voice",))
+
+            # stream 级规则已注册，不回退全局
+            assert manager.should_skip_recognition("stream_42", "image") is False
+            assert manager.should_skip_recognition("stream_42", "voice") is True
+            # 整流粒度：stream 级注册过任意类型
+            assert manager.should_skip_recognition("stream_42") is True
+
+    def test_clear_global_skip_restores_default(self) -> None:
+        """清除全局策略后恢复默认行为（识别）。"""
+        with patch('src.core.managers.media_manager.get_model_set_by_task'):
+            manager = MediaManager()
+
+            manager.set_global_skip_media_types(("image",))
+            assert manager.should_skip_recognition("any_stream", "image") is True
+
+            manager.clear_global_skip_media_types()
+            assert manager.should_skip_recognition("any_stream", "image") is False
+            assert manager.should_skip_recognition("any_stream") is False
+
+    def test_global_skip_default_is_empty(self) -> None:
+        """初始化后全局策略默认为空（不跳过任何类型）。"""
+        with patch('src.core.managers.media_manager.get_model_set_by_task'):
+            manager = MediaManager()
+
+            assert manager.should_skip_recognition("any_stream", "image") is False
+            assert manager.should_skip_recognition("any_stream", "emoji") is False
+            assert manager.should_skip_recognition("any_stream") is False
+
+    def test_global_skip_does_not_affect_stream_with_its_own_rule(self) -> None:
+        """已注册 stream 级 all-type 跳过规则不受全局策略影响。"""
+        with patch('src.core.managers.media_manager.get_model_set_by_task'):
+            manager = MediaManager()
+
+            manager.set_global_skip_media_types(("image",))
+            manager.skip_recognition_for_stream("stream_kfc")  # 跳过所有类型
+
+            assert manager.should_skip_recognition("stream_kfc", "image") is True
+            assert manager.should_skip_recognition("stream_kfc", "emoji") is True
 
 
 class TestMediaManagerRecognizeMedia:

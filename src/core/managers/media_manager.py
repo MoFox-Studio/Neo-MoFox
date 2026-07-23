@@ -68,6 +68,9 @@ class MediaManager:
         self._vlm_model_set = None
         # stream_id -> 跳过的媒体类型集合；值为 None 表示跳过所有类型
         self._skip_recognition_streams: dict[str, frozenset[str] | None] = {}
+        # 全局默认跳过策略：对所有 stream 生效，优先级低于 stream 级规则
+        # None 表示跳过所有类型，frozenset() 表示不跳过任何类型
+        self._global_skip_media_types: frozenset[str] | None = frozenset()
         self._initialize_vlm()
         self._initialize_asr()
         self._register_default_recognition_handlers()
@@ -417,6 +420,34 @@ class MediaManager:
         self._skip_recognition_streams.pop(stream_id, None)
         logger.debug(f"已取消跳过识别: stream_id={stream_id[:8]}")
 
+    def set_global_skip_media_types(
+        self,
+        media_types: Iterable[str] | None = None,
+    ) -> None:
+        """设置全局默认跳过策略，对所有聊天流生效。
+
+        优先级低于 stream 级规则：若某 stream 已通过
+        ``skip_recognition_for_stream`` 注册了自己的跳过规则，
+        则该 stream 不受全局策略影响。
+
+        Args:
+            media_types: 要全局跳过的媒体类型集合（如 ``("image",)``）。
+                为 ``None`` 表示跳过所有类型。
+        """
+        if media_types is None:
+            self._global_skip_media_types = None
+            logger.debug("已设置全局跳过识别: 全部类型")
+            return
+        self._global_skip_media_types = frozenset(media_types)
+        logger.debug(
+            f"已设置全局跳过识别: 类型={sorted(self._global_skip_media_types)}"
+        )
+
+    def clear_global_skip_media_types(self) -> None:
+        """清除全局默认跳过策略。"""
+        self._global_skip_media_types = frozenset()
+        logger.debug("已清除全局跳过识别策略")
+
     def should_skip_recognition(
         self,
         stream_id: str,
@@ -424,22 +455,34 @@ class MediaManager:
     ) -> bool:
         """查询指定聊天流是否应跳过媒体识别。
 
+        查询优先级：stream 级规则 > 全局默认策略 > 默认行为（识别）。
+
         Args:
             stream_id: 聊天流 ID
             media_type: 待识别媒体的类型；省略时表示
-                ""该流是否对任意类型注册了跳过""，用于保留旧的整流粒度语义。
+                "该流是否对任意类型注册了跳过"，用于保留旧的整流粒度语义。
 
         Returns:
             True 表示该聊天流（针对给定媒体类型）应跳过识别
         """
-        if stream_id not in self._skip_recognition_streams:
-            return False
-        types = self._skip_recognition_streams[stream_id]
-        if types is None:
+        # 1. 先查 stream 级规则
+        if stream_id in self._skip_recognition_streams:
+            types = self._skip_recognition_streams[stream_id]
+            if types is None:
+                return True
+            if media_type is None:
+                return True
+            return media_type in types
+
+        # 2. stream 级未命中，回退到全局策略
+        # None 表示全局跳过所有类型；空 frozenset 表示不跳过任何类型
+        if self._global_skip_media_types is None:
             return True
+        if not self._global_skip_media_types:
+            return False
         if media_type is None:
             return True
-        return media_type in types
+        return media_type in self._global_skip_media_types
 
     # ──────────────────────────────────────────
     # 公共 API：媒体识别
