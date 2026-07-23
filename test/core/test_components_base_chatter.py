@@ -181,8 +181,7 @@ class TestBaseChatter:
         request.add_payload(LLMPayload(ROLE.ASSISTANT, Text("reply")))
         request.add_payload(LLMPayload(ROLE.USER, Text("again")))
 
-        assert cast(Text, request.payloads[0].content[0]).text == "<system_reminder>\n[goal]\nonly once\n</system_reminder>"
-        assert cast(Text, request.payloads[0].content[1]).text == "hello"
+        assert cast(Text, request.payloads[0].content[0]).text == "hello"
         assert cast(Text, request.payloads[2].content[0]).text == "again"
 
         reset_system_reminder_store()

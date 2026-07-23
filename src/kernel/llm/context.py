@@ -155,7 +155,7 @@ class LLMContextManager:
 
 
     def _apply_reminders(self, payloads: list[LLMPayload]) -> list[LLMPayload]:
-        """把解析后的 reminder 注入到首个和/或最后一个 user payload。"""
+        """刷新 reminder，使 fixed 与 dynamic 分别只位于首尾 user。"""
         from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
 
         updated = list(payloads)
@@ -166,9 +166,6 @@ class LLMContextManager:
             return updated
 
         resolved_reminders, strip_texts_by_type = self._resolve_reminders()
-        if not resolved_reminders:
-            return updated
-
         first_user_index = user_indices[0]
         last_user_index = user_indices[-1]
 
@@ -195,37 +192,27 @@ class LLMContextManager:
             if reminder.consume_type == SystemReminderConsumeType.ONCE:
                 consumed_now.add(reminder.source_key)
 
-        if not new_parts:
+        strip_texts = {
+            text
+            for texts in strip_texts_by_type.values()
+            for text in texts
+        }
+        if not new_parts and not strip_texts:
             return updated
-
-        for user_index, prefix_parts in new_parts.items():
+        for user_index in user_indices:
             user_payload = updated[user_index]
             content_parts = list(user_payload.content)
-            target_strip_set: set[str] = set()
 
-            if user_index == first_user_index:
-                target_strip_set.update(
-                    strip_texts_by_type[SystemReminderInsertType.FIXED]
-                )
-            if user_index == last_user_index:
-                target_strip_set.update(
-                    strip_texts_by_type[SystemReminderInsertType.FIXED]
-                )
-                target_strip_set.update(
-                    strip_texts_by_type[SystemReminderInsertType.DYNAMIC]
-                )
+            prefix_end = 0
+            while prefix_end < len(content_parts):
+                part = content_parts[prefix_end]
+                if not isinstance(part, Text) or part.text not in strip_texts:
+                    break
+                prefix_end += 1
+            if prefix_end > 0:
+                content_parts = content_parts[prefix_end:]
 
-            if target_strip_set:
-                prefix_end = 0
-                while prefix_end < len(content_parts):
-                    part = content_parts[prefix_end]
-                    if not isinstance(part, Text) or part.text not in target_strip_set:
-                        break
-                    prefix_end += 1
-                if prefix_end > 0:
-                    content_parts = content_parts[prefix_end:]
-
-            rebuilt = list(prefix_parts) + content_parts
+            rebuilt = list(new_parts.get(user_index, [])) + content_parts
             updated[user_index] = LLMPayload(ROLE.USER, rebuilt)
 
         self._consumed_once_reminder_keys.update(consumed_now)
