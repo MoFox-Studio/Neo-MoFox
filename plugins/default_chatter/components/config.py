@@ -289,7 +289,7 @@ class DefaultChatterConfig(BaseConfig):
                 hint="有效范围 0.0-1.0。值越大，群聊中越容易跳过 LLM sub-agent 直接响应。",
             )
             name_mention_bonus: float = Field(
-                default=1.0,
+                default=0.7,
                 description="未读消息存在强提及（被@或被回复）时叠加的放行概率加成。",
                 label="强提及加成",
                 tag="ai",

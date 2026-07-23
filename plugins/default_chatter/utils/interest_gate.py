@@ -50,8 +50,13 @@ class InterestGate:
     ) -> SubAgentDecision:
         """判断当前未读消息是否需要响应。
 
-        根据两个开关决定流程：都关闭时直接响应，仅启用一个时使用对应过滤器，
-        两个都启用时先进行兴趣值初筛，再交给 sub-agent 判断。
+        决策流程（按优先级从前到后）：
+
+        1. 概率直通：当 ``enable_programmatic_controller`` 和 ``enable_sub_agent``
+           同时开启时，先做本地概率判定。命中则直接放行，跳过所有后续过滤。
+        2. 未命中概率直通后，根据 ``enable_interest_filter`` 和 ``enable_sub_agent``
+           两个开关决定后续流程：都关闭时直接响应，仅启用一个时使用对应过滤器，
+           两个都启用时先进行兴趣值初筛，再交给 sub-agent 判断。
 
         Args:
             unreads_text: 格式化后的未读消息文本
@@ -87,7 +92,6 @@ class InterestGate:
             plugin_config is not None
             and plugin_config.plugin.enable_programmatic_controller
             and enable_sub_agent
-            and not enable_interest_filter
         ):
             bypassed, bypass_reason = should_bypass_via_probability(
                 unread_msgs,
