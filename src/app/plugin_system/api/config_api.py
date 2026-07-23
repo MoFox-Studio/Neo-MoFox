@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Type
 
 from src.core.components.base.config import BaseConfig
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.managers.config_manager import ConfigManager
 
@@ -150,6 +152,7 @@ def initialize_all_configs() -> None:
 
 
 __all__ = [
+    "API_VERSION",
     "load_config",
     "reload_config",
     "get_config",

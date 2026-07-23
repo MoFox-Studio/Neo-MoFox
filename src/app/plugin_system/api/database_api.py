@@ -7,6 +7,8 @@ from typing import Any, TypeVar
 
 from src.kernel.db import CRUDBase, QueryBuilder, AggregateQuery
 
+API_VERSION = "1.0.0"
+
 T = TypeVar("T", bound=Any)
 
 

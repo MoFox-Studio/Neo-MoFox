@@ -270,7 +270,7 @@ class DemoConfig(BaseConfig):
 
 每个插件目录必须提供 `manifest.json`。加载器支持目录、`.zip`、`.mfp` 三种来源，但三者最终都依赖 manifest。
 
-最小示例：
+最小示例（字符串形式，最简）：
 
 ```json
 {
@@ -297,6 +297,36 @@ class DemoConfig(BaseConfig):
 }
 ```
 
+推荐形式（dict，精确声明所用 API 模块）：
+
+```json
+{
+  "name": "demo_plugin",
+  "version": "1.0.0",
+  "description": "Demo plugin",
+  "author": "MoFox Team",
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "tool",
+      "component_name": "demo_tool",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "api_version": {
+    "llm_api": "1.0.0",
+    "send_api": "1.0.0"
+  },
+  "python_dependencies": [],
+  "dependencies_required": true
+}
+```
+
 硬性规则：
 
 - `include` 字段必须手工维护。系统不会自动扫描你的组件文件。
@@ -305,7 +335,7 @@ class DemoConfig(BaseConfig):
 - `dependencies` 内的每一项都必须是完整组件签名。
 - `entry_point` 默认语义是插件根目录下的 `plugin.py`。
 - 如果声明了 `python_dependencies`，要确保运行环境可安装这些依赖。
-- `api_version` 声明插件要求的插件 API 版本，格式为 x.y.z（语义化版本）。推荐始终显式填写。
+- `api_version` 声明插件用到的插件 API 模块版本，支持字符串（等价于对全部 20 个 `*_api` 模块应用同一要求）与 `dict[str, str]`（仅校验声明模块，key 必须是合法 API 模块名）两种形式。插件 `import` 了任何 `*_api` 模块就应声明此项，优先用 dict 形式精确声明。与 `min_core_version` 同等判断（声明即校验，都声明则都须满足）。
 
 ### 5.1 真实加载行为补充
 
@@ -333,38 +363,56 @@ class DemoConfig(BaseConfig):
 
 #### 5.1.3 版本兼容性声明
 
-插件通过 `manifest.json` 中的字段声明对核心框架的版本要求。
+插件通过 `manifest.json` 中的 `api_version` 与 `min_core_version` 声明对核心框架的版本要求。**两者同等判断（AND 语义）**：声明了哪一项就校验哪一项，只要任一项声明且不满足即拒绝注册；两者都未声明才回退到「警告但加载」。不存在二流声明。
 
-**推荐：使用 `api_version`**
+##### `api_version`（推荐，声明插件 API 模块版本）
 
-`api_version` 声明插件需要的**插件 API 版本**（与 `CORE_VERSION` 独立）。格式为 `x.y.z`（语义化版本）：
+声明插件用到的 **插件 API 模块** 版本（按 20 个 `*_api` 模块逐一校验）。支持两种形式：
+
+- **字符串形式**（最简）：`"api_version": "1.0.0"`，等价于对该版本声明时全部 20 个 API 模块都要求该版本。
+- **dict 形式**（推荐，精确声明）：`"api_version": {"llm_api": "1.0.0", "send_api": "1.2.0"}`，仅校验声明的 keys，未声明的模块不校验。
+
+格式为 `x.y.z`（语义化版本）：
 
 - **主版本号 （x）**：破坏性更新，API 签名或行为发生不可兼容的变更
 - **次版本号 （y）**：部分非兼容性更新，可能包含弃用、行为微调等
 - **小版本号 （z）**：可向下兼容的更新，仅新增可选 API 或修复问题
 
-兼容性检查规则：
+兼容性检查规则（每个声明模块）：
+
 - 主版本号不一致 → **拒绝加载**（存在破坏性变更）
 - 核心 API 的次版本号低于插件要求 → **拒绝加载**（核心过旧）
 - 核心 API 的次版本号与小版本号均不低于插件要求 → **允许加载**（兼容或仅有可向下兼容的差异）
 - 核心 API 的次版本号高于插件要求 → **允许加载，但警告**（可能存在非兼容变更）
 
-```json
-"api_version": "1.0.0"
-```
-
-**已弃用：`min_core_version`**
-
-`min_core_version` 是旧字段，基于 `CORE_VERSION` 做简单的大于等于比较。由于 `CORE_VERSION` 与插件 API 版本无关，该字段已弃用。若 `api_version` 存在则优先使用；否则回退到 `min_core_version`。
+dict 形式示例：
 
 ```json
-"min_core_version": "1.0.0"
+"api_version": {
+  "llm_api": "1.0.0",
+  "send_api": "1.2.0",
+  "service_api": "1.0.0"
+}
 ```
 
-**缺省行为**：
+合法 API 模块名（20 个，与 `src/app/plugin_system/api/` 一一对应）：`action_api`、`adapter_api`、`agent_api`、`chat_api`、`command_api`、`config_api`、`database_api`、`event_api`、`llm_api`、`log_api`、`media_api`、`message_api`、`permission_api`、`plugin_api`、`prompt_api`、`router_api`、`send_api`、`service_api`、`storage_api`、`stream_api`。任何不在此清单中的 key 都会被拒绝加载（防止拼写错误被静默接受）。
 
-- 两者均未声明时：允许加载，但输出警告，提示无法保证兼容性。
-- `min_core_version` 缺失时 loader 会回退到一个内部默认值，行为不稳定。**始终显式声明版本要求。**
+##### `min_core_version`（声明核心能力版本）
+
+声明插件依赖的 **核心能力** 版本（基于 `CORE_VERSION` 做简单 `>=` 比较）。适用于插件依赖核心某些新功能——例如某些新的事件、新的核心组件机制、新的内核接口等——这些能力不通过 `*_api` 模块暴露，无法被 `api_version` 覆盖，必须由 `min_core_version` 兜底。
+
+```json
+"min_core_version": "1.2.0"
+```
+
+##### `api_version` 与 `min_core_version` 的区别
+
+| 字段 | 校验对象 | 适用场景 |
+|---|---|---|
+| `api_version` | 20 个 `*_api` 插件 API 模块（逐一语义化版本校验） | 插件 `import` 了 `*_api` 模块 |
+| `min_core_version` | `CORE_VERSION`（简单 `>=` 比较） | 插件依赖核心新事件 / 新内核接口 / 新组件机制 |
+
+两个字段是「或」关系，**按需填写**：插件 `import` 了任何 `*_api` 模块就写 `api_version`；插件用到「必须更高版本核心才支持」的能力（新事件、新内核接口、新组件机制）就写 `min_core_version`；两者都不需要也可都不写（仅警告但加载）。一旦声明，即按 AND 同等判断：声明了哪一项就校验哪一项，只要任一项声明且不满足即拒绝注册。
 
 #### 5.1.4 `dependencies.plugins` 目前只用于插件级加载顺序
 
@@ -600,6 +648,8 @@ dependencies = ["other_plugin:service:storage"]
 
 ### 9.1 manifest.json
 
+最简形式（字符串 `api_version`，等价于对全部 20 个 API 模块要求 `1.0.0`）：
+
 ```json
 {
   "name": "demo_plugin",
@@ -620,6 +670,37 @@ dependencies = ["other_plugin:service:storage"]
   ],
   "entry_point": "plugin.py",
   "api_version": "1.0.0",
+  "python_dependencies": [],
+  "dependencies_required": true
+}
+```
+
+推荐形式（dict `api_version`，精确声明用到的 API 模块；若还依赖核心新能力可同时填 `min_core_version`，两者 AND 同等判断）：
+
+```json
+{
+  "name": "demo_plugin",
+  "version": "1.0.0",
+  "description": "最小 demo 插件",
+  "author": "MoFox Team",
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "tool",
+      "component_name": "demo_tool",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "api_version": {
+    "llm_api": "1.0.0",
+    "send_api": "1.0.0"
+  },
+  "min_core_version": "1.2.0",
   "python_dependencies": [],
   "dependencies_required": true
 }

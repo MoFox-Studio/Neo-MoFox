@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.command import BaseCommand
     from src.core.managers.command_manager import CommandManager
@@ -169,6 +171,7 @@ def get_all_command_names() -> list[str]:
 
 
 __all__ = [
+    "API_VERSION",
     "set_prefixes",
     "get_all_commands",
     "get_commands_for_plugin",

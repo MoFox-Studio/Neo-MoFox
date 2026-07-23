@@ -16,6 +16,8 @@ from src.core.prompt import (
     SystemReminderInsertType,
 )
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.prompt import PromptManager, PromptTemplate, SystemReminderBucket
     from src.core.prompt.system_reminder import SystemReminderStore
@@ -348,6 +350,7 @@ def clear_stream_reminders(stream_id: str) -> None:
 
 
 __all__ = [
+    "API_VERSION",
     "register_template",
     "unregister_template",
     "get_template",

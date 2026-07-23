@@ -26,7 +26,10 @@ from src.core.utils.llm_tool_call import (
     run_tool_call,
 )
 
+API_VERSION = "1.0.0"
+
 __all__ = [
+    "API_VERSION",
     "create_llm_request",
     "create_embedding_request",
     "create_rerank_request",
