@@ -197,6 +197,8 @@ class LLMContextManager:
             for texts in strip_texts_by_type.values()
             for text in texts
         }
+        if not new_parts and not strip_texts:
+            return updated
         for user_index in user_indices:
             user_payload = updated[user_index]
             content_parts = list(user_payload.content)
