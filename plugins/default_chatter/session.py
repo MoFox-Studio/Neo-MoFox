@@ -825,15 +825,26 @@ class DefaultChatterSession:
                     continue
 
                 if call_outcome.should_wait:
-                    _append_suspend_payload_if_tool_result_tail(
-                        response=llm_response,
-                        suspend_text=self.suspend_text,
-                        session=self,
-                    )
-                    resume_event = yield Wait(
-                        time=call_outcome.wait_seconds,
-                        step_data=_consume_actor_round_step_data(state),
-                    )
+                    # LLM 执行期间可能有新消息入队（竞态）：
+                    # 若此时已有新未读消息，跳过 yield Wait，直接回到 WAIT_USER，
+                    # 下一轮循环会正常读取并处理这些消息，不会被 Wait 基线吸收。
+                    _, fresh_unreads = await self.adapters.unread_adapter.fetch_unreads()
+                    if fresh_unreads:
+                        self.logger.debug(
+                            f"pass_and_wait 前检测到 {len(fresh_unreads)} 条新消息，"
+                            "跳过等待直接进入下一轮"
+                        )
+                        _consume_actor_round_step_data(state)
+                    else:
+                        _append_suspend_payload_if_tool_result_tail(
+                            response=llm_response,
+                            suspend_text=self.suspend_text,
+                            session=self,
+                        )
+                        resume_event = yield Wait(
+                            time=call_outcome.wait_seconds,
+                            step_data=_consume_actor_round_step_data(state),
+                        )
                 else:
                     _consume_actor_round_step_data(state)
                 _transition(
