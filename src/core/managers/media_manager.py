@@ -820,11 +820,17 @@ class MediaManager:
         try:
             changed = False
             async with get_db_session() as session:
-                # 查找现有记录（使用 image_id 作为唯一标识）
-                # 这里使用 scalars().first() 来避免数据库中存在多条重复记录导致的 MultipleResultsFound 错误
+                # 查找现有记录：image_id 与 path 都是唯一相关字段，需同时校验。
+                # 之所以同时按 path 查询，是因为 images.path 上有 UNIQUE 约束，
+                # 若只按 image_id 查询，同一 file_path 以不同 media_hash 写入时会触发
+                # "UNIQUE constraint failed: images.path"。
+                effective_path = file_path or media_hash
                 stmt = (
                     select(Images)
-                    .where(Images.image_id == media_hash)
+                    .where(
+                        (Images.image_id == media_hash)
+                        | (Images.path == effective_path)
+                    )
                     .order_by(Images.timestamp.desc())
                     .limit(1)
                 )
@@ -834,6 +840,11 @@ class MediaManager:
                 if existing:
                     # 更新现有记录
                     existing.count += 1
+                    # 若命中是因 path 相同但 image_id 不同，则同步 image_id 为最新哈希
+                    if existing.image_id != media_hash:
+                        existing.image_id = media_hash
+                    if file_path and existing.path != file_path:
+                        existing.path = file_path
                     if description:
                         existing.description = description
                     if vlm_processed:
@@ -844,7 +855,7 @@ class MediaManager:
                     # 创建新记录
                     new_image = Images(
                         image_id=media_hash,
-                        path=file_path or media_hash,  # 如果没有路径，用哈希值
+                        path=effective_path,  # 如果没有路径，用哈希值
                         type=media_type,
                         description=description,
                         timestamp=time.time(),
@@ -856,6 +867,7 @@ class MediaManager:
                     logger.debug(f"创建新媒体记录: {media_hash[:8]}...")
 
                 await session.commit()
+
             if changed:
                 invalidate_model_cache(Images)
 
@@ -916,9 +928,16 @@ class MediaManager:
         try:
             changed = False
             async with get_db_session() as session:
+                # 同 save_media_info：voices.path 上有 UNIQUE 约束，
+                # 需同时按 voice_id 与 path 校验，避免同一 file_path 不同 voice_hash
+                # 写入时触发 "UNIQUE constraint failed: voices.path"。
+                effective_path = file_path or voice_hash
                 stmt = (
                     select(Voices)
-                    .where(Voices.voice_id == voice_hash)
+                    .where(
+                        (Voices.voice_id == voice_hash)
+                        | (Voices.path == effective_path)
+                    )
                     .order_by(Voices.timestamp.desc())
                     .limit(1)
                 )
@@ -927,6 +946,10 @@ class MediaManager:
 
                 if existing:
                     existing.count += 1
+                    if existing.voice_id != voice_hash:
+                        existing.voice_id = voice_hash
+                    if file_path and existing.path != file_path:
+                        existing.path = file_path
                     if description:
                         existing.description = description
                     if asr_processed:
@@ -936,7 +959,7 @@ class MediaManager:
                 else:
                     new_voice = Voices(
                         voice_id=voice_hash,
-                        path=file_path or voice_hash,
+                        path=effective_path,
                         type="voice",
                         description=description,
                         timestamp=time.time(),

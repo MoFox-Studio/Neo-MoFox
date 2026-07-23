@@ -14,10 +14,14 @@
 from __future__ import annotations
 
 import pytest
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 import base64
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
 from src.core.managers.media_manager import MediaManager, get_media_manager
+from src.core.models.sql_alchemy import Base, Images, Voices
 
 
 class TestMediaManagerInit:
@@ -499,3 +503,134 @@ class TestMediaManagerRecognizeVoice:
             result = await manager._recognize_with_asr(audio_b64)
 
             assert result is None
+
+
+class TestMediaManagerSaveUniquePathRegression:
+    """回归测试：同一路径不同 hash 不应触发 UNIQUE constraint failed: images.path。
+
+    历史 bug：``save_media_info`` 仅按 ``image_id`` 查询存在性，而 ``Images.path``
+    上有 UNIQUE 约束。同一 file_path 以不同 media_hash 写入时，image_id 查不到
+    旧记录 → 走 INSERT → path 已存在 → IntegrityError。
+
+    这些用例使用真实内存 SQLite + 真实表结构验证修复。
+    """
+
+    @staticmethod
+    def _make_manager() -> MediaManager:
+        """构造一个绕过 __init__ 的 MediaManager，仅用于调用 save/get 方法。"""
+        return MediaManager.__new__(MediaManager)
+
+    @pytest.fixture
+    async def real_session_factory(self):
+        """创建内存 SQLite 引擎与会话工厂，建好 Images/Voices 表。"""
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all, tables=[Images.__table__, Voices.__table__])
+        factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+        try:
+            yield factory
+        finally:
+            await engine.dispose()
+
+    @staticmethod
+    def _patch_session(factory):
+        """把 media_manager.get_db_session 替换为使用真实 factory 的实现。"""
+
+        @asynccontextmanager
+        async def _real_session():
+            async with factory() as session:
+                try:
+                    yield session
+                    if session.is_active:
+                        await session.commit()
+                except Exception:
+                    if session.is_active:
+                        await session.rollback()
+                    raise
+                finally:
+                    await session.close()
+
+        return patch("src.core.managers.media_manager.get_db_session", lambda: _real_session())
+
+    @pytest.mark.asyncio
+    async def test_same_path_different_hash_updates_existing(self, real_session_factory) -> None:
+        """同一路径不同 hash 第二次写入应更新原记录而非触发 UNIQUE 冲突。"""
+        manager = self._make_manager()
+        with self._patch_session(real_session_factory):
+            await manager.save_media_info(
+                media_hash="hash_A",
+                media_type="image",
+                file_path="/media/img.jpg",
+                description="first",
+            )
+            # 第二次：相同 path，不同 hash —— 修复前这里会抛 IntegrityError
+            await manager.save_media_info(
+                media_hash="hash_B",
+                media_type="image",
+                file_path="/media/img.jpg",
+                description="second",
+                vlm_processed=True,
+            )
+
+        async with real_session_factory() as s:
+            rows = (await s.execute(__import__("sqlalchemy").select(Images))).scalars().all()
+            assert len(rows) == 1  # 没有重复插入
+            row = rows[0]
+            assert row.path == "/media/img.jpg"
+            assert row.image_id == "hash_B"  # image_id 同步为最新 hash
+            assert row.count == 2  # 计数累加
+            assert row.description == "second"
+            assert row.vlm_processed is True
+
+    @pytest.mark.asyncio
+    async def test_same_hash_second_call_increments_count(self, real_session_factory) -> None:
+        """相同 hash 第二次写入应走更新分支，count 累加。"""
+        manager = self._make_manager()
+        with self._patch_session(real_session_factory):
+            await manager.save_media_info("hash_X", "image", "/m/x.png")
+            await manager.save_media_info("hash_X", "image", "/m/x.png")
+            await manager.save_media_info("hash_X", "image", "/m/x.png")
+
+        async with real_session_factory() as s:
+            rows = (await s.execute(__import__("sqlalchemy").select(Images))).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].count == 3
+
+    @pytest.mark.asyncio
+    async def test_distinct_paths_create_separate_rows(self, real_session_factory) -> None:
+        """不同路径应分别建行。"""
+        manager = self._make_manager()
+        with self._patch_session(real_session_factory):
+            await manager.save_media_info("hash_1", "image", "/m/a.png")
+            await manager.save_media_info("hash_2", "image", "/m/b.png")
+
+        async with real_session_factory() as s:
+            rows = (await s.execute(__import__("sqlalchemy").select(Images))).scalars().all()
+            assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_voice_same_path_different_hash_updates(self, real_session_factory) -> None:
+        """save_voice_info 同型 bug 回归：同路径不同 hash 应更新而非冲突。"""
+        manager = self._make_manager()
+        with self._patch_session(real_session_factory):
+            await manager.save_voice_info(
+                voice_hash="vh_A",
+                file_path="/media/v1.wav",
+                description="first",
+            )
+            await manager.save_voice_info(
+                voice_hash="vh_B",
+                file_path="/media/v1.wav",
+                description="second",
+                asr_processed=True,
+            )
+
+        async with real_session_factory() as s:
+            rows = (await s.execute(__import__("sqlalchemy").select(Voices))).scalars().all()
+            assert len(rows) == 1
+            row = rows[0]
+            assert row.voice_id == "vh_B"
+            assert row.path == "/media/v1.wav"
+            assert row.count == 2
+            assert row.description == "second"
+            assert row.asr_processed is True
