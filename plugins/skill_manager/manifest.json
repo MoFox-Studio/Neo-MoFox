@@ -36,7 +36,7 @@
     }
   ],
     "entry_point": "plugin.py",
-    "min_core_version": "1.2.0RC1",
+    "min_core_version": "1.2.0-rc.2",
     "api_version": {
         "send_api": "1.0.0"
     }
