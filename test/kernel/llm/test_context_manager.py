@@ -275,8 +275,7 @@ def test_context_manager_dynamic_bucket_moves_to_new_last_user(reminder_store) -
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("回复")))
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
 
-    assert cast(Text, payloads[0].content[0]).text == "[recent]\n只跟最后一条"
-    assert cast(Text, payloads[0].content[1]).text == "第一条"
+    assert cast(Text, payloads[0].content[0]).text == "第一条"
     assert cast(Text, payloads[2].content[0]).text == "[recent]\n只跟最后一条"
     assert cast(Text, payloads[2].content[1]).text == "第二条"
 
@@ -297,8 +296,7 @@ def test_context_manager_fixed_and_dynamic_bucket_reminders_target_different_use
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
 
     assert cast(Text, payloads[0].content[0]).text == "[goal]\n固定开头"
-    assert cast(Text, payloads[0].content[1]).text == "[recent]\n最近一条"
-    assert cast(Text, payloads[0].content[2]).text == "第一条"
+    assert cast(Text, payloads[0].content[1]).text == "第一条"
     assert cast(Text, payloads[2].content[0]).text == "[recent]\n最近一条"
     assert cast(Text, payloads[2].content[1]).text == "第二条"
 
@@ -317,8 +315,7 @@ def test_context_manager_reminder_bucket_refreshes_updated_dynamic_content() -> 
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("回复")))
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
 
-    assert cast(Text, payloads[0].content[0]).text == "<system_reminder>\n[screen]\n第一次\n</system_reminder>"
-    assert cast(Text, payloads[0].content[1]).text == "第一条"
+    assert cast(Text, payloads[0].content[0]).text == "第一条"
     assert cast(Text, payloads[2].content[0]).text == "<system_reminder>\n[screen]\n第二次\n</system_reminder>"
     assert cast(Text, payloads[2].content[1]).text == "第二条"
 
@@ -342,10 +339,8 @@ def test_context_manager_dynamic_bucket_multiple_updates_do_not_accumulate() -> 
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("回复二")))
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第三条")))
 
-    assert cast(Text, payloads[0].content[0]).text == "<system_reminder>\n[screen]\n第一次\n</system_reminder>"
-    assert cast(Text, payloads[0].content[1]).text == "第一条"
-    assert cast(Text, payloads[2].content[0]).text == "<system_reminder>\n[screen]\n第二次\n</system_reminder>"
-    assert cast(Text, payloads[2].content[1]).text == "第二条"
+    assert cast(Text, payloads[0].content[0]).text == "第一条"
+    assert cast(Text, payloads[2].content[0]).text == "第二条"
     assert cast(Text, payloads[4].content[0]).text == "<system_reminder>\n[screen]\n第三次\n</system_reminder>"
     assert cast(Text, payloads[4].content[1]).text == "第三条"
     assert len(
@@ -353,7 +348,7 @@ def test_context_manager_dynamic_bucket_multiple_updates_do_not_accumulate() -> 
             part for payload in payloads if payload.role == ROLE.USER for part in payload.content
             if isinstance(part, Text) and part.text.startswith("<system_reminder>\n[screen]\n")
         ]
-    ) == 3
+    ) == 1
 
 
 def test_context_manager_dynamic_bucket_keeps_historical_prefix_stable(reminder_store) -> None:
@@ -377,8 +372,7 @@ def test_context_manager_dynamic_bucket_keeps_historical_prefix_stable(reminder_
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("回复")))
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
 
-    assert cast(Text, payloads[0].content[0]).text == "[dynamic_a]\n动态前缀A"
-    assert cast(Text, payloads[0].content[1]).text == "第一条"
+    assert cast(Text, payloads[0].content[0]).text == "第一条"
     assert cast(Text, payloads[2].content[0]).text == "[dynamic_a]\n动态前缀A"
     assert cast(Text, payloads[2].content[1]).text == "[dynamic_b]\n动态前缀B"
     assert cast(Text, payloads[2].content[2]).text == "第二条"
@@ -399,8 +393,7 @@ def test_context_manager_dynamic_once_reminder_is_consumed_per_manager(reminder_
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("reply")))
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("second")))
 
-    assert cast(Text, payloads[0].content[0]).text == "<system_reminder>\n[screen]\nonly once\n</system_reminder>"
-    assert cast(Text, payloads[0].content[1]).text == "first"
+    assert cast(Text, payloads[0].content[0]).text == "first"
     assert cast(Text, payloads[2].content[0]).text == "second"
 
 
@@ -421,7 +414,7 @@ def test_context_manager_dynamic_once_reminder_isolated_between_managers(reminde
     payloads_a = manager_a.add_payload(payloads_a, LLMPayload(ROLE.USER, Text("again")))
     payloads_b = manager_b.add_payload([], LLMPayload(ROLE.USER, Text("B")))
 
-    assert cast(Text, payloads_a[0].content[0]).text == "<system_reminder>\n[screen]\none shot\n</system_reminder>"
+    assert cast(Text, payloads_a[0].content[0]).text == "A"
     assert cast(Text, payloads_a[2].content[0]).text == "again"
     assert cast(Text, payloads_b[0].content[0]).text == "<system_reminder>\n[screen]\none shot\n</system_reminder>"
     assert cast(Text, payloads_b[0].content[1]).text == "B"
@@ -450,7 +443,7 @@ def test_context_manager_dynamic_once_reminder_reappears_after_content_refresh(r
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("reply")))
     payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("two")))
 
-    assert cast(Text, payloads[0].content[0]).text == "<system_reminder>\n[screen]\nversion 1\n</system_reminder>"
+    assert cast(Text, payloads[0].content[0]).text == "one"
     assert cast(Text, payloads[2].content[0]).text == "<system_reminder>\n[screen]\nversion 2\n</system_reminder>"
     assert cast(Text, payloads[2].content[1]).text == "two"
 
@@ -571,3 +564,26 @@ def test_context_manager_allows_user_after_tool_result() -> None:
         ROLE.TOOL_RESULT,
         ROLE.USER,
     ]
+
+
+def test_context_manager_dynamic_reminder_removed_from_historical_user_when_deleted_from_store() -> None:
+    """动态 reminder 从 store 删除后，所有 USER 上的旧前缀都应被清理。"""
+    reset_system_reminder_store()
+    store = get_system_reminder_store()
+    store.set("actor", "screen", "初始版本", insert_type=SystemReminderInsertType.DYNAMIC)
+
+    manager = make_manager("actor", wrap_with_system_tag=True)
+    payloads: list[LLMPayload] = []
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第一条")))
+    assert cast(Text, payloads[0].content[0]).text == "<system_reminder>\n[screen]\n初始版本\n</system_reminder>"
+
+    store.delete("actor", "screen")
+
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.ASSISTANT, Text("回复")))
+    payloads = manager.add_payload(payloads, LLMPayload(ROLE.USER, Text("第二条")))
+
+    assert cast(Text, payloads[0].content[0]).text == "第一条"
+    assert cast(Text, payloads[2].content[0]).text == "第二条"
+
+    reset_system_reminder_store()
