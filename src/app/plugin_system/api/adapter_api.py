@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.adapter import BaseAdapter
     from src.core.managers.adapter_manager import AdapterManager
@@ -199,6 +201,7 @@ async def send_adapter_command(
 
 
 __all__ = [
+    "API_VERSION",
     "start_adapter",
     "stop_adapter",
     "restart_adapter",

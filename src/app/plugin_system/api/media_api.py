@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.managers.media_manager import MediaManager
 
@@ -202,6 +204,7 @@ async def get_media_info(media_hash: str) -> dict[str, Any] | None:
 
 
 __all__ = [
+    "API_VERSION",
     "recognize_media",
     "recognize_batch",
     "save_media_info",

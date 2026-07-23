@@ -22,8 +22,13 @@
       "enabled": true
     }
   ],
-  "entry_point": "plugin.py",
-  "api_version": "1.0.0",
+    "entry_point": "plugin.py",
+    "min_core_version": "1.2.0RC1",
+    "api_version": {
+        "llm_api": "1.0.0",
+        "send_api": "1.0.0",
+        "service_api": "1.0.0"
+    },
   "python_dependencies": ["pillow"],
   "dependencies_required": true
 }

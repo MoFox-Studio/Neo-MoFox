@@ -66,6 +66,8 @@ from src.kernel.db.core.cache import invalidate_model_cache
 from src.kernel.logger import get_logger
 from src.kernel.storage import JSONStore
 
+API_VERSION = "1.0.0"
+
 logger = get_logger("plugin.storage", display="插件存储")
 
 T = TypeVar("T", bound=Any)
@@ -337,6 +339,7 @@ class PluginDatabase:
 
 
 __all__ = [
+    "API_VERSION",
     # JSON 存储
     "JSONStore",
     "save_json",

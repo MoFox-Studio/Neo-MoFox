@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
     from src.core.components.base.router import BaseRouter
@@ -209,6 +211,7 @@ async def reload_router(signature: str, plugin: "BasePlugin") -> "BaseRouter":
 
 
 __all__ = [
+    "API_VERSION",
     "get_all_routers",
     "get_routers_for_plugin",
     "get_router_class",

@@ -17,5 +17,13 @@
         }
     ],
     "entry_point": "plugin.py",
-    "api_version": "1.0.0"
+    "min_core_version": "1.2.0RC1",
+    "api_version": {
+        "command_api": "1.0.0",
+        "database_api": "1.0.0",
+        "log_api": "1.0.0",
+        "permission_api": "1.0.0",
+        "send_api": "1.0.0",
+        "stream_api": "1.0.0"
+    }
 }

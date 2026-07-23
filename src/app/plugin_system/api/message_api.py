@@ -14,6 +14,7 @@ from typing import Any, cast
 from src.core.models.sql_alchemy import Messages, PersonInfo
 from src.kernel.db import QueryBuilder
 
+API_VERSION = "1.0.0"
 
 def _get_adapter_manager():
 	"""延迟获取 AdapterManager，避免导入时循环依赖。

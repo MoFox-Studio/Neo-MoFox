@@ -36,5 +36,10 @@
         }
     ],
     "entry_point": "plugin.py",
-    "api_version": "1.0.0"
+    "api_version": {
+        "llm_api": "1.0.0",
+        "log_api": "1.0.0",
+        "storage_api": "1.0.0"
+    },
+    "min_core_version": "1.2.0RC1"
 }

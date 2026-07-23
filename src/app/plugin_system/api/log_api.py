@@ -1,5 +1,7 @@
 from src.kernel.logger import get_logger as kernel_get_logger, COLOR, Logger
 
+API_VERSION = "1.0.0"
+
 def get_logger(
     name: str,
     display: str | None = None,
@@ -31,4 +33,4 @@ def get_logger(
         enable_event_broadcast=enable_event_broadcast,
     )
 
-__all__ = ["get_logger", "COLOR"]
+__all__ = ["API_VERSION", "get_logger", "COLOR"]

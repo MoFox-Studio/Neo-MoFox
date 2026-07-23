@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import PermissionLevel
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.command import BaseCommand
     from src.core.managers.permission_manager import PermissionManager
@@ -232,6 +234,7 @@ async def get_user_command_overrides(person_id: str) -> list[dict[str, Any]]:
 
 
 __all__ = [
+    "API_VERSION",
     "generate_raw_person_id",
     "generate_person_id",
     "get_user_permission_level",

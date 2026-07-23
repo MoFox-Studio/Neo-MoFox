@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.service import BaseService
     from src.core.managers.service_manager import ServiceManager
@@ -87,6 +89,7 @@ def get_service(signature: str) -> "BaseService | None":
 
 
 __all__ = [
+    "API_VERSION",
     "get_all_services",
     "get_services_for_plugin",
     "get_service_class",

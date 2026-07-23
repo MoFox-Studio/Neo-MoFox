@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.models.message import Message
     from src.core.models.stream import ChatStream, StreamContext
@@ -370,6 +372,7 @@ async def bulk_clear_streams(chat_type: str = "") -> int:
 
 
 __all__ = [
+    "API_VERSION",
     "get_or_create_stream",
     "get_stream",
     "build_stream_from_database",

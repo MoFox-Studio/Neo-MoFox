@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.action import BaseAction
     from src.core.components.base.plugin import BasePlugin
@@ -231,6 +233,7 @@ async def modify_actions(stream_id: str, message_content: str = "") -> list[str]
 
 
 __all__ = [
+    "API_VERSION",
     "get_all_actions",
     "get_actions_for_plugin",
     "get_actions_for_chat",
