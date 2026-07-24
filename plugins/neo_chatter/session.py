@@ -38,6 +38,7 @@ from .utils.prompt_builder import NeoChatterPromptBuilder
 from .utils.tool_flow import (
     ToolCallOutcome,
     append_suspend_payload_if_action_only,
+    append_suspend_payload_if_tool_result_tail,
     process_tool_calls,
 )
 
@@ -463,7 +464,7 @@ class ConversationSession:
             # 2) 拉取最新未读消息（无论处于哪个阶段都拉，便于 WAIT_USER 决策）
             _, unread_msgs = await self._runtime.fetch_unreads()
 
-            # === 阶段 WAIT_USER：等待用户消息 / 处理恢复事件 ===
+
             if state.phase == _Phase.WAIT_USER and not unread_msgs and current_resume is None:
                 # 2.1) 没有新消息、也没有恢复事件：纯挂起等用户说话
                 resume_event = yield Wait()
@@ -575,7 +576,7 @@ class ConversationSession:
             # === 阶段 TOOL_EXEC：解析工具调用并执行 ===
             if state.phase == _Phase.TOOL_EXEC:
                 response = state.response
-                calls = getattr(response, "call_list", None) or []
+                calls = response.call_list or []
                 # 4.1) 统计本回合调用了哪些工具（供 actor_round 通知）
                 state.used_tools_in_round.update(
                     str(getattr(c, "name", "") or "").strip() for c in calls
@@ -643,7 +644,6 @@ class ConversationSession:
                     response=response,
                     suspend_text=_SUSPEND_TEXT,
                     enable_action_suspend=cfg.enable_action_suspend,
-                    logger=logger,
                 )
 
                 # 4.7) 纯 action 且 pass_and_wait 没要求等待时：按配置挂起或直接 FOLLOW_UP
@@ -668,10 +668,10 @@ class ConversationSession:
                     else:
                         # 4.8.2) 真正进入 Wait：若末尾是工具结果，补一条
                         #        ASSISTANT __SUSPEND__ 切断上下文
-                        if state.has_tool_result_tail():
-                            response.add_payload(
-                                LLMPayload(ROLE.ASSISTANT, Text(_SUSPEND_TEXT))
-                            )
+                        append_suspend_payload_if_tool_result_tail(
+                            response=response,
+                            suspend_text=_SUSPEND_TEXT,
+                        )
                         resume_event = yield Wait(
                             time=outcome.wait_seconds,
                             step_data=_consume_step_data(state),

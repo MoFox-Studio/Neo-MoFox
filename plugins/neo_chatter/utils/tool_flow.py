@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from src.app.plugin_system.api.log_api import Logger
+from src.app.plugin_system.api.log_api import get_logger,Logger
 from src.app.plugin_system.types import (
     LLMPayload,
     Message,
@@ -27,6 +27,7 @@ from src.kernel.concurrency import get_watchdog
 if TYPE_CHECKING:
     from src.app.plugin_system.types import LLMResponse
 
+logger: Logger = get_logger("neo_chatter.tool_flow")
 
 @dataclass
 class ToolCallOutcome:
@@ -234,7 +235,6 @@ def append_suspend_payload_if_action_only(
     response: "LLMResponse",
     suspend_text: str,
     enable_action_suspend: bool,
-    logger: Logger,
 ) -> None:
     """当本轮全是 action 调用时，补充 SUSPEND 占位 assistant 消息。
 
@@ -254,6 +254,35 @@ def append_suspend_payload_if_action_only(
     if enable_action_suspend and calls and all(call.name.startswith("action-") for call in calls):
         response.add_payload(LLMPayload(ROLE.ASSISTANT, Text(suspend_text)))
         logger.debug("已注入 SUSPEND 占位符（本轮全部为 action 调用）")
+
+
+def append_suspend_payload_if_tool_result_tail(
+    *,
+    response: "LLMResponse",
+    suspend_text: str,
+) -> None:
+    """若 response 末尾 payload 是 TOOL_RESULT，追加一条 ASSISTANT SUSPEND 占位。
+
+    用于 ``pass_and_wait`` 进入 ``Wait`` 之前：闭合工具结果尾巴，避免下一轮
+    LLM 把上一条 ``TOOL_RESULT`` 当成自己未收尾的发言而续写、复述或把
+    紧随其后的用户消息与工具回执串成一段连续输入.
+
+    与 :func:`append_suspend_payload_if_action_only` 互补：
+    - 前者面向「纯 action 回合」的尾态闭合，受 ``enable_action_suspend`` 开关约束；
+    - 后者面向「pass_and_wait 要求定时等待」的尾态闭合，无论开关与否都生效，
+      因为定时等待结束后模型会基于该上下文继续推理，裸 TOOL_RESULT 尾巴必须
+      显式闭合。
+
+    Args:
+        response: 当前 LLM 响应对象；占位 assistant 消息会写回其中。
+        suspend_text: SUSPEND 占位符的文本内容。
+        logger: 用于记录调试信息的 logger。
+    """
+    payloads = getattr(response, "payloads", None)
+    if not payloads or payloads[-1].role != ROLE.TOOL_RESULT:
+        return
+    response.add_payload(LLMPayload(ROLE.ASSISTANT, Text(suspend_text)))
+    logger.debug("注入 SUSPEND 占位符以在等待之前关闭工具结果尾部")
 
 
 def _build_call_dedupe_key(call_name: str, args: object) -> str:
