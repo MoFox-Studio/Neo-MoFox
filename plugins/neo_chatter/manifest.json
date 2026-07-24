@@ -37,6 +37,18 @@
       "component_name": "stop_conversation",
       "dependencies": [],
       "enabled": true
+    },
+    {
+      "component_type": "event_handler",
+      "component_name": "probability_bypass",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "event_handler",
+      "component_name": "sub_agent_decision",
+      "dependencies": [],
+      "enabled": true
     }
   ],
   "entry_point": "plugin.py",

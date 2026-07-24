@@ -63,6 +63,102 @@ class NeoChatterConfig(BaseConfig):
                 tag="text",
             )
 
+        @config_section("preprocess_probability_bypass", title="预处理-概率直通", tag="ai")
+        class PreprocessProbabilityBypassSection(SectionBase):
+            """消息预处理 - 概率直通门参数。
+
+            本节控制 ``neo_chatter:preprocess`` 事件中的概率直通处理器：
+            当随机值低于放行概率时，直接放行给主 chatter，跳过 sub-agent LLM 决策；
+            未命中则交给 sub_agent 处理器判定。
+            """
+
+            enabled: bool = Field(
+                default=True,
+                description="是否启用 概率直通处理器。",
+                label="启用 概率直通",
+                tag="ai",
+                hint="关闭后所有消息都会落入 sub_agent 处理器判定。",
+            )
+            base_bypass_probability: float = Field(
+                default=0.1,
+                description="本地概率直通的基础放行概率，每轮 tick 的起始概率。",
+                label="基础放行概率",
+                tag="ai",
+                hint="有效范围 0.0-1.0。值越大越容易跳过 sub_agent LLM 决策直接响应。",
+            )
+            name_mention_bonus: float = Field(
+                default=0.7,
+                description="未读消息存在强提及（被@或被回复）时叠加的放行概率加成。",
+                label="强提及加成",
+                tag="ai",
+                hint="有效范围 0.0-1.0。精准@机器人或回复机器人发言时触发。",
+            )
+            alias_mention_bonus: float = Field(
+                default=0.4,
+                description="未读消息存在弱提及（文本命中全名或别名）时叠加的放行概率加成。",
+                label="弱提及加成",
+                tag="ai",
+                hint="有效范围 0.0-1.0。文本包含机器人昵称或别名时触发。",
+            )
+            unread_message_bonus: float = Field(
+                default=0.05,
+                description="每条未读消息叠加的放行概率加成，累积值 = 未读数 * 该值。",
+                label="未读消息加成",
+                tag="ai",
+                hint="有效范围 0.0-1.0。未读消息越多直通概率越高。",
+            )
+
+        @config_section("preprocess_sub_agent", title="预处理-SubAgent判定", tag="ai")
+        class PreprocessSubAgentSection(SectionBase):
+            """消息预处理 - sub_agent 轻量 LLM 判定参数。
+
+            本节控制 ``neo_chatter:preprocess`` 事件中的 sub_agent 处理器：
+            当 概率直通门未命中时，发起一次轻量 LLM 单轮判定，
+            让模型决定本轮消息是否值得主 chatter 立即回复。
+            """
+
+            enabled: bool = Field(
+                default=True,
+                description="是否启用 sub_agent 轻量 LLM 判定处理器。",
+                label="启用 SubAgent 判定",
+                tag="ai",
+                hint="关闭后，概率直通门未命中时也会直接放行给主 chatter。",
+            )
+            task_name: str = Field(
+                default="actor",
+                description="判定请求使用的 LLM 任务名，对应 config/model.toml 中的 task key。",
+                label="判定任务名",
+                tag="ai",
+                hint="建议指向一个轻量 / 低成本模型任务以节省 token。",
+            )
+            request_name: str = Field(
+                default="neo_chatter:preprocess:sub_agent_decision",
+                description="LLM 请求名，用于统计与日志识别。",
+                label="请求名",
+                tag="ai",
+            )
+            max_context_messages: int = Field(
+                default=8,
+                description="拼入判定 prompt 的最近历史消息条数上限。",
+                label="上下文消息上限",
+                tag="ai",
+                hint="值越大判定越准但越耗 token；0 表示只看本轮未读消息。",
+            )
+            max_unread_messages: int = Field(
+                default=10,
+                description="拼入判定 prompt 的本轮未读消息条数上限。",
+                label="未读消息上限",
+                tag="ai",
+                hint="超过该数量的未读消息会被截断，仅保留最近若干条。",
+            )
+            decision_temperature: float = Field(
+                default=0.2,
+                description="判定请求的温度参数，越低判定越确定。",
+                label="判定温度",
+                tag="ai",
+                hint="建议保持较低温度以保证判定一致性。",
+            )
+
         enabled: bool = Field(
             default=True,
             description="是否启用 Neo-Chatter",
@@ -147,6 +243,16 @@ class NeoChatterConfig(BaseConfig):
             default_factory=lambda: NeoChatterConfig.PluginSection.ThemeGuideSection(),
             description="按聊天类型区分的额外提示词",
             label="场景引导配置",
+        )
+        preprocess_probability_bypass: "NeoChatterConfig.PluginSection.PreprocessProbabilityBypassSection" = Field(
+            default_factory=lambda: NeoChatterConfig.PluginSection.PreprocessProbabilityBypassSection(),
+            description="消息预处理 概率直通门参数",
+            label="概率直通配置",
+        )
+        preprocess_sub_agent: "NeoChatterConfig.PluginSection.PreprocessSubAgentSection" = Field(
+            default_factory=lambda: NeoChatterConfig.PluginSection.PreprocessSubAgentSection(),
+            description="消息预处理 sub_agent 轻量 LLM 判定参数",
+            label="SubAgent 判定配置",
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)

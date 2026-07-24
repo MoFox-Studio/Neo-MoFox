@@ -13,6 +13,10 @@ from .components.actions import (
 )
 from .components.chatter import NeoChatter
 from .components.config import NeoChatterConfig
+from .components.event_handlers import (
+    ProbabilityBypassHandler,
+    SubAgentDecisionHandler,
+)
 from .components.service import NeoChatterService
 from .utils.prompts import system_prompt, user_prompt
 
@@ -105,4 +109,6 @@ class NeoChatterPlugin(BasePlugin):
             SendTextAction,
             PassAndWaitAction,
             StopConversationAction,
+            ProbabilityBypassHandler,
+            SubAgentDecisionHandler,
         ]
