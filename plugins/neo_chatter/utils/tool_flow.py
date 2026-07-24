@@ -100,37 +100,57 @@ async def process_tool_calls(
         ToolCallOutcome: 本轮控制流与普通调用执行后的汇总结果。
     """
     outcome = ToolCallOutcome()
+    # 本轮内已见过的调用签名，避免同一轮 LLM 输出里重复执行同款调用
     seen: set[str] = set()
+    # 控制流边界前累积的普通调用，待批量交给执行器
     pending_calls: list[ToolCall] = []
 
     async def flush_pending_calls() -> None:
-        """批量执行暂存的普通调用，并更新本轮控制流状态。"""
+        """批量执行暂存的普通调用，并更新本轮控制流状态。
+
+        之所以拆出内部函数：``pass_and_wait`` / ``stop_conversation`` /
+        去重跳过 三个分支都需要在各自处理前把已暂存的普通调用一次性 flush
+        出去，保证普通调用与控制流调用之间的相对顺序符合模型输出顺序。
+        """
         if not pending_calls:
             return
 
+        # 复制一份并立即清空原列表，避免执行过程中再次累积造成死循环
         current_pending = list(pending_calls)
         pending_calls.clear()
+        # 批量交给统一执行器；results 与 current_pending 顺序一一对应
         results = await run_tool_call(current_pending, response, usable_map, trigger_msg)
 
+        # 把执行结果摘要回填到 outcome，并判断是否产生了下一轮需要 LLM 继续推理的 TOOL_RESULT
         for pending_call, (appended, success) in zip(current_pending, results, strict=False):
             outcome.execution_results.append(
                 {"name": pending_call.name, "success": bool(success)}
             )
+            # action-* 调用不向模型回写结果，因此不会触发 pending_tool_results
             if appended and not pending_call.name.startswith("action-"):
                 outcome.has_pending_tool_results = True
 
+    # ===== 主循环：按模型输出顺序逐条处理 tool calls =====
     for call in calls:
+        # 每处理一条都喂 watchdog，避免长轮 tool calls 被判定为卡死
         get_watchdog().feed_dog(stream_id)
 
+        # 规范化入参：非 dict 视作空 dict，方便后续按 key 取值
         args = call.args if isinstance(call.args, dict) else {}
+        # 去重时忽略 reason 字段：相同动作不同理由仍视为同一调用
         dedupe_args = (
             {k: v for k, v in args.items() if k != "reason"}
             if isinstance(args, dict)
             else args
         )
+        # 生成形如 "call_name:{json}" 的稳定签名
         dedupe_key = _build_call_dedupe_key(call.name, dedupe_args)
+
+        # 去重判定：本轮已见过 或 跨轮去重集合中已存在 都跳过
         if dedupe_key in seen or (seen_signatures is not None and dedupe_key in seen_signatures):
+            # 跳过前先把已暂存的普通调用 flush 掉，保证顺序
             await flush_pending_calls()
+            # 写回一条 TOOL_RESULT 告知模型本次调用被跳过，避免模型认为调用成功而后续走错流程
             response.add_payload(
                 LLMPayload(
                     ROLE.TOOL_RESULT,
@@ -142,12 +162,17 @@ async def process_tool_calls(
                 )
             )
             continue
+
+        # 登记到本轮与跨轮去重集合，确保后续相同调用同样被跳过
         seen.add(dedupe_key)
         if seen_signatures is not None:
             seen_signatures.add(dedupe_key)
 
+        # ----- 控制流分支 1：pass_and_wait（等待新消息）-----
         if call.name == pass_call_name:
+            # 进入等待前先把已累积的普通调用批量执行，确保等待动作生效时它们已完成
             await flush_pending_calls()
+            # seconds 缺省表示无限期等待新消息；否则按用户指定秒数定时唤醒
             wait_seconds = args.get("seconds")
             outcome.wait_seconds = None if wait_seconds is None else float(wait_seconds)
             wait_text = (
@@ -155,6 +180,7 @@ async def process_tool_calls(
                 if outcome.wait_seconds is None
                 else f"已登记等待，本轮动作完成后等待 {outcome.wait_seconds} 秒后继续对话"
             )
+            # 写回提示文本，但本函数不再触发后续 LLM follow-up（由 should_wait 标志位控制上层逻辑）
             response.add_payload(
                 LLMPayload(
                     ROLE.TOOL_RESULT,
@@ -168,8 +194,11 @@ async def process_tool_calls(
             outcome.should_wait = True
             continue
 
+        # ----- 控制流分支 2：stop_conversation（结束对话）-----
         if call.name == stop_call_name:
+            # 停止前同样先 flush 普通调用，避免被丢弃导致本轮应完成的副作用未执行
             await flush_pending_calls()
+            # 解析 minutes；非法或缺省时退回默认冷却分钟数
             raw_minutes = args.get("minutes")
             try:
                 outcome.stop_minutes = (
@@ -177,6 +206,7 @@ async def process_tool_calls(
                 )
             except (TypeError, ValueError):
                 outcome.stop_minutes = float(default_stop_minutes)
+            # 写回停止提示文本，由上层根据 should_stop 切换对话状态
             response.add_payload(
                 LLMPayload(
                     ROLE.TOOL_RESULT,
@@ -190,8 +220,10 @@ async def process_tool_calls(
             outcome.should_stop = True
             continue
 
+        # ----- 默认分支：普通可执行调用，先暂存等待批量执行 -----
         pending_calls.append(call)
 
+    # 循环结束前若还有未 flush 的普通调用，补一次批量执行
     await flush_pending_calls()
     return outcome
 
@@ -204,15 +236,46 @@ def append_suspend_payload_if_action_only(
     enable_action_suspend: bool,
     logger: Logger,
 ) -> None:
-    """当本轮全是 action 调用时，补充 SUSPEND 占位 assistant 消息。"""
+    """当本轮全是 action 调用时，补充 SUSPEND 占位 assistant 消息。
+
+    若本轮 LLM 输出的 tool calls 全部以 ``action-`` 开头，意味着模型
+    只产出动作、没有可让模型继续推理的 ``TOOL_RESULT``。这种情况下若上层
+    不注入占位 assistant 消息，下一轮上下文会以 tool_result 结尾，部分
+    模型会因此报错。本函数负责在该场景下补一段占位文本。
+
+    Args:
+        calls: 本轮 LLM 响应中的 tool call 列表。
+        response: 当前 LLM 响应对象；占位 assistant 消息会写回其中。
+        suspend_text: SUSPEND 占位符的文本内容。
+        enable_action_suspend: 总开关；为 False 时本函数直接 no-op。
+        logger: 用于记录调试信息的 logger。
+    """
+    # 仅在开关开启且 calls 非空且全部为 action-* 时注入，避免误污染普通对话轮
     if enable_action_suspend and calls and all(call.name.startswith("action-") for call in calls):
         response.add_payload(LLMPayload(ROLE.ASSISTANT, Text(suspend_text)))
         logger.debug("已注入 SUSPEND 占位符（本轮全部为 action 调用）")
 
 
 def _build_call_dedupe_key(call_name: str, args: object) -> str:
-    """构建 tool call 去重键。"""
+    """构建 tool call 的去重键。
+
+    将调用名与入参序列化为稳定字符串 ``"<call_name>:<json>"``，便于放入
+    ``set`` 做本轮或跨轮去重判定。使用 ``sort_keys=True`` 与紧凑分隔符确保
+    相同语义的不同 dict 字面量（如键顺序不同）能映射到同一键。
+
+    Args:
+        call_name: tool call 的名称（含可能的 ``action-`` 前缀）。
+        args: 已经预处理过（如剥离 reason 字段）的入参对象，通常为 dict。
+
+    Returns:
+        形如 ``"call_name:{json}"`` 的稳定字符串键。
+
+    Note:
+        若 ``args`` 包含不可 JSON 序列化的对象，会退回 ``str(args)`` 作为兜底，
+        保证函数永不抛 ``TypeError``。
+    """
     try:
+        # sort_keys=True 保证 dict 键顺序不影响序列化结果；separators 去掉多余空白
         serialized_args = json.dumps(
             args,
             ensure_ascii=False,
@@ -221,5 +284,6 @@ def _build_call_dedupe_key(call_name: str, args: object) -> str:
             default=str,
         )
     except TypeError:
+        # 极端情况下 json.dumps 仍可能失败（例如自定义 __str__ 抛错），退回 str()
         serialized_args = str(args)
     return f"{call_name}:{serialized_args}"
