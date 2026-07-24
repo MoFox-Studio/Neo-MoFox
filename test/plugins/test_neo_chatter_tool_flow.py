@@ -13,8 +13,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
-import pytest
-
 from plugins.neo_chatter.utils import tool_flow as tool_flow_mod
 from src.kernel.llm import ROLE
 
@@ -41,11 +39,6 @@ class _FakePayload:
         self.role = role
 
 
-def _make_logger() -> Any:
-    """返回一个吃掉所有调用的 logger。"""
-    return SimpleNamespace(debug=lambda *_args, **_kwargs: None)
-
-
 # ---------------------------------------------------------------------------
 # append_suspend_payload_if_tool_result_tail（方案 2 抽出的 helper）
 # ---------------------------------------------------------------------------
@@ -60,7 +53,6 @@ def test_append_suspend_payload_if_tool_result_tail_injects_on_tool_result_tail(
     append_suspend_payload_if_tool_result_tail(
         response=response,
         suspend_text="__SUSPEND__",
-        logger=_make_logger(),
     )
 
     assert len(response.payloads) == 3
@@ -77,7 +69,6 @@ def test_append_suspend_payload_if_tool_result_tail_skips_when_tail_is_assistant
     append_suspend_payload_if_tool_result_tail(
         response=response,
         suspend_text="__SUSPEND__",
-        logger=_make_logger(),
     )
 
     assert len(response.payloads) == 2  # 不变
@@ -90,7 +81,6 @@ def test_append_suspend_payload_if_tool_result_tail_skips_when_payloads_empty() 
     append_suspend_payload_if_tool_result_tail(
         response=response,
         suspend_text="__SUSPEND__",
-        logger=_make_logger(),
     )
 
     assert response.payloads == []
@@ -104,7 +94,6 @@ def test_append_suspend_payload_if_tool_result_tail_skips_when_payloads_empty() 
 def test_append_suspend_payload_only_for_action_calls() -> None:
     """仅当 call_list 全是 action-* 时才注入 SUSPEND。"""
     response = _FakeResponse()
-    logger = _make_logger()
 
     append_suspend_payload_if_action_only(
         calls=[
@@ -114,7 +103,6 @@ def test_append_suspend_payload_only_for_action_calls() -> None:
         response=response,
         suspend_text="__SUSPEND__",
         enable_action_suspend=True,
-        logger=logger,
     )
     assert len(response.payloads) == 1
     assert response.payloads[0].role == ROLE.ASSISTANT
@@ -128,7 +116,6 @@ def test_append_suspend_payload_only_for_action_calls() -> None:
         response=response_2,
         suspend_text="__SUSPEND__",
         enable_action_suspend=True,
-        logger=logger,
     )
     assert response_2.payloads == []
 
@@ -137,14 +124,12 @@ def test_append_suspend_payload_respects_disable_flag() -> None:
     """关闭 action suspend 时不应注入 SUSPEND。"""
 
     response = _FakeResponse()
-    logger = _make_logger()
 
     append_suspend_payload_if_action_only(
         calls=[SimpleNamespace(name="action-send_text")],
         response=response,
         suspend_text="__SUSPEND__",
         enable_action_suspend=False,
-        logger=logger,
     )
 
     assert response.payloads == []

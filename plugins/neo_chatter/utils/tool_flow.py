@@ -248,7 +248,6 @@ def append_suspend_payload_if_action_only(
         response: 当前 LLM 响应对象；占位 assistant 消息会写回其中。
         suspend_text: SUSPEND 占位符的文本内容。
         enable_action_suspend: 总开关；为 False 时本函数直接 no-op。
-        logger: 用于记录调试信息的 logger。
     """
     # 仅在开关开启且 calls 非空且全部为 action-* 时注入，避免误污染普通对话轮
     if enable_action_suspend and calls and all(call.name.startswith("action-") for call in calls):
@@ -276,7 +275,6 @@ def append_suspend_payload_if_tool_result_tail(
     Args:
         response: 当前 LLM 响应对象；占位 assistant 消息会写回其中。
         suspend_text: SUSPEND 占位符的文本内容。
-        logger: 用于记录调试信息的 logger。
     """
     payloads = getattr(response, "payloads", None)
     if not payloads or payloads[-1].role != ROLE.TOOL_RESULT:
