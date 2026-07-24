@@ -1,4 +1,4 @@
-"""Neo-Chatter 工具调用控制流模块。
+"""Neo-Default-Chatter 工具调用控制流模块。
 
 负责在主会话逻辑调用统一执行器前，先拦截 ``pass_and_wait`` 与
 ``stop_conversation`` 两个控制流动作（不写回 TOOL_RESULT，避免模型继续 follow-up），
@@ -27,7 +27,7 @@ from src.kernel.concurrency import get_watchdog
 if TYPE_CHECKING:
     from src.app.plugin_system.types import LLMResponse
 
-logger: Logger = get_logger("neo_chatter.tool_flow")
+logger: Logger = get_logger("neo_default_chatter.tool_flow")
 
 @dataclass
 class ToolCallOutcome:

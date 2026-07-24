@@ -1,4 +1,4 @@
-"""neo_chatter.tool_flow 模块测试。
+"""neo_default_chatter.tool_flow 模块测试。
 
 镜像 ``test_default_chatter_tool_flow.py`` 的最小化 ``_FakeResponse`` 模式，
 覆盖两个 SUSPEND 注入 helper：
@@ -13,7 +13,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
-from plugins.neo_chatter.utils import tool_flow as tool_flow_mod
+from plugins.neo_default_chatter.utils import tool_flow as tool_flow_mod
 from src.kernel.llm import ROLE
 
 append_suspend_payload_if_action_only = cast(Any, tool_flow_mod.append_suspend_payload_if_action_only)

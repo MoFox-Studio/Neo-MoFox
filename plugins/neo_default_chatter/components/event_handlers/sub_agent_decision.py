@@ -1,6 +1,6 @@
-"""Neo-Chatter 预处理事件处理器：sub_agent 轻量 LLM 判定。
+"""Neo-Default-Chatter 预处理事件处理器：sub_agent 轻量 LLM 判定。
 
-订阅 ``neo_chatter:preprocess`` 事件，在 概率直通门未命中放行后，发起一次
+订阅 ``neo_default_chatter:preprocess`` 事件，在 概率直通门未命中放行后，发起一次
 轻量 LLM 单轮判定，让模型基于「最近历史 + 本轮未读消息 + 一点上下文」决定
 本轮是否值得主 chatter 立即回复。
 
@@ -34,16 +34,16 @@ from src.kernel.event import EventDecision
 from ..config import NeoChatterConfig
 from ...utils.prompt_builder import NeoChatterPromptBuilder
 
-logger = get_logger("neo_chatter.preprocess.sub_agent")
+logger = get_logger("neo_default_chatter.preprocess.sub_agent")
 
 #: NFC 预处理事件名。
-_PREPROCESS_EVENT = "neo_chatter:preprocess"
+_PREPROCESS_EVENT = "neo_default_chatter:preprocess"
 
 
 class SubAgentDecisionHandler(BaseEventHandler):
     """sub_agent 轻量 LLM 判定处理器。
 
-    在 ``neo_chatter:preprocess`` 事件链中位于 概率直通门之后（weight 较低）。
+    在 ``neo_default_chatter:preprocess`` 事件链中位于 概率直通门之后（weight 较低）。
     若 概率直通门已经 ``STOP``，本处理器不会执行；若 概率直通门未命中放行，
     本处理器发起一次 LLM 单轮判定决定是否 proceed。
 
@@ -52,7 +52,7 @@ class SubAgentDecisionHandler(BaseEventHandler):
 
     Class Attributes:
         weight: 50，低于 概率直通处理器（100），确保 概率直通处理器先执行。
-        init_subscribe: 订阅 ``neo_chatter:preprocess`` 事件。
+        init_subscribe: 订阅 ``neo_default_chatter:preprocess`` 事件。
     """
 
     name = "sub_agent_decision"

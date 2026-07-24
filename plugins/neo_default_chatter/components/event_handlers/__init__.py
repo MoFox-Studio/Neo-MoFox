@@ -1,6 +1,6 @@
-"""Neo-Chatter 消息预处理事件处理器集合。
+"""Neo-Default-Chatter 消息预处理事件处理器集合。
 
-本包内的处理器都订阅 ``neo_chatter:preprocess`` 事件，按权重串行执行：
+本包内的处理器都订阅 ``neo_default_chatter:preprocess`` 事件，按权重串行执行：
 
 - :class:`ProbabilityBypassHandler` (weight=100)：移植自 default_chatter 的概率门，
   命中放行概率即 ``STOP`` 阻断后续处理器，让主 chatter 直接处理本轮消息。

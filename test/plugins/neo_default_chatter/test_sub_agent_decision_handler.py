@@ -19,13 +19,13 @@ from typing import Any
 
 import pytest
 
-from plugins.neo_chatter.components.config import NeoChatterConfig
-from plugins.neo_chatter.components.event_handlers.sub_agent_decision import (
+from plugins.neo_default_chatter.components.config import NeoChatterConfig
+from plugins.neo_default_chatter.components.event_handlers.sub_agent_decision import (
     SubAgentDecisionHandler,
 )
-from plugins.neo_chatter.plugin import NeoChatterPlugin
-from plugins.neo_chatter.utils.prompt_builder import NeoChatterPromptBuilder
-from plugins.neo_chatter.utils.prompts import (
+from plugins.neo_default_chatter.plugin import NeoChatterPlugin
+from plugins.neo_default_chatter.utils.prompt_builder import NeoChatterPromptBuilder
+from plugins.neo_default_chatter.utils.prompts import (
     sub_agent_system_prompt,
     sub_agent_user_prompt,
 )
@@ -46,12 +46,12 @@ def _register_sub_agent_templates() -> None:
     """注册 sub_agent 提示词模板，供 prompt_builder 渲染。"""
 
     get_prompt_manager().get_or_create(
-        name="neo_chatter_sub_agent_system_prompt",
+        name="neo_default_chatter_sub_agent_system_prompt",
         template=sub_agent_system_prompt,
         policies={},
     )
     get_prompt_manager().get_or_create(
-        name="neo_chatter_sub_agent_user_prompt",
+        name="neo_default_chatter_sub_agent_user_prompt",
         template=sub_agent_user_prompt,
         policies={
             "stream_name": optional("未知对话"),
@@ -163,7 +163,7 @@ async def test_handler_disabled_returns_success_without_modification() -> None:
     stream = _make_stream()
     params = _make_params([_make_msg("hi")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["proceed"] is False
@@ -178,7 +178,7 @@ async def test_handler_no_unreads_returns_success() -> None:
     stream = _make_stream()
     params = _make_params([], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["reason"] == ""
@@ -204,7 +204,7 @@ async def test_handler_upstream_approved_skips_llm() -> None:
 
     handler._call_llm = _spy_call  # type: ignore[method-assign]
     try:
-        decision, out = await handler.execute("neo_chatter:preprocess", params)
+        decision, out = await handler.execute("neo_default_chatter:preprocess", params)
     finally:
         handler._call_llm = original_call  # type: ignore[method-assign]
 
@@ -213,7 +213,7 @@ async def test_handler_upstream_approved_skips_llm() -> None:
     assert call_count == 0
 
 
-async def test_handler_config_not_neo_chatter_config_returns_success() -> None:
+async def test_handler_config_not_neo_default_chatter_config_returns_success() -> None:
     """``params['config']`` 不是 :class:`NeoChatterConfig` 时应早退放行。"""
 
     handler = SubAgentDecisionHandler(_make_plugin(_make_config()))
@@ -221,7 +221,7 @@ async def test_handler_config_not_neo_chatter_config_returns_success() -> None:
     params = _make_params([_make_msg("hi")], stream, _make_config())
     params["config"] = SimpleNamespace()
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["reason"] == ""
@@ -235,7 +235,7 @@ async def test_handler_missing_chat_stream_returns_success() -> None:
     params = _make_params([_make_msg("hi")], _make_stream(), cfg)
     params["chat_stream"] = "not a chat stream"
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["reason"] == ""
@@ -261,7 +261,7 @@ async def test_llm_respond_true_sets_proceed_true(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(handler, "_call_llm", _fake_call)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["proceed"] is True
@@ -284,7 +284,7 @@ async def test_llm_respond_false_sets_proceed_false(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(handler, "_call_llm", _fake_call)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["proceed"] is False
@@ -312,7 +312,7 @@ async def test_llm_exception_falls_back_to_proceed_true(
 
     monkeypatch.setattr(handler, "_call_llm", _boom)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["proceed"] is True
@@ -334,7 +334,7 @@ async def test_llm_returns_none_falls_back_to_proceed_true(
 
     monkeypatch.setattr(handler, "_call_llm", _none)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["proceed"] is True
@@ -355,7 +355,7 @@ async def test_call_llm_model_task_not_configured_returns_none(
         raise RuntimeError("Model config not initialized")
 
     monkeypatch.setattr(
-        "plugins.neo_chatter.components.event_handlers.sub_agent_decision.llm_api.get_model_set_by_task",
+        "plugins.neo_default_chatter.components.event_handlers.sub_agent_decision.llm_api.get_model_set_by_task",
         _raise,
     )
 
@@ -622,4 +622,4 @@ def test_handler_metadata() -> None:
     assert SubAgentDecisionHandler.name == "sub_agent_decision"
     assert SubAgentDecisionHandler.weight == 50
     assert SubAgentDecisionHandler.component_type == "event_handler"
-    assert "neo_chatter:preprocess" in SubAgentDecisionHandler.init_subscribe
+    assert "neo_default_chatter:preprocess" in SubAgentDecisionHandler.init_subscribe

@@ -1,4 +1,4 @@
-"""Neo-Chatter 配置定义。"""
+"""Neo-Default-Chatter 配置定义。"""
 
 from __future__ import annotations
 
@@ -33,14 +33,14 @@ _GROUP_DEFAULT = (
 
 
 class NeoChatterConfig(BaseConfig):
-    """Neo-Chatter 配置。"""
+    """Neo-Default-Chatter 配置。"""
 
     name: ClassVar[str] = "config"
-    description: ClassVar[str] = "Neo-Chatter 配置"
+    description: ClassVar[str] = "Neo-Default-Chatter 配置"
 
     @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):
-        """Neo-Chatter 主配置节。"""
+        """Neo-Default-Chatter 主配置节。"""
 
         @config_section("theme_guide", title="场景引导", tag="text")
         class ThemeGuideSection(SectionBase):
@@ -67,7 +67,7 @@ class NeoChatterConfig(BaseConfig):
         class PreprocessProbabilityBypassSection(SectionBase):
             """消息预处理 - 概率直通门参数。
 
-            本节控制 ``neo_chatter:preprocess`` 事件中的概率直通处理器：
+            本节控制 ``neo_default_chatter:preprocess`` 事件中的概率直通处理器：
             当随机值低于放行概率时，直接放行给主 chatter，跳过 sub-agent LLM 决策；
             未命中则交给 sub_agent 处理器判定。
             """
@@ -112,7 +112,7 @@ class NeoChatterConfig(BaseConfig):
         class PreprocessSubAgentSection(SectionBase):
             """消息预处理 - sub_agent 轻量 LLM 判定参数。
 
-            本节控制 ``neo_chatter:preprocess`` 事件中的 sub_agent 处理器：
+            本节控制 ``neo_default_chatter:preprocess`` 事件中的 sub_agent 处理器：
             当 概率直通门未命中时，发起一次轻量 LLM 单轮判定，
             让模型决定本轮消息是否值得主 chatter 立即回复。
             """
@@ -132,7 +132,7 @@ class NeoChatterConfig(BaseConfig):
                 hint="建议指向一个轻量 / 低成本模型任务以节省 token。",
             )
             request_name: str = Field(
-                default="neo_chatter:preprocess:sub_agent_decision",
+                default="neo_default_chatter:preprocess:sub_agent_decision",
                 description="LLM 请求名，用于统计与日志识别。",
                 label="请求名",
                 tag="ai",
@@ -160,8 +160,8 @@ class NeoChatterConfig(BaseConfig):
             )
 
         enabled: bool = Field(
-            default=True,
-            description="是否启用 Neo-Chatter",
+            default=False,
+            description="是否启用 Neo-Default-Chatter",
             label="启用插件",
             tag="plugin",
         )

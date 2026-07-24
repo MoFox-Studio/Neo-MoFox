@@ -18,11 +18,11 @@ from src.app.plugin_system.api.send_api import send_message
 from src.app.plugin_system.base import BaseAction
 from src.app.plugin_system.types import Message, MessageType
 
-logger = get_logger("neo_chatter")
+logger = get_logger("neo_default_chatter")
 
 _TYPING_DELAY_PER_CHAR = 0.5
 _TYPING_DELAY_MAX_SECONDS = 10.0
-_LAST_SEND_TIME_ATTR = "_neo_chatter_last_send_text_time"
+_LAST_SEND_TIME_ATTR = "_neo_default_chatter_last_send_text_time"
 
 
 class SendTextAction(BaseAction):
@@ -38,7 +38,7 @@ class SendTextAction(BaseAction):
         "注意：本工具无法发送表情包等非文本内容。所有@对象都应该通过 at 参数而不是直接写在文本里，以确保正确解析和发送。"
     )
 
-    chatter_allow: list[str] = ["neo_chatter"]
+    chatter_allow: list[str] = ["neo_default_chatter"]
     associated_types = ["text"]
 
     @staticmethod

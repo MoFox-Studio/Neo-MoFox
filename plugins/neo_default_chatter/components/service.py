@@ -1,4 +1,4 @@
-"""Neo-Chatter 会话工厂。"""
+"""Neo-Default-Chatter 会话工厂。"""
 
 from __future__ import annotations
 
@@ -12,22 +12,22 @@ from ..session import ConversationSession
 if TYPE_CHECKING:
     from src.app.plugin_system.base import BasePlugin
 
-logger = get_logger("neo_chatter")
+logger = get_logger("neo_default_chatter")
 
 
 class NeoChatterService(BaseService):
-    """Neo-Chatter 会话工厂。
+    """Neo-Default-Chatter 会话工厂。
 
     暴露主会话逻辑给其他插件：第三方插件通过 ``service_api.get_service``
     拿到本 Service 实例（每次新建，非单例），再调用 :meth:`create_session`
     得到一个可 ``async for`` 的 :class:`ConversationSession`。
 
     会话行为完全自包含，不暴露任何运行时替换点；需要差异化「是否响应」
-    或「响应前注入什么」时，通过订阅 ``neo_chatter:preprocess`` 事件实现。
+    或「响应前注入什么」时，通过订阅 ``neo_default_chatter:preprocess`` 事件实现。
     """
 
     name = "chat_core"
-    description = "Neo-Chatter 会话工厂，复用主会话逻辑构建自定义聊天器"
+    description = "Neo-Default-Chatter 会话工厂，复用主会话逻辑构建自定义聊天器"
     version = "0.1.0"
 
     def create_session(

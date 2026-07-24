@@ -1,11 +1,11 @@
-"""Neo-Chatter 主会话逻辑。
+"""Neo-Default-Chatter 主会话逻辑。
 
 ``ConversationSession`` 是 NFC 的对话主流程载体：自包含、不持有宿主 chatter 引用，
 所有上下文从 ``stream_id`` 经框架 API 取得。``NeoChatter``（注册的 Chatter）和
 第三方插件都通过 :class:`NeoChatterService` 拿到同一个 session 并驱动它。
 
 会话状态机沿用 default_chatter 的四阶段模型（WAIT_USER / MODEL_TURN / TOOL_EXEC /
-FOLLOW_UP），但用**事件驱动预处理**（发布 ``neo_chatter:preprocess``）替代了
+FOLLOW_UP），但用**事件驱动预处理**（发布 ``neo_default_chatter:preprocess``）替代了
 sub-agent / 兴趣值过滤，并去掉了子代理协作、语义训练等内置策略。
 """
 
@@ -49,8 +49,8 @@ if TYPE_CHECKING:
 #:
 #: 本文件所有 ``ConversationSession`` 实例共享同一个 logger，避免在每次创建会话
 #: 时重复构造；同时与同插件的 ``service.py`` / ``actions/send_text.py`` 风格保持一致
-#: （都使用 ``get_logger("neo_chatter", ...)``）。
-logger = get_logger("neo_chatter", display="Neo-Chatter")
+#: （都使用 ``get_logger("neo_default_chatter", ...)``）。
+logger = get_logger("neo_default_chatter", display="Neo-Default-Chatter")
 
 #: 控制流工具调用名（``to_schema`` 会给 action 加 ``action-`` 前缀）
 _PASS_CALL_NAME = "action-pass_and_wait"
@@ -230,7 +230,7 @@ def _pick_trigger_message(chat_stream: ChatStream, unreads: list[Message]) -> Me
         platform=chat_stream.platform,
         chat_type=chat_stream.chat_type,
         stream_id=chat_stream.stream_id,
-        sender_name="neo_chatter",
+        sender_name="neo_default_chatter",
     )
 
 
@@ -314,7 +314,7 @@ def _transition(
 
 
 class ConversationSession:
-    """Neo-Chatter 主会话逻辑。
+    """Neo-Default-Chatter 主会话逻辑。
 
     通过 :class:`NeoChatterService` 创建。调用 ``execute()`` 得到一个异步生成器，
     产出 ``Wait / Success / Failure / Stop``，并接收 ``WaitResumeEvent`` 恢复事件。
@@ -571,7 +571,7 @@ class ConversationSession:
                     self._runtime.format_message_line(msg) for msg in unread_msgs
                 )
 
-                # 2.6) 跑 neo_chatter:preprocess 事件，让订阅者决定是否继续 / 注入 extra
+                # 2.6) 跑 neo_default_chatter:preprocess 事件，让订阅者决定是否继续 / 注入 extra
                 decision = await run_preprocess(
                     chat_stream=chat_stream,
                     unreads=unread_msgs,

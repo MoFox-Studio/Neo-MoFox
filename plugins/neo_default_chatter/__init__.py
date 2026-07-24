@@ -1,4 +1,4 @@
-"""Neo-Chatter (NFC) 插件。
+"""Neo-Default-Chatter (NFC) 插件。
 
 可复用的会话逻辑中台：事件驱动预处理 + 原生多模态。
 """

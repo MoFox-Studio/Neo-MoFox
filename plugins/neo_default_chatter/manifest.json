@@ -1,7 +1,7 @@
 {
-  "name": "neo_chatter",
+  "name": "neo_default_chatter",
   "version": "0.1.0",
-  "description": "Neo-Chatter：可复用的会话逻辑中台，事件驱动预处理 + 原生多模态",
+  "description": "Neo-Default-Chatter：可复用的会话逻辑中台，事件驱动预处理 + 原生多模态",
   "author": "MoFox Team",
   "dependencies": {
     "plugins": [],
@@ -10,7 +10,7 @@
   "include": [
     {
       "component_type": "chatter",
-      "component_name": "neo_chatter",
+      "component_name": "neo_default_chatter",
       "dependencies": [],
       "enabled": true
     },

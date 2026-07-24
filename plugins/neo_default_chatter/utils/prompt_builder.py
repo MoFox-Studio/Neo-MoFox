@@ -1,4 +1,4 @@
-"""Neo-Chatter 提示词构建模块。"""
+"""Neo-Default-Chatter 提示词构建模块。"""
 
 from __future__ import annotations
 
@@ -11,14 +11,14 @@ from src.core.prompt import get_prompt_manager
 
 from ..components.config import NeoChatterConfig
 
-_SYSTEM_TEMPLATE_NAME = "neo_chatter_system_prompt"
-_USER_TEMPLATE_NAME = "neo_chatter_user_prompt"
-_SUB_AGENT_SYSTEM_TEMPLATE_NAME = "neo_chatter_sub_agent_system_prompt"
-_SUB_AGENT_USER_TEMPLATE_NAME = "neo_chatter_sub_agent_user_prompt"
+_SYSTEM_TEMPLATE_NAME = "neo_default_chatter_system_prompt"
+_USER_TEMPLATE_NAME = "neo_default_chatter_user_prompt"
+_SUB_AGENT_SYSTEM_TEMPLATE_NAME = "neo_default_chatter_sub_agent_system_prompt"
+_SUB_AGENT_USER_TEMPLATE_NAME = "neo_default_chatter_sub_agent_user_prompt"
 
 
 class NeoChatterPromptBuilder:
-    """Neo-Chatter 提示词构建器。
+    """Neo-Default-Chatter 提示词构建器。
 
     所有方法均为静态方法，从 prompt_manager 取出模板并填充占位符，
     不持有任何可变状态，便于被会话逻辑直接调用。

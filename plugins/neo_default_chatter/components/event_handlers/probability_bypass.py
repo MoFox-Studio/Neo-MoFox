@@ -1,6 +1,6 @@
-"""Neo-Chatter 预处理事件处理器：概率直通。
+"""Neo-Default-Chatter 预处理事件处理器：概率直通。
 
-订阅 ``neo_chatter:preprocess`` 事件，按移植自 default_chatter ``probability_gate``
+订阅 ``neo_default_chatter:preprocess`` 事件，按移植自 default_chatter ``probability_gate``
 的概率门逻辑决定是否直接放行给主 chatter，跳过后续 sub_agent LLM 决策处理器。
 
 命中放行概率 → 设置 ``proceed=True`` 并返回 ``EventDecision.STOP``，
@@ -23,16 +23,16 @@ from src.kernel.event import EventDecision
 
 from ..config import NeoChatterConfig
 
-logger = get_logger("neo_chatter.preprocess.probability_bypass")
+logger = get_logger("neo_default_chatter.preprocess.probability_bypass")
 
 #: NFC 预处理事件名。
-_PREPROCESS_EVENT = "neo_chatter:preprocess"
+_PREPROCESS_EVENT = "neo_default_chatter:preprocess"
 
 
 class ProbabilityBypassHandler(BaseEventHandler):
     """概率直通处理器。
 
-    在 ``neo_chatter:preprocess`` 事件中按概率决定是否直接放行给主 chatter，
+    在 ``neo_default_chatter:preprocess`` 事件中按概率决定是否直接放行给主 chatter，
     跳过后续 sub_agent LLM 决策处理器。
 
     概率构成（移植自 default_chatter ``probability_gate``）：
@@ -46,7 +46,7 @@ class ProbabilityBypassHandler(BaseEventHandler):
 
     Class Attributes:
         weight: 100，高于 sub_agent 处理器，确保先执行。
-        init_subscribe: 订阅 ``neo_chatter:preprocess`` 事件。
+        init_subscribe: 订阅 ``neo_default_chatter:preprocess`` 事件。
     """
 
     name = "probability_bypass"

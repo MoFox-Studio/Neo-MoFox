@@ -1,4 +1,4 @@
-"""Neo-Chatter 对话控制动作。"""
+"""Neo-Default-Chatter 对话控制动作。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ class PassAndWaitAction(BaseAction):
         "适合需要回复后稍后主动继续、定时追问或延时确认的场景。"
     )
 
-    chatter_allow: list[str] = ["neo_chatter"]
+    chatter_allow: list[str] = ["neo_default_chatter"]
     associated_types = ["text"]
 
     async def execute(self, seconds: float | None = None) -> tuple[bool, str]:
@@ -44,7 +44,7 @@ class StopConversationAction(BaseAction):
         "直到冷却时间结束后才会重新允许开启新对话。"
     )
 
-    chatter_allow: list[str] = ["neo_chatter"]
+    chatter_allow: list[str] = ["neo_default_chatter"]
     associated_types = ["text"]
 
     async def execute(self, minutes: float | None = None) -> tuple[bool, str]:

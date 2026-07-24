@@ -1,4 +1,4 @@
-"""Neo-Chatter 提示词模板。
+"""Neo-Default-Chatter 提示词模板。
 
 注册到 prompt_manager，运行时由 :mod:`utils.prompt_builder` 渲染。
 模板占位符使用 Python format 语法，渲染策略在 ``plugin.py`` 注册时声明。

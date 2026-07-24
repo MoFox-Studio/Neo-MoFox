@@ -1,6 +1,6 @@
-"""Neo-Chatter 消息预处理事件发布与决策合并。
+"""Neo-Default-Chatter 消息预处理事件发布与决策合并。
 
-主会话逻辑在调用大模型前，会先发布 ``neo_chatter:preprocess`` 事件，
+主会话逻辑在调用大模型前，会先发布 ``neo_default_chatter:preprocess`` 事件，
 让订阅了该事件的 :class:`BaseEventHandler` 有机会拦截或修改本轮消息。
 
 事件处理器返回 ``(EventDecision, dict)``，NFC 只关心 dict 中的约定字段
@@ -29,8 +29,8 @@ from src.app.plugin_system.api import event_api
 from src.app.plugin_system.api.log_api import Logger
 from src.app.plugin_system.types import ChatStream, Message
 
-#: NFC 预处理事件名。订阅者用 ``subscribe = ["neo_chatter:preprocess"]``。
-PREPROCESS_EVENT = "neo_chatter:preprocess"
+#: NFC 预处理事件名。订阅者用 ``subscribe = ["neo_default_chatter:preprocess"]``。
+PREPROCESS_EVENT = "neo_default_chatter:preprocess"
 
 #: 预填到 params 里的决策字段名集合；处理器只能修改这些字段的值，不能新增 key。
 _DECISION_KEYS: tuple[str, ...] = (

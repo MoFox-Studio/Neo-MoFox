@@ -1,4 +1,4 @@
-"""Neo-Chatter 默认 Chatter。
+"""Neo-Default-Chatter 默认 Chatter。
 
 作为 Neo-MoFox 框架聊天流调度入口，把对话主流程委托给自包含的
 :class:`ConversationSession`。会话行为与第三方插件经 Service 拿到的完全一致。
@@ -42,9 +42,9 @@ from .service import NeoChatterService
 
 
 class NeoChatter(BaseChatter):
-    """Neo-Chatter 默认聊天器，委托主会话逻辑执行。"""
+    """Neo-Default-Chatter 默认聊天器，委托主会话逻辑执行。"""
 
-    name: str = "neo_chatter"
+    name: str = "neo_default_chatter"
     description: str = "可复用的会话逻辑中台，事件驱动预处理 + 原生多模态"
     associated_platforms: list[str] = []
     chat_type: ChatType = ChatType.ALL

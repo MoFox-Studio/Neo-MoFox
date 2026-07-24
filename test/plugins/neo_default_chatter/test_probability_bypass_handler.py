@@ -17,11 +17,11 @@ from typing import Any
 
 import pytest
 
-from plugins.neo_chatter.components.config import NeoChatterConfig
-from plugins.neo_chatter.components.event_handlers.probability_bypass import (
+from plugins.neo_default_chatter.components.config import NeoChatterConfig
+from plugins.neo_default_chatter.components.event_handlers.probability_bypass import (
     ProbabilityBypassHandler,
 )
-from plugins.neo_chatter.plugin import NeoChatterPlugin
+from plugins.neo_default_chatter.plugin import NeoChatterPlugin
 from src.app.plugin_system.types import ChatStream, Message
 from src.kernel.event import EventDecision
 
@@ -129,7 +129,7 @@ def _patch_personality(
     """把 ``get_core_config`` 替换为返回指定 personality 的桩。"""
 
     monkeypatch.setattr(
-        "plugins.neo_chatter.components.event_handlers.probability_bypass.get_core_config",
+        "plugins.neo_default_chatter.components.event_handlers.probability_bypass.get_core_config",
         lambda: SimpleNamespace(
             personality=SimpleNamespace(
                 nickname=nickname,
@@ -143,7 +143,7 @@ def _patch_random(monkeypatch: pytest.MonkeyPatch, value: float) -> None:
     """把处理器模块内的 ``random.random`` 替换为返回固定值的桩。"""
 
     monkeypatch.setattr(
-        "plugins.neo_chatter.components.event_handlers.probability_bypass.random.random",
+        "plugins.neo_default_chatter.components.event_handlers.probability_bypass.random.random",
         lambda: value,
     )
 
@@ -173,7 +173,7 @@ async def test_handler_disabled_returns_success_without_modification(
     stream = _make_stream()
     params = _make_params([_make_msg("hi")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["proceed"] is True
@@ -188,7 +188,7 @@ async def test_handler_no_unreads_returns_success(monkeypatch: pytest.MonkeyPatc
     stream = _make_stream()
     params = _make_params([], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["reason"] == ""
@@ -204,13 +204,13 @@ async def test_handler_missing_chat_stream_returns_success(
     params = _make_params([_make_msg("hi")], _make_stream(), cfg)
     params["chat_stream"] = "not a chat stream"
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["reason"] == ""
 
 
-async def test_handler_config_not_neo_chatter_config_returns_success(
+async def test_handler_config_not_neo_default_chatter_config_returns_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``params['config']`` 不是 :class:`NeoChatterConfig` 时应早退放行。"""
@@ -220,7 +220,7 @@ async def test_handler_config_not_neo_chatter_config_returns_success(
     params = _make_params([_make_msg("hi")], stream, _make_config())
     params["config"] = SimpleNamespace()  # 类型不匹配
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["reason"] == ""
@@ -241,7 +241,7 @@ async def test_handler_hit_returns_stop_with_reason(monkeypatch: pytest.MonkeyPa
     stream = _make_stream(bot_id="bot1")
     params = _make_params([_make_msg("hi", at_user_id="bot1")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert out["proceed"] is True
@@ -262,7 +262,7 @@ async def test_handler_miss_returns_success_without_modification(
     stream = _make_stream(bot_id="bot1")
     params = _make_params([_make_msg("hello world")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["proceed"] is True
@@ -279,7 +279,7 @@ async def test_handler_random_below_probability_hits(monkeypatch: pytest.MonkeyP
     stream = _make_stream(bot_id="bot1")
     params = _make_params([_make_msg("hello")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "概率直通命中" in out["reason"]
@@ -297,7 +297,7 @@ async def test_handler_random_equal_or_above_probability_misses(
     stream = _make_stream(bot_id="bot1")
     params = _make_params([_make_msg("hello")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
     assert out["reason"] == ""
@@ -318,7 +318,7 @@ async def test_strong_mention_via_at_users_adds_bonus(monkeypatch: pytest.Monkey
     stream = _make_stream(bot_id="bot1")
     params = _make_params([_make_msg("hi", at_user_id="bot1")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "强提及" in out["reason"]
@@ -336,7 +336,7 @@ async def test_strong_mention_via_text_at_marker_adds_bonus(
     stream = _make_stream(bot_id="bot1")
     params = _make_params([_make_msg("hi :bot1>")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "强提及" in out["reason"]
@@ -352,7 +352,7 @@ async def test_weak_mention_via_nickname_adds_bonus(monkeypatch: pytest.MonkeyPa
     stream = _make_stream(bot_id="bot1")
     params = _make_params([_make_msg("小狐狸你好")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "弱提及" in out["reason"]
@@ -369,7 +369,7 @@ async def test_weak_mention_via_alias_adds_bonus(monkeypatch: pytest.MonkeyPatch
     stream = _make_stream(bot_id="bot1")
     params = _make_params([_make_msg("阿狸出来玩")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "弱提及" in out["reason"]
@@ -388,7 +388,7 @@ async def test_strong_mention_takes_precedence_over_weak(monkeypatch: pytest.Mon
         [_make_msg("小狐狸 :bot1>", at_user_id="bot1")], stream, cfg
     )
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "强提及" in out["reason"]
@@ -411,7 +411,7 @@ async def test_unread_count_bonus_accumulates(monkeypatch: pytest.MonkeyPatch) -
     unreads = [_make_msg(f"msg{i}") for i in range(5)]
     params = _make_params(unreads, stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "5 条未读" in out["reason"]
@@ -430,7 +430,7 @@ async def test_probability_capped_at_one(monkeypatch: pytest.MonkeyPatch) -> Non
         [_make_msg("hi", at_user_id="bot1")] * 5, stream, cfg
     )
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "封顶 1.00" in out["reason"]
@@ -450,7 +450,7 @@ async def test_personality_missing_falls_back_to_bot_nickname(
         raise RuntimeError("core config not initialized")
 
     monkeypatch.setattr(
-        "plugins.neo_chatter.components.event_handlers.probability_bypass.get_core_config",
+        "plugins.neo_default_chatter.components.event_handlers.probability_bypass.get_core_config",
         _raise,
     )
     _patch_random(monkeypatch, 0.3)  # base 0.1 + alias 0.4 = 0.5
@@ -459,7 +459,7 @@ async def test_personality_missing_falls_back_to_bot_nickname(
     stream = _make_stream(bot_id="bot1", bot_nickname="小狐狸")
     params = _make_params([_make_msg("小狐狸你好")], stream, cfg)
 
-    decision, out = await handler.execute("neo_chatter:preprocess", params)
+    decision, out = await handler.execute("neo_default_chatter:preprocess", params)
 
     assert decision == EventDecision.STOP
     assert "弱提及" in out["reason"]
@@ -476,4 +476,4 @@ def test_handler_metadata() -> None:
     assert ProbabilityBypassHandler.name == "probability_bypass"
     assert ProbabilityBypassHandler.weight == 100
     assert ProbabilityBypassHandler.component_type == "event_handler"
-    assert "neo_chatter:preprocess" in ProbabilityBypassHandler.init_subscribe
+    assert "neo_default_chatter:preprocess" in ProbabilityBypassHandler.init_subscribe

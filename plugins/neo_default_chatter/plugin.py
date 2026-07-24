@@ -1,4 +1,4 @@
-"""Neo-Chatter 插件类与生命周期实现。"""
+"""Neo-Default-Chatter 插件类与生命周期实现。"""
 
 from __future__ import annotations
 
@@ -25,21 +25,21 @@ from .utils.prompts import (
     user_prompt,
 )
 
-_SYSTEM_TEMPLATE_NAME = "neo_chatter_system_prompt"
-_USER_TEMPLATE_NAME = "neo_chatter_user_prompt"
-_SUB_AGENT_SYSTEM_TEMPLATE_NAME = "neo_chatter_sub_agent_system_prompt"
-_SUB_AGENT_USER_TEMPLATE_NAME = "neo_chatter_sub_agent_user_prompt"
+_SYSTEM_TEMPLATE_NAME = "neo_default_chatter_system_prompt"
+_USER_TEMPLATE_NAME = "neo_default_chatter_user_prompt"
+_SUB_AGENT_SYSTEM_TEMPLATE_NAME = "neo_default_chatter_sub_agent_system_prompt"
+_SUB_AGENT_USER_TEMPLATE_NAME = "neo_default_chatter_sub_agent_user_prompt"
 
 
 @register_plugin
 class NeoChatterPlugin(BasePlugin):
-    """Neo-Chatter 插件。
+    """Neo-Default-Chatter 插件。
 
     会话逻辑中台：事件驱动预处理 + 原生多模态。
     注册提示词模板并把 Chatter / Service / 三个默认 Action 暴露给框架。
     """
 
-    plugin_name = "neo_chatter"
+    plugin_name = "neo_default_chatter"
     plugin_version = "0.1.0"
     plugin_author = "MoFox Team"
     plugin_description = "可复用的会话逻辑中台，事件驱动预处理 + 原生多模态"
