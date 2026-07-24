@@ -1,0 +1,56 @@
+{
+  "name": "neo_chatter",
+  "version": "0.1.0",
+  "description": "Neo-Chatter：可复用的会话逻辑中台，事件驱动预处理 + 原生多模态",
+  "author": "MoFox Team",
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "chatter",
+      "component_name": "neo_chatter",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "service",
+      "component_name": "chat_core",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "send_text",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "pass_and_wait",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "stop_conversation",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "api_version": {
+    "event_api": "1.0.0",
+    "llm_api": "1.0.0",
+    "send_api": "1.0.0",
+    "prompt_api": "1.0.0",
+    "stream_api": "1.0.0",
+    "log_api": "1.0.0",
+    "adapter_api": "1.0.0",
+    "message_api": "1.0.0",
+    "service_api": "1.0.0"
+  },
+  "python_dependencies": [],
+  "dependencies_required": true
+}
