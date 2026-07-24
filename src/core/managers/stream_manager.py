@@ -347,7 +347,7 @@ class StreamManager:
         for msg_record in reversed(messages_records):  # 按时间正序
             history_messages.append(
                 await self._db_message_to_runtime(  # type: ignore[arg-type]
-                    msg_record,
+                    msg_record, # type: ignore
                     chat_type=stream_record.chat_type,
                 )
             )
