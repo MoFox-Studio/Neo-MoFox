@@ -18,10 +18,17 @@ from .components.event_handlers import (
     SubAgentDecisionHandler,
 )
 from .components.service import NeoChatterService
-from .utils.prompts import system_prompt, user_prompt
+from .utils.prompts import (
+    sub_agent_system_prompt,
+    sub_agent_user_prompt,
+    system_prompt,
+    user_prompt,
+)
 
 _SYSTEM_TEMPLATE_NAME = "neo_chatter_system_prompt"
 _USER_TEMPLATE_NAME = "neo_chatter_user_prompt"
+_SUB_AGENT_SYSTEM_TEMPLATE_NAME = "neo_chatter_sub_agent_system_prompt"
+_SUB_AGENT_USER_TEMPLATE_NAME = "neo_chatter_sub_agent_user_prompt"
 
 
 @register_plugin
@@ -98,6 +105,24 @@ class NeoChatterPlugin(BasePlugin):
                 .then(min_len(2))
                 .then(wrap("# 额外信息\n", "\n- （以上为额外信息，你可以适当参考）")),
                 "stream_id": optional(""),
+            },
+        )
+
+        get_prompt_manager().get_or_create(
+            name=_SUB_AGENT_SYSTEM_TEMPLATE_NAME,
+            template=sub_agent_system_prompt,
+            policies={},
+        )
+
+        get_prompt_manager().get_or_create(
+            name=_SUB_AGENT_USER_TEMPLATE_NAME,
+            template=sub_agent_user_prompt,
+            policies={
+                "stream_name": optional("未知对话"),
+                "chat_type": optional("未知类型"),
+                "bot_nickname": optional("机器人"),
+                "history": optional("（无）"),
+                "unreads": optional("（无）"),
             },
         )
 

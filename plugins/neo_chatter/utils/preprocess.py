@@ -9,7 +9,7 @@
 ==========  ==================  =========================================
 字段        类型                含义
 ==========  ==================  =========================================
-proceed     bool                是否继续处理这条消息（缺省视为 True）
+proceed     bool                是否继续处理这条消息（缺省视为 False）
 reason      str                 不处理时的理由（写日志、回写 Failure）
 mutations   dict[str, Any]      可选，对 prompt extra 板块的额外注入
 force_stop_minutes float|None   可选，要求直接进入 Stop 冷却
@@ -45,7 +45,7 @@ _DECISION_KEYS: tuple[str, ...] = (
 class PreprocessDecision:
     """预处理事件合并后的最终决策。"""
 
-    proceed: bool = True
+    proceed: bool = False
     reason: str = ""
     extra: str = ""
     force_stop_minutes: float | None = None
@@ -55,16 +55,16 @@ class PreprocessDecision:
 
 
 def _coerce_proceed(value: Any) -> bool:
-    """容错解析 proceed 字段，缺省视为 True。"""
+    """容错解析 proceed 字段，缺省视为 False。"""
     if value is None:
-        return True
+        return False
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in {"false", "0", "no", "off"}:
-            return False
-        return True
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        return False
     return bool(value)
 
 
@@ -133,7 +133,7 @@ async def run_preprocess(
         "unreads": list(unreads),
         "history_text": history_text,
         "config": config,
-        "proceed": True,
+        "proceed": False,
         "reason": "",
         "mutations": "",
         "force_stop_minutes": None,
@@ -153,7 +153,7 @@ async def run_preprocess(
     # 「是否真的发布」= 是否有处理器真的改写了任一决策字段（偏离默认值）。
     # 无订阅者或所有处理器都未改动决策时为 False，避免无谓的日志噪音。
     published = (
-        _coerce_proceed(final_params.get("proceed")) is False
+        _coerce_proceed(final_params.get("proceed")) is True
         or bool(_coerce_reason(final_params.get("reason")))
         or bool(_coerce_extra(final_params.get("mutations")))
         or _coerce_force_stop_minutes(final_params.get("force_stop_minutes")) is not None

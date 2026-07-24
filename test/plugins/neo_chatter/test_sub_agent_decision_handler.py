@@ -2,14 +2,14 @@
 
 覆盖 sub_agent 轻量 LLM 判定处理器的所有路径：
 
-- 禁用 / 无未读 / 上游已拦截 / 配置缺失 → 早退 ``SUCCESS``
+- 禁用 / 无未读 / 上游已放行 / 配置缺失 → 早退 ``SUCCESS``（不修改 ``proceed``）
 - LLM 判定值得回复 → 写回 ``proceed=True`` + reason
 - LLM 判定不值得回复 → 写回 ``proceed=False`` + reason
-- LLM 调用异常 → 按放行处理（``SUCCESS``，不修改 ``proceed``）
-- 模型任务未配置 → 跳过判定（``SUCCESS``，不修改 ``proceed``）
+- LLM 调用异常 → 按放行处理（``SUCCESS``，置 ``proceed=True``）
+- 模型任务未配置 → 按放行处理（``SUCCESS``，置 ``proceed=True``）
 - ``_parse_decision``：JSON 解析 / markdown 包裹 / 关键词回退 / 解析失败默认放行
-- ``_build_user_prompt``：历史截断、未读截断、占位符填充
-- ``_format_message_line``：文本 / 非文本内容回退
+- ``NeoChatterPromptBuilder.build_sub_agent_user_prompt``：历史截断、未读截断、占位符填充
+- ``NeoChatterPromptBuilder._format_sub_agent_message_line``：文本 / 非文本内容回退
 """
 
 from __future__ import annotations
@@ -24,15 +24,43 @@ from plugins.neo_chatter.components.event_handlers.sub_agent_decision import (
     SubAgentDecisionHandler,
 )
 from plugins.neo_chatter.plugin import NeoChatterPlugin
+from plugins.neo_chatter.utils.prompt_builder import NeoChatterPromptBuilder
+from plugins.neo_chatter.utils.prompts import (
+    sub_agent_system_prompt,
+    sub_agent_user_prompt,
+)
 from src.app.plugin_system.types import ChatStream, Message
+from src.core.prompt import get_prompt_manager, optional
 from src.kernel.event import EventDecision
 
 _DEFAULT_DECISION_FIELDS: dict[str, Any] = {
-    "proceed": True,
+    "proceed": False,
     "reason": "",
     "mutations": "",
     "force_stop_minutes": None,
 }
+
+
+@pytest.fixture(autouse=True)
+def _register_sub_agent_templates() -> None:
+    """注册 sub_agent 提示词模板，供 prompt_builder 渲染。"""
+
+    get_prompt_manager().get_or_create(
+        name="neo_chatter_sub_agent_system_prompt",
+        template=sub_agent_system_prompt,
+        policies={},
+    )
+    get_prompt_manager().get_or_create(
+        name="neo_chatter_sub_agent_user_prompt",
+        template=sub_agent_user_prompt,
+        policies={
+            "stream_name": optional("未知对话"),
+            "chat_type": optional("未知类型"),
+            "bot_nickname": optional("机器人"),
+            "history": optional("（无）"),
+            "unreads": optional("（无）"),
+        },
+    )
 
 
 def _make_config(
@@ -92,7 +120,7 @@ def _make_params(
     chat_stream: ChatStream,
     cfg: NeoChatterConfig,
     *,
-    proceed: bool = True,
+    proceed: bool = False,
     history_text: str = "",
 ) -> dict[str, Any]:
     """构造与 ``run_preprocess`` 预填字段一致的事件参数。"""
@@ -128,7 +156,7 @@ def _make_response(message: str = "") -> Any:
 
 
 async def test_handler_disabled_returns_success_without_modification() -> None:
-    """处理器禁用时应直接放行，不修改任何决策字段。"""
+    """处理器禁用时应早退，不修改任何决策字段（proceed 保持默认 False）。"""
 
     cfg = _make_config(enabled=False)
     handler = SubAgentDecisionHandler(_make_plugin(cfg))
@@ -138,7 +166,7 @@ async def test_handler_disabled_returns_success_without_modification() -> None:
     decision, out = await handler.execute("neo_chatter:preprocess", params)
 
     assert decision == EventDecision.SUCCESS
-    assert out["proceed"] is True
+    assert out["proceed"] is False
     assert out["reason"] == ""
 
 
@@ -156,15 +184,15 @@ async def test_handler_no_unreads_returns_success() -> None:
     assert out["reason"] == ""
 
 
-async def test_handler_upstream_blocked_keeps_proceed_false() -> None:
-    """上游处理器已 ``proceed=False`` 时应保持拦截，不调用 LLM。"""
+async def test_handler_upstream_approved_skips_llm() -> None:
+    """上游处理器已 ``proceed=True``（放行）时应跳过 LLM 判定，保持放行。"""
 
     cfg = _make_config()
     handler = SubAgentDecisionHandler(_make_plugin(cfg))
     stream = _make_stream()
-    params = _make_params([_make_msg("hi")], stream, cfg, proceed=False)
+    params = _make_params([_make_msg("hi")], stream, cfg, proceed=True)
 
-    # 即便 _call_llm 被调用也会抛错，验证它根本没被调用
+    # 即便 _call_llm 被调用也会因模型未初始化走 None 分支，验证它根本没被调用
     call_count = 0
 
     original_call = handler._call_llm
@@ -181,7 +209,7 @@ async def test_handler_upstream_blocked_keeps_proceed_false() -> None:
         handler._call_llm = original_call  # type: ignore[method-assign]
 
     assert decision == EventDecision.SUCCESS
-    assert out["proceed"] is False
+    assert out["proceed"] is True
     assert call_count == 0
 
 
@@ -409,21 +437,46 @@ def test_parse_decision_empty_message_defaults_to_true() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _build_user_prompt 构造逻辑
+# build_sub_agent_system_prompt 构造逻辑
 # ---------------------------------------------------------------------------
 
 
-def test_build_user_prompt_fills_placeholders() -> None:
+async def test_build_system_prompt_renders_json_literal() -> None:
+    """系统提示词中的 JSON 示例 ``{"respond": ...}`` 应被原样渲染，不报 KeyError。"""
+
+    prompt = await NeoChatterPromptBuilder.build_sub_agent_system_prompt()
+
+    assert prompt, "system prompt 不应为空"
+    assert '{"respond": true|false, "reason": "简短理由，不超过 50 字"}' in prompt
+    assert "{{" not in prompt
+    assert "}}" not in prompt
+
+
+async def test_build_system_prompt_contains_judgement_rules() -> None:
+    """系统提示词应包含判定原则关键字。"""
+
+    prompt = await NeoChatterPromptBuilder.build_sub_agent_system_prompt()
+
+    assert "消息判定子代理" in prompt
+    assert "值得回复" in prompt
+    assert "不值得回复" in prompt
+
+
+# ---------------------------------------------------------------------------
+# build_sub_agent_user_prompt 构造逻辑
+# ---------------------------------------------------------------------------
+
+
+async def test_build_user_prompt_fills_placeholders() -> None:
     """用户提示词应正确填充流名、类型、昵称、历史、未读。"""
 
     cfg = _make_config()
-    handler = SubAgentDecisionHandler(_make_plugin(cfg))
     stream = _make_stream(bot_nickname="小狐狸", stream_name="测试群")
     unreads = [_make_msg("你好", sender="Alice")]
-    params = _make_params(unreads, stream, cfg, history_text="[Bob] 早上好")
+    history_text = "[Bob] 早上好"
 
-    prompt = handler._build_user_prompt(
-        stream, unreads, params, cfg.plugin.preprocess_sub_agent
+    prompt = await NeoChatterPromptBuilder.build_sub_agent_user_prompt(
+        stream, history_text, unreads, cfg.plugin.preprocess_sub_agent
     )
 
     assert "测试群" in prompt
@@ -433,18 +486,15 @@ def test_build_user_prompt_fills_placeholders() -> None:
     assert "[Alice] 你好" in prompt
 
 
-def test_build_user_prompt_truncates_history() -> None:
+async def test_build_user_prompt_truncates_history() -> None:
     """历史消息超过 ``max_context_messages`` 时应截断到最近 N 行。"""
 
     cfg = _make_config(max_context_messages=2)
-    handler = SubAgentDecisionHandler(_make_plugin(cfg))
     stream = _make_stream()
-    params = _make_params(
-        [_make_msg("hi")], stream, cfg, history_text="[A] 1\n[A] 2\n[A] 3\n[A] 4"
-    )
+    history_text = "[A] 1\n[A] 2\n[A] 3\n[A] 4"
 
-    prompt = handler._build_user_prompt(
-        stream, [_make_msg("hi")], params, cfg.plugin.preprocess_sub_agent
+    prompt = await NeoChatterPromptBuilder.build_sub_agent_user_prompt(
+        stream, history_text, [_make_msg("hi")], cfg.plugin.preprocess_sub_agent
     )
 
     # 只保留最近 2 行
@@ -454,17 +504,15 @@ def test_build_user_prompt_truncates_history() -> None:
     assert "[A] 2" not in prompt
 
 
-def test_build_user_prompt_truncates_unreads() -> None:
+async def test_build_user_prompt_truncates_unreads() -> None:
     """未读消息超过 ``max_unread_messages`` 时应截断到最近 N 条。"""
 
     cfg = _make_config(max_unread_messages=2)
-    handler = SubAgentDecisionHandler(_make_plugin(cfg))
     stream = _make_stream()
     unreads = [_make_msg(f"msg{i}") for i in range(5)]
-    params = _make_params(unreads, stream, cfg)
 
-    prompt = handler._build_user_prompt(
-        stream, unreads, params, cfg.plugin.preprocess_sub_agent
+    prompt = await NeoChatterPromptBuilder.build_sub_agent_user_prompt(
+        stream, "", unreads, cfg.plugin.preprocess_sub_agent
     )
 
     assert "msg4" in prompt
@@ -473,23 +521,21 @@ def test_build_user_prompt_truncates_unreads() -> None:
     assert "msg1" not in prompt
 
 
-def test_build_user_prompt_empty_history_shows_placeholder() -> None:
+async def test_build_user_prompt_empty_history_shows_placeholder() -> None:
     """历史为空时应显示「（无）」占位。"""
 
     cfg = _make_config()
-    handler = SubAgentDecisionHandler(_make_plugin(cfg))
     stream = _make_stream()
-    params = _make_params([_make_msg("hi")], stream, cfg, history_text="")
 
-    prompt = handler._build_user_prompt(
-        stream, [_make_msg("hi")], params, cfg.plugin.preprocess_sub_agent
+    prompt = await NeoChatterPromptBuilder.build_sub_agent_user_prompt(
+        stream, "", [_make_msg("hi")], cfg.plugin.preprocess_sub_agent
     )
 
     assert "（无）" in prompt
 
 
 # ---------------------------------------------------------------------------
-# _format_message_line
+# _format_sub_agent_message_line
 # ---------------------------------------------------------------------------
 
 
@@ -502,7 +548,7 @@ def test_format_message_line_uses_processed_plain_text() -> None:
         processed_plain_text="处理后",
         sender_name="Alice",
     )
-    line = SubAgentDecisionHandler._format_message_line(msg)
+    line = NeoChatterPromptBuilder._format_sub_agent_message_line(msg)
 
     assert "[Alice] 处理后" == line
 
@@ -516,7 +562,7 @@ def test_format_message_line_falls_back_to_content() -> None:
         processed_plain_text=None,
         sender_name="Bob",
     )
-    line = SubAgentDecisionHandler._format_message_line(msg)
+    line = NeoChatterPromptBuilder._format_sub_agent_message_line(msg)
 
     assert "[Bob] 原始内容" == line
 
@@ -530,7 +576,7 @@ def test_format_message_line_non_text_content_stringified() -> None:
         processed_plain_text=None,
         sender_name="Carol",
     )
-    line = SubAgentDecisionHandler._format_message_line(msg)
+    line = NeoChatterPromptBuilder._format_sub_agent_message_line(msg)
 
     assert line.startswith("[Carol] ")
     assert "image" in line  # str({"type": "image"}) 包含 "image"
@@ -545,7 +591,7 @@ def test_format_message_line_empty_text_shows_placeholder() -> None:
         processed_plain_text="   ",
         sender_name="Dave",
     )
-    line = SubAgentDecisionHandler._format_message_line(msg)
+    line = NeoChatterPromptBuilder._format_sub_agent_message_line(msg)
 
     assert "[Dave] （非文本内容）" == line
 
@@ -560,7 +606,7 @@ def test_format_message_line_anonymous_sender() -> None:
         sender_name="",
         sender_id="",
     )
-    line = SubAgentDecisionHandler._format_message_line(msg)
+    line = NeoChatterPromptBuilder._format_sub_agent_message_line(msg)
 
     assert "[匿名] hello" == line
 

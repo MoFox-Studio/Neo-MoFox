@@ -68,7 +68,7 @@ class ProbabilityBypassHandler(BaseEventHandler):
             ``(EventDecision, params)``：
 
             - 命中放行概率 → ``(STOP, params)``，``proceed=True``、``reason`` 写入概率构成；
-            - 未命中 / 未启用 / 无未读 → ``(SUCCESS, params)``，``proceed`` 保持默认 ``True``，
+            - 未命中 / 未启用 / 无未读 → ``(SUCCESS, params)``，``proceed`` 保持默认 ``False``，
               让后续 sub_agent 处理器继续判定。
         """
         cfg = self._get_bypass_config(params)
