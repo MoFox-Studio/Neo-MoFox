@@ -251,6 +251,68 @@ def _consume_step_data(state: _SessionState) -> dict[str, Any]:
     return {"step_scope": _AFTER_CHATTER_STEP_SCOPE, "used_tools": used_tools}
 
 
+def _format_tool_args(args: Any) -> str:
+    """格式化工具调用参数用于日志展示；跳过 ``reason`` 键。"""
+    if not isinstance(args, dict):
+        return ""
+    display_items: list[str] = []
+    for key, value in args.items():
+        if key == "reason":
+            continue
+        display_items.append(f"{key}: {value}")
+    return ", ".join(display_items)
+
+
+def _build_actor_decision_panel(chat_stream: ChatStream, response: LLMResponse) -> str:
+    """构造 Actor 决策面板文本：展示思考、独白与工具调用列表。"""
+    stream_name = (
+        chat_stream.stream_name
+        or chat_stream.stream_id
+        or "未知聊天流"
+    )
+    thought = response.reasoning_content.strip() if response.reasoning_content else "（无）"
+    monologue = response.message.strip() if response.message else "（无）"
+
+    tool_lines: list[str] = []
+    for call in response.call_list or []:
+        formatted_args = _format_tool_args(call.args)
+        if formatted_args:
+            tool_lines.append(f"    {call.name} ({formatted_args})")
+        else:
+            tool_lines.append(f"    {call.name}")
+
+    tools_text = "\n".join(tool_lines) if tool_lines else "    （无）"
+    return (
+        f"聊天流名称：{stream_name}\n\n"
+        f"思考：{thought}\n\n"
+        f"独白：{monologue}\n\n"
+        f"调用工具：\n{tools_text}"
+    )
+
+
+def _print_actor_decision_panel(
+    chat_stream: ChatStream, response: LLMResponse
+) -> None:
+    """在控制台渲染 Actor 决策面板；无工具调用时跳过。"""
+    if not response.call_list:
+        return
+    logger.print_panel(
+        _build_actor_decision_panel(chat_stream, response),
+        title="Actor 决策",
+        border_style="cyan",
+    )
+
+
+def _transition(
+    *, state: _SessionState, to_phase: _Phase, reason: str
+) -> None:
+    """切换状态机阶段，并在阶段变化时打 DEBUG 日志。"""
+    if state.phase == to_phase:
+        return
+    logger.debug(f"[FSM] {state.phase.value} -> {to_phase.value}: {reason}")
+    state.phase = to_phase
+
+
 class ConversationSession:
     """Neo-Chatter 主会话逻辑。
 
@@ -464,7 +526,7 @@ class ConversationSession:
             # 2) 拉取最新未读消息（无论处于哪个阶段都拉，便于 WAIT_USER 决策）
             _, unread_msgs = await self._runtime.fetch_unreads()
 
-
+            # === 阶段 WAIT_USER：等待用户消息 / 处理恢复事件 ===
             if state.phase == _Phase.WAIT_USER and not unread_msgs and current_resume is None:
                 # 2.1) 没有新消息、也没有恢复事件：纯挂起等用户说话
                 resume_event = yield Wait()
@@ -488,7 +550,11 @@ class ConversationSession:
                     state.used_tools_in_round.clear()
                     state.unreads = []
                     self._append_user_payload(state.response, resume_text)
-                    state.phase = _Phase.MODEL_TURN
+                    _transition(
+                        state=state,
+                        to_phase=_Phase.MODEL_TURN,
+                        reason="收到恢复事件",
+                    )
                     continue
 
                 # 2.4) 没有恢复事件，但也没有未读消息：继续等
@@ -549,15 +615,31 @@ class ConversationSession:
                     state.response, user_prompt, unread_msgs=unread_msgs
                 )
                 state.unread_msgs_to_flush = []
-                state.phase = _Phase.MODEL_TURN
+                _transition(
+                    state=state,
+                    to_phase=_Phase.MODEL_TURN,
+                    reason="收到未读消息",
+                )
                 continue
 
             # === 阶段 MODEL_TURN / FOLLOW_UP：发起 LLM 请求 ===
             if state.phase in (_Phase.MODEL_TURN, _Phase.FOLLOW_UP):
                 try:
                     # 3.1) 非流式发送请求并 await 完成；FOLLOW_UP 时是带工具结果的二次请求
+                    logger.debug(
+                        f"[LLM 请求] phase={state.phase.value} "
+                        f"task={cfg.actor_task_name} "
+                        f"payloads={len(state.response.payloads)}"
+                    )
                     state.response = await state.response.send(stream=False)
                     await state.response
+                    _resp = state.response
+                    logger.debug(
+                        f"[LLM 响应] message={(_resp.message or '')[:80]!r} "
+                        f"calls={len(_resp.call_list or [])} "
+                        f"reasoning={(_resp.reasoning_content or '')[:80]!r} "
+                        f"stop={_resp.stop_reason}"
+                    )
                     # 3.2) MODEL_TURN 完成后处理积压的 flush（避免重复发消息）
                     if state.phase == _Phase.MODEL_TURN and state.unread_msgs_to_flush:
                         await self._runtime.flush_unreads(state.unread_msgs_to_flush)
@@ -566,11 +648,19 @@ class ConversationSession:
                     # 3.3) LLM 请求失败：产出 Failure，但保留会话，下一轮回到 WAIT_USER
                     logger.error(f"LLM 请求失败: {error}", exc_info=True)
                     yield Failure("LLM 请求失败", error)
-                    state.phase = _Phase.WAIT_USER
+                    _transition(
+                        state=state,
+                        to_phase=_Phase.WAIT_USER,
+                        reason="请求失败",
+                    )
                     continue
 
                 # 3.4) 请求成功，进入工具执行阶段
-                state.phase = _Phase.TOOL_EXEC
+                _transition(
+                    state=state,
+                    to_phase=_Phase.TOOL_EXEC,
+                    reason="模型已响应",
+                )
                 continue
 
             # === 阶段 TOOL_EXEC：解析工具调用并执行 ===
@@ -582,6 +672,9 @@ class ConversationSession:
                     str(getattr(c, "name", "") or "").strip() for c in calls
                 )
 
+                # 4.1.1) 渲染 Actor 决策面板（思考/独白/工具调用）
+                _print_actor_decision_panel(chat_stream, response)
+
                 # 4.2) 没有工具调用：
                 #      - message == __SUSPEND__ → 上轮是 action_only 挂起，正常 Wait
                 #      - 非空 message           → LLM 直接吐纯文本，告警并 Wait
@@ -590,20 +683,35 @@ class ConversationSession:
                     message = getattr(response, "message", None)
                     if isinstance(message, str) and message.strip() == _SUSPEND_TEXT:
                         resume_event = yield Wait(step_data=_consume_step_data(state))
-                        state.phase = _Phase.WAIT_USER
+                        _transition(
+                            state=state,
+                            to_phase=_Phase.WAIT_USER,
+                            reason="SUSPEND 挂起",
+                        )
                         continue
                     if message and message.strip():
                         logger.warning(
                             f"LLM 返回纯文本而非工具调用: {message[:100]}"
                         )
                     resume_event = yield Wait(step_data=_consume_step_data(state))
-                    state.phase = _Phase.WAIT_USER
+                    _transition(
+                        state=state,
+                        to_phase=_Phase.WAIT_USER,
+                        reason="无工具调用",
+                    )
                     continue
 
                 # 4.3) 有工具调用：日志记录，再交给 tool_flow 统一执行
                 logger.info(
                     f"当前回合的工具调用: {[c.name for c in calls]}"
                 )
+                for call in calls:
+                    args = call.args if isinstance(call.args, dict) else {}
+                    reason = args.get("reason", "未提供原因")
+                    logger.info(
+                        f"LLM 调用了 {call.name}; 原因={reason}; "
+                        f"参数={_format_tool_args(call.args)}"
+                    )
 
                 outcome: ToolCallOutcome = await process_tool_calls(
                     stream_id=chat_stream.stream_id,
@@ -630,7 +738,11 @@ class ConversationSession:
 
                 # 4.5) 还有未消费的工具结果：进入 FOLLOW_UP，让 LLM 二次请求消化
                 if outcome.has_pending_tool_results:
-                    state.phase = _Phase.FOLLOW_UP
+                    _transition(
+                        state=state,
+                        to_phase=_Phase.FOLLOW_UP,
+                        reason="有待消化的工具结果",
+                    )
                     continue
 
                 # 4.6) 全部为 action-* 工具（如 send_text）：考虑是否挂起会话
@@ -650,9 +762,17 @@ class ConversationSession:
                 if action_only and not outcome.should_wait:
                     if cfg.enable_action_suspend:
                         resume_event = yield Wait(step_data=_consume_step_data(state))
-                        state.phase = _Phase.WAIT_USER
+                        _transition(
+                            state=state,
+                            to_phase=_Phase.WAIT_USER,
+                            reason="action 挂起",
+                        )
                         continue
-                    state.phase = _Phase.FOLLOW_UP
+                    _transition(
+                        state=state,
+                        to_phase=_Phase.FOLLOW_UP,
+                        reason="action 不挂起",
+                    )
                     continue
 
                 # 4.8) pass_and_wait 要求等待：进入定时等待分支
@@ -681,5 +801,9 @@ class ConversationSession:
                     _consume_step_data(state)
 
                 # 5) 默认回到 WAIT_USER，等待下一轮用户消息或恢复事件
-                state.phase = _Phase.WAIT_USER
+                _transition(
+                    state=state,
+                    to_phase=_Phase.WAIT_USER,
+                    reason="默认等待",
+                )
                 continue
