@@ -19,8 +19,7 @@ from datetime import timezone
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, Float, Index, Integer, Text, UniqueConstraint
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column,declarative_base
 
 # 创建基类
 Base = declarative_base()
