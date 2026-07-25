@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import time
 from pathlib import Path
@@ -122,9 +123,11 @@ class MediaManager:
             manager.register_template(image_prompt)
             
             # 注册表情包识别提示词
+            custom_emoji_prompt = get_core_config().chat.emoji_recognition_prompt
+            default_emoji_template = "描述这个表情包的画面内容。若有文字，完整转述。"
             emoji_prompt = PromptTemplate(
                 name="media.emoji_recognition",
-                template="请简要描述这个表情包的内容和含义，用一句话概括。"
+                template=custom_emoji_prompt if custom_emoji_prompt else default_emoji_template
             )
             manager.register_template(emoji_prompt)
             
@@ -1058,9 +1061,23 @@ class MediaManager:
             # 处理 base64 数据：提取纯净的 base64 内容
             clean_base64 = self._extract_clean_base64(base64_data)
             mime_type = self._extract_image_mime_type(base64_data)
-            
-            # 使用标准的 data URL 格式（大多数 VLM API 都支持）
-            image_value = f"data:{mime_type};base64,{clean_base64}"
+
+            # GIF 特殊处理：提取关键帧横向拼接为单张 PNG，兼容不支持 GIF 的 VLM
+            if mime_type == "image/gif":
+                frames_b64 = self._extract_gif_key_frames(clean_base64)
+                if frames_b64:
+                    image_value = f"data:image/png;base64,{frames_b64}"
+                    gif_note = (
+                        "这是一张GIF表情包的关键帧横向拼接图，"
+                        "从左到右依次为动画的各帧画面，请综合理解其动态内容。"
+                    )
+                    prompt = f"{prompt}\n\n{gif_note}"
+                else:
+                    # 关键帧提取失败，回退为直接发送首帧
+                    image_value = f"data:image/png;base64,{clean_base64}"
+            else:
+                # 使用标准的 data URL 格式（大多数 VLM API 都支持）
+                image_value = f"data:{mime_type};base64,{clean_base64}"
 
             # 添加 payload 并发送请求
             request.add_payload(LLMPayload(ROLE.USER, [Text(prompt), Image(image_value)]))
@@ -1295,6 +1312,80 @@ class MediaManager:
             if mime_type.startswith("image/"):
                 return mime_type
         return "image/png"
+
+    @staticmethod
+    def _extract_gif_key_frames(
+        clean_base64: str, max_frames: int = 8
+    ) -> str | None:
+        """从 GIF base64 数据中提取关键帧并横向拼接为单张 PNG。
+
+        通过均匀采样最多 ``max_frames`` 帧，横向拼接为一张 PNG 图，
+        兼容不支持 GIF 动图格式的 VLM 模型。
+
+        Args:
+            clean_base64: 纯净的 GIF base64 字符串（无 data URL 前缀）。
+            max_frames: 最多提取的帧数，默认 8。
+
+        Returns:
+            拼接后 PNG 的 base64 字符串；提取失败返回 None。
+        """
+        import io
+
+        try:
+            from PIL import Image as PILImage
+        except ImportError:
+            logger.warning("Pillow 未安装，无法提取 GIF 关键帧")
+            return None
+
+        try:
+            raw_bytes = base64_decode_to_bytes(clean_base64)
+            gif = PILImage.open(io.BytesIO(raw_bytes))
+
+            # 收集所有帧
+            frames: list[PILImage.Image] = []
+            try:
+                while True:
+                    frame = gif.copy()
+                    if frame.mode not in ("RGB", "RGBA"):
+                        frame = frame.convert("RGBA")
+                    frames.append(frame)
+                    gif.seek(gif.tell() + 1)
+            except EOFError:
+                pass
+
+            if not frames:
+                return None
+
+            # 单帧 GIF 直接转 PNG
+            if len(frames) == 1:
+                buf = io.BytesIO()
+                frames[0].save(buf, format="PNG")
+                return base64.b64encode(buf.getvalue()).decode("ascii")
+
+            # 均匀采样最多 max_frames 帧
+            if len(frames) > max_frames:
+                step = len(frames) / max_frames
+                sampled = [frames[int(i * step)] for i in range(max_frames)]
+            else:
+                sampled = frames
+
+            # 统一高度取最大值，宽度累加
+            max_h = max(f.height for f in sampled)
+            total_w = sum(f.width for f in sampled)
+            canvas = PILImage.new("RGBA", (total_w, max_h), (255, 255, 255, 255))
+
+            x_off = 0
+            for frame in sampled:
+                canvas.paste(frame, (x_off, 0))
+                x_off += frame.width
+
+            buf = io.BytesIO()
+            canvas.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode("ascii")
+
+        except Exception as e:
+            logger.warning(f"提取 GIF 关键帧失败: {e}")
+            return None
     
     async def _save_to_pending(
         self,

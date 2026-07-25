@@ -634,3 +634,166 @@ class TestMediaManagerSaveUniquePathRegression:
             assert row.count == 2
             assert row.description == "second"
             assert row.asr_processed is True
+
+
+class TestGifKeyFrameExtraction:
+    """测试 GIF 关键帧提取与拼接功能。"""
+
+    @staticmethod
+    def _make_gif_base64(num_frames: int = 3, size: tuple[int, int] = (50, 50)) -> str:
+        """生成多帧 GIF 的 base64 字符串用于测试。
+
+        Args:
+            num_frames: GIF 帧数。
+            size: 每帧的尺寸 (width, height)。
+
+        Returns:
+            纯净的 base64 字符串（无 data URL 前缀）。
+        """
+        import io
+
+        from PIL import Image as PILImage
+
+        frames: list[PILImage.Image] = []
+        for i in range(num_frames):
+            frame = PILImage.new("RGB", size, (i * 30 + 10, 100, 200))
+            frames.append(frame)
+
+        buf = io.BytesIO()
+        frames[0].save(
+            buf,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=100,
+            loop=0,
+        )
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def test_extract_gif_returns_png_base64(self) -> None:
+        """提取多帧 GIF 应返回非空 PNG base64 字符串。"""
+        gif_b64 = self._make_gif_base64(num_frames=4)
+        result = MediaManager._extract_gif_key_frames(gif_b64, max_frames=8)
+
+        assert result is not None
+        assert isinstance(result, str)
+        assert len(result) > 0
+        # 验证可解码为 PNG
+        raw = base64.b64decode(result)
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_extract_gif_single_frame(self) -> None:
+        """单帧 GIF 应直接转为 PNG 返回。"""
+        gif_b64 = self._make_gif_base64(num_frames=1)
+        result = MediaManager._extract_gif_key_frames(gif_b64, max_frames=8)
+
+        assert result is not None
+        raw = base64.b64decode(result)
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_extract_gif_sampling_max_frames(self) -> None:
+        """帧数超过 max_frames 时应均匀采样到 max_frames 帧。"""
+        gif_b64 = self._make_gif_base64(num_frames=20)
+
+        with patch("src.core.managers.media_manager.logger") as mock_log:
+            result = MediaManager._extract_gif_key_frames(gif_b64, max_frames=4)
+            # 不应有警告（提取成功）
+            mock_log.warning.assert_not_called()
+
+        assert result is not None
+        # 验证拼接图宽度应大于单帧宽度（4 帧 * 50px = 200px）
+        import io
+        from PIL import Image as PILImage
+
+        raw = base64.b64decode(result)
+        img = PILImage.open(io.BytesIO(raw))
+        assert img.width == 200
+        assert img.height == 50
+
+    def test_extract_gif_invalid_data_returns_none(self) -> None:
+        """无效 base64 数据应返回 None 并记录警告。"""
+        with patch("src.core.managers.media_manager.logger") as mock_log:
+            result = MediaManager._extract_gif_key_frames("invalid_base64_data!!!", max_frames=8)
+
+        assert result is None
+        mock_log.warning.assert_called_once()
+
+    def test_extract_gif_non_gif_data_returns_single_frame_png(self) -> None:
+        """非 GIF 数据（如 PNG）应被当作单帧图像处理，返回有效 PNG。"""
+        import io
+
+        from PIL import Image as PILImage
+
+        buf = io.BytesIO()
+        PILImage.new("RGB", (10, 10)).save(buf, format="PNG")
+        png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        result = MediaManager._extract_gif_key_frames(png_b64, max_frames=8)
+
+        # Pillow 可打开 PNG，视为单帧，返回有效 PNG base64
+        assert result is not None
+        raw = base64.b64decode(result)
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+        # 单帧输出尺寸应与输入一致
+        img = PILImage.open(io.BytesIO(raw))
+        assert img.width == 10
+        assert img.height == 10
+
+
+class TestEmojiPromptConfig:
+    """测试表情包识别提示词可配置功能。"""
+
+    @staticmethod
+    def _make_mock_core_config(
+        image_prompt: str = "", emoji_prompt: str = ""
+    ) -> MagicMock:
+        """构造带 chat 配置的 mock core config。"""
+        mock_config = MagicMock()
+        mock_chat = MagicMock()
+        mock_chat.image_recognition_prompt = image_prompt
+        mock_chat.emoji_recognition_prompt = emoji_prompt
+        mock_config.return_value.chat = mock_chat
+        return mock_config
+
+    def test_emoji_prompt_uses_custom_config(self) -> None:
+        """自定义表情包提示词时应使用配置值。"""
+        mock_core_config = self._make_mock_core_config(
+            image_prompt="custom image prompt", emoji_prompt="custom emoji prompt"
+        )
+
+        with (
+            patch("src.core.managers.media_manager.get_model_set_by_task", return_value=None),
+            patch("src.core.managers.media_manager.get_core_config", mock_core_config),
+            patch("src.core.managers.media_manager.get_prompt_manager") as mock_pm,
+        ):
+            mock_manager = MagicMock()
+            mock_pm.return_value = mock_manager
+
+            MediaManager()
+
+            # _register_prompts 在构造时已被调用一次（2 个模板）
+            assert mock_manager.register_template.call_count == 2
+            # 第二个注册的是表情包提示词
+            emoji_template = mock_manager.register_template.call_args_list[1][0][0]
+            assert emoji_template.template == "custom emoji prompt"
+
+    def test_emoji_prompt_uses_default_when_empty(self) -> None:
+        """表情包提示词配置为空时应使用内置默认值。"""
+        mock_core_config = self._make_mock_core_config(
+            image_prompt="", emoji_prompt=""
+        )
+
+        with (
+            patch("src.core.managers.media_manager.get_model_set_by_task", return_value=None),
+            patch("src.core.managers.media_manager.get_core_config", mock_core_config),
+            patch("src.core.managers.media_manager.get_prompt_manager") as mock_pm,
+        ):
+            mock_manager = MagicMock()
+            mock_pm.return_value = mock_manager
+
+            MediaManager()
+
+            # _register_prompts 在构造时已被调用一次（2 个模板）
+            assert mock_manager.register_template.call_count == 2
+            emoji_template = mock_manager.register_template.call_args_list[1][0][0]
+            assert emoji_template.template == "描述这个表情包的画面内容。若有文字，完整转述。"
