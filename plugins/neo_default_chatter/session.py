@@ -11,7 +11,6 @@ sub-agent / 兴趣值过滤，并去掉了子代理协作、语义训练等内�
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, TYPE_CHECKING
@@ -101,27 +100,9 @@ class _ConfigView:
 
     native_multimodal: bool = False
     default_stop_minutes: float = 5.0
-    enable_cooldown: bool = True
     enable_action_suspend: bool = True
     enable_stop_wake: bool = False
-    stop_wake_prob: float = 0.0
-    placeholder: str = "[图片-{idx}]"
     actor_task_name: str = "actor"
-
-
-def _is_timer_resume(event: WaitResumeEvent | None) -> bool:
-    """判断恢复事件是否来自定时器（即之前由 ``pass_and_wait`` 设置的等待已到期）。
-
-    定时器恢复代表「LLM 自己设定的等待时间到了，但用户没有发新消息」，
-    此时应该让 LLM 主动决定是否继续，而不是把消息塞进对话历史。
-
-    Args:
-        event: 驱动方送来的恢复事件，可能为 ``None``。
-
-    Returns:
-        bool: ``event`` 非空且 ``event.source == "timer"`` 时为 ``True``。
-    """
-    return event is not None and event.source == "timer"
 
 
 def _is_message_resume(event: WaitResumeEvent | None) -> bool:
@@ -137,98 +118,6 @@ def _is_message_resume(event: WaitResumeEvent | None) -> bool:
         bool: ``event`` 非空且 ``event.source == "message"`` 时为 ``True``。
     """
     return event is not None and event.source == "message"
-
-
-def _build_timer_resume_prompt(event: WaitResumeEvent) -> str:
-    """构造定时器恢复时塞进对话历史的 USER 提示文本。
-
-    通知 LLM「上一次设置的等待已经结束、当前没有新用户消息」，并要求它基于
-    现有上下文主动决策：要么再次调用 ``pass_and_wait`` 推迟回复，
-    要么直接产出回复 / 调用工具。
-
-    Args:
-        event: ``WaitResumeEvent``，``event.source`` 为 ``"timer"``。
-
-    Returns:
-        str: 直接作为 USER payload 追加到 response 的提示文本。
-    """
-    waited_text = (
-        "你之前设置的等待时间已经结束。"
-        if event.wait_time is None
-        else f"你之前设置的等待 {event.wait_time} 秒已经结束。"
-    )
-    return (
-        f"系统事件：{waited_text} 当前没有新的用户消息。"
-        "请基于已有上下文主动决定下一步。"
-        "如果现在不应继续，请再次调用 pass_and_wait；"
-        "如果需要回复或执行动作，请直接使用相应工具。"
-    )
-
-
-def _build_generic_resume_prompt(event: WaitResumeEvent) -> str:
-    """未知 / 子代理 / 内部上下文等 source 的通用恢复提示。
-
-    当 ``WaitResumeEvent.source`` 既不是 ``"timer"`` 也不是 ``"message"`` 时调用，
-    例如子代理 / 内部上下文 / 自定义事件源。若上游通过 ``event.extra["resume_prompt"]``
-    显式提供了提示文本则直接使用；否则按 source 标签生成一段默认提示。
-
-    Args:
-        event: ``WaitResumeEvent``，``event.source`` 不是 ``"timer"`` / ``"message"``。
-
-    Returns:
-        str: 直接作为 USER payload 追加到 response 的提示文本。
-    """
-    custom = event.extra.get("resume_prompt")
-    if isinstance(custom, str) and custom.strip():
-        return custom
-    source_label = event.source or "未知来源"
-    return (
-        f"系统事件：收到来自 '{source_label}' 的恢复请求。"
-        "请基于已有上下文主动决定下一步。"
-        "如果现在无需继续处理，请调用 pass_and_wait；"
-        "如果需要继续回复或执行动作，请直接使用相应工具。"
-    )
-
-
-def _pick_trigger_message(chat_stream: ChatStream, unreads: list[Message]) -> Message:
-    """选取本轮工具执行所用的触发消息。
-
-    工具调用需要绑定一条「触发消息」用于权限校验、回复路由、@ 解析等。
-    选取顺序为：
-
-    1. 本轮未读消息的最后一条（最常见，对应「用户发问→LLM 工具调用」）
-    2. context.current_message（当前激活消息）
-    3. context.unread_messages 的最后一条
-    4. context.history_messages 的最后一条
-    5. 全部为空时构造一个伪空消息，保证工具调用流程可以继续
-
-    Args:
-        chat_stream: 已激活的聊天流，用于回退取上下文消息。
-        unreads: 本轮 ``fetch_unreads`` 返回的未读消息列表。
-
-    Returns:
-        Message: 选中的触发消息。
-    """
-    if unreads:
-        return unreads[-1]
-
-    context = chat_stream.context
-    if context.current_message is not None:
-        return context.current_message
-    if context.unread_messages:
-        return context.unread_messages[-1]
-    if context.history_messages:
-        return context.history_messages[-1]
-
-    return Message(
-        message_id=f"neo-chatter-{int(time.time() * 1000)}",
-        content="",
-        processed_plain_text="",
-        platform=chat_stream.platform,
-        chat_type=chat_stream.chat_type,
-        stream_id=chat_stream.stream_id,
-        sender_name="neo_default_chatter",
-    )
 
 
 def _consume_step_data(state: _SessionState) -> dict[str, Any]:
@@ -312,29 +201,13 @@ class ConversationSession:
 
         Args:
             stream_id: 目标聊天流 ID。
-            plugin: NFC 插件实例（用于读取 :class:`NeoChatterConfig` 与构造私有 chatter）。
+            plugin: NFC 插件实例（用于读取 :class:`NeoChatterConfig`）。
         """
         self.stream_id = stream_id
         self.plugin = plugin
         self._config: NeoChatterConfig | None = (
             plugin.config if isinstance(plugin.config, NeoChatterConfig) else None
         )
-        # 日志记录器使用模块级全局变量 ``logger``，无需在每个会话实例上重复构造
-        self._chatter: Any = None  # 私有 NeoChatter 实例，延迟创建
-
-    @property
-    def _runtime(self) -> Any:
-        """延迟创建私有 NeoChatter 实例，复用 BaseChatter 的会话辅助方法。
-
-        该实例仅用于调用 ``fetch_unreads`` / ``flush_unreads`` / ``create_request``
-        / ``inject_usables`` / ``run_tool_call`` 等辅助方法，**不会**调用其 ``execute()``，
-        因此不会与驱动方产生循环。
-        """
-        if self._chatter is None:
-            from .components.chatter import NeoChatter
-
-            self._chatter = NeoChatter(self.stream_id, self.plugin)
-        return self._chatter
 
     def _cfg(self) -> _ConfigView:
         """读取配置字段，配置不可用时回退到默认值。
@@ -355,11 +228,8 @@ class ConversationSession:
         return _ConfigView(
             native_multimodal=bool(cfg.plugin.native_multimodal),
             default_stop_minutes=float(cfg.plugin.default_stop_minutes),
-            enable_cooldown=bool(cfg.plugin.enable_cooldown),
             enable_action_suspend=bool(cfg.plugin.enable_action_suspend),
             enable_stop_wake=bool(cfg.plugin.enable_stop_direct_message_wake),
-            stop_wake_prob=float(cfg.plugin.stop_direct_message_wake_probability),
-            placeholder=str(cfg.plugin.image_placeholder_template),
             actor_task_name=str(cfg.plugin.actor_task_name),
         )
 

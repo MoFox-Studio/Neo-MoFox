@@ -2,21 +2,71 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from src.app.plugin_system.base import BaseEventHandler
 from src.kernel.event import EventDecision
 
 from ....utils.event_publisher import NdfcEvent
-from ....session import (
-    _build_generic_resume_prompt,
-    _build_timer_resume_prompt,
-)
+
+if TYPE_CHECKING:
+    from src.app.plugin_system.base import WaitResumeEvent
 
 #: ``WaitResumeEvent.source`` 为 ``"message"`` 时，提示文本留空——消息本身走未读路径，
 #: 不重复注入（依据 ``session._is_message_resume`` 注释）。
 _MESSAGE_SOURCE = "message"
 _TIMER_SOURCE = "timer"
+
+
+def _build_timer_resume_prompt(event: WaitResumeEvent) -> str:
+    """构造定时器恢复时塞进对话历史的 USER 提示文本。
+
+    通知 LLM「上一次设置的等待已经结束、当前没有新用户消息」，并要求它基于
+    现有上下文主动决策：要么再次调用 ``pass_and_wait`` 推迟回复，
+    要么直接产出回复 / 调用工具。
+
+    Args:
+        event: ``WaitResumeEvent``，``event.source`` 为 ``"timer"``。
+
+    Returns:
+        str: 直接作为 USER payload 追加到 response 的提示文本。
+    """
+    waited_text = (
+        "你之前设置的等待时间已经结束。"
+        if event.wait_time is None
+        else f"你之前设置的等待 {event.wait_time} 秒已经结束。"
+    )
+    return (
+        f"系统事件：{waited_text} 当前没有新的用户消息。"
+        "请基于已有上下文主动决定下一步。"
+        "如果现在不应继续，请再次调用 pass_and_wait；"
+        "如果需要回复或执行动作，请直接使用相应工具。"
+    )
+
+
+def _build_generic_resume_prompt(event: WaitResumeEvent) -> str:
+    """未知 / 子代理 / 内部上下文等 source 的通用恢复提示。
+
+    当 ``WaitResumeEvent.source`` 既不是 ``"timer"`` 也不是 ``"message"`` 时调用，
+    例如子代理 / 内部上下文 / 自定义事件源。若上游通过 ``event.extra["resume_prompt"]``
+    显式提供了提示文本则直接使用；否则按 source 标签生成一段默认提示。
+
+    Args:
+        event: ``WaitResumeEvent``，``event.source`` 不是 ``"timer"`` / ``"message"``。
+
+    Returns:
+        str: 直接作为 USER payload 追加到 response 的提示文本。
+    """
+    custom = event.extra.get("resume_prompt")
+    if isinstance(custom, str) and custom.strip():
+        return custom
+    source_label = event.source or "未知来源"
+    return (
+        f"系统事件：收到来自 '{source_label}' 的恢复请求。"
+        "请基于已有上下文主动决定下一步。"
+        "如果现在无需继续处理，请调用 pass_and_wait；"
+        "如果需要继续回复或执行动作，请直接使用相应工具。"
+    )
 
 
 class BuildResumePromptDefaultHandler(BaseEventHandler):

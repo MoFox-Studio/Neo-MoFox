@@ -22,19 +22,19 @@
 | 设计章节 | 设计目标 | 当前状态 | 备注 |
 | --- | --- | --- | --- |
 | §2 定位 | Plugin / Chatter / Service / 3 Action / 1 Config | ✅ 已落地 | 额外新增 2 个 EventHandler |
-| §3 架构 | ConversationSession 自包含主流程 | ✅ 已落地 | `session.py` 809 行，状态机式实现 |
-| §4 组件清单 | 5 个注册组件 | ✅ 已落地 + 2 新增 | manifest 已同步登记 |
+| §3 架构 | ConversationSession 自包含主流程 | ✅ 已落地 | `session.py` 状态机式实现；全部 seam 经 `NdfcPublisher` 事件化 |
+| §4 组件清单 | 5 个注册组件 | ✅ 已落地 + 13 新增 | manifest 已同步登记（7 个 v0.1 + 16 个 Tier II 默认 handler） |
 | §5 会话流程 | 8 步主流程 | ✅ 已落地 | 详见 §3.2 |
 | §6 配置 | 9 字段 + theme_guide 子节 | ✅ 已落地 + 3 子节 | 详见 §4.2 |
 | §7 原生多模态 | 占位符内联 + base64 | ✅ 已落地 | `utils/multimodal.py` |
 | §8 stop 冷却 | Stop + 直接唤醒概率 | ✅ 已落地 | `_apply_stop_wake` |
 | §9 默认动作契约 | send_text / pass_and_wait / stop_conversation | ✅ 已落地 | `actions/` 完整 |
-| §10 目录结构 | components + utils | ✅ 已落地 + 1 子目录 | 新增 `event_handlers/` |
-| §11 manifest | 注册 5 组件 | ✅ 已落地 | 实际为 7 组件 |
+| §10 目录结构 | components + utils | ✅ 已落地 + 2 子目录 | 新增 `event_handlers/` 与 `event_handlers/defaults/` |
+| §11 manifest | 注册 5 组件 | ✅ 已落地 | 实际为 18 组件（7 v0.1 + 16 Tier II handler） |
 | §12 关键文件骨架 | chatter.py / plugin.py | ✅ 已落地 | 与设计基本一致 |
 | §13 Service 对外契约 | `create_session(stream_id, plugin)` | ✅ 已落地 | 签名严格匹配设计 |
 | §14 与 default_chatter 关系 | 更瘦可复用骨架 | ⚠️ 偏离 | NDFC 已内建预处理策略（详见 §5） |
-| §15 实现路线 8 步 | 1-7 已完成，8 单测未完成 | 🟡 进行中 | 路线 1-7 完成，路线 8 未落地 |
+| §15 实现路线 8 步 | 1-7 已完成，8 单测未完成 | ✅ 完成 | 1-8 全部完成，含 NDFC 事件 Hook 扩展（详见 §8） |
 
 ## 3. 架构与主流程现状
 
@@ -44,8 +44,8 @@
 plugins/neo_default_chatter/
 ├── manifest.json
 ├── __init__.py
-├── plugin.py                      # NeoChatterPlugin：注册 4 个 prompt 模板
-├── session.py                     # ConversationSession：809 行状态机
+├── plugin.py                      # NeoChatterPlugin：注册 4 个 prompt 模板 + 18 个组件
+├── session.py                     # ConversationSession：状态机；全部 seam 经 NdfcPublisher 事件化
 ├── components/
 │   ├── chatter.py                 # NeoChatter：纯 forward yield/asend
 │   ├── config.py                  # NeoChatterConfig：扩展为 4 个子节
@@ -55,18 +55,37 @@ plugins/neo_default_chatter/
 │   │   └── control.py             # PassAndWaitAction + StopConversationAction
 │   └── event_handlers/            # 【新增】设计文档未列出的子目录
 │       ├── probability_bypass.py  # ProbabilityBypassHandler (weight=100)
-│       └── sub_agent_decision.py  # SubAgentDecisionHandler (weight=50)
+│       ├── sub_agent_decision.py  # SubAgentDecisionHandler (weight=50)
+│       └── defaults/              # 【新增】16 个 Tier II 默认 handler (weight=0)
+│           ├── _runtime_helper.py # 共享 NeoChatter 缓存（被 6 个委托 _runtime 的 handler 引用）
+│           ├── fetch_unreads.py
+│           ├── format_unread_line.py
+│           ├── flush_unreads.py
+│           ├── create_request.py
+│           ├── inject_usables.py
+│           ├── run_tool_call.py
+│           ├── inject_unread_payload.py
+│           ├── build_history_text.py
+│           ├── build_negative_extra.py
+│           ├── pick_trigger_message.py
+│           ├── build_resume_prompt.py
+│           ├── dedupe_tool_call.py
+│           ├── format_tool_result.py
+│           ├── compute_stop_wake.py
+│           ├── compute_cooldown.py
+│           └── session_transition.py
 └── utils/
+    ├── event_publisher.py         # 【新增】NdfcEvent StrEnum + NdfcPublisher 16 静态方法
     ├── preprocess.py              # run_preprocess + PreprocessDecision
     ├── multimodal.py              # extract_images + inline_images
     ├── prompt_builder.py          # NeoChatterPromptBuilder（4 套模板）
-    ├── tool_flow.py               # process_tool_calls + SUSPEND 闭合
+    ├── tool_flow.py               # process_tool_calls + SUSPEND 闭合 + 调 :dedupe_tool_call / :format_tool_result 事件
     └── prompts.py                 # system / user / sub_agent_* 模板原文
 ```
 
 ### 3.2 ConversationSession 状态机
 
-实际实现的会话状态机由 `_Phase` 枚举驱动，与设计文档 §5.1 的「8 步线性流程」相比更结构化：
+实际实现的会话状态机由 `_Phase` 枚举驱动，与设计文档 §5.1 的「8 步线性流程」相比更结构化。所有可替换 seam（拉未读 / flush / 构造请求 / 注入工具 / 跑工具 / 构造提示 / 决定冷却等）都通过 :class:`NdfcPublisher` 发布对应 ``neo_default_chatter:*`` 事件，默认 handler (weight=0) 提供兜底实现，第三方订阅更高 weight 即可介入。
 
 ```
 WAIT_USER ──(收到未读/恢复事件)──▶ MODEL_TURN ──(LLM 响应)──▶ TOOL_EXEC
@@ -99,7 +118,7 @@ WAIT_USER ──(收到未读/恢复事件)──▶ MODEL_TURN ──(LLM 响�
 
 ### 4.1 注册组件清单
 
-`manifest.json` 与 `plugin.get_components()` 一致，共注册 7 个组件：
+`manifest.json` 与 `plugin.get_components()` 一致，共注册 18 个组件：
 
 | 组件 | 类型 | name | 实现文件 | 设计章节 |
 | --- | --- | --- | --- | --- |
@@ -110,6 +129,7 @@ WAIT_USER ──(收到未读/恢复事件)──▶ MODEL_TURN ──(LLM 响�
 | `StopConversationAction` | Action | `stop_conversation` | `components/actions/control.py` | §8.1 / §9.3 |
 | `ProbabilityBypassHandler` | EventHandler | `probability_bypass` | `components/event_handlers/probability_bypass.py` | **设计未列出** |
 | `SubAgentDecisionHandler` | EventHandler | `sub_agent_decision` | `components/event_handlers/sub_agent_decision.py` | **设计未列出** |
+| 16 个 Tier II 默认 handler | EventHandler | `<seam>_default` | `components/event_handlers/defaults/*.py` | ndfc-event-hooks.md §5 |
 
 > Config（`NeoChatterConfig`）通过 `plugin.configs = [NeoChatterConfig]` 注册，未在 `include` 里登记，符合规范。
 
@@ -154,11 +174,13 @@ WAIT_USER ──(收到未读/恢复事件)──▶ MODEL_TURN ──(LLM 响�
 
 `session.py:316` 实现了以下设计文档未充分展开的能力：
 
-1. **延迟创建私有 NeoChatter**（`session.py:338`）：`_runtime` 属性按需构造 `NeoChatter(self.stream_id, self.plugin)`，仅用于复用 `fetch_unreads / flush_unreads / create_request / inject_usables / run_tool_call`，**不调用其 `execute()`**，避免与驱动方形成循环。
-2. **配置不可用回退**（`session.py:352`）：`_cfg()` 在 `NeoChatterConfig` 缺失或类型不匹配时返回全默认 `_ConfigView`，保证第三方插件传错 plugin 也能继续运行。
-3. **`pass_and_wait` 前二次拉取未读**（`session.py:782`）：进入 Wait 之前再 `fetch_unreads` 一次，若期间已有新消息直接跳过 Wait，避免消息被 Wait 吞掉。
+1. **事件化会话 seam**（``session.py:316``）：所有可替换函数（``fetch_unreads`` / ``flush_unreads`` / ``create_request`` / ``inject_usables`` / ``run_tool_call`` / ``inject_unread_payload`` / ``build_history_text`` / ``build_negative_extra`` / ``pick_trigger_message`` / ``build_resume_prompt`` / ``dedupe_tool_call`` / ``format_tool_result`` / ``compute_stop_wake`` / ``compute_cooldown`` / ``session_transition``）都通过 :class:`NdfcPublisher` 发布对应 ``neo_default_chatter:*`` 事件，由 16 个默认 handler (weight=0) 提供兜底实现，第三方订阅更高 weight 即可 ``STOP`` 替换或 ``SUCCESS`` 协作。详见 ``docs/ndfc-event-hooks.md``。
+2. **配置不可用回退**（``session.py:228``）：`_cfg()` 在 `NeoChatterConfig` 缺失或类型不匹配时返回全默认 `_ConfigView`，保证第三方插件传错 plugin 也能继续运行。
+3. **`pass_and_wait` 前二次拉取未读**（``session.py``）：进入 Wait 之前再发布一次 :fetch_unreads 事件，若期间已有新消息直接跳过 Wait，避免消息被 Wait 吞掉。
 4. **`actor_round` 通知事件**：`_consume_step_data` 收集本回合使用的工具列表，作为 `Wait/Stop.step_data` 上报，供下游订阅者感知「这一轮做了什么」。
-5. **Actor 决策面板**（`session.py:266`）：在控制台以 Rich panel 形式渲染「思考 / 独白 / 工具调用」，便于调试。
+5. **Actor 决策面板**（``session.py:266``）：在控制台以 Rich panel 形式渲染「思考 / 独白 / 工具调用」，便于调试。
+
+> **``_runtime`` 已移除**：早期实现中 ``ConversationSession`` 持有 ``self._chatter`` + ``@property _runtime`` 延迟构造一个私有 ``NeoChatter`` 实例，用于复用 ``BaseChatter.fetch_unreads / flush_unreads / create_request / inject_usables / run_tool_call`` 等方法。事件化改造后这些方法都通过 :class:`NdfcPublisher` 发布事件，由默认 handler 经 :func:`components.event_handlers.defaults._runtime_helper.get_runtime` 拿到**共享缓存**的 ``NeoChatter`` 实例——session 自身不再直接持 ``NeoChatter``，``_runtime`` / ``_chatter`` 已从 ``session.py`` 删除（``rg "_runtime|_chatter" session.py`` 零匹配）。
 
 ## 5. 与设计文档的偏差
 
@@ -184,14 +206,25 @@ WAIT_USER ──(收到未读/恢复事件)──▶ MODEL_TURN ──(LLM 响�
 - §11 manifest：实际 `include` 长度为 7，不是 5。
 - §14 对比表：NDFC 不再是「本期不内建 sub-agent」，而是「内建 sub_agent + probability_bypass，但以 EventHandler 形式可插拔」。
 
+### 5.3 NDFC 事件 Hook 扩展（``ndfc-event-hooks.md`` 落地）
+
+设计文档 ``ndfc-event-hooks.md`` 描述的「全部 seam 通过 EventBus 暴露」机制已实现，相对设计稿存在以下偏差：
+
+1. **``NdfcEvent`` 用 ``StrEnum`` 而非设计稿的 ``str, Enum``**——后者在 Python 3.11+ 上 ``str(member)`` 返回 ``"NdfcEvent.X"`` 而非事件名，会破坏 ``EventManager._coerce_event_name`` 对非 ``EventType`` 走 ``str(event)`` 的分支（``event_manager.py:237``），导致第三方字符串字面量订阅无法匹配发布方。
+2. **Tier II 实际为 16 个而非设计稿表格写的 15 个**——设计稿表格与 §1.2.1 注释自相矛盾（枚举块 + §5.6 manifest 实际列 16 个，含 ``:session_transition``）。实现按枚举块数量落地。
+3. **``_runtime`` 已从 session 移除**——设计稿 §5.2 写「``_runtime`` 继续保留，但只作为默认 handler 的内部实现细节」，实现时改为默认 handler 通过独立的 ``components/event_handlers/defaults/_runtime_helper.py`` 共享缓存拿 ``NeoChatter``，session 自身不再持有 ``_chatter`` 字段或 ``_runtime`` 属性。
+
+已落地的工件清单见 ``ndfc-event-hooks.md`` §10。第三方扩展模式（STOP 替换 / SUCCESS 协作 / PASS 观察 / 条件过滤）见该文档 §6。
+
 ## 6. utils 模块实现现状
 
 | 模块 | 行数 | 核心职责 | 与设计文档对应章节 |
 | --- | --- | --- | --- |
+| `utils/event_publisher.py` | 312 | `NdfcEvent`（StrEnum，17 成员）+ `NdfcPublisher`（16 静态方法，发布事件 + payload 预填 + 读回结果）| ndfc-event-hooks.md §1.2 |
 | `utils/preprocess.py` | 187 | 发布 `neo_default_chatter:preprocess` 事件并合并决策 | §5.2 |
 | `utils/multimodal.py` | 133 | 提取图片 + 占位符内联，构造多模态 Content 列表 | §7 |
 | `utils/prompt_builder.py` | 210 | 渲染 system / user / sub_agent_system / sub_agent_user 四套模板 | §6 / §9 |
-| `utils/tool_flow.py` | 316 | 控制流拦截（pass/stop）+ 去重 + SUSPEND 注入 | §9.4 |
+| `utils/tool_flow.py` | 372 | 控制流拦截（pass/stop）+ 去重 + SUSPEND 注入 + 调 :dedupe_tool_call / :format_tool_result 事件 | §9.4 |
 | `utils/prompts.py` | 178 | 4 套提示词模板原文（注册到 prompt_manager） | §6 / §9 |
 
 `utils/preprocess.py` 关键设计：
@@ -236,7 +269,8 @@ async for result in session.execute():
 | 5. stop 直接唤醒 | ✅ 完成 | `_apply_stop_wake` 注入到 `Stop` 结果 |
 | 6. prompt 模板 | ✅ 完成 | 4 套模板注册到 `prompt_manager` |
 | 7. Service 对外契约 | ✅ 完成 | `create_session` 已可被第三方驱动 |
-| 8. 单元测试 | ❌ 未完成 | 当前仓库内未发现针对 NDFC 的单测 |
+| 8. 单元测试 | ✅ 完成 | 139 项 pytest 全绿，覆盖概率直通 / sub_agent 决策 / tool_flow SUSPEND / 16 个默认 handler / NdfcPublisher payload / EventBus 集成 / _runtime_helper 缓存 |
+| 9. NDFC 事件 Hook 扩展 | ✅ 完成 | ``NdfcEvent`` + ``NdfcPublisher`` + 16 默认 handler + session/tool_flow 改造；详见 ``ndfc-event-hooks.md`` |
 
 设计 §16「生成前自检」中以下项在实现中已落实：
 
@@ -257,9 +291,9 @@ async for result in session.execute():
 
 按优先级从高到低：
 
-1. **补单元测试**：覆盖 `run_preprocess` 决策合并、`process_tool_calls` 控制流拦截、`inline_images_into_text` 占位符唯一性、`_apply_stop_wake` 概率边界、第三方驱动 `asend` 转发一致性。
-2. **表情包图片过滤**：在 `extract_images_from_messages` 增加按 `extra.emoji / media_kind` 过滤，避免表情包图片被无谓塞进 LLM payload（设计 §7.4 明确要求）。
-3. **同步更新设计文档**：把 §5.1 列出的偏差反向同步到 `nfc-neo-default-chatter-design.md`，或者把该文档标记为「历史设计稿」、本文档作为「事实现状」的唯一来源。
-4. **`enable_cooldown=false` 时的语义验证**：当前实现把 `Stop.time` 直接置 0，未在 chatter 层做特殊处理，需确认框架对 `Stop(time=0)` 的处理是否符合预期。
-5. **`actor_round` step_data 消费方落地**：`_consume_step_data` 已上报 `used_tools` 列表，但目前没有内置订阅者；可考虑提供一个默认的 `actor_round` EventHandler 供统计 / 审计使用。
-6. **设计 §7.4 占位符引用回写**：模型回复里写 `[图片-1]` 时由 `send_text` 自动改发原图片——本期未实现，作为后续扩展项跟踪。
+1. **表情包图片过滤**：在 `extract_images_from_messages` 增加按 `extra.emoji / media_kind` 过滤，避免表情包图片被无谓塞进 LLM payload（设计 §7.4 明确要求）。
+2. **同步更新设计文档**：把 §5.1 列出的偏差反向同步到 `nfc-neo-default-chatter-design.md`，或者把该文档标记为「历史设计稿」、本文档作为「事实现状」的唯一来源。
+3. **`enable_cooldown=false` 时的语义验证**：当前实现把 `Stop.time` 直接置 0，未在 chatter 层做特殊处理，需确认框架对 `Stop(time=0)` 的处理是否符合预期。
+4. **`actor_round` step_data 消费方落地**：`_consume_step_data` 已上报 `used_tools` 列表，但目前没有内置订阅者；可考虑提供一个默认的 `actor_round` EventHandler 供统计 / 审计使用。
+5. **设计 §7.4 占位符引用回写**：模型回复里写 `[图片-1]` 时由 `send_text` 自动改发原图片——本期未实现，作为后续扩展项跟踪。
+6. **会话结束清理 ``_runtime_helper`` 缓存**：当前 :func:`drop_runtime` 已实现但未被 session 生命周期调用。可在 ``Stop / Failure`` 终态处调一次 ``drop_runtime(stream_id)``，避免长期运行时 ``_RUNTIME_CACHE`` 累积无用 ``NeoChatter`` 实例。
