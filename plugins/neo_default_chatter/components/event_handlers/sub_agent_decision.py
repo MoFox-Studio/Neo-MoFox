@@ -32,12 +32,13 @@ from src.app.plugin_system.types import (
 from src.kernel.event import EventDecision
 
 from ..config import NeoChatterConfig
+from ...utils.event_publisher import NdfcEvent
 from ...utils.prompt_builder import NeoChatterPromptBuilder
 
 logger = get_logger("neo_default_chatter.preprocess.sub_agent")
 
-#: NFC 预处理事件名。
-_PREPROCESS_EVENT = "neo_default_chatter:preprocess"
+#: NFC 预处理事件名。与 ``utils.preprocess.PREPROCESS_EVENT`` 同源。
+_PREPROCESS_EVENT = NdfcEvent.PREPROCESS
 
 
 class SubAgentDecisionHandler(BaseEventHandler):

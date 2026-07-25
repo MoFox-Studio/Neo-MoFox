@@ -14,7 +14,23 @@ from .components.actions import (
 from .components.chatter import NeoChatter
 from .components.config import NeoChatterConfig
 from .components.event_handlers import (
+    BuildHistoryTextDefaultHandler,
+    BuildNegativeExtraDefaultHandler,
+    BuildResumePromptDefaultHandler,
+    ComputeCooldownDefaultHandler,
+    ComputeStopWakeDefaultHandler,
+    CreateRequestDefaultHandler,
+    DedupeToolCallDefaultHandler,
+    FetchUnreadsDefaultHandler,
+    FlushUnreadsDefaultHandler,
+    FormatToolResultDefaultHandler,
+    FormatUnreadLineDefaultHandler,
+    InjectUnreadPayloadDefaultHandler,
+    InjectUsablesDefaultHandler,
+    PickTriggerMessageDefaultHandler,
     ProbabilityBypassHandler,
+    RunToolCallDefaultHandler,
+    SessionTransitionDefaultHandler,
     SubAgentDecisionHandler,
 )
 from .components.service import NeoChatterService
@@ -136,4 +152,21 @@ class NeoChatterPlugin(BasePlugin):
             StopConversationAction,
             ProbabilityBypassHandler,
             SubAgentDecisionHandler,
+            # Tier II 默认 handler（16 个）：NDFC 自带的可替换 seam 兜底实现
+            FetchUnreadsDefaultHandler,
+            FormatUnreadLineDefaultHandler,
+            FlushUnreadsDefaultHandler,
+            CreateRequestDefaultHandler,
+            InjectUsablesDefaultHandler,
+            RunToolCallDefaultHandler,
+            InjectUnreadPayloadDefaultHandler,
+            BuildHistoryTextDefaultHandler,
+            BuildNegativeExtraDefaultHandler,
+            PickTriggerMessageDefaultHandler,
+            BuildResumePromptDefaultHandler,
+            DedupeToolCallDefaultHandler,
+            FormatToolResultDefaultHandler,
+            ComputeStopWakeDefaultHandler,
+            ComputeCooldownDefaultHandler,
+            SessionTransitionDefaultHandler,
         ]

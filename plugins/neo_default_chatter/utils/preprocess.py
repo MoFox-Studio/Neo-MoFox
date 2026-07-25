@@ -29,8 +29,11 @@ from src.app.plugin_system.api import event_api
 from src.app.plugin_system.api.log_api import Logger
 from src.app.plugin_system.types import ChatStream, Message
 
-#: NFC 预处理事件名。订阅者用 ``subscribe = ["neo_default_chatter:preprocess"]``。
-PREPROCESS_EVENT = "neo_default_chatter:preprocess"
+from .event_publisher import NdfcEvent
+
+#: NFC 预处理事件名。订阅者用 ``subscribe = ["neo_default_chatter:preprocess"]``，
+#: 也可用 ``subscribe = [NdfcEvent.PREPROCESS]``（两者等价，``StrEnum`` 保证）。
+PREPROCESS_EVENT = NdfcEvent.PREPROCESS
 
 #: 预填到 params 里的决策字段名集合；处理器只能修改这些字段的值，不能新增 key。
 _DECISION_KEYS: tuple[str, ...] = (

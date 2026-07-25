@@ -24,6 +24,8 @@ from src.app.plugin_system.types import (
 )
 from src.kernel.concurrency import get_watchdog
 
+from .event_publisher import NdfcPublisher
+
 if TYPE_CHECKING:
     from src.app.plugin_system.types import LLMResponse
 
@@ -138,7 +140,9 @@ async def process_tool_calls(
 
         # 规范化入参：非 dict 视作空 dict，方便后续按 key 取值
         args = call.args if isinstance(call.args, dict) else {}
-        # 去重时忽略 reason 字段：相同动作不同理由仍视为同一调用
+
+        # 本轮内去重（快路径，不发布事件）：去重时忽略 reason 字段，
+        # 相同动作不同理由仍视为同一调用
         dedupe_args = (
             {k: v for k, v in args.items() if k != "reason"}
             if isinstance(args, dict)
@@ -146,17 +150,37 @@ async def process_tool_calls(
         )
         # 生成形如 "call_name:{json}" 的稳定签名
         dedupe_key = _build_call_dedupe_key(call.name, dedupe_args)
+        is_local_duplicate = dedupe_key in seen
+
+        # 跨轮去重（发布 :dedupe_tool_call 事件，默认 handler 检查/登记
+        # seen_signatures；seen_signatures 为 None 时只做本轮去重）
+        if not is_local_duplicate and seen_signatures is not None:
+            # 默认: defaults/dedupe_tool_call.py
+            is_cross_duplicate = await NdfcPublisher.dedupe_tool_call(
+                stream_id=stream_id,
+                call=call,
+                seen_signatures=seen_signatures,
+            )
+        else:
+            is_cross_duplicate = False
 
         # 去重判定：本轮已见过 或 跨轮去重集合中已存在 都跳过
-        if dedupe_key in seen or (seen_signatures is not None and dedupe_key in seen_signatures):
+        if is_local_duplicate or is_cross_duplicate:
             # 跳过前先把已暂存的普通调用 flush 掉，保证顺序
             await flush_pending_calls()
+            # 默认: defaults/format_tool_result.py
+            dup_text = await NdfcPublisher.format_tool_result(
+                stream_id=stream_id,
+                call_name=call.name,
+                kind="duplicate",
+                args=args,
+            )
             # 写回一条 TOOL_RESULT 告知模型本次调用被跳过，避免模型认为调用成功而后续走错流程
             response.add_payload(
                 LLMPayload(
                     ROLE.TOOL_RESULT,
                     ToolResult(  # type: ignore[arg-type]
-                        value="检测到重复工具调用，已自动跳过",
+                        value=dup_text,
                         call_id=call.id,
                         name=call.name,
                     ),
@@ -164,10 +188,8 @@ async def process_tool_calls(
             )
             continue
 
-        # 登记到本轮与跨轮去重集合，确保后续相同调用同样被跳过
+        # 登记到本轮去重集合（跨轮集合 seen_signatures 已由默认 handler 登记）
         seen.add(dedupe_key)
-        if seen_signatures is not None:
-            seen_signatures.add(dedupe_key)
 
         # ----- 控制流分支 1：pass_and_wait（等待新消息）-----
         if call.name == pass_call_name:
@@ -176,10 +198,12 @@ async def process_tool_calls(
             # seconds 缺省表示无限期等待新消息；否则按用户指定秒数定时唤醒
             wait_seconds = args.get("seconds")
             outcome.wait_seconds = None if wait_seconds is None else float(wait_seconds)
-            wait_text = (
-                "已登记等待，本轮动作完成后等待用户新消息"
-                if outcome.wait_seconds is None
-                else f"已登记等待，本轮动作完成后等待 {outcome.wait_seconds} 秒后继续对话"
+            # 默认: defaults/format_tool_result.py
+            wait_text = await NdfcPublisher.format_tool_result(
+                stream_id=stream_id,
+                call_name=call.name,
+                kind="pass",
+                args=args,
             )
             # 写回提示文本，但本函数不再触发后续 LLM follow-up（由 should_wait 标志位控制上层逻辑）
             response.add_payload(
@@ -207,12 +231,19 @@ async def process_tool_calls(
                 )
             except (TypeError, ValueError):
                 outcome.stop_minutes = float(default_stop_minutes)
+            # 默认: defaults/format_tool_result.py
+            stop_text = await NdfcPublisher.format_tool_result(
+                stream_id=stream_id,
+                call_name=call.name,
+                kind="stop",
+                args={"minutes": outcome.stop_minutes},
+            )
             # 写回停止提示文本，由上层根据 should_stop 切换对话状态
             response.add_payload(
                 LLMPayload(
                     ROLE.TOOL_RESULT,
                     ToolResult(  # type: ignore[arg-type]
-                        value=f"对话已结束，将在 {outcome.stop_minutes} 分钟后允许新对话",
+                        value=stop_text,
                         call_id=call.id,
                         name=call.name,
                     ),

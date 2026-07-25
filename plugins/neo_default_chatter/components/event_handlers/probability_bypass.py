@@ -22,11 +22,12 @@ from src.core.config import get_core_config
 from src.kernel.event import EventDecision
 
 from ..config import NeoChatterConfig
+from ...utils.event_publisher import NdfcEvent
 
 logger = get_logger("neo_default_chatter.preprocess.probability_bypass")
 
-#: NFC 预处理事件名。
-_PREPROCESS_EVENT = "neo_default_chatter:preprocess"
+#: NFC 预处理事件名。与 ``utils.preprocess.PREPROCESS_EVENT`` 同源。
+_PREPROCESS_EVENT = NdfcEvent.PREPROCESS
 
 
 class ProbabilityBypassHandler(BaseEventHandler):

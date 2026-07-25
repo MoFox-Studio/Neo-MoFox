@@ -21,10 +21,8 @@ from src.app.plugin_system.api.log_api import get_logger
 from src.app.plugin_system.base import Failure, Stop, Wait, WaitResumeEvent
 from src.app.plugin_system.types import (
     ChatStream,
-    Content,
     LLMPayload,
     LLMResponse,
-    LLMUsable,
     Message,
     ROLE,
     Text,
@@ -32,8 +30,7 @@ from src.app.plugin_system.types import (
 )
 
 from .components.config import NeoChatterConfig
-from .utils.multimodal import extract_images_from_messages, inline_images_into_text
-from .utils.preprocess import run_preprocess
+from .utils.event_publisher import NdfcPublisher
 from .utils.prompt_builder import NeoChatterPromptBuilder
 from .utils.tool_flow import (
     ToolCallOutcome,
@@ -75,7 +72,7 @@ class _Phase(str, Enum):
 class _SessionState:
     """单次会话的可变运行时状态。"""
 
-    response: "LLMResponse"
+    response: LLMConversationState  # LLMRequest | LLMResponse（鸭子类型，两者都有 add_payload/payloads/send）
     phase: _Phase
     history_merged: bool
     unreads: list[Message]
@@ -303,16 +300,6 @@ def _print_actor_decision_panel(
     )
 
 
-def _transition(
-    *, state: _SessionState, to_phase: _Phase, reason: str
-) -> None:
-    """切换状态机阶段，并在阶段变化时打 DEBUG 日志。"""
-    if state.phase == to_phase:
-        return
-    logger.debug(f"[FSM] {state.phase.value} -> {to_phase.value}: {reason}")
-    state.phase = to_phase
-
-
 class ConversationSession:
     """Neo-Default-Chatter 主会话逻辑。
 
@@ -376,21 +363,28 @@ class ConversationSession:
             actor_task_name=str(cfg.plugin.actor_task_name),
         )
 
-    def _apply_stop_wake(self, stop_result: Stop) -> Stop:
-        """根据配置给 :class:`Stop` 结果补上「直接消息唤醒」参数。
+    async def _apply_stop_wake(
+        self, stop_result: Stop, chat_type: Any
+    ) -> Stop:
+        """根据配置给 :class:`Stop` 结果补上「直接消息唤醒」参数（异步）。
 
-        框架的 ``Stop`` 表示「主动结束会话并冷却 N 秒」。当 ``enable_stop_wake``
-        开启时，冷却期间收到用户私信仍可按概率提前唤醒；本方法把配置里的
-        开关与概率合并到 ``stop_result`` 上返回新的 :class:`Stop`。
+        发布 :compute_stop_wake 事件委托默认 handler 算概率；``chat_type`` 透传
+        给 handler 用于「仅私聊启用」判定（依据 §3.2.6）。
 
         Args:
             stop_result: 已构造好的 ``Stop``，包含冷却时长与 step_data。
+            chat_type: 当前聊天流类型（``ChatType`` 枚举或字符串）。
 
         Returns:
-            Stop: 补齐 ``direct_message_wake_*`` 字段后的新 ``Stop`` 实例。
+            补齐 ``direct_message_wake_*`` 字段后的新 ``Stop`` 实例。
         """
         cfg = self._cfg()
-        probability = max(0.0, min(1.0, cfg.stop_wake_prob))
+        # 默认: defaults/compute_stop_wake.py
+        probability = await NdfcPublisher.compute_stop_wake(
+            stream_id=self.stream_id,
+            config=self._config,
+            chat_type=chat_type,
+        )
         return Stop(
             time=stop_result.time,
             direct_message_wake_enabled=cfg.enable_stop_wake,
@@ -398,17 +392,16 @@ class ConversationSession:
             step_data=stop_result.step_data,
         )
 
-    def _append_user_payload(
+    async def _append_user_payload(
         self,
         response: "LLMResponse",
         formatted_text: str,
         unread_msgs: list[Message] | None = None,
     ) -> None:
-        """把 user 提示词追加为 ``ROLE.USER`` payload，按配置决定是否内联图片。
+        """把 user 提示词追加为 ``ROLE.USER`` payload（异步）。
 
-        多模态开关 ``native_multimodal`` 开启时，会从未读消息中提取所有图片，
-        按占位符模板 ``[图片-{idx}]`` 内联到提示文本里，构造多模态 Content 列表；
-        否则把提示文本作为纯 ``Text`` 追加，图片交给媒体管理器走识别路径。
+        发布 :inject_unread_payload 事件委托默认 handler 注入：原生多模态开启时
+        从未读消息提取图片按占位符内联，否则把提示文本作为纯 ``Text`` 追加。
 
         Args:
             response: 待追加 payload 的 LLM 请求 / 响应对象。
@@ -416,15 +409,36 @@ class ConversationSession:
             unread_msgs: 本轮未读消息；多模态内联时用于提取图片。
         """
         cfg = self._cfg()
-        content_list: list[Content | LLMUsable]
-        if cfg.native_multimodal and unread_msgs:
-            images = extract_images_from_messages(unread_msgs)
-            content_list = inline_images_into_text(formatted_text, images, cfg.placeholder)
-            if images:
-                logger.debug(f"已内联 {len(images)} 张图片到占位符位置")
-        else:
-            content_list = [Text(formatted_text)]
-        response.add_payload(LLMPayload(ROLE.USER, content_list))
+        # 默认: defaults/inject_unread_payload.py
+        await NdfcPublisher.inject_unread_payload(
+            stream_id=self.stream_id,
+            response=response,
+            formatted_text=formatted_text,
+            unread_msgs=unread_msgs,
+            native_multimodal=cfg.native_multimodal,
+        )
+
+    async def _transition(
+        self, *, state: _SessionState, to_phase: _Phase, reason: str
+    ) -> None:
+        """切换状态机阶段，并在阶段变化时打 DEBUG 日志 + 发布 :session_transition 事件。
+
+        Args:
+            state: 当前会话运行时状态。
+            to_phase: 目标阶段。
+            reason: 阶段切换的人类可读理由（写入日志）。
+        """
+        if state.phase == to_phase:
+            return
+        from_phase = state.phase.value
+        logger.debug(f"[FSM] {from_phase} -> {to_phase.value}: {reason}")
+        state.phase = to_phase
+        # 默认: defaults/session_transition.py
+        await NdfcPublisher.session_transition(
+            stream_id=self.stream_id,
+            from_phase=from_phase,
+            to_phase=to_phase.value,
+        )
 
     async def execute(self) -> AsyncGenerator[Wait | Stop | Failure, WaitResumeEvent | None]:
         """激活聊天流并执行会话控制流。
@@ -486,8 +500,11 @@ class ConversationSession:
 
         # 0.2) 创建 LLM 请求对象；模型配置缺失 / 任务名错误时直接失败退出
         try:
-            request = self._runtime.create_request(
-                cfg.actor_task_name, with_reminder="actor"
+            # 默认: defaults/create_request.py
+            request = await NdfcPublisher.create_request(
+                stream_id=chat_stream.stream_id,
+                task_name=cfg.actor_task_name,
+                with_reminder="actor",
             )
         except (ValueError, KeyError) as error:
             logger.error(f"模型配置错误: {error}")
@@ -500,10 +517,14 @@ class ConversationSession:
         )
         request.add_payload(LLMPayload(ROLE.SYSTEM, Text(system_prompt_text)))
 
-        history_text = NeoChatterPromptBuilder.build_history_text(
-            chat_stream, self._runtime.format_message_line
+        # 默认: defaults/build_history_text.py
+        history_text = await NdfcPublisher.build_history_text(
+            stream_id=chat_stream.stream_id, chat_stream=chat_stream
         )
-        usable_map: ToolRegistry = await self._runtime.inject_usables(request)
+        # 默认: defaults/inject_usables.py
+        usable_map: ToolRegistry = await NdfcPublisher.inject_usables(
+            stream_id=chat_stream.stream_id, request=request
+        )
 
         # 0.4) 初始化会话运行时状态，从 WAIT_USER 起步
         state = _SessionState(
@@ -524,7 +545,8 @@ class ConversationSession:
             resume_event = None
 
             # 2) 拉取最新未读消息（无论处于哪个阶段都拉，便于 WAIT_USER 决策）
-            _, unread_msgs = await self._runtime.fetch_unreads()
+            # 默认: defaults/fetch_unreads.py
+            unread_msgs = await NdfcPublisher.fetch_unreads(chat_stream.stream_id)
 
             # === 阶段 WAIT_USER：等待用户消息 / 处理恢复事件 ===
             if state.phase == _Phase.WAIT_USER and not unread_msgs and current_resume is None:
@@ -541,16 +563,18 @@ class ConversationSession:
                 # 2.3) 处理非消息类恢复（定时器 / 子代理 / 内部上下文）：
                 #      把构造好的系统提示塞进对话历史，让 LLM 自行决定下一步
                 if current_resume is not None:
-                    if _is_timer_resume(current_resume):
-                        resume_text = _build_timer_resume_prompt(current_resume)
-                    else:
-                        resume_text = _build_generic_resume_prompt(current_resume)
+                    # 默认: defaults/build_resume_prompt.py
+                    resume_text = await NdfcPublisher.build_resume_prompt(
+                        stream_id=chat_stream.stream_id,
+                        resume_event=current_resume,
+                        source=current_resume.source or "",
+                    )
                     # 恢复视为新一轮，重置跨回合状态
                     state.seen_signatures.clear()
                     state.used_tools_in_round.clear()
                     state.unreads = []
-                    self._append_user_payload(state.response, resume_text)
-                    _transition(
+                    await self._append_user_payload(state.response, resume_text)
+                    await self._transition(
                         state=state,
                         to_phase=_Phase.MODEL_TURN,
                         reason="收到恢复事件",
@@ -567,12 +591,19 @@ class ConversationSession:
                 state.used_tools_in_round.clear()
                 state.unreads = unread_msgs
 
+                # 默认: defaults/format_unread_line.py
                 unread_lines = "\n".join(
-                    self._runtime.format_message_line(msg) for msg in unread_msgs
+                    [
+                        await NdfcPublisher.format_unread_line(
+                            stream_id=chat_stream.stream_id, message=msg
+                        )
+                        for msg in unread_msgs
+                    ]
                 )
 
                 # 2.6) 跑 neo_default_chatter:preprocess 事件，让订阅者决定是否继续 / 注入 extra
-                decision = await run_preprocess(
+                # 默认: probability_bypass.py + sub_agent_decision.py
+                decision = await NdfcPublisher.preprocess(
                     chat_stream=chat_stream,
                     unreads=unread_msgs,
                     history_text=history_text if not state.history_merged else "",
@@ -585,12 +616,17 @@ class ConversationSession:
                 #      - 否则继续 Wait，把消息留到下一轮（不 flush）
                 if not decision.proceed:
                     if decision.force_stop_minutes is not None:
-                        await self._runtime.flush_unreads(unread_msgs)
+                        # 默认: defaults/flush_unreads.py
+                        await NdfcPublisher.flush_unreads(
+                            stream_id=chat_stream.stream_id, messages=unread_msgs
+                        )
                         stop_result = Stop(
                             decision.force_stop_minutes * 60,
                             step_data=_consume_step_data(state),
                         )
-                        yield self._apply_stop_wake(stop_result)
+                        yield await self._apply_stop_wake(
+                            stop_result, chat_stream.chat_type
+                        )
                         return
                     logger.info(
                         f"[预处理] 拦截但继续等待：{decision.reason or '未提供理由'}"
@@ -599,10 +635,18 @@ class ConversationSession:
                     continue
 
                 # 2.8) 预处理放行：flush 未读消息，构造本轮 USER 提示词并追加
-                await self._runtime.flush_unreads(unread_msgs)
-                extra = NeoChatterPromptBuilder.build_negative_behaviors_extra(self._config)
+                # 默认: defaults/flush_unreads.py
+                await NdfcPublisher.flush_unreads(
+                    stream_id=chat_stream.stream_id, messages=unread_msgs
+                )
+                # 默认: defaults/build_negative_extra.py
+                neg_extra = await NdfcPublisher.build_negative_extra(
+                    stream_id=chat_stream.stream_id, config=self._config
+                )
+                fragments = [neg_extra] if neg_extra else []
                 if decision.extra:
-                    extra = f"{extra}\n{decision.extra}" if extra else decision.extra
+                    fragments.append(decision.extra)
+                extra = "\n".join(fragments)
 
                 user_prompt = await NeoChatterPromptBuilder.build_user_prompt(
                     chat_stream,
@@ -611,11 +655,11 @@ class ConversationSession:
                     extra=extra,
                 )
                 state.history_merged = True
-                self._append_user_payload(
+                await self._append_user_payload(
                     state.response, user_prompt, unread_msgs=unread_msgs
                 )
                 state.unread_msgs_to_flush = []
-                _transition(
+                await self._transition(
                     state=state,
                     to_phase=_Phase.MODEL_TURN,
                     reason="收到未读消息",
@@ -642,13 +686,17 @@ class ConversationSession:
                     )
                     # 3.2) MODEL_TURN 完成后处理积压的 flush（避免重复发消息）
                     if state.phase == _Phase.MODEL_TURN and state.unread_msgs_to_flush:
-                        await self._runtime.flush_unreads(state.unread_msgs_to_flush)
+                        # 默认: defaults/flush_unreads.py
+                        await NdfcPublisher.flush_unreads(
+                            stream_id=chat_stream.stream_id,
+                            messages=state.unread_msgs_to_flush,
+                        )
                         state.unread_msgs_to_flush = []
                 except Exception as error:  # noqa: BLE001
                     # 3.3) LLM 请求失败：产出 Failure，但保留会话，下一轮回到 WAIT_USER
                     logger.error(f"LLM 请求失败: {error}", exc_info=True)
                     yield Failure("LLM 请求失败", error)
-                    _transition(
+                    await self._transition(
                         state=state,
                         to_phase=_Phase.WAIT_USER,
                         reason="请求失败",
@@ -656,7 +704,7 @@ class ConversationSession:
                     continue
 
                 # 3.4) 请求成功，进入工具执行阶段
-                _transition(
+                await self._transition(
                     state=state,
                     to_phase=_Phase.TOOL_EXEC,
                     reason="模型已响应",
@@ -683,7 +731,7 @@ class ConversationSession:
                     message = getattr(response, "message", None)
                     if isinstance(message, str) and message.strip() == _SUSPEND_TEXT:
                         resume_event = yield Wait(step_data=_consume_step_data(state))
-                        _transition(
+                        await self._transition(
                             state=state,
                             to_phase=_Phase.WAIT_USER,
                             reason="SUSPEND 挂起",
@@ -694,7 +742,7 @@ class ConversationSession:
                             f"LLM 返回纯文本而非工具调用: {message[:100]}"
                         )
                     resume_event = yield Wait(step_data=_consume_step_data(state))
-                    _transition(
+                    await self._transition(
                         state=state,
                         to_phase=_Phase.WAIT_USER,
                         reason="无工具调用",
@@ -713,13 +761,35 @@ class ConversationSession:
                         f"参数={_format_tool_args(call.args)}"
                     )
 
+                # 默认: defaults/pick_trigger_message.py
+                trigger_msg = await NdfcPublisher.pick_trigger_message(
+                    stream_id=chat_stream.stream_id,
+                    chat_stream=chat_stream,
+                    unreads=state.unreads,
+                )
+
+                async def _run_tool_call_cb(
+                    calls: list,
+                    response: Any,
+                    usable_map: ToolRegistry,
+                    trigger_msg: Message | None,
+                ) -> list[tuple[bool, bool]]:
+                    # 默认: defaults/run_tool_call.py
+                    return await NdfcPublisher.run_tool_call(
+                        stream_id=chat_stream.stream_id,
+                        calls=calls,
+                        response=response,
+                        usable_map=usable_map,
+                        trigger_msg=trigger_msg,
+                    )
+
                 outcome: ToolCallOutcome = await process_tool_calls(
                     stream_id=chat_stream.stream_id,
                     calls=calls,
                     response=response,
-                    run_tool_call=self._runtime.run_tool_call,
+                    run_tool_call=_run_tool_call_cb,
                     usable_map=usable_map,
-                    trigger_msg=_pick_trigger_message(chat_stream, state.unreads),
+                    trigger_msg=trigger_msg,
                     pass_call_name=_PASS_CALL_NAME,
                     stop_call_name=_STOP_CALL_NAME,
                     default_stop_minutes=cfg.default_stop_minutes,
@@ -729,16 +799,21 @@ class ConversationSession:
 
                 # 4.4) 工具要求 Stop（pass_and_wait 给出 stop_minutes 或 stop_conversation）
                 if outcome.should_stop:
-                    cooldown = (
-                        outcome.stop_minutes * 60 if cfg.enable_cooldown else 0
+                    # 默认: defaults/compute_cooldown.py
+                    cooldown = await NdfcPublisher.compute_cooldown(
+                        stream_id=chat_stream.stream_id,
+                        minutes=outcome.stop_minutes,
+                        config=self._config,
                     )
                     stop_result = Stop(cooldown, step_data=_consume_step_data(state))
-                    yield self._apply_stop_wake(stop_result)
+                    yield await self._apply_stop_wake(
+                        stop_result, chat_stream.chat_type
+                    )
                     return
 
                 # 4.5) 还有未消费的工具结果：进入 FOLLOW_UP，让 LLM 二次请求消化
                 if outcome.has_pending_tool_results:
-                    _transition(
+                    await self._transition(
                         state=state,
                         to_phase=_Phase.FOLLOW_UP,
                         reason="有待消化的工具结果",
@@ -762,13 +837,13 @@ class ConversationSession:
                 if action_only and not outcome.should_wait:
                     if cfg.enable_action_suspend:
                         resume_event = yield Wait(step_data=_consume_step_data(state))
-                        _transition(
+                        await self._transition(
                             state=state,
                             to_phase=_Phase.WAIT_USER,
                             reason="action 挂起",
                         )
                         continue
-                    _transition(
+                    await self._transition(
                         state=state,
                         to_phase=_Phase.FOLLOW_UP,
                         reason="action 不挂起",
@@ -779,7 +854,10 @@ class ConversationSession:
                 if outcome.should_wait:
                     # 4.8.1) 在 Wait 之前再拉一次未读：若期间已有新消息，
                     #        跳过 Wait，直接回 WAIT_USER 处理（避免消息被 Wait 吞掉）
-                    _, fresh_unreads = await self._runtime.fetch_unreads()
+                    # 默认: defaults/fetch_unreads.py
+                    fresh_unreads = await NdfcPublisher.fetch_unreads(
+                        chat_stream.stream_id
+                    )
                     if fresh_unreads:
                         logger.debug(
                             f"pass_and_wait 前检测到 {len(fresh_unreads)} 条新消息，跳过等待"
@@ -801,7 +879,7 @@ class ConversationSession:
                     _consume_step_data(state)
 
                 # 5) 默认回到 WAIT_USER，等待下一轮用户消息或恢复事件
-                _transition(
+                await self._transition(
                     state=state,
                     to_phase=_Phase.WAIT_USER,
                     reason="默认等待",
