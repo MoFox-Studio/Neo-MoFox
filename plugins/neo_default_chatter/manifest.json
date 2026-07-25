@@ -1,6 +1,6 @@
 {
   "name": "neo_default_chatter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Neo-Default-Chatter：可复用的会话逻辑中台，事件驱动预处理 + 原生多模态",
   "author": "MoFox Team",
   "dependencies": {
@@ -159,6 +159,7 @@
     "message_api": "1.0.0",
     "service_api": "1.0.0"
   },
+  "min_core_version": "1.2.0-rc.2",
   "python_dependencies": [],
   "dependencies_required": true
 }
