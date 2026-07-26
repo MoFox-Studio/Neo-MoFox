@@ -77,7 +77,10 @@ class MediaManager:
         # 两个独立的清理任务：缓存清理（pending 目录）与文件清理（images/emojis 目录）
         self._cache_cleanup_task_id: str | None = None
         self._file_cleanup_task_id: str | None = None
-        self._start_cleanup_scheduler()
+        try:
+            asyncio.create_task(self._start_cleanup_scheduler())
+        except Exception as e:
+            logger.error(f"启动清理调度器失败: {e}")
 
     def _initialize_vlm(self) -> None:
         """初始化 VLM 模型配置。"""
@@ -180,74 +183,61 @@ class MediaManager:
         self._media_file_max_total_size_mb = chat_cfg.media_file_max_total_size_mb
         self._media_file_cleanup_interval_hours = chat_cfg.media_file_cleanup_interval_hours
 
-    def _start_cleanup_scheduler(self) -> None:
+    async def _start_cleanup_scheduler(self) -> None:
         """启动两个独立的定时清理任务。
 
         - 缓存清理任务：高频清理 pending 目录中的陈旧文件
         - 文件清理任务：按用户配置间隔清理 images/emojis 目录中的已识别文件
         """
-        try:
-            asyncio.create_task(self._register_cache_cleanup_task())
-            asyncio.create_task(self._register_file_cleanup_task())
-            logger.info(
-                "媒体清理调度器已启动"
-                f"(缓存清理每 {self._media_cache_cleanup_interval_hours}h，"
-                f"文件清理每 {self._media_file_cleanup_interval_hours}h)"
-            )
-        except Exception as e:
-            logger.error(f"启动清理调度器失败: {e}")
+        scheduler = get_unified_scheduler()
 
-    async def _register_cache_cleanup_task(self) -> None:
-        """注册 pending 目录的定时清理任务到调度器。"""
-        try:
-            if not self._media_cache_cleanup_enabled:
-                logger.info("媒体缓存清理已禁用，跳过 pending 目录清理任务注册")
-                return
+        # 缓存清理任务（pending 目录）
+        if self._media_cache_cleanup_enabled:
+            try:
+                interval_seconds = self._media_cache_cleanup_interval_hours * 3600
+                schedule_id = await scheduler.create_schedule(
+                    callback=self._cleanup_pending_folder,
+                    trigger_type=TriggerType.TIME,
+                    trigger_config={"delay_seconds": interval_seconds},
+                    is_recurring=True,
+                    task_name="media_cache_cleanup",
+                    force_overwrite=True,
+                )
+                self._cache_cleanup_task_id = schedule_id
+                logger.info(
+                    f"媒体缓存清理任务已注册(间隔 {self._media_cache_cleanup_interval_hours}h): {schedule_id}"
+                )
+            except Exception as e:
+                logger.error(f"注册缓存清理任务失败: {e}")
+        else:
+            logger.info("媒体缓存清理已禁用，跳过 pending 目录清理任务注册")
 
-            scheduler = get_unified_scheduler()
-            interval_seconds = self._media_cache_cleanup_interval_hours * 3600
+        # 文件清理任务（images/emojis 目录）
+        if self._media_file_cleanup_enabled:
+            try:
+                interval_seconds = self._media_file_cleanup_interval_hours * 3600
+                schedule_id = await scheduler.create_schedule(
+                    callback=self._cleanup_media_files,
+                    trigger_type=TriggerType.TIME,
+                    trigger_config={"delay_seconds": interval_seconds},
+                    is_recurring=True,
+                    task_name="media_file_cleanup",
+                    force_overwrite=True,
+                )
+                self._file_cleanup_task_id = schedule_id
+                logger.info(
+                    f"媒体文件清理任务已注册(间隔 {self._media_file_cleanup_interval_hours}h): {schedule_id}"
+                )
+            except Exception as e:
+                logger.error(f"注册文件清理任务失败: {e}")
+        else:
+            logger.info("媒体文件清理已禁用，跳过 images/emojis 目录清理任务注册")
 
-            schedule_id = await scheduler.create_schedule(
-                callback=self._cleanup_pending_folder,
-                trigger_type=TriggerType.TIME,
-                trigger_config={"delay_seconds": interval_seconds},
-                is_recurring=True,
-                task_name="media_cache_cleanup",
-                force_overwrite=True,
-            )
-
-            self._cache_cleanup_task_id = schedule_id
-            logger.info(
-                f"媒体缓存清理任务已注册(间隔 {self._media_cache_cleanup_interval_hours}h): {schedule_id}"
-            )
-        except Exception as e:
-            logger.error(f"注册缓存清理任务失败: {e}")
-
-    async def _register_file_cleanup_task(self) -> None:
-        """注册 images/emojis 目录的定时清理任务到调度器。"""
-        try:
-            if not self._media_file_cleanup_enabled:
-                logger.info("媒体文件清理已禁用，跳过 images/emojis 目录清理任务注册")
-                return
-
-            scheduler = get_unified_scheduler()
-            interval_seconds = self._media_file_cleanup_interval_hours * 3600
-
-            schedule_id = await scheduler.create_schedule(
-                callback=self._cleanup_media_files,
-                trigger_type=TriggerType.TIME,
-                trigger_config={"delay_seconds": interval_seconds},
-                is_recurring=True,
-                task_name="media_file_cleanup",
-                force_overwrite=True,
-            )
-
-            self._file_cleanup_task_id = schedule_id
-            logger.info(
-                f"媒体文件清理任务已注册(间隔 {self._media_file_cleanup_interval_hours}h): {schedule_id}"
-            )
-        except Exception as e:
-            logger.error(f"注册文件清理任务失败: {e}")
+        logger.info(
+            "媒体清理调度器已启动"
+            f"(缓存清理每 {self._media_cache_cleanup_interval_hours}h，"
+            f"文件清理每 {self._media_file_cleanup_interval_hours}h)"
+        )
 
     async def _cleanup_pending_folder(self) -> None:
         """清理待识别文件夹中的陈旧文件。

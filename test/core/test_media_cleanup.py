@@ -11,7 +11,7 @@
 - 不存在的目录不报错
 - _safe_delete_media 静态方法
 - pending 目录按 5 分钟阈值清理
-- 两个清理任务各自独立的调度注册逻辑
+- _start_cleanup_scheduler 合并注册两个清理任务（缓存与文件）的调度逻辑
 """
 
 from __future__ import annotations
@@ -355,53 +355,44 @@ class TestCleanupPendingFolder:
         assert subfolder.exists()
 
 
-class TestRegisterCacheCleanupTask:
-    """测试 _register_cache_cleanup_task 方法。"""
+class TestStartCleanupScheduler:
+    """测试 _start_cleanup_scheduler 方法。
+
+    合并注册缓存清理（pending 目录）与文件清理（images/emojis 目录）
+    两个任务到同一方法，分别按各自的 enabled 开关决定是否注册。
+    """
 
     @pytest.mark.asyncio
-    async def test_register_cache_cleanup_when_enabled(self, mock_media_manager: MediaManager) -> None:
-        """测试启用时成功注册缓存清理任务。"""
+    async def test_start_cleanup_when_both_enabled(self, mock_media_manager: MediaManager) -> None:
+        """测试两项均启用时同时注册两个清理任务。"""
         mock_scheduler = MagicMock()
-        mock_scheduler.create_schedule = AsyncMock(return_value="cache_schedule_id")
+        mock_scheduler.create_schedule = AsyncMock(
+            side_effect=["cache_schedule_id", "file_schedule_id"],
+        )
 
         with patch(
             "src.core.managers.media_manager.get_unified_scheduler",
             return_value=mock_scheduler,
         ):
-            await mock_media_manager._register_cache_cleanup_task()
+            await mock_media_manager._start_cleanup_scheduler()
 
-            mock_scheduler.create_schedule.assert_called_once()
-            call_kwargs = mock_scheduler.create_schedule.call_args.kwargs
-            assert call_kwargs["task_name"] == "media_cache_cleanup"
-            assert call_kwargs["is_recurring"] is True
+            assert mock_scheduler.create_schedule.call_count == 2
+            cache_kwargs = mock_scheduler.create_schedule.call_args_list[0].kwargs
+            file_kwargs = mock_scheduler.create_schedule.call_args_list[1].kwargs
+            assert cache_kwargs["task_name"] == "media_cache_cleanup"
+            assert cache_kwargs["is_recurring"] is True
+            assert file_kwargs["task_name"] == "media_file_cleanup"
+            assert file_kwargs["is_recurring"] is True
             assert mock_media_manager._cache_cleanup_task_id == "cache_schedule_id"
+            assert mock_media_manager._file_cleanup_task_id == "file_schedule_id"
 
     @pytest.mark.asyncio
-    async def test_register_cache_cleanup_skipped_when_disabled(
+    async def test_start_cleanup_skips_cache_when_disabled(
         self, mock_media_manager: MediaManager
     ) -> None:
-        """测试禁用时不注册缓存清理任务。"""
+        """测试禁用缓存清理时只注册文件清理任务。"""
         mock_media_manager._media_cache_cleanup_enabled = False
 
-        mock_scheduler = MagicMock()
-        mock_scheduler.create_schedule = AsyncMock()
-
-        with patch(
-            "src.core.managers.media_manager.get_unified_scheduler",
-            return_value=mock_scheduler,
-        ):
-            await mock_media_manager._register_cache_cleanup_task()
-
-            mock_scheduler.create_schedule.assert_not_called()
-            assert mock_media_manager._cache_cleanup_task_id is None
-
-
-class TestRegisterFileCleanupTask:
-    """测试 _register_file_cleanup_task 方法。"""
-
-    @pytest.mark.asyncio
-    async def test_register_file_cleanup_when_enabled(self, mock_media_manager: MediaManager) -> None:
-        """测试启用时成功注册文件清理任务。"""
         mock_scheduler = MagicMock()
         mock_scheduler.create_schedule = AsyncMock(return_value="file_schedule_id")
 
@@ -409,19 +400,42 @@ class TestRegisterFileCleanupTask:
             "src.core.managers.media_manager.get_unified_scheduler",
             return_value=mock_scheduler,
         ):
-            await mock_media_manager._register_file_cleanup_task()
+            await mock_media_manager._start_cleanup_scheduler()
 
-            mock_scheduler.create_schedule.assert_called_once()
+            assert mock_scheduler.create_schedule.call_count == 1
             call_kwargs = mock_scheduler.create_schedule.call_args.kwargs
             assert call_kwargs["task_name"] == "media_file_cleanup"
-            assert call_kwargs["is_recurring"] is True
+            assert mock_media_manager._cache_cleanup_task_id is None
             assert mock_media_manager._file_cleanup_task_id == "file_schedule_id"
 
     @pytest.mark.asyncio
-    async def test_register_file_cleanup_skipped_when_disabled(
+    async def test_start_cleanup_skips_file_when_disabled(
         self, mock_media_manager: MediaManager
     ) -> None:
-        """测试禁用时不注册文件清理任务。"""
+        """测试禁用文件清理时只注册缓存清理任务。"""
+        mock_media_manager._media_file_cleanup_enabled = False
+
+        mock_scheduler = MagicMock()
+        mock_scheduler.create_schedule = AsyncMock(return_value="cache_schedule_id")
+
+        with patch(
+            "src.core.managers.media_manager.get_unified_scheduler",
+            return_value=mock_scheduler,
+        ):
+            await mock_media_manager._start_cleanup_scheduler()
+
+            assert mock_scheduler.create_schedule.call_count == 1
+            call_kwargs = mock_scheduler.create_schedule.call_args.kwargs
+            assert call_kwargs["task_name"] == "media_cache_cleanup"
+            assert mock_media_manager._cache_cleanup_task_id == "cache_schedule_id"
+            assert mock_media_manager._file_cleanup_task_id is None
+
+    @pytest.mark.asyncio
+    async def test_start_cleanup_skips_all_when_both_disabled(
+        self, mock_media_manager: MediaManager
+    ) -> None:
+        """测试两项均禁用时不注册任何清理任务。"""
+        mock_media_manager._media_cache_cleanup_enabled = False
         mock_media_manager._media_file_cleanup_enabled = False
 
         mock_scheduler = MagicMock()
@@ -431,9 +445,10 @@ class TestRegisterFileCleanupTask:
             "src.core.managers.media_manager.get_unified_scheduler",
             return_value=mock_scheduler,
         ):
-            await mock_media_manager._register_file_cleanup_task()
+            await mock_media_manager._start_cleanup_scheduler()
 
             mock_scheduler.create_schedule.assert_not_called()
+            assert mock_media_manager._cache_cleanup_task_id is None
             assert mock_media_manager._file_cleanup_task_id is None
 
 
