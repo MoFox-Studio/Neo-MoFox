@@ -46,6 +46,8 @@ Logger 模块
 from .logger import (
     Logger,
     initialize_logger_system,
+    start_logger_cleanup,
+    stop_logger_cleanup,
     get_global_log_config,
     get_logger,
     remove_logger,
@@ -57,10 +59,13 @@ from .logger import (
 )
 from .color import COLOR, get_rich_color, DEFAULT_LEVEL_COLORS
 from .file_handler import FileHandler, RotationMode
+from .cleanup import LoggerCleanupManager
 
 __all__ = [
     # 全局初始化
     "initialize_logger_system",
+    "start_logger_cleanup",
+    "stop_logger_cleanup",
     "get_global_log_config",
     "shutdown_logger_system",
     # 主要接口
@@ -70,6 +75,8 @@ __all__ = [
     # 文件输出相关
     "FileHandler",
     "RotationMode",
+    # 自动清理
+    "LoggerCleanupManager",
     # 辅助函数
     "remove_logger",
     "get_all_loggers",

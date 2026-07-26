@@ -129,8 +129,31 @@ def inject_reason_parameter(
 
 def extract_model_transport_params(
     model_set: Mapping[str, object],
-) -> tuple[str, str | None, float | None, bool, bool, dict[str, object]]:
-    """提取所有 provider 客户端都会使用的传输层配置。"""
+) -> tuple[
+    str,
+    str | None,
+    float | None,
+    bool,
+    bool,
+    dict[str, object],
+    dict[str, str],
+    dict[str, object],
+    dict[str, object],
+]:
+    """提取所有 provider 客户端都会使用的传输层配置。
+
+    返回值依次为：
+        ``api_key``、``base_url``、``timeout``、``trust_env``、``force_ipv4``、
+        ``extra_params``、``extra_headers``、``extra_query``、``extra_body``。
+
+    其中 ``extra_headers``/``extra_query``/``extra_body`` 取自 ``extra_params``
+    中的同名特殊键（``headers``/``query``/``body``），用于直接控制 HTTP 层行为：
+    请求头、URL 查询参数、请求体字段。其余键保持原有透传逻辑，由具体
+    provider 客户端按其标准/非标准参数分流规则处理。
+
+    若 ``extra_params`` 中不包含这三个特殊键，行为与历史完全一致，避免对存量
+    配置造成回归。
+    """
     api_key = str(model_set.get("api_key") or "")
     if not api_key:
         raise ValueError("model.api_key cannot be empty")
@@ -154,6 +177,13 @@ def extract_model_transport_params(
     normalized_extra_params.pop("context_reserve_tokens", None)
     normalized_extra_params.pop("force_sync_http", None)
 
+    # 提取 HTTP 传输层特殊键：headers / query / body
+    # 它们与一般请求参数不同，分别用于注入 HTTP 请求头、URL 查询参数和请求体字段，
+    # 取出后不会继续留在 extra_params 中，避免被 provider 客户端重复处理。
+    extra_headers = _coerce_headers(normalized_extra_params.pop("headers", None))
+    extra_query = _coerce_dict(normalized_extra_params.pop("query", None))
+    extra_body = _coerce_dict(normalized_extra_params.pop("body", None))
+
     timeout_float = float(timeout) if isinstance(timeout, (int, float)) else None
     return (
         api_key,
@@ -162,7 +192,36 @@ def extract_model_transport_params(
         trust_env,
         force_ipv4,
         normalized_extra_params,
+        extra_headers,
+        extra_query,
+        extra_body,
     )
+
+
+def _coerce_dict(value: Any) -> dict[str, object]:
+    """将任意输入归一化为 ``dict[str, object]``，非 dict 一律视为空字典。"""
+    if isinstance(value, Mapping):
+        return {str(k): v for k, v in value.items()}
+    return {}
+
+
+def _coerce_headers(value: Any) -> dict[str, str]:
+    """将 headers 配置归一化为 ``dict[str, str]``。
+
+    HTTP 请求头值必须是字符串，因此对 bool/number 等做安全转换；
+    非字典输入返回空字典，避免污染下游 SDK 调用。
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    headers: dict[str, str] = {}
+    for k, v in value.items():
+        if isinstance(v, bool):
+            headers[str(k)] = "true" if v else "false"
+        elif v is None:
+            continue
+        else:
+            headers[str(k)] = str(v)
+    return headers
 
 
 def log_provider_request_body(

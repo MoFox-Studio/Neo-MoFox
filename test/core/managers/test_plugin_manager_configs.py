@@ -16,7 +16,7 @@ from src.core.managers.plugin_manager import PluginManager
 
 
 class _TestConfig(BaseConfig):
-    config_name = "test_config"
+    name = "test_config"
 
 
 @dataclass
@@ -188,8 +188,8 @@ async def test_register_components_supports_agent_type() -> None:
     """插件组件注册应支持 Agent 组件类型。"""
 
     class _TestAgent(BaseAgent):
-        agent_name = "planner"
-        agent_description = "planner agent"
+        name = "planner"
+        description = "planner agent"
         associated_types = ["text"]
 
         async def execute(self, task: str) -> tuple[bool, str]:

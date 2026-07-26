@@ -133,30 +133,38 @@ from plugins.my_plugin.config import MyPluginConfig
 
 下面只列插件系统真实识别并自动注册的主要组件类型。
 
+> **统一命名约定**：从 `BaseComponent` 起，所有组件使用统一属性 `name` / `description` 标识自身。
+> 旧属性名（如 `tool_name` / `tool_description`、`action_name` / `action_description` 等）仍可通过 `BaseComponent._legacy_name_attr` / `_legacy_desc_attr` 桥接使用，但会触发 `DeprecationWarning`。
+> **新生成的插件代码一律使用统一属性 `name` / `description`，不要继续使用旧属性名。**
+
 | 组件类型 | 基类 | 必填名称属性 | 何时使用 | 构造函数 | 必须实现 | 返回约定 | 关键边界 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Plugin | `BasePlugin` | `plugin_name` | 作为组件容器 | `__init__(config=None)` | `get_components()` | `list[type]` | 插件本身不是普通组件列表项 |
-| Config | `BaseConfig` | `config_name` | 插件配置 | 无需实例化入口约定 | 定义配置节 | 配置模型 | 必须放入 `BasePlugin.configs` |
-| Tool | `BaseTool` | `tool_name` | 给 LLM 查询信息或计算 | `__init__(plugin)` | `execute()` | `(bool, str | dict)` | 偏信息获取，不做明显副作用 |
-| Action | `BaseAction` | `action_name` | 给 LLM 执行动作 | `__init__(chat_stream, plugin)` | `execute()` | `(bool, str)` | 偏副作用；会注入 `ChatStream` |
-| Agent | `BaseAgent` | `agent_name` | 需要私有 usables 的复杂任务代理 | `__init__(stream_id, plugin)` | `execute()` | `(bool, str | dict)` | `usables` 是私有组件集，不进全局注册表 |
-| Chatter | `BaseChatter` | `chatter_name` | 作为对话主控制器 | `__init__(stream_id, plugin)` | `execute()` | `AsyncGenerator[Wait | Success | Failure | Stop, None]` | 是对话流程核心，不等于普通 Tool |
-| Command | `BaseCommand` | `command_name` | 处理命令式输入 | `__init__(plugin, stream_id)` | 路由方法而非通常重写 `execute()` | `(bool, str)` | 使用 `@cmd_route` 构建 Trie 路由 |
-| Service | `BaseService` | `service_name` | 给其他插件/组件直接调用能力 | `__init__(plugin)` | 自定义公开方法 | 自定 | 适合暴露稳定能力接口 |
-| EventHandler | `BaseEventHandler` | `handler_name` | 响应系统事件 | `__init__(plugin)` | `execute(event_name, params)` | `(EventDecision, dict[str, Any])` | 可订阅、拦截、调整事件参数 |
-| Router | `BaseRouter` | `router_name` | 暴露 HTTP API | `__init__(plugin)` | `register_endpoints()` | 无 | 基于 FastAPI，不要用于聊天逻辑 |
-| Adapter | `BaseAdapter` | `adapter_name` | 平台协议桥接 | `__init__(core_sink, plugin=None, **kwargs)` | `from_platform_message()`、`get_bot_info()` | `MessageEnvelope` / `dict` | 负责平台消息与统一消息模型转换 |
+| Config | `BaseConfig` | `name` | 插件配置 | 无需实例化入口约定 | 定义配置节 | 配置模型 | 必须放入 `BasePlugin.configs` |
+| Tool | `BaseTool` | `name` | 给 LLM 查询信息或计算 | `__init__(plugin)` | `execute()` | `(bool, str | dict)` | 偏信息获取，不做明显副作用 |
+| Action | `BaseAction` | `name` | 给 LLM 执行动作 | `__init__(chat_stream, plugin)` | `execute()` | `(bool, str)` | 偏副作用；会注入 `ChatStream` |
+| Agent | `BaseAgent` | `name` | 需要私有 usables 的复杂任务代理 | `__init__(stream_id, plugin)` | `execute()` | `(bool, str | dict)` | `usables` 是私有组件集，不进全局注册表 |
+| Chatter | `BaseChatter` | `name` | 作为对话主控制器 | `__init__(stream_id, plugin)` | `execute()` | `AsyncGenerator[Wait | Success | Failure | Stop, None]` | 是对话流程核心，不等于普通 Tool |
+| Command | `BaseCommand` | `name` | 处理命令式输入 | `__init__(plugin, stream_id)` | 路由方法而非通常重写 `execute()` | `(bool, str)` | 使用 `@cmd_route` 构建 Trie 路由 |
+| Service | `BaseService` | `name` | 给其他插件/组件直接调用能力 | `__init__(plugin)` | 自定义公开方法 | 自定 | 适合暴露稳定能力接口 |
+| EventHandler | `BaseEventHandler` | `name` | 响应系统事件 | `__init__(plugin)` | `execute(event_name, params)` | `(EventDecision, dict[str, Any])` | 可订阅、拦截、调整事件参数 |
+| Router | `BaseRouter` | `name` | 暴露 HTTP API | `__init__(plugin)` | `register_endpoints()` | 无 | 基于 FastAPI，不要用于聊天逻辑 |
+| Adapter | `BaseAdapter` | `name` | 平台协议桥接 | `__init__(core_sink, plugin=None, **kwargs)` | `from_platform_message()`、`get_bot_info()` | `MessageEnvelope` / `dict` | 负责平台消息与统一消息模型转换 |
+
+> 上表"必填名称属性"列均为统一属性 `name`；对应描述属性为统一属性 `description`（未在表中单列）。
+> Adapter 额外保留 `adapter_version`、`platform` 等适配器专属元数据，不受统一命名影响。
 
 ## 4. 每类组件的精确规则
 
 ### 4.1 Config
 
 - 继承 `BaseConfig`。
+- 必须定义统一属性 `name`（配置节文件名，旧属性 `config_name` 已弃用但仍可用）和 `description`。
 - 使用 `@config_section`、`SectionBase`、`Field` 定义节和字段。
 - 默认配置路径为：
 
 ```text
-config/plugins/{plugin_name}/{config_name}.toml
+config/plugins/{plugin_name}/{name}.toml
 ```
 
 - 可通过 `load_for_plugin()` 加载，也可依赖插件管理器在加载插件时提前处理。
@@ -168,8 +176,8 @@ from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_se
 
 
 class DemoConfig(BaseConfig):
-    config_name = "config"
-    config_description = "demo 插件配置"
+    name = "config"
+    description = "demo 插件配置"
 
     @config_section("plugin")
     class PluginSection(SectionBase):
@@ -181,7 +189,7 @@ class DemoConfig(BaseConfig):
 ### 4.2 Tool
 
 - 继承 `BaseTool`。
-- 必须定义 `tool_name` 和 `tool_description`。
+- 必须定义统一属性 `name` 和 `description`（旧属性 `tool_name` / `tool_description` 已弃用但仍可用）。
 - 必须实现 `async def execute(...) -> tuple[bool, str | dict]`。
 - 参数必须有类型注解和含义清晰的文档字符串，管理器会据此生成 schema。
 - Tool 用于查询和返回信息，不适合承担明确的外部副作用。
@@ -189,7 +197,7 @@ class DemoConfig(BaseConfig):
 ### 4.3 Action
 
 - 继承 `BaseAction`。
-- 必须定义 `action_name` 和 `action_description`。
+- 必须定义统一属性 `name` 和 `description`（旧属性 `action_name` / `action_description` 已弃用但仍可用）。
 - 必须实现 `async def execute(...) -> tuple[bool, str]`。
 - 与 Tool 最大区别：Action 是动作，重点是执行副作用，不是返回信息。
 - `BaseAction` 构造函数会注入 `chat_stream`；如果动作需要上下文消息、历史消息、发送目标等，优先从 `self.chat_stream` 获取。
@@ -197,16 +205,16 @@ class DemoConfig(BaseConfig):
 ### 4.4 Agent
 
 - 继承 `BaseAgent`。
-- 必须定义 `agent_name` 和 `agent_description`。
+- 必须定义统一属性 `name` 和 `description`（旧属性 `agent_name` / `agent_description` 已弃用但仍可用）。
 - 必须实现 `async def execute(...) -> tuple[bool, str | dict]`。
 - `usables` 是 Agent 私有能力集，可以写组件类，也可以写组件签名字符串。
 - Agent 的私有 usables 不进入全局注册表，只对该 Agent 可见。
-- 当需求只是“查询信息”时优先用 Tool；只有当需要让一个子代理编排私有 tools/actions/agents 时才用 Agent。
+- 当需求只是"查询信息"时优先用 Tool；只有当需要让一个子代理编排私有 tools/actions/agents 时才用 Agent。
 
 ### 4.5 Chatter
 
 - 继承 `BaseChatter`。
-- 必须定义 `chatter_name` 和 `chatter_description`。
+- 必须定义统一属性 `name` 和 `description`（旧属性 `chatter_name` / `chatter_description` 已弃用但仍可用）。
 - 必须实现 `async def execute(self) -> AsyncGenerator[ChatterResult, None]`。
 - `ChatterResult` 由 `Wait`、`Success`、`Failure`、`Stop` 组成。
 - Chatter 是对话主流程控制器，会组合 Tool、Action、Agent，而不是替代它们。
@@ -214,22 +222,22 @@ class DemoConfig(BaseConfig):
 ### 4.6 Command
 
 - 继承 `BaseCommand`。
-- 必须定义 `command_name`，可定义 `command_prefix`、`permission_level`。
+- 必须定义统一属性 `name`（旧属性 `command_name` 已弃用但仍可用），可定义 `command_prefix`、`permission_level`。
 - 通常不要重写 `execute()`；正确做法是写若干个被 `@cmd_route(...)` 装饰的方法。
 - 路由方法返回值约定为 `(bool, str)`。
-- `BaseCommand.execute()` 接收的是已经去掉前缀和 `command_name` 的子路由文本，不要按完整原始命令文本编写逻辑。
+- `BaseCommand.execute()` 接收的是已经去掉前缀和 `name` 的子路由文本，不要按完整原始命令文本编写逻辑。
 
 ### 4.7 Service
 
 - 继承 `BaseService`。
-- 必须定义 `service_name` 和 `service_description`。
+- 必须定义统一属性 `name` 和 `description`（旧属性 `service_name` / `service_description` 已弃用但仍可用）。
 - Service 不服务于 LLM schema，而服务于插件间或模块间直接调用。
 - 如果能力应被其他插件稳定复用，优先设计为 Service，而不是伪装成 Tool。
 
 ### 4.8 EventHandler
 
 - 继承 `BaseEventHandler`。
-- 必须定义 `handler_name` 和 `handler_description`。
+- 必须定义统一属性 `name` 和 `description`（旧属性 `handler_name` / `handler_description` 已弃用但仍可用）。
 - 若要初始化订阅，使用 `init_subscribe`。
 - `execute(event_name, params)` 的返回值必须是：
   - `EventDecision.SUCCESS, params`
@@ -240,14 +248,14 @@ class DemoConfig(BaseConfig):
 ### 4.9 Router
 
 - 继承 `BaseRouter`。
-- 必须定义 `router_name` 和 `router_description`。
+- 必须定义统一属性 `name` 和 `description`（旧属性 `router_name` / `router_description` 已弃用但仍可用）。
 - 必须实现 `register_endpoints()` 并在其中向 `self.app` 注册 FastAPI 端点。
 - Router 用于 HTTP 接口，不应用来承载命令、聊天主流程或平台适配逻辑。
 
 ### 4.10 Adapter
 
 - 继承 `BaseAdapter`。
-- 必须定义 `adapter_name`、`adapter_version`、`adapter_description`、`platform`。
+- 必须定义统一属性 `name` 和 `description`（旧属性 `adapter_name` / `adapter_description` 已弃用但仍可用），以及 `adapter_version`、`platform`。
 - 必须实现：
   - `async def from_platform_message(self, raw: Any) -> MessageEnvelope`
   - `async def get_bot_info(self) -> dict[str, Any]`
@@ -262,7 +270,7 @@ class DemoConfig(BaseConfig):
 
 每个插件目录必须提供 `manifest.json`。加载器支持目录、`.zip`、`.mfp` 三种来源，但三者最终都依赖 manifest。
 
-最小示例：
+最小示例（字符串形式，最简）：
 
 ```json
 {
@@ -283,7 +291,37 @@ class DemoConfig(BaseConfig):
     }
   ],
   "entry_point": "plugin.py",
-  "min_core_version": "1.0.0",
+  "api_version": "1.0.0",
+  "python_dependencies": [],
+  "dependencies_required": true
+}
+```
+
+推荐形式（dict，精确声明所用 API 模块）：
+
+```json
+{
+  "name": "demo_plugin",
+  "version": "1.0.0",
+  "description": "Demo plugin",
+  "author": "MoFox Team",
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "tool",
+      "component_name": "demo_tool",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "api_version": {
+    "llm_api": "1.0.0",
+    "send_api": "1.0.0"
+  },
   "python_dependencies": [],
   "dependencies_required": true
 }
@@ -293,10 +331,11 @@ class DemoConfig(BaseConfig):
 
 - `include` 字段必须手工维护。系统不会自动扫描你的组件文件。
 - `component_type` 必须与真实组件类型匹配。
-- `component_name` 必须与组件类上的名称属性匹配，例如 Tool 对应 `tool_name`。
+- `component_name` 必须与组件类上的统一名称属性 `name` 匹配（旧属性如 `tool_name` / `action_name` 已弃用但仍可桥接到 `name`）。
 - `dependencies` 内的每一项都必须是完整组件签名。
 - `entry_point` 默认语义是插件根目录下的 `plugin.py`。
 - 如果声明了 `python_dependencies`，要确保运行环境可安装这些依赖。
+- `api_version` 声明插件用到的插件 API 模块版本，支持字符串（等价于对全部 20 个 `*_api` 模块应用同一要求）与 `dict[str, str]`（仅校验声明模块，key 必须是合法 API 模块名）两种形式。插件 `import` 了任何 `*_api` 模块就应声明此项，优先用 dict 形式精确声明。与 `min_core_version` 同等判断（声明即校验，都声明则都须满足）。
 
 ### 5.1 真实加载行为补充
 
@@ -322,12 +361,58 @@ class DemoConfig(BaseConfig):
 
 前提是该文件确实位于插件目录内部，并且相对导入关系是自洽的。
 
-#### 5.1.3 `min_core_version` 缺失时，当前 loader 的默认值不是文档示例值
+#### 5.1.3 版本兼容性声明
 
-当前 `loader.py` 在字段缺失时会回退到一个默认核心版本要求，而不是简单继承示例里的 `1.0.0`。因此：
+插件通过 `manifest.json` 中的 `api_version` 与 `min_core_version` 声明对核心框架的版本要求。**两者同等判断（AND 语义）**：声明了哪一项就校验哪一项，只要任一项声明且不满足即拒绝注册；两者都未声明才回退到「警告但加载」。不存在二流声明。
 
-- **不要依赖缺省行为。**
-- 始终在 `manifest.json` 中显式写 `min_core_version`。
+##### `api_version`（推荐，声明插件 API 模块版本）
+
+声明插件用到的 **插件 API 模块** 版本（按 20 个 `*_api` 模块逐一校验）。支持两种形式：
+
+- **字符串形式**（最简）：`"api_version": "1.0.0"`，等价于对该版本声明时全部 20 个 API 模块都要求该版本。
+- **dict 形式**（推荐，精确声明）：`"api_version": {"llm_api": "1.0.0", "send_api": "1.2.0"}`，仅校验声明的 keys，未声明的模块不校验。
+
+格式为 `x.y.z`（语义化版本）：
+
+- **主版本号 （x）**：破坏性更新，API 签名或行为发生不可兼容的变更
+- **次版本号 （y）**：部分非兼容性更新，可能包含弃用、行为微调等
+- **小版本号 （z）**：可向下兼容的更新，仅新增可选 API 或修复问题
+
+兼容性检查规则（每个声明模块）：
+
+- 主版本号不一致 → **拒绝加载**（存在破坏性变更）
+- 核心 API 的次版本号低于插件要求 → **拒绝加载**（核心过旧）
+- 核心 API 的次版本号与小版本号均不低于插件要求 → **允许加载**（兼容或仅有可向下兼容的差异）
+- 核心 API 的次版本号高于插件要求 → **允许加载，但警告**（可能存在非兼容变更）
+
+dict 形式示例：
+
+```json
+"api_version": {
+  "llm_api": "1.0.0",
+  "send_api": "1.2.0",
+  "service_api": "1.0.0"
+}
+```
+
+合法 API 模块名（20 个，与 `src/app/plugin_system/api/` 一一对应）：`action_api`、`adapter_api`、`agent_api`、`chat_api`、`command_api`、`config_api`、`database_api`、`event_api`、`llm_api`、`log_api`、`media_api`、`message_api`、`permission_api`、`plugin_api`、`prompt_api`、`router_api`、`send_api`、`service_api`、`storage_api`、`stream_api`。任何不在此清单中的 key 都会被拒绝加载（防止拼写错误被静默接受）。
+
+##### `min_core_version`（声明核心能力版本）
+
+声明插件依赖的 **核心能力** 版本（基于 `CORE_VERSION` 做简单 `>=` 比较）。适用于插件依赖核心某些新功能——例如某些新的事件、新的核心组件机制、新的内核接口等——这些能力不通过 `*_api` 模块暴露，无法被 `api_version` 覆盖，必须由 `min_core_version` 兜底。
+
+```json
+"min_core_version": "1.2.0"
+```
+
+##### `api_version` 与 `min_core_version` 的区别
+
+| 字段 | 校验对象 | 适用场景 |
+|---|---|---|
+| `api_version` | 20 个 `*_api` 插件 API 模块（逐一语义化版本校验） | 插件 `import` 了 `*_api` 模块 |
+| `min_core_version` | `CORE_VERSION`（简单 `>=` 比较） | 插件依赖核心新事件 / 新内核接口 / 新组件机制 |
+
+两个字段是「或」关系，**按需填写**：插件 `import` 了任何 `*_api` 模块就写 `api_version`；插件用到「必须更高版本核心才支持」的能力（新事件、新内核接口、新组件机制）就写 `min_core_version`；两者都不需要也可都不写（仅警告但加载）。一旦声明，即按 AND 同等判断：声明了哪一项就校验哪一项，只要任一项声明且不满足即拒绝注册。
 
 #### 5.1.4 `dependencies.plugins` 目前只用于插件级加载顺序
 
@@ -458,20 +543,23 @@ AI 编写 Adapter 时必须遵守以下认知：
 
 ### 8.1 组件识别依赖继承关系和名称属性
 
-管理器通过组件继承关系识别类型，并读取对应名称属性：
+管理器通过组件继承关系识别类型，并读取统一名称属性 `name`：
 
-- Action -> `action_name`
-- Agent -> `agent_name`
-- Tool -> `tool_name`
-- Adapter -> `adapter_name`
-- Chatter -> `chatter_name`
-- Command -> `command_name`
-- Config -> `config_name`
-- EventHandler -> `handler_name`
-- Service -> `service_name`
-- Router -> `router_name`
+- Action -> `name`
+- Agent -> `name`
+- Tool -> `name`
+- Adapter -> `name`
+- Chatter -> `name`
+- Command -> `name`
+- Config -> `name`
+- EventHandler -> `name`
+- Service -> `name`
+- Router -> `name`
 
-这些名称属性缺失、为空、或与 manifest 不一致，都会造成识别或加载问题。
+> 旧属性名（`action_name` / `tool_name` / `chatter_name` / `command_name` / `config_name` / `handler_name` / `service_name` / `router_name` / `adapter_name` / `agent_name`）由 `BaseComponent` 的 `_legacy_name_attr` 桥接到统一属性 `name`，仍可使用但会触发 `DeprecationWarning`。
+> **新生成的插件代码必须直接使用 `name`**，不要继续依赖旧属性名。
+
+统一属性 `name` 缺失、为空，或与 manifest 中的 `component_name` 不一致，都会造成识别或加载问题。
 
 ### 8.2 dependencies 必须写完整签名
 
@@ -560,6 +648,8 @@ dependencies = ["other_plugin:service:storage"]
 
 ### 9.1 manifest.json
 
+最简形式（字符串 `api_version`，等价于对全部 20 个 API 模块要求 `1.0.0`）：
+
 ```json
 {
   "name": "demo_plugin",
@@ -579,7 +669,38 @@ dependencies = ["other_plugin:service:storage"]
     }
   ],
   "entry_point": "plugin.py",
-  "min_core_version": "1.0.0",
+  "api_version": "1.0.0",
+  "python_dependencies": [],
+  "dependencies_required": true
+}
+```
+
+推荐形式（dict `api_version`，精确声明用到的 API 模块；若还依赖核心新能力可同时填 `min_core_version`，两者 AND 同等判断）：
+
+```json
+{
+  "name": "demo_plugin",
+  "version": "1.0.0",
+  "description": "最小 demo 插件",
+  "author": "MoFox Team",
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "tool",
+      "component_name": "demo_tool",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "api_version": {
+    "llm_api": "1.0.0",
+    "send_api": "1.0.0"
+  },
+  "min_core_version": "1.2.0",
   "python_dependencies": [],
   "dependencies_required": true
 }
@@ -594,8 +715,8 @@ from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_se
 class DemoConfig(BaseConfig):
     """demo 插件配置。"""
 
-    config_name = "config"
-    config_description = "demo 插件配置"
+    name = "config"
+    description = "demo 插件配置"
 
     @config_section("plugin")
     class PluginSection(SectionBase):
@@ -617,8 +738,8 @@ from src.app.plugin_system.base import BaseTool
 class DemoTool(BaseTool):
     """返回简单文本的示例工具。"""
 
-    tool_name = "demo_tool"
-    tool_description = "返回带前缀的文本。"
+    name = "demo_tool"
+    description = "返回带前缀的文本。"
 
     async def execute(
         self,
@@ -677,7 +798,7 @@ AI 在生成插件前，先做下面的判定。
 2. 插件类是否有 `@register_plugin`，以及完整的 `plugin_name`、`plugin_description`、`plugin_version`。
 3. `get_components()` 是否返回类而不是实例。
 4. 配置类是否放在 `configs` 中，而不是放进 `get_components()`。
-5. 每个组件是否定义了正确的名称属性，并与 manifest 中的 `component_name` 一致。
+5. 每个组件是否定义了统一属性 `name`（不要继续使用 `tool_name` / `action_name` 等旧属性名），并与 manifest 中的 `component_name` 一致。
 6. Tool、Action、Agent、Chatter 的方法签名和返回值是否匹配基类要求。
 7. `dependencies` 是否写成完整组件签名。
 8. 是否误把副作用组件写成 Tool，或误把查询组件写成 Action。

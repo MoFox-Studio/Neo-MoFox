@@ -19,6 +19,16 @@ if TYPE_CHECKING:
 
 logger = get_logger("onebot_adapter")
 
+# 控制字符（除常见空格类字符外）移除表
+_INVALID_CHARS = str.maketrans({chr(i): None for i in range(0x20) if i not in (0x09, 0x0A, 0x0D)})
+
+
+def sanitize_text(text: str | None) -> str | None:
+    """移除字符串中可能导致 PostgreSQL UTF-8 存储失败的无效字符"""
+    if text is None:
+        return None
+    return text.translate(_INVALID_CHARS)
+
 # 简单的缓存实现，通过 kernel.storage 实现磁盘持久化存储
 _CACHE_LOADED = False
 _CACHE: dict[str, dict[str, dict[str, Any]]] = {
@@ -337,7 +347,8 @@ async def get_image_format(raw_data: str) -> str:
         format: str: 图片的格式类型，如 'jpeg', 'png', 'gif'等
     """
     image_bytes = await asyncio.to_thread(base64_decode_to_bytes, raw_data)
-    return Image.open(io.BytesIO(image_bytes)).format.lower()
+    img_format = Image.open(io.BytesIO(image_bytes)).format
+    return (img_format or "unknown").lower()
 
 
 async def get_stranger_info(
@@ -386,7 +397,7 @@ async def get_message_detail(
 
 async def get_record_detail(
     file: str,
-    file_id: str | None = None,
+    file_id: str  = "",
     *,
     adapter: "OneBotAdapter | None" = None,
 ) -> dict | None:
@@ -405,7 +416,7 @@ async def get_record_detail(
 
 async def get_forward_message(
     raw_message: dict, *, adapter: "OneBotAdapter | None" = None
-) -> dict[str, Any] | None:
+) -> list[dict[str, Any]] | None:
     forward_message_data: dict = raw_message.get("data", {})
     if not forward_message_data:
         logger.warning("转发消息内容为空")
@@ -433,8 +444,9 @@ async def get_forward_message(
         if len(orjson.dumps(response).decode("utf-8")) > 80
         else orjson.dumps(response).decode("utf-8")
     )
-    response_data: dict = response.get("data")
+    response_data: dict[str, Any] | None = response.get("data")
     if not response_data:
         logger.warning("转发消息内容为空或获取失败")
         return None
-    return response_data.get("messages")
+    messages: list[dict[str, Any]] | None = response_data.get("messages")
+    return messages

@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 
 from src.core.components.types import ChatType
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.chatter import BaseChatter
     from src.core.managers.chatter_manager import ChatterManager
@@ -202,6 +204,7 @@ def get_or_create_chatter_for_stream(
 
 
 __all__ = [
+    "API_VERSION",
     "get_all_chatters",
     "get_chatters_for_plugin",
     "get_chatter_class",

@@ -564,7 +564,6 @@ def initialize_event_manager() -> None:
     """
     get_event_manager()
 
-
 async def on_all_plugins_loaded(
     _: str, params: Dict[str, Any]
 ) -> Tuple[EventDecision, Dict[str, Any]]:

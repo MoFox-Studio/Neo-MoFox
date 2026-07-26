@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
     from src.core.components.loader import PluginManifest
@@ -197,6 +199,7 @@ async def list_unloaded_plugins() -> dict[str, dict]:
 
 
 __all__ = [
+    "API_VERSION",
     "load_plugin_from_manifest",
     "load_plugin",
     "unload_plugin",

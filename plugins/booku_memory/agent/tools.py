@@ -190,8 +190,8 @@ def _pick_tag_triplet(
 class BookuMemoryCommandTool(BaseTool):
     """统一命令工具：memory_command。"""
 
-    tool_name: str = "memory_command"
-    tool_description: str = (
+    name: str = "memory_command"
+    description: str = (
         "Booku Memory 命令工具。"
         "支持 help/search/read/create/update/delete。"
         "使用该工具应当非常频繁，多记多读。"
@@ -399,8 +399,8 @@ class BookuMemoryCommandTool(BaseTool):
 class BookuTemporaryMemoTool(BaseTool):
     """短期临时备忘录工具。"""
 
-    tool_name: str = "temporary_memo"
-    tool_description: str = (
+    name: str = "temporary_memo"
+    description: str = (
         "记录短期关键便签的临时备忘录工具。"
         "主要用来保存短期关键信息，并会自动过期。"
         "由于你看不到跨聊天流的消息，所以通常用于记录当前聊天流的关键信息，这在跨聊天流保持重要信息连续性时非常有用。"

@@ -7,6 +7,7 @@ Command 组件使用 Trie 树进行命令匹配，支持多级命令和参数解
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
@@ -22,6 +23,25 @@ if TYPE_CHECKING:
 
 
 logger = get_logger("command_manager")
+
+# 需要从消息文本开头剥离的"噪声"前缀（引用预览、媒体占位符），
+# 剥离后才能识别用户实际输入的命令。
+_LEADING_NOISE_RE = re.compile(
+    r"^\s*"
+    r"(?:"
+    r"\[回复<[^\>]*>：.*?\]，说："  # 适配器格式: [回复<name(id)>：content]，说：
+    r"|\[回复:[^\]]*\]"            # converter: [回复:msg_id]
+    r"|\[回复\]"                    # converter: [回复]
+    r"|「回复：[^」]*」"             # converter: 「回复：text」
+    r"|\[(?:图片|表情包|语音|文件)(?::[^\]]*)?\]"  # 媒体占位符
+    r")"
+)
+
+# 兜底：匹配 [xxx] 这种格式的未知占位符
+_LEADING_BRACKET_RE = re.compile(r"^\s*\[[^\]]*\]")
+
+# 匹配 @<nickname:user_id> 格式的 @ 占位符
+_LEADING_AT_RE = re.compile(r"^\s*@<[^\>]+:\d+>\s*")
 
 
 class CommandManager:
@@ -55,6 +75,36 @@ class CommandManager:
         """
         self._command_prefixes = prefixes
         logger.info(f"设置命令前缀: {prefixes}")
+
+    @staticmethod
+    def _strip_leading_noise(text: str) -> str:
+        """剥离消息文本开头的引用预览和媒体占位符。
+
+        适配器格式的引用预览、converter 生成的回复前缀和媒体占位符
+        会干扰命令识别。此方法反复剥离这些前缀，直到文本以用户
+        实际输入内容开头。
+
+        Args:
+            text: 消息文本
+
+        Returns:
+            str: 剥离噪声前缀后的文本
+
+        Examples:
+            >>> CommandManager._strip_leading_noise("[回复:abc]/help")
+            '/help'
+            >>> CommandManager._strip_leading_noise("[图片]/help")
+            '/help'
+        """
+        prev = None
+        while prev != text:
+            prev = text
+            text = _LEADING_NOISE_RE.sub("", text, count=1)
+            if text == prev:
+                text = _LEADING_BRACKET_RE.sub("", text, count=1)
+            if text == prev:
+                text = _LEADING_AT_RE.sub("", text, count=1)
+        return text
 
     def get_all_commands(self) -> dict[str, type[BaseCommand]]:
         """获取所有已注册的 Command 组件。
@@ -118,8 +168,7 @@ class CommandManager:
         if not text:
             return False
 
-        stripped = text.strip()
-        return any(stripped.startswith(prefix) for prefix in self._command_prefixes)
+        return any(text.startswith(prefix) for prefix in self._command_prefixes)
 
     def match_command(
         self, text: str
@@ -127,9 +176,10 @@ class CommandManager:
         """匹配命令。
 
         解析文本并查找匹配的 Command 组件。
+        自动剥离引用预览和媒体占位符前缀。
 
         Args:
-            text: 命令文本
+            text: 命令文本（可包含引用/媒体前缀）
 
         Returns:
             tuple[str, type[BaseCommand] | None, list[str]]: (命令路径, Command 类, 参数列表)
@@ -138,10 +188,10 @@ class CommandManager:
             >>> command_path, command_cls, args = manager.match_command("/set seconds 30")
             >>> ("/set", SetCommand, ["seconds", "30"])
         """
-        if not self.is_command(text):
-            return "", None, []
+        stripped = self._strip_leading_noise(text.strip())
 
-        stripped = text.strip()
+        if not self.is_command(stripped):
+            return "", None, []
 
         # 移除命令前缀
         for prefix in self._command_prefixes:
@@ -176,6 +226,7 @@ class CommandManager:
         """执行命令。
 
         解析消息内容并执行匹配的命令。
+        在执行前、执行成功后、执行失败时分别触发对应的生命周期事件。
 
         Args:
             message: 触发的消息
@@ -228,17 +279,125 @@ class CommandManager:
             return False, f"插件未加载: {sig_info['plugin_name']}"
 
         # 创建 Command 实例并执行
+        import time
+        start_time = time.time()
+        routed_text = self._extract_routed_text(command_text, command_path)
         try:
             command_instance = command_cls(plugin=plugin, stream_id=message.stream_id, message_id=message.message_id, message=message)
-            routed_text = self._extract_routed_text(command_text, command_path)
+
+            # 触发命令执行前事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.BEFORE_COMMAND_EXECUTE):
+                    _, modified_params = await event_bus.publish(
+                        EventType.BEFORE_COMMAND_EXECUTE,
+                        {
+                            "signature": signature,
+                            "command_name": command_cls.name,
+                            "command_description": getattr(
+                                command_cls, "description", ""
+                            ),
+                            "command_path": command_path,
+                            "args": args,
+                            "message_text": routed_text,
+                            "message": message,
+                        },
+                    )
+                    # 应用事件处理器对参数的修改
+                    if "message_text" in modified_params:
+                        new_routed_text = modified_params["message_text"]
+                        if isinstance(new_routed_text, str):
+                            routed_text = new_routed_text
+                    if "message" in modified_params:
+                        modified_message = modified_params["message"]
+                        if modified_message is not None:
+                            message = modified_message
+            except Exception:
+                # 事件触发失败不中断命令执行，静默降级
+                pass
+
             # 传入 stream_id 以便命令可以访问聊天流信息
             result = await command_instance.execute(
                 message_text=routed_text,
             )
+
+            execution_time = time.time() - start_time
+            status_emoji = "✅" if result[0] else "❌"
+            logger.info(
+                f"{status_emoji} 命令执行完成: {command_path}, 耗时: {execution_time:.2f}s"
+            )
+
+            # 触发命令执行后事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.AFTER_COMMAND_EXECUTE):
+                    _, modified_params = await event_bus.publish(
+                        EventType.AFTER_COMMAND_EXECUTE,
+                        {
+                            "signature": signature,
+                            "command_name": command_cls.name,
+                            "command_description": getattr(
+                                command_cls, "description", ""
+                            ),
+                            "command_path": command_path,
+                            "args": args,
+                            "message_text": routed_text,
+                            "result": result[1],
+                            "success": result[0],
+                            "execution_time": execution_time,
+                            "message": message,
+                        },
+                    )
+                    # 应用事件处理器对结果和消息的修改
+                    if "result" in modified_params:
+                        new_result = modified_params["result"]
+                        if new_result is not None:
+                            result = (result[0], new_result)
+            except Exception:
+                # 事件触发失败不中断命令执行，静默降级
+                pass
+
             return result
 
         except Exception as e:
+            execution_time = time.time() - start_time
             logger.error(f"执行命令失败 ({command_path}): {e}")
+
+            # 触发命令执行失败事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.ON_COMMAND_EXECUTE_FAILED):
+                    await event_bus.publish(
+                        EventType.ON_COMMAND_EXECUTE_FAILED,
+                        {
+                            "signature": signature,
+                            "command_name": command_cls.name,
+                            "command_description": getattr(
+                                command_cls, "description", ""
+                            ),
+                            "command_path": command_path,
+                            "args": args,
+                            "message_text": routed_text,
+                            "error": e,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "execution_time": execution_time,
+                            "message": message,
+                        },
+                    )
+            except Exception:
+                # 事件触发失败不中断异常传播，静默降级
+                pass
+
             return False, f"命令执行失败: {e}"
 
     def _extract_routed_text(self, text: str, command_path: str) -> str:
@@ -298,8 +457,8 @@ class CommandManager:
 
         # 生成帮助信息
         help_lines = [
-            f"命令: /{command_cls.command_name}",
-            f"描述: {command_cls.command_description}",
+            f"命令: /{command_cls.name}",
+            f"描述: {command_cls.description}",
         ]
 
         # 遍历命令树生成子命令列表
@@ -308,7 +467,7 @@ class CommandManager:
             for child_name, child_node in command_instance._root.children.items():
                 desc = child_node.description or "无描述"
                 help_lines.append(
-                    f"  /{command_cls.command_name} {child_name} - {desc}"
+                    f"  /{command_cls.name} {child_name} - {desc}"
                 )
 
         return "\n".join(help_lines)
@@ -347,7 +506,7 @@ class CommandManager:
             >>> ["/help", "/set", "/status"]
         """
         all_commands = self.get_all_commands()
-        return [f"/{cmd_cls.command_name}" for cmd_cls in all_commands.values()]
+        return [f"/{cmd_cls.name}" for cmd_cls in all_commands.values()]
 
 
 # 全局 Command 管理器实例

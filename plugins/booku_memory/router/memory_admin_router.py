@@ -78,8 +78,8 @@ class MemoryUpdatePayload(BaseModel):
 class BookuMemoryAdminRouter(BaseRouter):
     """Booku Memory 后台管理 Router。"""
 
-    router_name: str = "memory_admin"
-    router_description: str = "Booku Memory 记忆管理后台"
+    name: str = "memory_admin"
+    description: str = "Booku Memory 记忆管理后台"
     custom_route_path: str = "/booku-memory"
     cors_origins: list[str] = ["*"]
 

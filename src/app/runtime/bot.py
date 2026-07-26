@@ -11,12 +11,12 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from src.core.config import CORE_VERSION
 
-from .console_ui import ConsoleUIManager, UILevel
+from .console_ui import ConsoleUIManager
 from .exceptions import BotInitializationError, BotRuntimeError, BotShutdownError
 from .signal_handler import SignalHandler
 
@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from src.kernel.scheduler import UnifiedScheduler
     from src.kernel.storage import JSONStore
     from src.kernel.vector_db import VectorDBBase
+
+    from .command_parser import CommandParser
 
 class Bot:
     """Neo-MoFox Bot 主类
@@ -48,7 +50,6 @@ class Bot:
         config_path: 配置文件路径
         plugins_dir: 插件目录
         log_dir: 日志目录
-        ui_level: UI 详细程度
     """
 
     bot_name: str = "Neo-MoFox"
@@ -58,7 +59,6 @@ class Bot:
         config_path: str = "config/core.toml",
         plugins_dir: str = "plugins",
         log_dir: str = "logs",
-        ui_level: UILevel = UILevel.STANDARD,
     ) -> None:
         """初始化 Bot
 
@@ -66,14 +66,13 @@ class Bot:
             config_path: 配置文件路径
             plugins_dir: 插件目录
             log_dir: 日志目录
-            ui_level: UI 详细程度
         """
         self.config_path = config_path
         self.plugins_dir = plugins_dir
         self.log_dir = log_dir
 
         # UI 管理器
-        self.ui = ConsoleUIManager(level=ui_level)
+        self.ui = ConsoleUIManager()
 
         # 状态标志
         self._initialized = False
@@ -106,6 +105,20 @@ class Bot:
         self._dns_executor: ThreadPoolExecutor | None = None
         self._original_getaddrinfo: Any | None = None
         self._original_getnameinfo: Any | None = None
+
+        # 日志清理启停函数引用（由 initialize() 中 initialize_logger_system 后赋值，
+        # 由 run()/shutdown() 在调度器启停时调用）
+        self._start_logger_cleanup: Callable[[], Awaitable[None]] | None = None
+        self._stop_logger_cleanup: Callable[[], Awaitable[None]] | None = None
+
+        # 信号处理器引用（由 run() 中创建，shutdown() 完成后卸下）
+        # 保留到 shutdown 之后，让 shutdown 期间的第二次 Ctrl+C 仍能强制退出。
+        self._signal_handler: SignalHandler | None = None
+
+        # 命令解析器引用（由 run() 中创建，shutdown() 末尾关闭）
+        # 保留到 shutdown 之后，让 shutdown 期间第二次 Ctrl+C 仍能被
+        # input worker 读取并 raise_signal 触发强制退出。
+        self._command_parser: CommandParser | None = None
 
         # 统计数据
         self._stats: dict[str, int | bool | dict] = {
@@ -308,17 +321,37 @@ class Bot:
         self.ui.update_phase_status("配置", "已加载")
 
         # Step 2: Logger
-        from src.kernel.logger import get_logger, initialize_logger_system, COLOR
+        from src.kernel.logger import (
+            get_logger,
+            initialize_logger_system,
+            start_logger_cleanup,
+            stop_logger_cleanup,
+            COLOR,
+        )
 
-        initialize_logger_system(log_dir=self.log_dir, log_level=self.config.bot.log_level)
+        # 初始化日志系统（含日志自动清理管理器的创建）
+        # 清理调度任务的注册需在调度器启动后调用 start_logger_cleanup() 完成
+        initialize_logger_system(
+            log_dir=self.log_dir,
+            log_level=self.config.bot.log_level,
+            log_cleanup_enabled=self.config.bot.log_cleanup_enabled,
+            log_max_age_days=self.config.bot.log_max_age_days,
+            log_max_files=self.config.bot.log_max_files,
+            log_cleanup_interval_hours=self.config.bot.log_cleanup_interval_hours,
+        )
         self.logger = get_logger(name="console", display="控制台", color=COLOR.BLUE)
+        # 保存启停函数引用，供 run()/shutdown() 调用
+        self._start_logger_cleanup = start_logger_cleanup
+        self._stop_logger_cleanup = stop_logger_cleanup
+
         self.ui.update_phase_status("日志", "已初始化")
 
         await self._preflight_llm_providers()
 
         # Step 3: Event Bus
-        from src.kernel.event import get_event_bus
+        from src.kernel.event import get_event_bus, set_event_handler_timeout
 
+        set_event_handler_timeout(self.config.advanced.event_handler_timeout)
         self.event_bus = get_event_bus()
         self.ui.update_phase_status("事件总线", "已初始化")
 
@@ -556,7 +589,9 @@ class Bot:
             self.logger.warning("")
             self.logger.warning("=" * 80)
             self.logger.warning("")
-            input("输入回车来继续:")
+            from .console_input import prompt_console_input
+
+            prompt_console_input("输入回车来继续:")
 
             # 同时在 UI 中显示警告状态
             self.ui.update_phase_status("HTTP服务器", "⚠️ 不安全配置")
@@ -795,6 +830,14 @@ class Bot:
         await self.scheduler.start()
         self._stats["scheduler_running"] = True
 
+        # 启动日志自动清理任务（由 logger 模块统一管理）
+        if self._start_logger_cleanup is not None:
+            try:
+                await self._start_logger_cleanup()
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"启动日志自动清理失败: {e}")
+
         # 启动云端遥测客户端发送循环
         try:
             from src.app.cloud_telemetry import get_cloud_telemetry_client
@@ -816,19 +859,18 @@ class Bot:
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"触发 ON_START 事件失败: {e}")
-        
-        # 启动实时仪表盘（如果 UI 级别为 VERBOSE）
-        if self.ui.level == UILevel.VERBOSE:
-            self.ui.start_live_dashboard()
 
-        # 启动信号处理器
-        signal_handler = SignalHandler(self)
-        signal_handler.register_signals()
+        # 启动信号处理器（在 shutdown() 末尾统一卸下，保证关闭期间第二次
+        # Ctrl+C 仍能触发 SignalHandler 的强制退出分支）
+        self._signal_handler = SignalHandler(self)
+        self._signal_handler.register_signals()
 
-        # 创建交互式命令解析器
+        # 创建交互式命令解析器（保存为实例属性，shutdown() 末尾关闭，
+        # 让 shutdown 期间第二次 Ctrl+C 仍能被 input worker 读取并
+        # raise_signal 触发强制退出）
         from .command_parser import CommandParser
 
-        command_parser = CommandParser(self)
+        self._command_parser = CommandParser(self)
 
         self.logger.info("Neo-MoFox Bot 启动成功")
         self.logger.info("输入 /help 查看可用命令")
@@ -843,14 +885,10 @@ class Bot:
             while self._running:
                 try:
                     # 读取并执行命令（内部使用短超时轮询）
-                    should_continue = await command_parser.read_and_execute()
+                    should_continue = await self._command_parser.read_and_execute()
 
                     if not should_continue:
                         break
-
-                    # 更新仪表盘统计
-                    if self.ui.level == UILevel.VERBOSE:
-                        await self._update_runtime_stats()
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -866,29 +904,9 @@ class Bot:
 
         finally:
             await self._record_runtime_snapshot(event_name="run_stopped")
-            command_parser.close()
-
-            # 停止实时仪表盘
-            if self.ui.level == UILevel.VERBOSE:
-                self.ui.stop_live_dashboard()
-
-            # 恢复信号处理器
-            signal_handler.restore_handlers()
-
-    async def _update_runtime_stats(self) -> None:
-        """更新运行时统计数据（用于仪表盘）"""
-        assert self.task_manager is not None
-
-        stats = {
-            "plugins_loaded": self._stats["plugins_loaded"],
-            "plugins_failed": self._stats["plugins_failed"],
-            "components_by_type": self._stats["components_by_type"],
-            "tasks_active": len(self.task_manager.get_all_tasks()),
-            "db_connected": self._stats["db_connected"],
-            "scheduler_running": self._stats["scheduler_running"],
-        }
-
-        self.ui.update_dashboard_stats(stats)
+            # 注意：不在这里关闭 command_parser 或卸下 SignalHandler。
+            # 两者都保留到 shutdown() 末尾，让 shutdown 期间第二次 Ctrl+C
+            # 仍能被 input worker 读取并 raise_signal 触发强制退出。
 
     def _install_telemetry_hooks(self) -> None:
         """安装遥测日志订阅。"""
@@ -1119,7 +1137,15 @@ class Bot:
             # 3. 卸载插件
             await self._unload_all_plugins()
 
-            # 4. 停止调度器
+            # 4. 停止日志自动清理任务（由 logger 模块统一管理，需在调度器停止前移除）
+            if self._stop_logger_cleanup is not None:
+                try:
+                    await self._stop_logger_cleanup()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"停止日志自动清理失败: {e}")
+
+            # 5. 停止调度器
             if self.scheduler:
                 await self.scheduler.stop()
                 self._stats["scheduler_running"] = False
@@ -1238,6 +1264,19 @@ class Bot:
             else:
                 print(f"关闭过程中出错: {e}")
             raise BotShutdownError(f"关闭失败: {e}") from e
+        finally:
+            # 关闭命令解析器：input worker 活到现在，shutdown 期间的第二次
+            # Ctrl+C 仍能被它读取并 raise_signal 触发强制退出。shutdown 完成
+            # 后才关闭，并通过 app.exit 注入 EOF 让阻塞中的 prompt() 返回，
+            # 避免终端残留 raw 模式。
+            if self._command_parser is not None:
+                self._command_parser.close()
+                self._command_parser = None
+            # 卸下信号处理器：shutdown 已完成（或失败），不再需要拦截 SIGINT。
+            # 此后 Ctrl+C 恢复为 asyncio/Python 默认行为。
+            if self._signal_handler is not None:
+                self._signal_handler.restore_handlers()
+                self._signal_handler = None
 
     async def start(self) -> None:
         """完整的启动流程（初始化 + 运行 + 关闭）

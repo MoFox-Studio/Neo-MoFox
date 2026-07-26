@@ -116,6 +116,10 @@ def _validate_model_entry(model: dict[str, Any]) -> ModelEntry:
         model.get("tool_call_compat"), bool
     ):
         raise LLMConfigurationError("model.tool_call_compat 必须是 bool")
+    if "force_stream_mode" in model and not isinstance(
+        model.get("force_stream_mode"), bool
+    ):
+        raise LLMConfigurationError("model.force_stream_mode 必须是 bool")
     if "max_context" in model and not isinstance(model.get("max_context"), int):
         raise LLMConfigurationError("model.max_context 必须是 int")
 
@@ -133,8 +137,18 @@ def _validate_model_entry(model: dict[str, Any]) -> ModelEntry:
             raise LLMConfigurationError(
                 "model.extra_params.context_reserve_tokens 必须是 int"
             )
+        # HTTP 层特殊键：headers/query/body，必须为 dict，否则透传给 SDK 会触发类型错误
+        for _special_key in ("headers", "query", "body"):
+            _special_val = extra_params.get(_special_key)
+            if _special_val is None:
+                continue
+            if not isinstance(_special_val, dict):
+                raise LLMConfigurationError(
+                    f"model.extra_params.{_special_key} 必须是 dict"
+                )
 
     model.setdefault("tool_call_compat", False)
+    model.setdefault("force_stream_mode", False)
     model.setdefault("max_context", 0)
     model.setdefault("cache_hit_price_in", model.get("price_in", 0.0))
     return model  # type: ignore[return-value]

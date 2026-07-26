@@ -43,7 +43,11 @@ async def test_send_text_infers_platform_from_stream_info(
     captured = _Captured()
 
     class _FakeMessageSender:
-        async def send_message(self, message: object) -> bool:
+        async def send_message(
+            self,
+            message: object,
+            adapter_signature: str | None = None,
+        ) -> bool:
             captured.called = True
             captured.message = message
             return True
@@ -92,7 +96,11 @@ async def test_send_text_returns_false_when_platform_cannot_be_resolved(
             raise AssertionError("不应在 platform 未解析时查询 bot_info")
 
     class _FakeMessageSender:
-        async def send_message(self, message: object) -> bool:
+        async def send_message(
+            self,
+            message: object,
+            adapter_signature: str | None = None,
+        ) -> bool:
             raise AssertionError("不应在 platform 未解析时发送消息")
 
     monkeypatch.setattr(

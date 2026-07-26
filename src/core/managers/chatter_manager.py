@@ -1,13 +1,13 @@
 """Chatter 管理器。
 
-本模块提供 Chatter 管理器，负责 Chatter 组件的注册、发现和生命周期管理。
+本模块提供 Chatter 管理器，负责 Chatter 组件的注册、发现、生命周期管理和恢复控制。
 Chatter 是 Bot 的智能核心，定义对话逻辑和 LLMUsable 过滤。
 管理器维护 Chatter 组件的全局集合，并提供查询接口。
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 
@@ -104,13 +104,13 @@ class ChatterManager:
             >>> manager.register_active_chatter("stream_1", chatter_instance)
         """
         self._active_chatters[stream_id] = chatter
-        logger.debug(f"注册活跃 Chatter: stream_id={stream_id}, chatter={chatter.chatter_name}")
+        logger.debug(f"注册活跃 Chatter: stream_id={stream_id}, chatter={chatter.name}")
 
     def bind_chatter_for_stream(self, stream_id: str, chatter: BaseChatter) -> None:
         """显式绑定 chatter 到指定 stream。"""
         self._active_chatters[stream_id] = chatter
         logger.info(
-            f"显式绑定 Chatter: stream_id={stream_id}, chatter={chatter.chatter_name}"
+            f"显式绑定 Chatter: stream_id={stream_id}, chatter={chatter.name}"
         )
 
     def restore_stream_to_default(self, stream_id: str) -> bool:
@@ -148,6 +148,45 @@ class ChatterManager:
             >>> chatter = manager.get_chatter_by_stream("stream_1")
         """
         return self._active_chatters.get(stream_id)
+
+    async def resume_chatter(
+        self,
+        stream_id: str,
+        source: str,
+        *,
+        extra: dict[str, Any] | None = None,
+        context_key: str = "",
+    ) -> bool:
+        """恢复一个被 Wait 挂起的 Chatter。
+
+        向指定聊天流的驱动循环注入 WaitResumeEvent，下一 Tick
+        时 chatter 的 execute() 生成器将收到该事件并继续执行。
+
+        Args:
+            stream_id: 聊天流 ID
+            source:    resume 触发来源，自由字符串。
+                       内置约定值：message / timer / sub_agent / internal_context
+            extra:     可选的附加数据，通过 WaitResumeEvent.extra 传递给 chatter
+            context_key: internal_context 场景下的上下文键
+
+        Returns:
+            True 表示已成功注入 resume 事件，False 表示聊天流不存在
+
+        Examples:
+            >>> from src.core.managers.chatter_manager import get_chatter_manager
+            >>> await get_chatter_manager().resume_chatter("stream_1", source="sub_agent")
+        """
+        from src.core.components.base.chatter import WaitResumeEvent
+        from src.core.transport.distribution.stream_loop_manager import (
+            get_stream_loop_manager,
+        )
+
+        event = WaitResumeEvent(
+            source=source,
+            extra=extra or {},
+            context_key=context_key,
+        )
+        return await get_stream_loop_manager().trigger_external_resume(stream_id, event)
 
     def get_or_create_chatter_for_stream(
         self,
@@ -193,7 +232,7 @@ class ChatterManager:
         self.register_active_chatter(stream_id, chatter)
         logger.info(
             f"自动绑定 Chatter: stream_id={stream_id}, "
-            f"chatter={chatter.chatter_name}, chat_type={chat_type}, platform={platform}"
+            f"chatter={chatter.name}, chat_type={chat_type}, platform={platform}"
         )
         return chatter
 

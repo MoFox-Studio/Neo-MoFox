@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any
 from src.app.plugin_system.api.log_api import get_logger
 from src.core.components.base import BaseEventHandler
 from src.core.components.types import EventType
-from src.core.prompt import PROMPT_BUILD_EVENT
 from src.kernel.event import EventDecision
 
 from .config import BookuMemoryConfig
@@ -110,8 +109,8 @@ def _service(plugin: Any) -> BookuKnowledgeService:
 class BookuMemoryStartupIngestHandler(BaseEventHandler):
     """程序启动后自动导入本地知识库文档。并注入system_reminder"""
 
-    handler_name: str = "booku_memory_startup_ingest"
-    handler_description: str = "程序启动时按配置路径自动导入文档到本地知识库"
+    name: str = "booku_memory_startup_ingest"
+    description: str = "程序启动时按配置路径自动导入文档到本地知识库"
     weight: int = 5
     intercept_message: bool = False
     init_subscribe: list[EventType | str] = [EventType.ON_START]
@@ -289,11 +288,11 @@ class MemoryFlashbackInjector(BaseEventHandler):
     - 在目标层中按 activation_count 反向加权抽取（激活次数低更易被抽到）。
     """
 
-    handler_name: str = "memory_flashback_injector"
-    handler_description: str = "在 default_chatter user prompt extra 板块注入记忆闪回"
+    name: str = "memory_flashback_injector"
+    description: str = "在 default_chatter user prompt extra 板块注入记忆闪回"
     weight: int = 10
     intercept_message: bool = False
-    init_subscribe: list[str] = ["on_prompt_build"]
+    init_subscribe: list[EventType | str] = [EventType.ON_PROMPT_BUILD]
 
     def __init__(self, plugin: Any) -> None:
         super().__init__(plugin)
@@ -440,11 +439,11 @@ class MemoryFlashbackInjector(BaseEventHandler):
 class MemoryToolUsageWarningHandler(BaseEventHandler):
     """跟踪 actor 记忆工具使用情况，并按流注入一次性告警。"""
 
-    handler_name: str = "memory_tool_usage_warning_handler"
-    handler_description: str = "跟踪 actor 连续未使用 memory_command 的轮次，并向对应 prompt 注入告警"
+    name: str = "memory_tool_usage_warning_handler"
+    description: str = "跟踪 actor 连续未使用 memory_command 的轮次，并向对应 prompt 注入告警"
     weight: int = 12
     intercept_message: bool = False
-    init_subscribe: list[EventType | str] = [PROMPT_BUILD_EVENT, EventType.AFTER_CHATTER_STEP]
+    init_subscribe: list[EventType | str] = [EventType.ON_PROMPT_BUILD, EventType.AFTER_CHATTER_STEP]
 
     async def execute(
         self, event_name: str, params: dict[str, Any]

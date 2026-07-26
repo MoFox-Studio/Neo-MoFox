@@ -125,6 +125,7 @@ class MessageSender:
 
             # 7. 写入历史消息
             await self._persist_sent_message_to_history(message)
+            await self._emit_sent_event(message, envelope, adapter_signature)
 
             # 提取消息文本用于日志
             msg_text = (
@@ -277,6 +278,28 @@ class MessageSender:
         except Exception as e:
             logger.warning(f"触发发送事件失败: {e}")
             return True  # 异常时默认继续发送
+
+    async def _emit_sent_event(
+        self,
+        message: "Message",
+        envelope: MessageEnvelope,
+        adapter_signature: str,
+    ) -> None:
+        """在平台发送与历史持久化成功后发布事实事件。"""
+        try:
+            from src.core.components.types import EventType
+            from src.core.managers.event_manager import get_event_manager
+
+            await get_event_manager().publish_event(
+                EventType.AFTER_MESSAGE_SENT,
+                {
+                    "message": message,
+                    "envelope": envelope,
+                    "adapter_signature": adapter_signature,
+                },
+            )
+        except Exception as exc:
+            logger.warning(f"触发发送完成事件失败: {exc}")
 
 
 # 全局单例

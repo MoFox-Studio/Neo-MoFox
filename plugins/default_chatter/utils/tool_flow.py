@@ -6,13 +6,19 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from src.core.models.message import Message
-from src.kernel.logger import Logger
-from src.kernel.llm import LLMPayload, ROLE, Text, ToolResult
-from src.kernel.llm import ToolCall, ToolRegistry
+from src.app.plugin_system.api.log_api import Logger
+from src.app.plugin_system.types import (
+    LLMPayload,
+    Message,
+    ROLE,
+    Text,
+    ToolCall,
+    ToolRegistry,
+    ToolResult,
+)
 from src.kernel.concurrency import get_watchdog
 
-from .type_defs import LLMResponseLike
+from ..type_defs import LLMResponseLike
 
 
 @dataclass
@@ -32,6 +38,7 @@ class ToolCallOutcome:
     should_stop: bool = False
     stop_minutes: float = 0.0
     has_pending_tool_results: bool = False
+    execution_results: list[dict[str, object]] | None = None
 
 
 async def process_tool_calls(
@@ -69,7 +76,7 @@ async def process_tool_calls(
     Returns:
         ToolCallOutcome: 本轮控制流与普通调用执行后的汇总结果。
     """
-    outcome = ToolCallOutcome()
+    outcome = ToolCallOutcome(execution_results=[])
     seen_call_signatures: set[str] = set()
     pending_calls: list[ToolCall] = []
 
@@ -83,7 +90,10 @@ async def process_tool_calls(
         results = await run_tool_call(current_pending, response, usable_map, trigger_msg)
 
         for pending_call, (appended, success) in zip(current_pending, results, strict=False):
-            _ = success
+            assert outcome.execution_results is not None
+            outcome.execution_results.append(
+                {"name": pending_call.name, "success": bool(success)}
+            )
 
             if appended and not pending_call.name.startswith("action-"):
                 outcome.has_pending_tool_results = True

@@ -300,8 +300,8 @@ class BookuMemoryService(BaseService):
     对外提供记忆写入、检索、归档等能力。
     """
 
-    service_name: str = "booku_memory"
-    service_description: str = "Booku 记忆服务，提供写入判重与检索重塑"
+    name: str = "booku_memory"
+    description: str = "Booku 记忆服务，提供写入判重与检索重塑"
     version: str = "1.0.0"
 
     _repo: BookuMemoryMetadataRepository | None = None

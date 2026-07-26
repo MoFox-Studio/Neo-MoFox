@@ -11,8 +11,8 @@ from src.core.components.types import ChatType
 class ConcreteAction(BaseAction):
     """具体的 Action 实现用于测试。"""
 
-    action_name = "test_action"
-    action_description = "A test action"
+    name = "test_action"
+    description = "A test action"
     primary_action = False
     chatter_allow = []
     chat_type = ChatType.ALL
@@ -44,8 +44,8 @@ class TestBaseAction:
         action = ConcreteAction(mock_chat_stream, mock_plugin)
         assert action.chat_stream == mock_chat_stream
         assert action.plugin == mock_plugin
-        assert action.action_name == "test_action"
-        assert action.action_description == "A test action"
+        assert action.name == "test_action"
+        assert action.description == "A test action"
         assert action.primary_action is False
 
     def test_get_signature(self, mock_chat_stream, mock_plugin):
@@ -326,8 +326,8 @@ class TestActionAttributes:
         from src.core.components.types import ChatType
 
         class CustomAction(BaseAction):
-            action_name = "custom_action"
-            action_description = "Custom action description"
+            name = "custom_action"
+            description = "Custom action description"
             primary_action = True
             chatter_allow = ["chatter1", "chatter2"]
             chat_type = ChatType.GROUP
@@ -339,8 +339,8 @@ class TestActionAttributes:
                 return True, "done"
 
         action = CustomAction(mock_chat_stream, mock_plugin)
-        assert action.action_name == "custom_action"
-        assert action.action_description == "Custom action description"
+        assert action.name == "custom_action"
+        assert action.description == "Custom action description"
         assert action.primary_action is True
         assert action.chatter_allow == ["chatter1", "chatter2"]
         assert action.chat_type == ChatType.GROUP
@@ -356,8 +356,8 @@ class TestActionAssociatedTypesValidation:
         """associated_types 为空时应抛出异常。"""
 
         class InvalidAction(BaseAction):
-            action_name = "invalid_action"
-            action_description = "invalid"
+            name = "invalid_action"
+            description = "invalid"
             associated_types = []
 
             async def execute(self, data: str) -> tuple[bool, str]:

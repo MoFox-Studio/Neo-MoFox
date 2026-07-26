@@ -50,10 +50,10 @@ def _validate_bot_identity(config: OneBotAdapterConfig) -> None:
 class OneBotAdapter(BaseAdapter):
     """OneBot 适配器 - 完全基于 mofox-wire 架构"""
 
-    adapter_name = "onebot_adapter"
+    name = "onebot_adapter"
     adapter_version = "2.0.0"
     adapter_author = "MoFox Team"
-    adapter_description = "基于 MoFox-Bus 的 OneBot 11 适配器"
+    description = "基于 MoFox-Bus 的 OneBot 11 适配器"
     platform = "qq"
 
     run_in_subprocess = False
@@ -239,18 +239,19 @@ class OneBotAdapter(BaseAdapter):
         try:
             # 消息事件
             if post_type == "message":
-                return await self.message_handler.handle_raw_message(raw)  # type: ignore[return-value]
+                return await self.message_handler.handle_raw_message(raw) 
 
             # 通知事件
             elif post_type == "notice":
-                return await self.notice_handler.handle_notice(raw)  # type: ignore[return-value]
+                return await self.notice_handler.handle_notice(raw)  
 
             # 元事件
             elif post_type == "meta_event":
-                return await self.meta_event_handler.handle_meta_event(raw)  # type: ignore[return-value]
+                return await self.meta_event_handler.handle_meta_event(raw)  
 
             # 未知事件类型
             else:
+                logger.warning(f"未知事件类型:{post_type},raw={raw}")
                 return None
         except ValueError as ve:
             logger.warning(f"处理 OneBot 事件时数据无效: {ve}")
@@ -351,11 +352,11 @@ class OneBotAdapter(BaseAdapter):
 class OneBotAdapterPlugin(BasePlugin):
     """OneBot 适配器插件"""
 
-    plugin_name = "onebot_adapter"
-    plugin_version = "2.0.0"
-    plugin_author = "MoFox Team"
-    plugin_description = "OneBot 11 适配器（基于 Neo-MoFox 重写）"
-    configs = [OneBotAdapterConfig]
+    plugin_name: str = "onebot_adapter"
+    plugin_version: str = "2.0.0"
+    plugin_author: str = "MoFox Team"
+    plugin_description: str = "OneBot 11 适配器（基于 Neo-MoFox 重写）"
+    configs: list[type] = [OneBotAdapterConfig]
 
 
     def get_components(self) -> list[type]:
@@ -363,5 +364,10 @@ class OneBotAdapterPlugin(BasePlugin):
 
         Returns:
             list[type]: 插件内所有组件类的列表
+
         """
-        return [OneBotAdapter]
+        components = []
+        config = cast(OneBotAdapterConfig, self.config)
+        if config.plugin.enabled:
+            components.append(OneBotAdapter)
+        return components

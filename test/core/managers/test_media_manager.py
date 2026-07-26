@@ -14,10 +14,14 @@
 from __future__ import annotations
 
 import pytest
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 import base64
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
 from src.core.managers.media_manager import MediaManager, get_media_manager
+from src.core.models.sql_alchemy import Base, Images, Voices
 
 
 class TestMediaManagerInit:
@@ -70,72 +74,72 @@ class TestMediaManagerInit:
             assert manager1 is manager2
 
 
-class TestMediaManagerSkipVLM:
-    """测试 VLM 跳过功能。"""
+class TestMediaManagerSkipRecognition:
+    """测试识别跳过功能。"""
     
-    def test_skip_vlm_for_stream(self) -> None:
-        """测试为特定流跳过 VLM。"""
+    def test_skip_recognition_for_stream(self) -> None:
+        """测试为特定流跳过识别。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
             
-            manager.skip_vlm_for_stream("stream_123")
+            manager.skip_recognition_for_stream("stream_123")
             
-            assert manager.should_skip_vlm("stream_123") is True
+            assert manager.should_skip_recognition("stream_123") is True
     
-    def test_unskip_vlm_for_stream(self) -> None:
-        """测试恢复特定流的 VLM。"""
+    def test_unskip_recognition_for_stream(self) -> None:
+        """测试恢复特定流的识别。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
             
-            manager.skip_vlm_for_stream("stream_123")
-            assert manager.should_skip_vlm("stream_123") is True
+            manager.skip_recognition_for_stream("stream_123")
+            assert manager.should_skip_recognition("stream_123") is True
             
-            manager.unskip_vlm_for_stream("stream_123")
-            assert manager.should_skip_vlm("stream_123") is False
+            manager.unskip_recognition_for_stream("stream_123")
+            assert manager.should_skip_recognition("stream_123") is False
     
-    def test_should_skip_vlm_not_in_list(self) -> None:
+    def test_should_skip_recognition_not_in_list(self) -> None:
         """测试未跳过的流。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
             
-            assert manager.should_skip_vlm("stream_456") is False
+            assert manager.should_skip_recognition("stream_456") is False
 
-    def test_skip_vlm_for_stream_with_media_types(self) -> None:
-        """指定 media_types 时只对该类型生效，其余类型仍走 VLM。"""
+    def test_skip_recognition_for_stream_with_media_types(self) -> None:
+        """指定 media_types 时只对该类型生效，其余类型仍走识别。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
 
-            manager.skip_vlm_for_stream("stream_dfc", media_types=("image",))
+            manager.skip_recognition_for_stream("stream_dfc", media_types=("image",))
 
             # 整流粒度查询：只要注册过任意类型，都视为跳过
-            assert manager.should_skip_vlm("stream_dfc") is True
+            assert manager.should_skip_recognition("stream_dfc") is True
             # 类型粒度查询
-            assert manager.should_skip_vlm("stream_dfc", "image") is True
-            assert manager.should_skip_vlm("stream_dfc", "emoji") is False
-            assert manager.should_skip_vlm("stream_dfc", "voice") is False
+            assert manager.should_skip_recognition("stream_dfc", "image") is True
+            assert manager.should_skip_recognition("stream_dfc", "emoji") is False
+            assert manager.should_skip_recognition("stream_dfc", "voice") is False
 
-    def test_skip_vlm_for_stream_default_skips_all_types(self) -> None:
+    def test_skip_recognition_for_stream_default_skips_all_types(self) -> None:
         """不指定 media_types 时跳过所有媒体类型，保持向后兼容。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
 
-            manager.skip_vlm_for_stream("stream_kfc")
+            manager.skip_recognition_for_stream("stream_kfc")
 
-            assert manager.should_skip_vlm("stream_kfc") is True
-            assert manager.should_skip_vlm("stream_kfc", "image") is True
-            assert manager.should_skip_vlm("stream_kfc", "emoji") is True
-            assert manager.should_skip_vlm("stream_kfc", "voice") is True
+            assert manager.should_skip_recognition("stream_kfc") is True
+            assert manager.should_skip_recognition("stream_kfc", "image") is True
+            assert manager.should_skip_recognition("stream_kfc", "emoji") is True
+            assert manager.should_skip_recognition("stream_kfc", "voice") is True
 
-    def test_unskip_vlm_clears_typed_skip(self) -> None:
+    def test_unskip_recognition_clears_typed_skip(self) -> None:
         """unskip 必须同时清掉按类型注册的跳过。"""
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
 
-            manager.skip_vlm_for_stream("stream_dfc", media_types=("image",))
-            manager.unskip_vlm_for_stream("stream_dfc")
+            manager.skip_recognition_for_stream("stream_dfc", media_types=("image",))
+            manager.unskip_recognition_for_stream("stream_dfc")
 
-            assert manager.should_skip_vlm("stream_dfc") is False
-            assert manager.should_skip_vlm("stream_dfc", "image") is False
+            assert manager.should_skip_recognition("stream_dfc") is False
+            assert manager.should_skip_recognition("stream_dfc", "image") is False
 
 
 class TestMediaManagerRecognizeMedia:
@@ -209,10 +213,10 @@ class TestMediaManagerRecognizeMedia:
         with patch('src.core.managers.media_manager.get_model_set_by_task'):
             manager = MediaManager()
             
-            manager.skip_vlm_for_stream("stream_123")
+            manager.skip_recognition_for_stream("stream_123")
             test_data = base64.b64encode(b"test_image_data").decode()
             
-            # 跳过 VLM 识别的流使用缓存
+            # 跳过识别 识别的流使用缓存
             with patch.object(manager, '_get_cached_description', new_callable=AsyncMock) as mock_cache:
                 mock_cache.return_value = None
                 
@@ -373,7 +377,7 @@ class TestMediaManagerEdgeCases:
 
 
 class TestMediaManagerRecognizeVoice:
-    """测试语音识别（ASR）功能。"""
+    """测试语音识别（ASR）功能（通过统一 recognize_media 入口，media_type='voice'）。"""
 
     @pytest.mark.asyncio
     async def test_recognize_voice_asr_not_available(self) -> None:
@@ -384,7 +388,7 @@ class TestMediaManagerRecognizeVoice:
             manager = MediaManager()
             audio_b64 = base64.b64encode(b"fake_wav_data").decode()
 
-            result = await manager.recognize_voice(audio_b64)
+            result = await manager.recognize_media(audio_b64, "voice")
 
             assert result is None
 
@@ -406,7 +410,7 @@ class TestMediaManagerRecognizeVoice:
             with patch.object(manager, '_recognize_with_asr', new_callable=AsyncMock) as mock_asr:
                 mock_asr.return_value = "你好，世界"
 
-                result = await manager.recognize_voice(audio_b64)
+                result = await manager.recognize_media(audio_b64, "voice")
 
                 assert result == "你好，世界"
                 mock_asr.assert_called_once_with(audio_b64)
@@ -428,7 +432,7 @@ class TestMediaManagerRecognizeVoice:
             with patch.object(manager, '_recognize_with_asr', new_callable=AsyncMock) as mock_asr:
                 mock_asr.return_value = None
 
-                result = await manager.recognize_voice(audio_b64)
+                result = await manager.recognize_media(audio_b64, "voice")
 
                 assert result is None
 
@@ -449,7 +453,7 @@ class TestMediaManagerRecognizeVoice:
             with patch.object(manager, '_recognize_with_asr', new_callable=AsyncMock) as mock_asr:
                 mock_asr.side_effect = RuntimeError("ASR 连接失败")
 
-                result = await manager.recognize_voice(audio_b64)
+                result = await manager.recognize_media(audio_b64, "voice")
 
                 assert result is None
 
@@ -499,3 +503,297 @@ class TestMediaManagerRecognizeVoice:
             result = await manager._recognize_with_asr(audio_b64)
 
             assert result is None
+
+
+class TestMediaManagerSaveUniquePathRegression:
+    """回归测试：同一路径不同 hash 不应触发 UNIQUE constraint failed: images.path。
+
+    历史 bug：``save_media_info`` 仅按 ``image_id`` 查询存在性，而 ``Images.path``
+    上有 UNIQUE 约束。同一 file_path 以不同 media_hash 写入时，image_id 查不到
+    旧记录 → 走 INSERT → path 已存在 → IntegrityError。
+
+    这些用例使用真实内存 SQLite + 真实表结构验证修复。
+    """
+
+    @staticmethod
+    def _make_manager() -> MediaManager:
+        """构造一个绕过 __init__ 的 MediaManager，仅用于调用 save/get 方法。"""
+        return MediaManager.__new__(MediaManager)
+
+    @pytest.fixture
+    async def real_session_factory(self):
+        """创建内存 SQLite 引擎与会话工厂，建好 Images/Voices 表。"""
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all, tables=[Images.__table__, Voices.__table__])
+        factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+        try:
+            yield factory
+        finally:
+            await engine.dispose()
+
+    @staticmethod
+    def _patch_session(factory):
+        """把 media_manager.get_db_session 替换为使用真实 factory 的实现。"""
+
+        @asynccontextmanager
+        async def _real_session():
+            async with factory() as session:
+                try:
+                    yield session
+                    if session.is_active:
+                        await session.commit()
+                except Exception:
+                    if session.is_active:
+                        await session.rollback()
+                    raise
+                finally:
+                    await session.close()
+
+        return patch("src.core.managers.media_manager.get_db_session", lambda: _real_session())
+
+    @pytest.mark.asyncio
+    async def test_same_path_different_hash_updates_existing(self, real_session_factory) -> None:
+        """同一路径不同 hash 第二次写入应更新原记录而非触发 UNIQUE 冲突。"""
+        manager = self._make_manager()
+        with self._patch_session(real_session_factory):
+            await manager.save_media_info(
+                media_hash="hash_A",
+                media_type="image",
+                file_path="/media/img.jpg",
+                description="first",
+            )
+            # 第二次：相同 path，不同 hash —— 修复前这里会抛 IntegrityError
+            await manager.save_media_info(
+                media_hash="hash_B",
+                media_type="image",
+                file_path="/media/img.jpg",
+                description="second",
+                vlm_processed=True,
+            )
+
+        async with real_session_factory() as s:
+            rows = (await s.execute(__import__("sqlalchemy").select(Images))).scalars().all()
+            assert len(rows) == 1  # 没有重复插入
+            row = rows[0]
+            assert row.path == "/media/img.jpg"
+            assert row.image_id == "hash_B"  # image_id 同步为最新 hash
+            assert row.count == 2  # 计数累加
+            assert row.description == "second"
+            assert row.vlm_processed is True
+
+    @pytest.mark.asyncio
+    async def test_same_hash_second_call_increments_count(self, real_session_factory) -> None:
+        """相同 hash 第二次写入应走更新分支，count 累加。"""
+        manager = self._make_manager()
+        with self._patch_session(real_session_factory):
+            await manager.save_media_info("hash_X", "image", "/m/x.png")
+            await manager.save_media_info("hash_X", "image", "/m/x.png")
+            await manager.save_media_info("hash_X", "image", "/m/x.png")
+
+        async with real_session_factory() as s:
+            rows = (await s.execute(__import__("sqlalchemy").select(Images))).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].count == 3
+
+    @pytest.mark.asyncio
+    async def test_distinct_paths_create_separate_rows(self, real_session_factory) -> None:
+        """不同路径应分别建行。"""
+        manager = self._make_manager()
+        with self._patch_session(real_session_factory):
+            await manager.save_media_info("hash_1", "image", "/m/a.png")
+            await manager.save_media_info("hash_2", "image", "/m/b.png")
+
+        async with real_session_factory() as s:
+            rows = (await s.execute(__import__("sqlalchemy").select(Images))).scalars().all()
+            assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_voice_same_path_different_hash_updates(self, real_session_factory) -> None:
+        """save_voice_info 同型 bug 回归：同路径不同 hash 应更新而非冲突。"""
+        manager = self._make_manager()
+        with self._patch_session(real_session_factory):
+            await manager.save_voice_info(
+                voice_hash="vh_A",
+                file_path="/media/v1.wav",
+                description="first",
+            )
+            await manager.save_voice_info(
+                voice_hash="vh_B",
+                file_path="/media/v1.wav",
+                description="second",
+                asr_processed=True,
+            )
+
+        async with real_session_factory() as s:
+            rows = (await s.execute(__import__("sqlalchemy").select(Voices))).scalars().all()
+            assert len(rows) == 1
+            row = rows[0]
+            assert row.voice_id == "vh_B"
+            assert row.path == "/media/v1.wav"
+            assert row.count == 2
+            assert row.description == "second"
+            assert row.asr_processed is True
+
+
+class TestGifKeyFrameExtraction:
+    """测试 GIF 关键帧提取与拼接功能。"""
+
+    @staticmethod
+    def _make_gif_base64(num_frames: int = 3, size: tuple[int, int] = (50, 50)) -> str:
+        """生成多帧 GIF 的 base64 字符串用于测试。
+
+        Args:
+            num_frames: GIF 帧数。
+            size: 每帧的尺寸 (width, height)。
+
+        Returns:
+            纯净的 base64 字符串（无 data URL 前缀）。
+        """
+        import io
+
+        from PIL import Image as PILImage
+
+        frames: list[PILImage.Image] = []
+        for i in range(num_frames):
+            frame = PILImage.new("RGB", size, (i * 30 + 10, 100, 200))
+            frames.append(frame)
+
+        buf = io.BytesIO()
+        frames[0].save(
+            buf,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=100,
+            loop=0,
+        )
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def test_extract_gif_returns_png_base64(self) -> None:
+        """提取多帧 GIF 应返回非空 PNG base64 字符串。"""
+        gif_b64 = self._make_gif_base64(num_frames=4)
+        result = MediaManager._extract_gif_key_frames(gif_b64, max_frames=8)
+
+        assert result is not None
+        assert isinstance(result, str)
+        assert len(result) > 0
+        # 验证可解码为 PNG
+        raw = base64.b64decode(result)
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_extract_gif_single_frame(self) -> None:
+        """单帧 GIF 应直接转为 PNG 返回。"""
+        gif_b64 = self._make_gif_base64(num_frames=1)
+        result = MediaManager._extract_gif_key_frames(gif_b64, max_frames=8)
+
+        assert result is not None
+        raw = base64.b64decode(result)
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_extract_gif_sampling_max_frames(self) -> None:
+        """帧数超过 max_frames 时应均匀采样到 max_frames 帧。"""
+        gif_b64 = self._make_gif_base64(num_frames=20)
+
+        with patch("src.core.managers.media_manager.logger") as mock_log:
+            result = MediaManager._extract_gif_key_frames(gif_b64, max_frames=4)
+            # 不应有警告（提取成功）
+            mock_log.warning.assert_not_called()
+
+        assert result is not None
+        # 验证拼接图宽度应大于单帧宽度（4 帧 * 50px = 200px）
+        import io
+        from PIL import Image as PILImage
+
+        raw = base64.b64decode(result)
+        img = PILImage.open(io.BytesIO(raw))
+        assert img.width == 200
+        assert img.height == 50
+
+    def test_extract_gif_invalid_data_returns_none(self) -> None:
+        """无效 base64 数据应返回 None 并记录警告。"""
+        with patch("src.core.managers.media_manager.logger") as mock_log:
+            result = MediaManager._extract_gif_key_frames("invalid_base64_data!!!", max_frames=8)
+
+        assert result is None
+        mock_log.warning.assert_called_once()
+
+    def test_extract_gif_non_gif_data_returns_single_frame_png(self) -> None:
+        """非 GIF 数据（如 PNG）应被当作单帧图像处理，返回有效 PNG。"""
+        import io
+
+        from PIL import Image as PILImage
+
+        buf = io.BytesIO()
+        PILImage.new("RGB", (10, 10)).save(buf, format="PNG")
+        png_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        result = MediaManager._extract_gif_key_frames(png_b64, max_frames=8)
+
+        # Pillow 可打开 PNG，视为单帧，返回有效 PNG base64
+        assert result is not None
+        raw = base64.b64decode(result)
+        assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+        # 单帧输出尺寸应与输入一致
+        img = PILImage.open(io.BytesIO(raw))
+        assert img.width == 10
+        assert img.height == 10
+
+
+class TestEmojiPromptConfig:
+    """测试表情包识别提示词可配置功能。"""
+
+    @staticmethod
+    def _make_mock_core_config(
+        image_prompt: str = "", emoji_prompt: str = ""
+    ) -> MagicMock:
+        """构造带 chat 配置的 mock core config。"""
+        mock_config = MagicMock()
+        mock_chat = MagicMock()
+        mock_chat.image_recognition_prompt = image_prompt
+        mock_chat.emoji_recognition_prompt = emoji_prompt
+        mock_config.return_value.chat = mock_chat
+        return mock_config
+
+    def test_emoji_prompt_uses_custom_config(self) -> None:
+        """自定义表情包提示词时应使用配置值。"""
+        mock_core_config = self._make_mock_core_config(
+            image_prompt="custom image prompt", emoji_prompt="custom emoji prompt"
+        )
+
+        with (
+            patch("src.core.managers.media_manager.get_model_set_by_task", return_value=None),
+            patch("src.core.managers.media_manager.get_core_config", mock_core_config),
+            patch("src.core.managers.media_manager.get_prompt_manager") as mock_pm,
+        ):
+            mock_manager = MagicMock()
+            mock_pm.return_value = mock_manager
+
+            MediaManager()
+
+            # _register_prompts 在构造时已被调用一次（2 个模板）
+            assert mock_manager.register_template.call_count == 2
+            # 第二个注册的是表情包提示词
+            emoji_template = mock_manager.register_template.call_args_list[1][0][0]
+            assert emoji_template.template == "custom emoji prompt"
+
+    def test_emoji_prompt_uses_default_when_empty(self) -> None:
+        """表情包提示词配置为空时应使用内置默认值。"""
+        mock_core_config = self._make_mock_core_config(
+            image_prompt="", emoji_prompt=""
+        )
+
+        with (
+            patch("src.core.managers.media_manager.get_model_set_by_task", return_value=None),
+            patch("src.core.managers.media_manager.get_core_config", mock_core_config),
+            patch("src.core.managers.media_manager.get_prompt_manager") as mock_pm,
+        ):
+            mock_manager = MagicMock()
+            mock_pm.return_value = mock_manager
+
+            MediaManager()
+
+            # _register_prompts 在构造时已被调用一次（2 个模板）
+            assert mock_manager.register_template.call_count == 2
+            emoji_template = mock_manager.register_template.call_args_list[1][0][0]
+            assert emoji_template.template == "描述这个表情包的画面内容。若有文字，完整转述。"

@@ -156,7 +156,12 @@ class MessageConverter:
 
         # 递归解析段列表
         result = self._parse_segments(segments, depth=0)
-        
+
+        # 为二进制媒体项注入 image_id（哈希），便于后续按哈希从 Images 表回查图片信息。
+        # 必须在 _recognize_media_with_manager 之前执行，保证 VLM 跳过/早退时 image_id 仍注入。
+        if result.media:
+            self._enrich_media_image_ids(result.media)
+
         # 如果解析过程中发现有媒体资源，则后续需要考虑是否运行视觉语言模型识别
         if result.media:
             # 提前提取 stream_id 以供逐项过滤 VLM
@@ -548,10 +553,12 @@ class MessageConverter:
         2. 嵌套段列表 — 回复内容的结构化表示
         """
         if isinstance(data, str):
-            # data 是消息 ID
+            # data 是消息 ID：仅记录 reply_to，不再追加 ``[回复:msg_id]`` 文本。
+            # 文本预览由适配器在 seglist 里以 ``[回复<...>：...]`` 形式提供；
+            # 这里再追加会和 seglist 内的前缀文本重复，并在命令前缀噪声剥离
+            # 之外造成冗余显示。
             if not result.reply_to:
                 result.reply_to = data
-            result.text_parts.append(f"[回复:{data}]")
         elif isinstance(data, list):
             # 嵌套段：递归解析
             inner = self._parse_segments(data, depth + 1)
@@ -572,10 +579,32 @@ class MessageConverter:
         result: _ParseResult,
         depth: int,
     ) -> None:
-        """处理 seglist 段（嵌套段列表）。"""
+        """处理 seglist 段（嵌套段列表）。
+
+        如果 seglist 是 reply 引用内容（包含 ``reply`` 段，或首段文本以
+        ``[回复<`` / ``「回复：`` 开头），则只合并文本与 at，不合并其中的
+        media，避免引用中的文件/图片等被误判为当前消息的内容。
+        """
         if isinstance(data, list):
             inner = self._parse_segments(data, depth + 1)
-            result.merge(inner)
+
+            # 检测是否为 reply 引用内容：
+            # 1) seglist 内含 reply 段（适配器前置 reply 段的规范写法）
+            # 2) 或首段文本以 "[回复<" / "「回复：" 开头（兼容旧格式）
+            is_reply_content = bool(inner.reply_to)
+            if not is_reply_content and inner.text_parts:
+                first_text = inner.text_parts[0].strip()
+                if first_text.startswith("[回复<") or first_text.startswith("「回复："):
+                    is_reply_content = True
+
+            if is_reply_content:
+                # reply 引用内容只合并文本和 at，不合并 media
+                result.text_parts.extend(inner.text_parts)
+                if inner.reply_to and not result.reply_to:
+                    result.reply_to = inner.reply_to
+                result.at_users.extend(inner.at_users)
+            else:
+                result.merge(inner)
         else:
             logger.warning(f"seglist 的 data 不是列表: {type(data)}")
             result.text_parts.append(str(data))
@@ -610,6 +639,31 @@ class MessageConverter:
 
         return type_mapping.get(first_media_type, MessageType.UNKNOWN)
 
+    def _enrich_media_image_ids(self, media_list: list[dict[str, Any]]) -> None:
+        """为二进制媒体项注入 image_id（哈希），与 MediaManager 识别流程一致。
+
+        对 type ∈ {image, emoji, voice} 且 data 为字符串、尚未带 image_id 的媒体项，
+        计算 SHA256 哈希写入 ``image_id`` 字段。后续入库剔除 ``data`` 后 ``image_id``
+        仍保留，可据此从 Images 表回查图片描述/文件路径。
+
+        Args:
+            media_list: 解析得到的媒体项列表，原地修改
+        """
+        try:
+            from src.core.managers.media_manager import MediaManager
+
+            for media in media_list:
+                if media.get("type") not in ("image", "emoji", "voice"):
+                    continue
+                if "image_id" in media:
+                    continue
+                data = media.get("data")
+                if not isinstance(data, str):
+                    continue
+                media["image_id"] = MediaManager.compute_media_hash(data)
+        except Exception:
+            logger.warning("媒体 image_id 注入失败", exc_info=True)
+
     async def _recognize_media_with_manager(
         self,
         result: _ParseResult,
@@ -617,59 +671,59 @@ class MessageConverter:
     ) -> _ParseResult:
         """使用 MediaManager 识别媒体内容（图片、表情包、语音）并更新文本描述。
 
+        遍历所有媒体项，对每个项调用 ``recognize_media``：
+        - image/emoji/voice：统一查询 ``should_skip_recognition``，
+          skip=True 时仅落盘+入库，不识别；
+          否则走事件链（默认引擎处理器 + 第三方可拦截）
+
         Args:
             result: 解析结果
-            stream_id: 聊天流 ID，用于逐项查询 ``should_skip_vlm`` 跳过选定类型的 VLM 识别
+            stream_id: 聊天流 ID，用于逐项查询 ``should_skip_recognition`` 跳过选定类型的识别
 
         Returns:
             更新后的解析结果
         """
         try:
-            # 延迟导入避免循环依赖
             from src.core.managers.media_manager import get_media_manager
 
             manager = get_media_manager()
 
-            # 收集需要识别的媒体（图片、表情包、语音），逐项过滤已注册跳过的类型
-            media_to_recognize = []
-            voice_to_recognize = []
+            descriptions: list[tuple[int, str | None]] = []
+            voice_texts: list[tuple[int, str | None]] = []
+
             for i, media in enumerate(result.media):
                 media_type = media["type"]
-                if media_type in ("image", "emoji"):
-                    if manager.should_skip_vlm(stream_id, media_type):
-                        continue
-                    media_to_recognize.append((i, media))
-                elif media_type == "voice":
-                    voice_to_recognize.append((i, media))
-            
-            # 早退策略：没有待识别媒体就直接返回原结果
-            if not media_to_recognize and not voice_to_recognize:
-                return result
-            
-            # 批量识别图片/表情包，并缓存描述
-            descriptions = []
-            for idx, media in media_to_recognize:
+                data = media.get("data")
+                if not isinstance(data, str) or not data:
+                    continue
+
                 try:
-                    description = await manager.recognize_media(
-                        media["data"],
-                        media["type"],
-                        use_cache=True
-                    )
-                    descriptions.append((idx, description))
+                    if media_type in ("image", "emoji"):
+                        skip = manager.should_skip_recognition(stream_id, media_type)
+                        description = await manager.recognize_media(
+                            data,
+                            media_type,
+                            use_cache=True,
+                            stream_id=stream_id,
+                            skip_recognition=skip,
+                        )
+                        descriptions.append((i, description))
+                    elif media_type == "voice":
+                        skip = manager.should_skip_recognition(stream_id, "voice")
+                        text = await manager.recognize_media(
+                            data,
+                            "voice",
+                            stream_id=stream_id,
+                            skip_recognition=skip,
+                        )
+                        voice_texts.append((i, text))
                 except Exception as e:
-                    logger.warning(f"识别{media['type']}失败: {e}")
-                    descriptions.append((idx, None))
-            
-            # 识别语音
-            voice_texts = []
-            for idx, media in voice_to_recognize:
-                try:
-                    text = await manager.recognize_voice(media["data"])
-                    voice_texts.append((idx, text))
-                except Exception as e:
-                    logger.warning(f"识别语音失败: {e}")
-                    voice_texts.append((idx, None))
-            
+                    logger.warning(f"识别{media_type}失败: {e}")
+                    if media_type in ("image", "emoji"):
+                        descriptions.append((i, None))
+                    elif media_type == "voice":
+                        voice_texts.append((i, None))
+
             # 将识别结果应用回 text_parts，替换占位符
             new_text_parts = []
             media_idx = 0
@@ -678,33 +732,33 @@ class MessageConverter:
                 if part in ("[图片]", "[表情包]"):
                     if media_idx < len(descriptions):
                         _, description = descriptions[media_idx]
+                        media_idx += 1
                         if description:
-                            media_type = "图片" if part == "[图片]" else "表情包"
-                            new_text_parts.append(f"[{media_type}:{description}]")
+                            label = "图片" if part == "[图片]" else "表情包"
+                            new_text_parts.append(f"[{label}:{description}]")
                         else:
                             new_text_parts.append(part)
-                        media_idx += 1
                     else:
                         new_text_parts.append(part)
                 elif part == "[语音]":
                     if voice_idx < len(voice_texts):
                         _, text = voice_texts[voice_idx]
+                        voice_idx += 1
                         if text:
                             new_text_parts.append(f"[语音:{text}]")
                         else:
                             new_text_parts.append(part)
-                        voice_idx += 1
                     else:
                         new_text_parts.append(part)
                 else:
                     new_text_parts.append(part)
-            
+
             result.text_parts = new_text_parts
-            
+
         except Exception as e:
             # 如果整个识别流程失败，不应阻止消息继续处理，仅记录错误
             logger.error(f"MediaManager 识别失败: {e}", exc_info=True)
-        
+
         return result
 
     @staticmethod

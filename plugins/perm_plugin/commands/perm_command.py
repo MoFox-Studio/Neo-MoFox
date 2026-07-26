@@ -70,8 +70,8 @@ class PermCommand(BaseCommand):
     使用 @cmd_route 注册子命令路由，中文别名通过独立路由方法代理实现。
     """
 
-    command_name: str = "perm"
-    command_description: str = "权限管理命令（仅主人可用）：查看/修改用户权限及命令覆盖"
+    name: str = "perm"
+    description: str = "权限管理命令（仅主人可用）：查看/修改用户权限及命令覆盖"
     permission_level: PermissionLevel = PermissionLevel.OWNER
 
     @classmethod

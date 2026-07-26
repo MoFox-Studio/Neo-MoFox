@@ -224,6 +224,7 @@ class ActionManager:
         """执行 Action。
 
         创建 Action 实例并调用其 execute 方法。
+        在执行前、执行成功后、执行失败时分别触发对应的生命周期事件。
 
         Args:
             signature: Action 组件签名
@@ -274,15 +275,122 @@ class ActionManager:
         if should_strip_auto_reason_argument(action_instance.execute, kwargs):
             kwargs.pop("reason", None)
 
+        import time
+
+        start_time = time.time()
+
+        # 触发动作调用执行前事件
+        try:
+            from src.core.components.types import EventType
+            from src.kernel.event import get_event_bus
+
+            event_bus = get_event_bus()
+            if event_bus.get_subscribers(EventType.BEFORE_ACTION_CALL):
+                _, modified_params = await event_bus.publish(
+                    EventType.BEFORE_ACTION_CALL,
+                    {
+                        "signature": signature,
+                        "action_name": action_instance.action_name,
+                        "action_description": getattr(
+                            action_instance, "action_description", ""
+                        ),
+                        "args": dict(kwargs),
+                        "message": message,
+                    },
+                )
+                # 应用事件处理器对参数的修改
+                if "args" in modified_params:
+                    new_args = modified_params["args"]
+                    if isinstance(new_args, dict):
+                        kwargs = new_args
+                if "message" in modified_params:
+                    modified_message = modified_params["message"]
+                    if modified_message is not None:
+                        message = modified_message
+        except Exception:
+            # 事件触发失败不中断动作执行，静默降级
+            pass
+
         # 执行 Action
         try:
             result = await action_instance._wrap_execute(**kwargs).wait_done()
+
+            execution_time = time.time() - start_time
+            status_emoji = "✅" if result[0] else "❌"
+            logger.info(
+                f"{status_emoji} 动作执行完成: {action_instance.name}, 耗时: {execution_time:.2f}s"
+            )
+
+            # 触发动作调用执行后事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.AFTER_ACTION_CALL):
+                    _, modified_params = await event_bus.publish(
+                        EventType.AFTER_ACTION_CALL,
+                        {
+                            "signature": signature,
+                            "action_name": action_instance.name,
+                            "action_description": getattr(
+                                action_instance, "description", ""
+                            ),
+                            "args": dict(kwargs),
+                            "result": result[1],
+                            "success": result[0],
+                            "execution_time": execution_time,
+                            "message": message,
+                        },
+                    )
+                    # 应用事件处理器对结果和消息的修改
+                    if "result" in modified_params:
+                        new_result = modified_params["result"]
+                        if new_result is not None:
+                            result = (result[0], new_result)
+                    if "message" in modified_params:
+                        modified_message = modified_params["message"]
+                        if modified_message is not None:
+                            message = modified_message
+            except Exception:
+                # 事件触发失败不中断动作执行，静默降级
+                pass
+
             return result
         except Exception as e:
+            execution_time = time.time() - start_time
             logger.error(
                 f"执行 Action 失败 ({signature}): {e}",
                 exc_info=True,
             )
+
+            # 触发动作调用失败事件
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.ON_ACTION_CALL_FAILED):
+                    await event_bus.publish(
+                        EventType.ON_ACTION_CALL_FAILED,
+                        {
+                            "signature": signature,
+                            "action_name": action_instance.name,
+                            "action_description": getattr(
+                                action_instance, "description", ""
+                            ),
+                            "args": dict(kwargs),
+                            "error": e,
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                            "execution_time": execution_time,
+                            "message": message,
+                        },
+                    )
+            except Exception:
+                # 事件触发失败不中断异常传播，静默降级
+                pass
+
             raise RuntimeError(f"Action 执行失败: {e}") from e
 
     def clear_schema_cache(self, signature: str | None = None) -> None:

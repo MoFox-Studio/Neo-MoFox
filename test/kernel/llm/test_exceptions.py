@@ -6,6 +6,11 @@
 3. 异常分类功能（classify_exception）
 """
 
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+
+import httpx
+import pytest
 
 from src.kernel.llm import (
     LLMError,
@@ -19,6 +24,7 @@ from src.kernel.llm import (
     LLMAPIError,
     classify_exception,
 )
+from src.kernel.llm.exceptions import decide_retry
 
 
 def test_llm_error_base():
@@ -169,6 +175,106 @@ def test_llm_api_error_without_attributes():
     assert error.status_code is None
     assert error.error_code is None
     assert error.model is None
+
+
+@pytest.mark.parametrize(
+    ("error", "retryable", "reason"),
+    [
+        (LLMAuthenticationError("unauthorized"), False, "authentication_error"),
+        (LLMTokenLimitError("too many tokens"), False, "token_limit"),
+        (LLMContentFilterError("filtered"), False, "content_filter"),
+        (LLMConfigurationError("invalid config"), False, "configuration_error"),
+        (LLMAPIError("invalid request", status_code=400), False, "api_request_error"),
+        (LLMAPIError("forbidden", status_code=403), False, "api_request_error"),
+        (LLMTimeoutError("timeout"), True, "transient_transport_error"),
+        (ConnectionResetError("reset"), True, "transient_transport_error"),
+        (LLMRateLimitError("rate limited"), True, "rate_limit"),
+        (LLMAPIError("request timeout", status_code=408), True, "transient_api_error"),
+        (LLMAPIError("rate limited", status_code=429), True, "transient_api_error"),
+        (LLMAPIError("server error", status_code=500), True, "transient_api_error"),
+        (ValueError("serialization failed"), False, "unknown_error"),
+    ],
+)
+def test_decide_retry_by_failure_type(error, retryable, reason):
+    decision = decide_retry(error)
+
+    assert decision.retryable is retryable
+    assert decision.reason == reason
+
+
+@pytest.mark.parametrize("sdk_module", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"retry-after": "2.5"}, 2.5),
+        ({"retry-after-ms": "1500", "retry-after": "3"}, 1.5),
+        ({"retry-after": "-1"}, None),
+        ({"retry-after": "nan"}, None),
+        ({"retry-after": "inf"}, None),
+        ({"retry-after": "1e999999"}, None),
+        ({"retry-after": "invalid"}, None),
+    ],
+)
+def test_classify_sdk_rate_limit_retry_after(sdk_module, headers, expected):
+    sdk = __import__(sdk_module)
+    response = httpx.Response(
+        429,
+        headers=headers,
+        request=httpx.Request("POST", "https://example.test"),
+    )
+    error = sdk.RateLimitError("rate limited", response=response, body={})
+
+    classified = classify_exception(error)
+
+    assert isinstance(classified, LLMRateLimitError)
+    assert classified.retry_after == expected
+
+
+@pytest.mark.parametrize("sdk_module", ["openai", "anthropic"])
+def test_classify_sdk_rate_limit_http_date(sdk_module, monkeypatch):
+    sdk = __import__(sdk_module)
+    now = datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr("src.kernel.llm.exceptions.datetime", FixedDateTime)
+    retry_at = now + timedelta(seconds=30)
+    response = httpx.Response(
+        429,
+        headers={"retry-after": format_datetime(retry_at, usegmt=True)},
+        request=httpx.Request("POST", "https://example.test"),
+    )
+    error = sdk.RateLimitError("rate limited", response=response, body={})
+
+    classified = classify_exception(error)
+
+    assert isinstance(classified, LLMRateLimitError)
+    assert classified.retry_after == 30.0
+
+
+def test_classify_openai_connection_error():
+    import httpx
+    from openai import APIConnectionError
+
+    error = APIConnectionError(request=httpx.Request("POST", "https://example.test"))
+    classified = classify_exception(error)
+
+    assert isinstance(classified, ConnectionError)
+    assert decide_retry(classified).retryable is True
+
+
+def test_classify_anthropic_connection_error():
+    import httpx
+    from anthropic import APIConnectionError
+
+    error = APIConnectionError(request=httpx.Request("POST", "https://example.test"))
+    classified = classify_exception(error)
+
+    assert isinstance(classified, ConnectionError)
+    assert decide_retry(classified).retryable is True
 
 
 def test_classify_exception_generic_rate_limit():

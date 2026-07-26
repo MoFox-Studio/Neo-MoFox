@@ -9,6 +9,7 @@ from src.core.components import EventType, BaseEventHandler
 from src.kernel.event import EventDecision
 from src.core.managers import get_event_manager
 
+API_VERSION = "1.0.0"
 
 # =============================================================================
 # 事件发布操作

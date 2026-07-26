@@ -4,11 +4,14 @@
 动作是"主动的响应"，通过 LLM Tool Calling 调用。
 """
 
+from __future__ import annotations
+
 import random
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Annotated, Any, TYPE_CHECKING
 from uuid import uuid4
 
+from src.core.components.base.component import BaseComponent
 from src.core.components.types import ChatType
 from src.core.components.utils import (
     parse_function_signature,
@@ -23,7 +26,7 @@ if TYPE_CHECKING:
     from src.kernel.llm import LLMUsable
 
 
-class BaseAction(ABC, LLMUsable):
+class BaseAction(BaseComponent, LLMUsable):
     """动作组件基类。
 
     动作定义了一个"动作"的行为，例如"发送消息"、"发送表情包"等。
@@ -32,8 +35,8 @@ class BaseAction(ABC, LLMUsable):
 
     Class Attributes:
         plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
-        action_name: 动作名称
-        action_description: 动作的功能描述
+        name: 动作名称
+        description: 动作的功能描述
         primary_action: 是否为主动作
         chatter_allow: 支持的 Chatter 列表
         chat_type: 支持的聊天类型
@@ -42,8 +45,8 @@ class BaseAction(ABC, LLMUsable):
 
     Examples:
         >>> class SendEmoji(BaseAction):
-        ...     action_name = "send_emoji"
-        ...     action_description = "发送一个表情"
+        ...     name = "send_emoji"
+        ...     description = "发送一个表情"
         ...     primary_action = False
         ...
         ...     async def execute(self, emoji_tag: str) -> tuple[bool, str]:
@@ -53,9 +56,15 @@ class BaseAction(ABC, LLMUsable):
     _plugin_: str
     _signature_: str
 
-    # 动作元数据
+    component_type = "action"
+    _legacy_name_attr = "action_name"
+    _legacy_desc_attr = "action_description"
     action_name: str = ""
     action_description: str = ""
+
+    # 动作元数据
+    name: str = ""
+    description: str = ""
 
     primary_action: bool = False
     chatter_allow: list[str] = []
@@ -77,23 +86,6 @@ class BaseAction(ABC, LLMUsable):
         self.chat_stream = chat_stream
         self.plugin = plugin
         self._last_message: str | None = None
-    
-    @classmethod
-    def get_signature(cls) -> str | None:
-        """获取动作组件的唯一签名。
-
-        Returns:
-            str | None: 组件签名，格式为 "plugin_name:action:action_name"，如果还未注入插件名称则返回 None
-
-        Examples:
-            >>> signature = SendEmoji.get_signature()
-            >>> "my_plugin:action:send_emoji"
-        """
-        if hasattr(cls, "_signature_") and cls._signature_:
-            return cls._signature_
-        if hasattr(cls, "_plugin_") and cls._plugin_ and cls.action_name:
-            return f"{cls._plugin_}:action:{cls.action_name}"
-        return None
 
     @classmethod
     def validate_associated_types(cls) -> list[str]:
@@ -102,7 +94,7 @@ class BaseAction(ABC, LLMUsable):
         return validate_associated_types(
             cls,
             component_kind="Action",
-            component_name_attr="action_name",
+            component_name_attr="name",
         )
     
     @abstractmethod
@@ -173,7 +165,7 @@ class BaseAction(ABC, LLMUsable):
             ... }
         """
         # 使用 utils 中的共同方法生成 schema，name 前缀加上组件类型
-        return parse_function_signature(cls.execute, f"action-{cls.action_name}", cls.action_description)
+        return parse_function_signature(cls.execute, f"action-{cls.name}", cls.description)
 
     async def go_activate(self) -> bool:
         """动作激活判定函数。
@@ -328,9 +320,9 @@ class BaseAction(ABC, LLMUsable):
                 action_require = action_require or []
 
             # 构建完整的判断提示词
-            prompt = f"""你需要判断在当前聊天情况下，是否应该激活名为"{self.action_name}"的动作。
+            prompt = f"""你需要判断在当前聊天情况下，是否应该激活名为"{self.name}"的动作。
 
-动作描述：{self.action_description}
+动作描述：{self.description}
 """
 
             if action_require:
@@ -448,7 +440,7 @@ class BaseAction(ABC, LLMUsable):
                     extra["target_group_name"] = target_group_name
 
                 message = Message(
-                    message_id=f"action_{self.action_name}_{uuid4().hex}",
+                    message_id=f"action_{self.name}_{uuid4().hex}",
                     content=content_str,
                     processed_plain_text=content_str,
                     message_type=MessageType.TEXT,
@@ -469,7 +461,7 @@ class BaseAction(ABC, LLMUsable):
 
             logger = get_logger("action")
             logger.error(
-                f"Action {self.action_name} 发送消息失败: {e}",
+                f"Action {self.name} 发送消息失败: {e}",
                 exc_info=True,
             )
             return False

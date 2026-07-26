@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json_repair
 
+from src.app.plugin_system.api.llm_api import LLMRequest
+from src.app.plugin_system.api.log_api import Logger
+from src.app.plugin_system.types import ChatStream, LLMPayload, ROLE, Text
 from src.core.config import get_core_config
-from src.core.models.stream import ChatStream
 from src.core.prompt import get_prompt_manager
-from src.kernel.logger import Logger
-from src.kernel.llm import LLMPayload, ROLE, Text
-from src.kernel.llm import LLMRequest
 from src.kernel.llm.token_counter import count_text_tokens
 
-from .type_defs import SubAgentDecision, SupportsRequestCreation
+from ..type_defs import SubAgentDecision, SupportsRequestCreation
 
 
 def _safe_count_tokens(text: str, model_identifier: str) -> int:
@@ -98,8 +97,20 @@ async def decide_should_respond(
     unreads_text: str,
     chat_stream: ChatStream,
     fallback_prompt: str,
+    history_text: str = "",
+    decision_history: list[SubAgentDecision] | None = None,
 ) -> SubAgentDecision:
-    """执行子代理决策并返回 should_respond 结果。"""
+    """执行子代理决策并返回 should_respond 结果。
+
+    Args:
+        chatter: 提供 create_request 能力的对象
+        logger: 日志器
+        unreads_text: 格式化后的未读消息文本
+        chat_stream: 当前会话流
+        fallback_prompt: 模板不可用时的回退提示词
+        history_text: 历史消息摘要文本（上下文感知）
+        decision_history: 之前的决策记录列表
+    """
     try:
         request = chatter.create_request(
             "sub_actor",
@@ -133,8 +144,27 @@ async def decide_should_respond(
             f"{len(unreads_text)} -> {len(fitted_unreads)} 字符"
         )
 
+    user_content_parts: list[str] = []
+
+    if history_text and history_text.strip():
+        user_content_parts.append(f"【历史消息摘要】\n{history_text.strip()}")
+
+    if decision_history:
+        history_lines: list[str] = []
+        for i, d in enumerate(decision_history, 1):
+            history_lines.append(
+                f"  {i}. 判定: {'回复' if d.get('should_respond') else '不回复'} "
+                f"— {d.get('reason', '无')}"
+            )
+        if history_lines:
+            user_content_parts.append(
+                "【之前的决策记录】\n" + "\n".join(history_lines)
+            )
+
+    user_content_parts.append(f"【新收到待判定消息】\n{fitted_unreads}")
+
     request.add_payload(
-        LLMPayload(ROLE.USER, Text(f"【新收到待判定消息】\n{fitted_unreads}"))
+        LLMPayload(ROLE.USER, Text("\n\n".join(user_content_parts)))
     )
 
     try:

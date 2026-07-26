@@ -13,6 +13,7 @@ policy/
 ├── base.py             # 策略接口定义（ModelStep / PolicySession / Policy）
 ├── round_robin.py      # 轮询策略实现
 ├── load_balanced.py    # 负载均衡策略实现（默认）
+├── utils.py            # 退避算法与重试/间隔归一化工具
 └── __init__.py          # 公开 API + 默认策略工厂
 ```
 

@@ -51,15 +51,59 @@ class EventType(str, Enum):
     ON_STOP = "on_stop"
     ON_MESSAGE_RECEIVED = "on_message_received"
     ON_MESSAGE_SENT = "on_message_sent"
+    AFTER_MESSAGE_SENT = "after_message_sent"
     ON_CHATTER_STEP = "on_chatter_step"
     AFTER_CHATTER_STEP = "after_chatter_step"
+    ON_INTERNAL_CONTEXT_REQUESTED = "on_internal_context_requested"
     ON_NOTICE_RECEIVED = "on_notice_received"
     ON_RECEIVED_OTHER_MESSAGE = "on_received_other_message"
     ON_ALL_PLUGIN_LOADED = "on_all_plugin_loaded"
     ON_PLUGIN_UNLOADED = "on_plugin_unloaded"
     ON_COMPONENT_LOADED = "on_component_loaded"
     ON_COMPONENT_UNLOADED = "on_component_unloaded"
+
+    # 提示词构建事件
+    ON_PROMPT_BUILD = "on_prompt_build"
+
+    # LLM 请求生命周期事件
+    BEFORE_LLM_REQUEST = "before_llm_request"
+    AFTER_LLM_REQUEST = "after_llm_request"
+    ON_LLM_REQUEST_FAILED = "on_llm_request_failed"
+
+    # 工具调用生命周期事件
+    BEFORE_TOOL_CALL = "before_tool_call"
+    AFTER_TOOL_CALL = "after_tool_call"
+    ON_TOOL_CALL_FAILED = "on_tool_call_failed"
+
+    # 动作调用生命周期事件
+    BEFORE_ACTION_CALL = "before_action_call"
+    AFTER_ACTION_CALL = "after_action_call"
+    ON_ACTION_CALL_FAILED = "on_action_call_failed"
+
+    # 命令执行生命周期事件
+    BEFORE_COMMAND_EXECUTE = "before_command_execute"
+    AFTER_COMMAND_EXECUTE = "after_command_execute"
+    ON_COMMAND_EXECUTE_FAILED = "on_command_execute_failed"
+
+    # 媒体识别事件（落盘入库后触发，处理器可回写 description）
+    ON_MEDIA_RECOGNIZE = "on_media_recognize"
+
     CUSTOM = "custom"  # 用于自定义事件
+
+
+class MediaEngine(str, Enum):
+    """媒体识别引擎类型。
+
+    用于 ``ON_MEDIA_RECOGNIZE`` 事件的 ``engine`` 字段，
+    供处理器判断应调用 VLM 还是 ASR。
+
+    Attributes:
+        VLM: 图片/表情包视觉识别引擎
+        ASR: 语音转文字引擎
+    """
+
+    VLM = "vlm"
+    ASR = "asr"
 
 
 class ComponentState(Enum):

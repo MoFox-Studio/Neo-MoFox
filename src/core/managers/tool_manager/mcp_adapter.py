@@ -29,7 +29,7 @@ class MCPToolAdapter:
         server_name: MCP 服务器名称
         mcp_tool: MCP 工具对象
         manager: 负责调用该工具的 MCP 管理器
-        tool_name: 适配后的工具名称
+        name: 适配后的工具名称
         description: 工具描述
 
     Examples:
@@ -59,10 +59,10 @@ class MCPToolAdapter:
         self.manager = manager
         normalized_server_name = _normalize_tool_name_part(server_name)
         normalized_tool_name = _normalize_tool_name_part(mcp_tool.name)
-        self.tool_name = f"mcp-{normalized_server_name}-{normalized_tool_name}"
+        self.name = f"mcp-{normalized_server_name}-{normalized_tool_name}"
         self.description = mcp_tool.description or f"MCP tool from {server_name}"
 
-        logger.debug(f"创建 MCP 工具适配器: {self.tool_name}")
+        logger.debug(f"创建 MCP 工具适配器: {self.name}")
 
     def get_schema(self) -> dict[str, Any]:
         """获取 Tool Schema。
@@ -88,7 +88,7 @@ class MCPToolAdapter:
         return {
             "type": "function",
             "function": {
-                "name": self.tool_name,
+                "name": self.name,
                 "description": self.description,
                 "parameters": input_schema,
             },
@@ -114,7 +114,7 @@ class MCPToolAdapter:
         """
         try:
             logger.debug(
-                f"执行 MCP 工具: {self.tool_name} | "
+                f"执行 MCP 工具: {self.name} | "
                 f"服务器: {self.server_name} | 参数: {arguments}"
             )
 
@@ -136,16 +136,16 @@ class MCPToolAdapter:
             return {
                 "type": "mcp_result",
                 "content": "",
-                "tool_name": self.tool_name,
+                "tool_name": self.name,
                 "is_error": False,
             }
 
         except Exception as e:
-            logger.error(f"MCP 工具执行失败: {self.tool_name} | 错误: {e}")
+            logger.error(f"MCP 工具执行失败: {self.name} | 错误: {e}")
             return {
                 "type": "error",
                 "content": f"MCP 工具调用失败: {e!s}",
-                "tool_name": self.tool_name,
+                "tool_name": self.name,
                 "is_error": True,
             }
 
@@ -162,7 +162,7 @@ class MCPToolAdapter:
             return {
                 "type": "mcp_result",
                 "content": "",
-                "tool_name": self.tool_name,
+                "tool_name": self.name,
                 "is_error": False,
             }
 
@@ -195,7 +195,7 @@ class MCPToolAdapter:
         return {
             "type": "mcp_result",
             "content": "\n".join(content_parts),
-            "tool_name": self.tool_name,
+            "tool_name": self.name,
             "is_error": getattr(result, "isError", False),
         }
 
@@ -237,7 +237,7 @@ async def load_mcp_tools(server_name: str) -> list[MCPToolAdapter]:
             try:
                 adapter = MCPToolAdapter(server_name, mcp_tool, manager)
                 adapters.append(adapter)
-                logger.debug(f" 加载工具: {adapter.tool_name}")
+                logger.debug(f" 加载工具: {adapter.name}")
             except Exception as e:
                 logger.error(f" 创建工具适配器失败: {mcp_tool.name} | 错误: {e}")
                 continue

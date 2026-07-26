@@ -98,10 +98,19 @@ class SignalHandler:
 
             # 第二次信号（3 秒内）：强制立即关闭
             elif self.signal_count >= 2:
-                self.bot.logger.warning("正在强制关闭...")
-                # 强制退出（不执行清理）
+                # 直接写原始 stderr：patch_stdout 期间 sys.stderr 被替换为
+                # StdoutProxy（带缓冲 + 独立 flush 线程），sys.exit(1) 立即
+                # 执行会让缓冲中的提示丢失。
                 import sys
 
+                try:
+                    real_stderr = sys.__stderr__
+                    if real_stderr is not None:
+                        real_stderr.write("正在强制关闭...\n")
+                        real_stderr.flush()
+                except Exception:
+                    pass
+                # 强制退出（不执行清理）
                 sys.exit(1)
 
     def restore_handlers(self) -> None:

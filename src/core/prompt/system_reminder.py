@@ -35,6 +35,12 @@ from threading import RLock
 from typing import Sequence, TypeAlias
 
 
+# 流私有 bucket 命名前缀：流私有 bucket 形如 ``stream:{stream_id}:{role}``。
+# 所有读写流私有 bucket 的代码都应通过此常量拼接，避免硬编码不一致。
+# 相关函数：prompt_api.add_stream_reminder / chatter.create_request 等。
+STREAM_BUCKET_PREFIX = "stream:"
+
+
 class SystemReminderBucket(str, Enum):
     """预定义的系统提醒分类（bucket）。可以根据实际需求扩展更多分类。"""
 
@@ -266,6 +272,25 @@ class SystemReminderStore:
                 self._data.pop(bucket_key, None)
             return True
 
+    def clear_by_prefix(self, prefix: str) -> None:
+        """删除所有 key 以指定前缀开头的 bucket。
+
+        主要用于流隔离场景：流私有 bucket 命名形如
+        ``stream:{stream_id}:{role}``，通过传入 ``stream:{stream_id}:``
+        前缀即可一次性清除该流的所有私有 reminder。
+
+        Args:
+            prefix: bucket key 前缀。为空字符串时直接返回（不做任何操作），
+                以防误清空所有 bucket。
+        """
+
+        if not prefix:
+            return
+        with self._lock:
+            for key in list(self._data):
+                if key.startswith(prefix):
+                    self._data.pop(key, None)
+
     def clear_all(self) -> None:
         """清空所有 bucket 下的所有 reminder。"""
 
@@ -293,6 +318,7 @@ def reset_system_reminder_store() -> None:
 
 
 __all__ = [
+    "STREAM_BUCKET_PREFIX",
     "SystemReminderBucket",
     "SystemReminderInsertType",
     "SystemReminderConsumeType",

@@ -11,8 +11,8 @@ from src.kernel.config.core import Field, SectionBase, config_section
 class SkillManagerConfig(BaseConfig):
     """SkillManager 配置模型。"""
 
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "SkillManager 配置"
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = "SkillManager 配置"
 
     @config_section("manager", title="技能管理", tag="plugin")
     class ManagerSection(SectionBase):

@@ -25,6 +25,7 @@ from .file_handler import FileHandler, RotationMode
 
 if TYPE_CHECKING:
     from src.kernel.event import EventBus
+    from .cleanup import LoggerCleanupManager
 
 
 @lru_cache(maxsize=1)
@@ -97,6 +98,10 @@ _config_lock = threading.Lock()
 # 全局共享的文件处理器（所有logger共享同一个）
 _global_file_handler: FileHandler | None = None
 _file_handler_lock = threading.Lock()
+
+# 全局日志清理管理器（由 initialize_logger_system 创建，由 start_logger_cleanup 启动）
+_global_cleanup_manager: LoggerCleanupManager | None = None
+_cleanup_manager_lock = threading.Lock()
 
 # 日志等级优先级映射
 _LOG_LEVEL_PRIORITY = {
@@ -486,6 +491,10 @@ def initialize_logger_system(
     max_file_size: int = 10 * 1024 * 1024,
     enable_event_broadcast: bool = True,
     log_filename: str = "mofox",
+    log_cleanup_enabled: bool = True,
+    log_max_age_days: int = 30,
+    log_max_files: int = 100,
+    log_cleanup_interval_hours: float = 6.0,
 ) -> None:
     """初始化日志系统全局配置
 
@@ -493,6 +502,11 @@ def initialize_logger_system(
     之后创建的所有logger将默认使用这些配置（除非在创建时显式指定）。
     
     所有logger将共享同一个日志文件，不会为每个logger创建单独的文件。
+
+    除日志输出配置外，本函数还会一并初始化日志文件的自动清理管理器
+    （[`LoggerCleanupManager`](./cleanup.py)）。清理管理器实例由本函数创建，
+    但其调度任务的注册需在调度器启动后调用 ``start_logger_cleanup()`` 完成，
+    在程序关闭前调用 ``stop_logger_cleanup()`` 停止。
 
     Args:
         log_dir: 日志文件目录路径
@@ -502,6 +516,10 @@ def initialize_logger_system(
         max_file_size: 单个日志文件最大大小（字节）
         enable_event_broadcast: 是否默认启用事件广播
         log_filename: 日志文件基础名称（所有logger共享）
+        log_cleanup_enabled: 是否启用日志自动清理
+        log_max_age_days: 日志文件最大保留天数，0 表示不按时间清理
+        log_max_files: 日志目录最大文件数，0 表示不限制
+        log_cleanup_interval_hours: 日志清理任务执行间隔（小时）
 
     Example:
         >>> from src.kernel.logger import initialize_logger_system
@@ -513,8 +531,8 @@ def initialize_logger_system(
         ...     log_filename="mofox",
         ... )
     """
-    global _global_file_handler
-    
+    global _global_file_handler, _global_cleanup_manager
+
     with _config_lock:
         _global_config["log_dir"] = log_dir
         _global_config["log_level"] = log_level.upper()
@@ -522,13 +540,13 @@ def initialize_logger_system(
         _global_config["file_rotation"] = file_rotation
         _global_config["max_file_size"] = max_file_size
         _global_config["enable_event_broadcast"] = enable_event_broadcast
-    
+
     # 创建或重新创建全局文件处理器
     with _file_handler_lock:
         # 关闭旧的文件处理器（如果存在）
         if _global_file_handler is not None:
             _global_file_handler.close()
-        
+
         # 创建新的文件处理器
         if enable_file:
             _global_file_handler = FileHandler(
@@ -539,8 +557,60 @@ def initialize_logger_system(
             )
         else:
             _global_file_handler = None
+
+    # 创建或重新创建全局日志清理管理器
+    from .cleanup import LoggerCleanupManager
+
+    with _cleanup_manager_lock:
+        _global_cleanup_manager = LoggerCleanupManager(
+            log_dir=log_dir,
+            max_age_days=log_max_age_days,
+            max_files=log_max_files,
+            cleanup_interval_hours=log_cleanup_interval_hours,
+            enabled=log_cleanup_enabled,
+        )
+
     # 安装 rich traceback
     install_rich_traceback_formatter()
+
+
+async def start_logger_cleanup() -> None:
+    """启动日志自动清理调度任务。
+
+    此函数应在调度器启动后调用，使用 [`initialize_logger_system`](#initialize_logger_system)
+    创建的全局清理管理器注册周期性清理任务。若日志清理已禁用或清理管理器
+    未初始化，则安全跳过。
+
+    Raises:
+        RuntimeError: 日志系统尚未初始化时调用
+    """
+    global _global_cleanup_manager
+
+    with _cleanup_manager_lock:
+        manager = _global_cleanup_manager
+
+    if manager is None:
+        raise RuntimeError("日志系统尚未初始化，请先调用 initialize_logger_system()")
+
+    await manager.start()
+
+
+async def stop_logger_cleanup() -> None:
+    """停止日志自动清理调度任务。
+
+    此函数应在调度器停止前调用，从调度器中移除已注册的清理任务。
+    若清理管理器未初始化或尚未启动，则安全跳过。
+    """
+    global _global_cleanup_manager
+
+    with _cleanup_manager_lock:
+        manager = _global_cleanup_manager
+
+    if manager is None:
+        return
+
+    await manager.stop()
+
 
 def get_global_log_config() -> dict[str, Any]:
     """获取全局日志配置
@@ -638,17 +708,24 @@ def get_all_loggers() -> dict[str, Logger]:
 
 def shutdown_logger_system() -> None:
     """关闭日志系统，释放所有资源
-    
-    包括关闭全局文件处理器和清除所有logger。
+
+    包括关闭全局文件处理器、清除所有logger以及释放清理管理器引用。
     建议在程序退出时调用。
+
+    注意：日志清理调度任务的停止需在调度器关闭前显式调用
+    ``stop_logger_cleanup()``，本函数仅释放清理管理器的实例引用。
     """
-    global _global_file_handler
+    global _global_file_handler, _global_cleanup_manager
 
     # 关闭全局文件处理器
     with _file_handler_lock:
         if _global_file_handler is not None:
             _global_file_handler.close()
             _global_file_handler = None
+
+    # 释放全局清理管理器引用
+    with _cleanup_manager_lock:
+        _global_cleanup_manager = None
 
 
 def install_rich_traceback_formatter():

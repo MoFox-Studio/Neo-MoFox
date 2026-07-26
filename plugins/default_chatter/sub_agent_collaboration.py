@@ -8,19 +8,21 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.core.components.base.chatter import BaseChatter, WaitResumeEvent
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
-from src.core.prompt import (
+from src.app.plugin_system.api import prompt_api
+from src.app.plugin_system.api.log_api import get_logger
+from src.app.plugin_system.base import BaseChatter
+from src.app.plugin_system.types import (
+    ChatStream,
+    LLMPayload,
+    Message,
+    ROLE,
     SystemReminderBucket,
-    SystemReminderInsertType,
-    get_system_reminder_store,
+    Text,
+    ToolRegistry,
 )
-from src.core.transport.distribution.stream_loop_manager import get_stream_loop_manager
-from src.kernel.llm import LLMPayload, ROLE, Text, ToolRegistry
-from src.kernel.logger import get_logger
+from src.core.prompt import SystemReminderInsertType
 
-from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
+from .utils.tool_flow import append_suspend_payload_if_action_only, process_tool_calls
 
 logger = get_logger("default_chatter.sub_agent_collaboration")
 
@@ -52,16 +54,6 @@ FIXED_SUB_AGENT_SYSTEM_PROMPT = """你是由 default chatter 创建的子代理�
 4. 当你完成任务时，给上级代理返回简洁、可执行的结果。
 5. 如果你被授予 create_agent、get_agent、kill_agent，则你可以继续创建更窄的子代理；否则不要尝试多级委托。
 """
-
-
-def _resolve_sub_agent_task_name(chatter: BaseChatter) -> str:
-    """解析协作子代理使用的模型任务名。"""
-    resolver = getattr(chatter, "_get_sub_agent_task_name", None)
-    if callable(resolver):
-        task_name = str(resolver() or "").strip()
-        if task_name:
-            return task_name
-    return "actor"
 
 
 def get_active_sub_agent_name() -> str | None:
@@ -260,7 +252,6 @@ class SubAgentCollaborationManager:
 
     def _set_actor_dynamic_reminder(self, stream_id: str) -> None:
         """刷新 actor 侧可见的子代理动态 reminder。"""
-        store = get_system_reminder_store()
         sessions = self._sessions.get(stream_id, {})
         active_sessions = [
             session
@@ -268,7 +259,11 @@ class SubAgentCollaborationManager:
             if session.status not in {"completed", "failed", "killed"}
         ]
         if not active_sessions:
-            store.delete(SystemReminderBucket.ACTOR, _ACTOR_REMINDER_NAME)
+            prompt_api.delete_stream_reminder(
+                stream_id,
+                SystemReminderBucket.ACTOR.value,
+                _ACTOR_REMINDER_NAME,
+            )
             return
 
         lines = ["以下是当前子代理的最新 assistant 动态："]
@@ -279,8 +274,9 @@ class SubAgentCollaborationManager:
             lines.append(f"[{session.name}] {session.status}")
             lines.append(latest_message)
 
-        store.set(
-            bucket=SystemReminderBucket.ACTOR,
+        prompt_api.add_stream_reminder(
+            stream_id=stream_id,
+            bucket=SystemReminderBucket.ACTOR.value,
             name=_ACTOR_REMINDER_NAME,
             content="\n".join(lines),
             insert_type=SystemReminderInsertType.DYNAMIC,
@@ -383,10 +379,9 @@ class SubAgentCollaborationManager:
 
     async def _resume_actor(self, *, stream_id: str) -> None:
         """向主 actor 注入一次恢复信号。"""
-        await get_stream_loop_manager().trigger_external_resume(
-            stream_id,
-            event=WaitResumeEvent(source="sub_agent"),
-        )
+        from src.core.managers.chatter_manager import get_chatter_manager
+
+        await get_chatter_manager().resume_chatter(stream_id, source="sub_agent")
 
     async def _drive_agent_once(
         self,
@@ -528,6 +523,7 @@ class SubAgentCollaborationManager:
         allowed_mcp_names: list[str],
         allow_create_sub_agent: bool,
         enable_action_suspend: bool,
+        task_name: str = "actor",
         parent_name: str | None = None,
     ) -> dict[str, Any]:
         """创建并登记一个新的子代理。"""
@@ -540,7 +536,7 @@ class SubAgentCollaborationManager:
             raise ValueError(f"子代理已存在: {normalized_name}")
 
         request = chatter.create_request(
-            _resolve_sub_agent_task_name(chatter),
+            task_name.strip() or "actor",
             request_name=f"sub_agent:{normalized_name}",
         )
         request.add_payload(LLMPayload(ROLE.SYSTEM, Text(system_prompt)))

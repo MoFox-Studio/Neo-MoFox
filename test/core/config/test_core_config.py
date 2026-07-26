@@ -17,18 +17,29 @@ class TestChatSection:
         """测试默认聊天配置。"""
         config = CoreConfig.ChatSection()
 
-        assert config.default_chat_mode == "normal"
         assert config.max_history_messages == 20
 
     def test_custom_chat_config(self):
         """测试自定义聊天配置。"""
         config = CoreConfig.ChatSection(
-            default_chat_mode="focus",
             max_history_messages=200,
         )
 
-        assert config.default_chat_mode == "focus"
         assert config.max_history_messages == 200
+
+    def test_default_media_cleanup_config(self):
+        """测试默认媒体清理配置（拆分后的两套独立配置）。"""
+        config = CoreConfig.ChatSection()
+
+        # 缓存清理（pending 目录）
+        assert config.media_cache_cleanup_enabled is True
+        assert config.media_cache_cleanup_interval_hours == 0.5
+
+        # 文件清理（images/emojis 目录）
+        assert config.media_file_cleanup_enabled is True
+        assert config.media_file_max_age_days == 7
+        assert config.media_file_max_total_size_mb == 500
+        assert config.media_file_cleanup_interval_hours == 1.0
 
 
 class TestLLMSection:
@@ -167,7 +178,7 @@ class TestChatSectionLegacyKeys:
             config_file.write_text(
                 """
 [chat]
-default_chat_mode = \"focus\"
+max_history_messages = 150
 max_context_size = 150
 context_validation_mode = \"repair\"
 """.lstrip(),
@@ -175,12 +186,113 @@ context_validation_mode = \"repair\"
             )
 
             config = init_core_config(str(config_file))
-            assert config.chat.default_chat_mode == "focus"
             assert config.chat.max_history_messages == 150
 
             updated = config_file.read_text(encoding="utf-8")
             assert "context_validation_mode" not in updated
             assert "max_context_size" not in updated
+        finally:
+            core_config_module._global_config = original_config
+
+
+class TestMediaCleanupConfigMigration:
+    """测试媒体清理配置的旧字段迁移到拆分后的新字段。"""
+
+    def test_migrate_legacy_media_cleanup_fields(self, temp_dir: Path) -> None:
+        """旧 media_cache_* 字段应迁移到拆分后的 media_file_* / media_cache_* 字段。"""
+        import src.core.config.core_config as core_config_module
+
+        original_config = core_config_module._global_config
+        core_config_module._global_config = None
+
+        try:
+            config_file = temp_dir / "core.toml"
+            config_file.write_text(
+                """
+[chat]
+default_chat_mode = "focus"
+media_cache_cleanup_enabled = false
+media_cache_max_age_days = 14
+media_cache_max_total_size_mb = 300
+media_cache_cleanup_interval_hours = 2.0
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            config = init_core_config(str(config_file))
+
+            # enabled 迁移：两边都应继承旧值
+            assert config.chat.media_cache_cleanup_enabled is False
+            assert config.chat.media_file_cleanup_enabled is False
+
+            # 文件清理相关字段迁移
+            assert config.chat.media_file_max_age_days == 14
+            assert config.chat.media_file_max_total_size_mb == 300
+            # 旧间隔 >= 1.0，迁移到 media_file_cleanup_interval_hours，media_cache 保持默认
+            assert config.chat.media_file_cleanup_interval_hours == 2.0
+            assert config.chat.media_cache_cleanup_interval_hours == 0.5
+
+            # 迁移后旧字段应从 TOML 文件中移除
+            updated = config_file.read_text(encoding="utf-8")
+            assert "media_cache_max_age_days" not in updated
+            assert "media_cache_max_total_size_mb" not in updated
+        finally:
+            core_config_module._global_config = original_config
+
+    def test_migrate_legacy_media_cache_short_interval(self, temp_dir: Path) -> None:
+        """旧 media_cache_cleanup_interval_hours 小于 1.0 时，media_cache 也应继承该短间隔。"""
+        import src.core.config.core_config as core_config_module
+
+        original_config = core_config_module._global_config
+        core_config_module._global_config = None
+
+        try:
+            config_file = temp_dir / "core.toml"
+            config_file.write_text(
+                """
+[chat]
+default_chat_mode = "focus"
+media_cache_max_age_days = 7
+media_cache_max_total_size_mb = 500
+media_cache_cleanup_interval_hours = 0.3
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            config = init_core_config(str(config_file))
+
+            # 旧间隔 < 1.0：media_file 与 media_cache 都继承该短间隔
+            assert config.chat.media_file_cleanup_interval_hours == 0.3
+            assert config.chat.media_cache_cleanup_interval_hours == 0.3
+        finally:
+            core_config_module._global_config = original_config
+
+    def test_no_migration_when_no_legacy_fields(self, temp_dir: Path) -> None:
+        """配置文件无旧字段时不应触发迁移逻辑，新字段保持默认。"""
+        import src.core.config.core_config as core_config_module
+
+        original_config = core_config_module._global_config
+        core_config_module._global_config = None
+
+        try:
+            config_file = temp_dir / "core.toml"
+            config_file.write_text(
+                """
+[chat]
+default_chat_mode = "focus"
+""".lstrip(),
+                encoding="utf-8",
+            )
+
+            config = init_core_config(str(config_file))
+
+            # 新字段使用默认值
+            assert config.chat.media_cache_cleanup_enabled is True
+            assert config.chat.media_cache_cleanup_interval_hours == 0.5
+            assert config.chat.media_file_cleanup_enabled is True
+            assert config.chat.media_file_max_age_days == 7
+            assert config.chat.media_file_max_total_size_mb == 500
+            assert config.chat.media_file_cleanup_interval_hours == 1.0
         finally:
             core_config_module._global_config = original_config
 
@@ -203,12 +315,10 @@ class TestCoreConfig:
         """测试聊天配置设置。"""
         config = CoreConfig(
             chat=CoreConfig.ChatSection(
-                default_chat_mode="proactive",
                 max_history_messages=150,
             )
         )
 
-        assert config.chat.default_chat_mode == "proactive"
         assert config.chat.max_history_messages == 150
 
     def test_database_settings(self):
@@ -235,7 +345,6 @@ class TestCoreConfig:
         """测试完整配置。"""
         config = CoreConfig(
             chat=CoreConfig.ChatSection(
-                default_chat_mode="priority",
                 max_history_messages=200,
             ),
             llm=CoreConfig.LLMSection(default_policy="round_robin"),
@@ -255,7 +364,6 @@ class TestCoreConfig:
             ),
         )
 
-        assert config.chat.default_chat_mode == "priority"
         assert config.chat.max_history_messages == 200
         assert config.llm.default_policy == "round_robin"
         assert config.telemetry.enabled is True
@@ -294,8 +402,7 @@ class TestGlobalCoreConfig:
             config_file.write_text(
                 """
 [chat]
-default_chat_mode = "focus"
-max_context_size = 150
+max_history_messages = 150
 
 [llm]
 default_policy = "round_robin"
@@ -315,7 +422,6 @@ allow_operator_promotion = true
             )
 
             config = init_core_config(str(config_file))
-            assert config.chat.default_chat_mode == "focus"
             assert config.chat.max_history_messages == 150
             assert config.llm.default_policy == "round_robin"
             assert config.telemetry.enabled is True
@@ -383,7 +489,6 @@ class TestCoreConfigScenarios:
         config = CoreConfig()
 
         # 应该能使用所有默认值
-        assert config.chat.default_chat_mode == "normal"
         assert config.database.database_type == "sqlite"
         assert config.permissions.default_permission_level == "user"
 
@@ -408,7 +513,6 @@ class TestCoreConfigScenarios:
         """测试开发环境配置。"""
         config = CoreConfig(
             chat=CoreConfig.ChatSection(
-                default_chat_mode="normal",
                 max_history_messages=50,
             ),
             permissions=CoreConfig.PermissionSection(
@@ -428,7 +532,6 @@ class TestCoreConfigScenarios:
         config = CoreConfig(
             database=CoreConfig.DatabaseSection(database_type="postgresql"),
             chat=CoreConfig.ChatSection(
-                default_chat_mode="priority",
                 max_history_messages=200,
             ),
             permissions=CoreConfig.PermissionSection(

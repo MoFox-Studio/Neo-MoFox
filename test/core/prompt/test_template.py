@@ -7,7 +7,8 @@ import asyncio
 import pytest
 
 import src.kernel.event.core as event_core
-from src.core.prompt.template import PromptTemplate, PROMPT_BUILD_EVENT
+from src.core.components.types import EventType
+from src.core.prompt.template import PromptTemplate
 from src.core.prompt.policies import trim, min_len, header
 from src.kernel.event import get_event_bus, EventDecision
 
@@ -251,8 +252,8 @@ class TestOnPromptBuildEvent:
     def setup_method(self) -> None:
         """每个测试前清理事件总线中的 on_prompt_build 订阅。"""
         bus = get_event_bus()
-        for handler in bus.get_subscribers(PROMPT_BUILD_EVENT):
-            bus.unsubscribe(PROMPT_BUILD_EVENT, handler)
+        for handler in bus.get_subscribers(EventType.ON_PROMPT_BUILD):
+            bus.unsubscribe(EventType.ON_PROMPT_BUILD, handler)
 
     @pytest.mark.asyncio
     async def test_build_fires_event(self) -> None:
@@ -264,7 +265,7 @@ class TestOnPromptBuildEvent:
             return (EventDecision.SUCCESS, params)
 
         bus = get_event_bus()
-        bus.subscribe(PROMPT_BUILD_EVENT, handler)
+        bus.subscribe(EventType.ON_PROMPT_BUILD, handler)
 
         tmpl = PromptTemplate(name="evt_test", template="Hello {name}")
         await tmpl.set("name", "World").build()
@@ -283,7 +284,7 @@ class TestOnPromptBuildEvent:
             return (EventDecision.SUCCESS, params)
 
         bus = get_event_bus()
-        bus.subscribe(PROMPT_BUILD_EVENT, inject_suffix)
+        bus.subscribe(EventType.ON_PROMPT_BUILD, inject_suffix)
 
         tmpl = PromptTemplate(name="modify_test", template="Hi {name}")
         result = await tmpl.set("name", "Alice").build()
@@ -299,7 +300,7 @@ class TestOnPromptBuildEvent:
             return (EventDecision.SUCCESS, params)
 
         bus = get_event_bus()
-        bus.subscribe(PROMPT_BUILD_EVENT, replace_template)
+        bus.subscribe(EventType.ON_PROMPT_BUILD, replace_template)
 
         tmpl = PromptTemplate(name="tmpl_replace_test", template="Hello {name}")
         result = await tmpl.set("name", "Bob").build()
@@ -314,7 +315,7 @@ class TestOnPromptBuildEvent:
             raise RuntimeError("intentional error")
 
         bus = get_event_bus()
-        bus.subscribe(PROMPT_BUILD_EVENT, bad_handler)
+        bus.subscribe(EventType.ON_PROMPT_BUILD, bad_handler)
 
         tmpl = PromptTemplate(name="fallback_test", template="Hello {name}")
         result = await tmpl.set("name", "Charlie").build()
@@ -334,7 +335,7 @@ class TestOnPromptBuildEvent:
         monkeypatch.setattr(event_core, "EVENT_HANDLER_TIMEOUT_SECONDS", 0.01)
 
         bus = get_event_bus()
-        bus.subscribe(PROMPT_BUILD_EVENT, hung_handler)
+        bus.subscribe(EventType.ON_PROMPT_BUILD, hung_handler)
 
         tmpl = PromptTemplate(name="timeout_test", template="Hello {name}")
         result = await tmpl.set("name", "Delta").build()
@@ -358,7 +359,7 @@ class TestOnPromptBuildEvent:
             return (EventDecision.SUCCESS, params)
 
         bus = get_event_bus()
-        bus.subscribe(PROMPT_BUILD_EVENT, capture)
+        bus.subscribe(EventType.ON_PROMPT_BUILD, capture)
 
         tmpl = PromptTemplate(name="keys_test", template="{x}")
         await tmpl.set("x", "1").build()

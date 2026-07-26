@@ -25,7 +25,7 @@ from src.kernel.telemetry import (
 class _TelemetryAction(BaseAction):
     """测试用 Action。"""
 
-    action_name = "telemetry_action"
+    name = "telemetry_action"
     associated_types = ["text"]
 
     async def execute(self, *args, **kwargs):

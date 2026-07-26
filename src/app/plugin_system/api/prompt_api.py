@@ -10,11 +10,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
+from src.core.prompt import (
+    STREAM_BUCKET_PREFIX,
+    SystemReminderConsumeType,
+    SystemReminderInsertType,
+)
+
+API_VERSION = "1.0.0"
 
 if TYPE_CHECKING:
-    from src.core.prompt import PromptManager, PromptTemplate
-    from src.core.prompt import SystemReminderBucket
+    from src.core.prompt import PromptManager, PromptTemplate, SystemReminderBucket
     from src.core.prompt.system_reminder import SystemReminderStore
 
 
@@ -208,7 +213,144 @@ def get_system_reminder(
     return _get_system_reminder_store().get(bucket=bucket, names=names)
 
 
+# ── 流隔离 reminder API ──────────────────────────────────────────────
+#
+# 以下函数在 system reminder store 上以 ``stream:{stream_id}:{bucket}``
+# 作为 bucket key 实现按聊天流隔离的 reminder 读写。
+# chatter 通过 ``create_request(with_reminder=...)`` 调用时自动同时拾取
+# 全局 bucket 和当前流私有 bucket，无需插件感知底层命名约定。
+
+
+def _stream_bucket(stream_id: str, bucket: str) -> str:
+    """构造流私有 bucket 名称。
+
+    Args:
+        stream_id: 聊天流 ID。
+        bucket: bucket 名称（如 ``"actor"``），必须是纯字符串。
+            若调用方持有 :class:`SystemReminderBucket` 枚举值，
+            应在上层取 ``.value`` 后再传入。
+
+    Returns:
+        形如 ``stream:{stream_id}:{bucket}`` 的流私有 bucket key。
+    """
+
+    _validate_non_empty(stream_id, "stream_id")
+    # strip 防止上游传入带空格的 stream_id 导致 bucket key 不一致
+    normalized_stream_id = stream_id.strip()
+    return f"{STREAM_BUCKET_PREFIX}{normalized_stream_id}:{bucket}"
+
+
+def add_stream_reminder(
+    stream_id: str,
+    bucket: str,
+    name: str,
+    content: str,
+    insert_type: str | SystemReminderInsertType = SystemReminderInsertType.FIXED,
+    consume: str | SystemReminderConsumeType = SystemReminderConsumeType.FOREVER,
+) -> None:
+    """向指定聊天流的私有 bucket 写入（覆盖）一条 system reminder。
+
+    与 :func:`add_system_reminder` 的区分：
+
+    - :func:`add_system_reminder` 写入全局 bucket，所有聊天流的 chatter
+      通过 ``with_reminder`` 都会拾取到同一条 reminder。
+    - 本函数写入 ``stream:{stream_id}:{bucket}`` 的私有 bucket，仅对
+      指定聊天流可见，其他流不受影响。
+
+    chatter 通过 ``create_request(with_reminder=...)`` 调用时，
+    会自动同时拾取全局 bucket 和当前流私有 bucket，插件无需关心拾取逻辑。
+
+    Args:
+        stream_id: 聊天流 ID。必填，用于定位流私有 bucket。
+        bucket: bucket 名称（推荐使用 :class:`SystemReminderBucket` 预设值，
+            如 ``actor`` / ``sub_agent``）。
+        name: reminder 名称，在同一个流私有 bucket 内唯一。
+        content: reminder 内容文本。
+        insert_type: reminder 插入位置类型（``fixed`` / ``dynamic``）。
+        consume: reminder 消费模式（``forever`` / ``once``）。
+
+    Returns:
+        None
+
+    Raises:
+        ValueError: 当 ``stream_id`` 为空，或 ``name`` / ``content`` 为空时。
+    """
+
+    _validate_non_empty(name, "name")
+    _validate_non_empty(content, "content")
+    _get_system_reminder_store().set(
+        bucket=_stream_bucket(stream_id, bucket),
+        name=name,
+        content=content,
+        insert_type=insert_type,
+        consume=consume,
+    )
+
+
+def get_stream_reminder(
+    stream_id: str,
+    bucket: str,
+    names: list[str] | None = None,
+) -> str:
+    """从指定聊天流的私有 bucket 读取 reminder 文本。
+
+    Args:
+        stream_id: 聊天流 ID。
+        bucket: bucket 名称。
+        names: 可选的 name 列表；传入时仅返回这些 name 对应的 reminder
+            （按 names 顺序拼接）。为 ``None`` 时返回 bucket 下所有 reminder。
+
+    Returns:
+        拼接后的 reminder 字符串；若 bucket 为空或无内容则返回空字符串。
+    """
+
+    return _get_system_reminder_store().get(
+        bucket=_stream_bucket(stream_id, bucket),
+        names=names,
+    )
+
+
+def delete_stream_reminder(
+    stream_id: str,
+    bucket: str,
+    name: str,
+) -> bool:
+    """从指定聊天流的私有 bucket 删除单条 reminder。
+
+    Args:
+        stream_id: 聊天流 ID。
+        bucket: bucket 名称。
+        name: 要删除的 reminder 名称。
+
+    Returns:
+        bool: 删除成功返回 ``True``；不存在时返回 ``False``。
+    """
+
+    return _get_system_reminder_store().delete(
+        bucket=_stream_bucket(stream_id, bucket),
+        name=name,
+    )
+
+
+def clear_stream_reminders(stream_id: str) -> None:
+    """清除指定聊天流在所有私有 bucket 下的 reminder。
+
+    主要用于聊天流销毁或重置时清理资源，避免流私有 reminder 残留。
+    本函数会扫描所有 bucket key，清除以 ``stream:{stream_id}:`` 开头的项，
+    对全局 bucket 无影响。
+
+    Args:
+        stream_id: 要清除的聊天流 ID。
+    """
+
+    _validate_non_empty(stream_id, "stream_id")
+    _get_system_reminder_store().clear_by_prefix(
+        f"{STREAM_BUCKET_PREFIX}{stream_id.strip()}:"
+    )
+
+
 __all__ = [
+    "API_VERSION",
     "register_template",
     "unregister_template",
     "get_template",
@@ -219,4 +361,8 @@ __all__ = [
     "count_templates",
     "add_system_reminder",
     "get_system_reminder",
+    "add_stream_reminder",
+    "get_stream_reminder",
+    "delete_stream_reminder",
+    "clear_stream_reminders",
 ]

@@ -28,7 +28,7 @@ from .core_config import (
     CoreConfig,
     get_core_config,
     init_core_config,
-    CORE_VERSION
+    CORE_VERSION,
 )
 from .mcp_config import (
     MCPConfig,

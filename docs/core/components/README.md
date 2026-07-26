@@ -12,6 +12,7 @@
 
 - [base](./base.md): 组件基类体系与职责边界
 - [loader](./loader.md): 插件注册装饰器、manifest 解析与加载计划
+- [plugin-api-versioning](./plugin-api-versioning.md): 按 API 模块的版本号设计与校验
 - [registry](./registry.md): 组件注册表与依赖关系管理
 - [state_manager](./state_manager.md): 组件状态与运行时数据管理
 - [types](./types.md): 枚举、签名解析与权限级别定义

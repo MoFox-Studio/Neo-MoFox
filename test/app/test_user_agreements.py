@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from src.app.runtime.console_ui import UILevel
 from src.app.runtime.user_agreements import (
     ensure_cloud_telemetry_consent,
     ensure_eula_accepted,
@@ -311,7 +310,6 @@ identity_storage_dir = "{(tmp_path / "cloud-state").as_posix()}"
     answers = iter(["agree", "agree"])
     result = await ensure_startup_agreements(
         "config/core.toml",
-        UILevel.MINIMAL,
         input_func=lambda _: next(answers),
     )
     assert result is True
@@ -361,7 +359,6 @@ identity_storage_dir = "{(tmp_path / "cloud-state").as_posix()}"
 
     result = await ensure_startup_agreements(
         "config/core.toml",
-        UILevel.MINIMAL,
         input_func=should_not_be_called,
     )
     assert result is True

@@ -7,12 +7,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncGenerator, TypeGuard
 
-from src.core.components.base import Failure, Stop, Wait, WaitResumeEvent
-from src.core.models.message import Message
-from src.core.models.stream import ChatStream
-from src.kernel.llm import LLMPayload, ROLE, Text
+from src.app.plugin_system.api import event_api, stream_api
+from src.app.plugin_system.base import Failure, Stop, Wait, WaitResumeEvent
+from src.app.plugin_system.types import ChatStream, EventType, LLMPayload, Message, ROLE, Text
 
-from .tool_flow import append_suspend_payload_if_action_only, process_tool_calls
+from .utils.tool_flow import append_suspend_payload_if_action_only, process_tool_calls
 from .type_defs import (
     DefaultChatterResumeEvent,
     DefaultChatterResult,
@@ -20,6 +19,7 @@ from .type_defs import (
     DefaultChatterSessionOptions,
     LLMConversationState,
     LLMResponseLike,
+    SubAgentDecision,
 )
 
 _AFTER_CHATTER_STEP_SCOPE = "actor_round"
@@ -46,6 +46,9 @@ class DefaultChatterSessionState:
     unread_msgs_to_flush: list[Message]
     plain_text_retry_count: int = 0
     used_tools_in_round: set[str] = field(default_factory=set)
+    tool_results_in_round: list[dict[str, object]] = field(default_factory=list)
+    decision_history: list[SubAgentDecision] = field(default_factory=list)
+    internal_context_ids: list[str] = field(default_factory=list)
 
     def has_tool_result_tail(self) -> bool:
         payloads = getattr(self.response, "payloads", None)
@@ -94,10 +97,18 @@ def collect_used_tool_names(calls: list[Any]) -> set[str]:
 def _consume_actor_round_step_data(state: DefaultChatterSessionState) -> dict[str, Any]:
     used_tools = sorted(state.used_tools_in_round)
     state.used_tools_in_round.clear()
-    return {
+    tool_results = list(state.tool_results_in_round)
+    state.tool_results_in_round.clear()
+    internal_context_ids = list(state.internal_context_ids)
+    state.internal_context_ids.clear()
+    step_data: dict[str, Any] = {
         "step_scope": _AFTER_CHATTER_STEP_SCOPE,
         "used_tools": used_tools,
     }
+    if internal_context_ids:
+        step_data["tool_results"] = tool_results
+        step_data["internal_context_ids"] = internal_context_ids
+    return step_data
 
 
 def _is_suspend_message(message: str | None, suspend_text: str) -> bool:
@@ -110,6 +121,31 @@ def _is_timer_resume_event(event: WaitResumeEvent | None) -> bool:
 
 def _is_sub_agent_resume_event(event: WaitResumeEvent | None) -> bool:
     return event is not None and event.source == "sub_agent"
+
+
+def _is_internal_context_resume_event(event: WaitResumeEvent | None) -> bool:
+    return event is not None and event.source == "internal_context"
+
+
+async def _request_internal_context(
+    stream_id: str,
+    event: WaitResumeEvent,
+) -> tuple[str, list[str]]:
+    """从事件总线请求插件提供的内部上下文。"""
+    result = await event_api.publish_event(
+        EventType.ON_INTERNAL_CONTEXT_REQUESTED,
+        {
+            "stream_id": stream_id,
+            "context_key": event.context_key,
+            "content": "",
+            "context_ids": [],
+        },
+    )
+    params = result.get("params") or {}
+    content = str(params.get("content") or "").strip()
+    raw_ids = params.get("context_ids") or []
+    context_ids = [str(item) for item in raw_ids if str(item).strip()]
+    return content, context_ids
 
 
 def _append_suspend_payload_if_tool_result_tail(
@@ -203,6 +239,24 @@ def _build_sub_agent_resume_prompt(_: WaitResumeEvent) -> str:
     )
 
 
+def _build_unknown_resume_prompt(event: WaitResumeEvent) -> str:
+    """未知 source 的通用恢复提示。
+
+    优先使用 ``extra["resume_prompt"]``，
+    否则返回基于 source 的默认文案。
+    """
+    custom = event.extra.get("resume_prompt")
+    if isinstance(custom, str) and custom.strip():
+        return custom
+    source_label = event.source or "未知来源"
+    return (
+        f"系统事件：收到来自 '{source_label}' 的恢复请求。"
+        "请基于已有上下文主动决定下一步。"
+        "如果现在无需继续处理，请调用 pass_and_wait；"
+        "如果需要继续回复、委派或执行动作，请直接使用相应工具。"
+    )
+
+
 def _build_sub_agent_result_user_prompt(events: list[dict[str, Any]]) -> str:
     lines = ["以下是子代理刚刚返回的结果，请基于这些结果继续处理："]
     for event in events:
@@ -272,7 +326,7 @@ def _transition(
 
 @dataclass(slots=True)
 class DefaultChatterSession:
-    """Default Chatter 会话核心，封装了一个聊天会话的完整运行时状态和执行逻辑。通过组合不同的适配器和配置选项，可以支持多种聊天场景和定制化需求。"""
+    """维护单次聊天会话状态并执行消息、模型和工具控制流。"""
 
     stream_id: str
     options: DefaultChatterSessionOptions
@@ -298,9 +352,8 @@ class DefaultChatterSession:
         )
 
     async def execute(self) -> AsyncGenerator[DefaultChatterResult, DefaultChatterResumeEvent]:
-        from src.core.managers.stream_manager import get_stream_manager
-
-        chat_stream = await get_stream_manager().activate_stream(self.stream_id)
+        """激活聊天流并执行会话控制流。"""
+        chat_stream = await stream_api.activate_stream(self.stream_id)
         if chat_stream is None:
             self.logger.error(f"无法激活聊天流: {self.stream_id}")
             yield Failure("无法激活聊天流")
@@ -328,9 +381,9 @@ class DefaultChatterSession:
         if self.options.native_multimodal:
             from src.core.managers.media_manager import get_media_manager
 
-            get_media_manager().skip_vlm_for_stream(chat_stream.stream_id, ["image"])
+            get_media_manager().skip_recognition_for_stream(chat_stream.stream_id, ["image"])
             self.logger.debug(
-                f"Skipped VLM image recognition for stream {chat_stream.stream_id[:8]}"
+                f"Skipped image recognition for stream {chat_stream.stream_id[:8]}"
             )
 
         try:
@@ -389,10 +442,23 @@ class DefaultChatterSession:
                     unread_lines,
                     unread_msgs,
                     chat_stream,
+                    history_text=history_text if not state.history_merged else "",
+                    decision_history=state.decision_history[-self.options.sub_agent_decision_history_limit:] if state.decision_history else None,
                 )
+                decision_source = decision.get("source", "sub_agent")
+                if decision_source == "interest":
+                    decision_tag = "[cyan]兴趣值过滤[/]"
+                elif decision_source == "probability":
+                    decision_tag = "[green]概率直通[/]"
+                else:
+                    decision_tag = "[bright_cyan]子代理决策[/]"
                 self.logger.info(
-                    f"子代理决策: {decision['reason']} (respond={decision['should_respond']})"
+                    f"{decision_tag}: {decision['reason']} (respond={decision['should_respond']})"
+                    + ("" if decision["should_respond"] else " → 继续等待")
                 )
+                state.decision_history.append(decision)
+                if len(state.decision_history) > self.options.sub_agent_decision_history_limit:
+                    state.decision_history = state.decision_history[-self.options.sub_agent_decision_history_limit:]
 
                 if decision["should_respond"]:
                     unread_user_prompt = await self.adapters.prompt_adapter._build_user_prompt(
@@ -408,7 +474,7 @@ class DefaultChatterSession:
                         formatted_text=unread_user_prompt,
                         unread_msgs=unread_msgs,
                         native_multimodal=self.options.native_multimodal,
-                        logger_override=self.logger,
+                        logger_override=self.logger,  # type: ignore[arg-type]
                     )
                     state.unread_msgs_to_flush = unread_msgs
                     _transition(
@@ -420,8 +486,10 @@ class DefaultChatterSession:
                     continue
 
             if state.phase == DefaultChatterSessionPhase.WAIT_USER:
-                if _is_timer_resume_event(current_resume_event) or _is_sub_agent_resume_event(
-                    current_resume_event
+                if (
+                    _is_timer_resume_event(current_resume_event)
+                    or _is_sub_agent_resume_event(current_resume_event)
+                    or _is_internal_context_resume_event(current_resume_event)
                 ):
                     assert current_resume_event is not None
                     state.cross_round_seen_signatures.clear()
@@ -429,11 +497,21 @@ class DefaultChatterSession:
                     state.used_tools_in_round.clear()
                     state.unreads = []
                     state.unread_msgs_to_flush = []
-                    reminder_text = (
-                        _build_sub_agent_resume_prompt(current_resume_event)
-                        if _is_sub_agent_resume_event(current_resume_event)
-                        else _build_wait_timeout_prompt(current_resume_event)
-                    )
+                    if _is_internal_context_resume_event(current_resume_event):
+                        reminder_text, context_ids = await _request_internal_context(
+                            self.stream_id,
+                            current_resume_event,
+                        )
+                        state.internal_context_ids.extend(context_ids)
+                        if not reminder_text:
+                            resume_event = yield Wait()
+                            continue
+                    else:
+                        reminder_text = (
+                            _build_sub_agent_resume_prompt(current_resume_event)
+                            if _is_sub_agent_resume_event(current_resume_event)
+                            else _build_wait_timeout_prompt(current_resume_event)
+                        )
                     if _is_sub_agent_resume_event(current_resume_event):
                         from .sub_agent_collaboration import get_sub_agent_collaboration_manager
 
@@ -454,8 +532,40 @@ class DefaultChatterSession:
                         reason=(
                             "子代理完成"
                             if _is_sub_agent_resume_event(current_resume_event)
-                            else "等待计时器到期"
+                            else (
+                                "内部上下文到达"
+                                if _is_internal_context_resume_event(current_resume_event)
+                                else "等待计时器到期"
+                            )
                         ),
+                    )
+                    continue
+
+                if current_resume_event is not None and current_resume_event.source == "message":
+                    current_resume_event = None
+
+                if current_resume_event is not None:
+                    state.cross_round_seen_signatures.clear()
+                    state.plain_text_retry_count = 0
+                    state.used_tools_in_round.clear()
+                    state.unreads = []
+                    state.unread_msgs_to_flush = []
+
+                    reminder_text = _build_unknown_resume_prompt(current_resume_event)
+
+                    context_ids = current_resume_event.extra.get("context_ids", [])
+                    if context_ids:
+                        state.internal_context_ids.extend(context_ids)
+
+                    self.adapters.unread_adapter._upsert_pending_unread_payload(
+                        response=state.response,
+                        formatted_text=reminder_text,
+                    )
+                    _transition(
+                        state=state,
+                        to_phase=DefaultChatterSessionPhase.MODEL_TURN,
+                        session=self,
+                        reason=f"外部恢复事件: {current_resume_event.source}",
                     )
                     continue
 
@@ -483,13 +593,25 @@ class DefaultChatterSession:
                     unread_lines,
                     unread_msgs,
                     chat_stream,
+                    history_text=history_text if not state.history_merged else "",
+                    decision_history=state.decision_history[-self.options.sub_agent_decision_history_limit:] if state.decision_history else None,
                 )
+                decision_source = decision.get("source", "sub_agent")
+                if decision_source == "interest":
+                    decision_tag = "[cyan]兴趣值过滤[/]"
+                elif decision_source == "probability":
+                    decision_tag = "[green]概率直通[/]"
+                else:
+                    decision_tag = "[bright_cyan]子代理决策[/]"
                 self.logger.info(
-                    f"子代理决策: {decision['reason']} (respond={decision['should_respond']})"
+                    f"{decision_tag}: {decision['reason']} (respond={decision['should_respond']})"
+                    + ("" if decision["should_respond"] else " → 继续等待")
                 )
+                state.decision_history.append(decision)
+                if len(state.decision_history) > self.options.sub_agent_decision_history_limit:
+                    state.decision_history = state.decision_history[-self.options.sub_agent_decision_history_limit:]
 
                 if not decision["should_respond"]:
-                    self.logger.info("子代理决定暂不响应; 继续等待")
                     resume_event = yield Wait()
                     continue
 
@@ -498,7 +620,7 @@ class DefaultChatterSession:
                     formatted_text=unread_user_prompt,
                     unread_msgs=unread_msgs,
                     native_multimodal=self.options.native_multimodal,
-                    logger_override=self.logger,
+                    logger_override=self.logger,  # type: ignore[arg-type]
                 )
                 _transition(
                     state=state,
@@ -527,7 +649,7 @@ class DefaultChatterSession:
                         await state.response.stream_events_with_callback(stream_observer)
                         finalize = getattr(stream_observer, "finalize", None)
                         if callable(finalize):
-                            await finalize()
+                            await finalize()  # type: ignore[awaitable-not-object]
                     else:
                         await state.response
                     if state.phase == DefaultChatterSessionPhase.MODEL_TURN:
@@ -649,6 +771,9 @@ class DefaultChatterSession:
                     stop_call_name=self.stop_call_name,
                     cross_round_seen_signatures=state.cross_round_seen_signatures,
                 )
+                state.tool_results_in_round.extend(
+                    getattr(call_outcome, "execution_results", None) or []
+                )
 
                 if call_outcome.should_stop:
                     cooldown_seconds = call_outcome.stop_minutes * 60 if self.options.enable_cooldown else 0
@@ -676,7 +801,7 @@ class DefaultChatterSession:
                     response=llm_response,
                     suspend_text=self.suspend_text,
                     enable_action_suspend=self.options.enable_action_suspend,
-                    logger=self.logger,
+                    logger=self.logger,  # type: ignore[arg-type]
                 )
 
                 if action_only_round and not call_outcome.should_wait:
@@ -700,15 +825,26 @@ class DefaultChatterSession:
                     continue
 
                 if call_outcome.should_wait:
-                    _append_suspend_payload_if_tool_result_tail(
-                        response=llm_response,
-                        suspend_text=self.suspend_text,
-                        session=self,
-                    )
-                    resume_event = yield Wait(
-                        time=getattr(call_outcome, "wait_seconds", None),
-                        step_data=_consume_actor_round_step_data(state),
-                    )
+                    # LLM 执行期间可能有新消息入队（竞态）：
+                    # 若此时已有新未读消息，跳过 yield Wait，直接回到 WAIT_USER，
+                    # 下一轮循环会正常读取并处理这些消息，不会被 Wait 基线吸收。
+                    _, fresh_unreads = await self.adapters.unread_adapter.fetch_unreads()
+                    if fresh_unreads:
+                        self.logger.debug(
+                            f"pass_and_wait 前检测到 {len(fresh_unreads)} 条新消息，"
+                            "跳过等待直接进入下一轮"
+                        )
+                        _consume_actor_round_step_data(state)
+                    else:
+                        _append_suspend_payload_if_tool_result_tail(
+                            response=llm_response,
+                            suspend_text=self.suspend_text,
+                            session=self,
+                        )
+                        resume_event = yield Wait(
+                            time=call_outcome.wait_seconds,
+                            step_data=_consume_actor_round_step_data(state),
+                        )
                 else:
                     _consume_actor_round_step_data(state)
                 _transition(

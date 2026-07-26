@@ -11,6 +11,8 @@ from src.core.components.types import ChatType, ComponentType
 from src.core.components.registry import get_global_registry
 from src.core.components.utils import should_strip_auto_reason_argument
 
+API_VERSION = "1.0.0"
+
 if TYPE_CHECKING:
     from src.core.components.base.agent import BaseAgent
     from src.core.components.base.plugin import BasePlugin
@@ -323,6 +325,7 @@ async def execute_agent_usable(
 
 
 __all__ = [
+    "API_VERSION",
     "get_all_agents",
     "get_agents_for_plugin",
     "get_agents_for_chat",

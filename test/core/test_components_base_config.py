@@ -22,8 +22,8 @@ class TestConfig(BaseConfig):
     """测试用的配置类。"""
 
     # 使用 ClassVar 标注类变量
-    config_name: ClassVar[str] = "test_config"
-    config_description: ClassVar[str] = "Test configuration"
+    name: ClassVar[str] = "test_config"
+    description: ClassVar[str] = "Test configuration"
     plugin_name: ClassVar[str] = "test_plugin"
 
     test_section: TestSection = Field(default_factory=TestSection)
@@ -39,8 +39,8 @@ class RequiredSection(SectionBase):
 class RequiredConfig(BaseConfig):
     """包含必填字段的测试配置类。"""
 
-    config_name: ClassVar[str] = "required_config"
-    config_description: ClassVar[str] = "Required fields config"
+    name: ClassVar[str] = "required_config"
+    description: ClassVar[str] = "Required fields config"
 
     @config_section("bot")
     class BotSection(RequiredSection):
@@ -55,8 +55,8 @@ class TestBaseConfig:
     def test_config_initialization(self):
         """测试配置初始化。"""
         config = TestConfig()
-        assert config.config_name == "test_config"
-        assert config.config_description == "Test configuration"
+        assert config.name == "test_config"
+        assert config.description == "Test configuration"
         assert config.plugin_name == "test_plugin"
 
     def test_get_default_path(self):
@@ -73,7 +73,7 @@ class TestBaseConfig:
         """测试获取签名。"""
         # 默认 plugin_name 是 unknown_plugin
         class UnknownConfig(BaseConfig):
-            config_name: ClassVar[str] = "unknown"
+            name: ClassVar[str] = "unknown"
 
         assert UnknownConfig.get_signature() is None
 
@@ -84,7 +84,7 @@ class TestBaseConfig:
     def test_get_default_path_different_plugin(self):
         """测试不同插件的默认路径。"""
         class OtherConfig(BaseConfig):
-            config_name: ClassVar[str] = "other_config"
+            name: ClassVar[str] = "other_config"
             plugin_name: ClassVar[str] = "other_plugin"
 
         OtherConfig._plugin_ = "other_plugin"
@@ -136,9 +136,9 @@ class TestBaseConfig:
     def test_generate_default_no_config_name(self):
         """测试没有 config_name 时生成默认配置。"""
         class NoNameConfig(BaseConfig):
-            config_name: ClassVar[str] = ""  # 空名称
+            name: ClassVar[str] = ""  # 空名称
 
-        with pytest.raises(RuntimeError, match="必须定义 config_name"):
+        with pytest.raises(RuntimeError, match="必须定义 name"):
             NoNameConfig.generate_default()
 
     @patch("src.core.components.base.config.Path.exists")
@@ -235,7 +235,7 @@ class TestConfigWithMultipleSections:
             value2: int = Field(default=2, description="Section 2 value")
 
         class MultiSectionConfig(BaseConfig):
-            config_name: ClassVar[str] = "multi_section"
+            name: ClassVar[str] = "multi_section"
             plugin_name: ClassVar[str] = "test_plugin"
 
             section1: Section1 = Field(default_factory=Section1)
@@ -257,7 +257,7 @@ class TestConfigWithMultipleSections:
             inner: InnerSection = Field(default_factory=InnerSection)
 
         class NestedConfig(BaseConfig):
-            config_name: ClassVar[str] = "nested"
+            name: ClassVar[str] = "nested"
             plugin_name: ClassVar[str] = "test_plugin"
 
             outer: OuterSection = Field(default_factory=OuterSection)

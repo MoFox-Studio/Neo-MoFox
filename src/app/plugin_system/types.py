@@ -34,6 +34,12 @@ from src.kernel.llm import (
     ToolCall,
     ToolRegistry,
     ToolResult,
+    LLMRequest,
+    EmbeddingRequest,
+    RerankRequest,
+    ReminderSourceSpec,
+    LLMContextManager,
+    LLMResponse,
 )
 
 
@@ -66,6 +72,12 @@ __all__ = [
     "MessageType",
     "ModelEntry",
     "ModelSet",
+    "LLMRequest",
+    "EmbeddingRequest",
+    "RerankRequest",
+    "ReminderSourceSpec",
+    "LLMContextManager",
+    "LLMResponse",
     "PermissionLevel",
     "PromptTemplate",
     "RenderPolicy",

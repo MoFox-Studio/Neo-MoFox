@@ -4,9 +4,12 @@
 工具是"查询"功能，供 LLM 调用以获取信息，与动作不同。
 """
 
-from abc import ABC, abstractmethod
+from __future__ import annotations
+
+from abc import abstractmethod
 from typing import Annotated, Any, TYPE_CHECKING
 
+from src.core.components.base.component import BaseComponent
 from src.core.components.types import ChatType
 from src.core.components.utils import parse_function_signature
 from src.kernel.llm.payload.tooling import LLMUsable, LLMUsableExecution
@@ -15,7 +18,7 @@ if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
     from src.core.models.message import Message
 
-class BaseTool(ABC, LLMUsable):
+class BaseTool(BaseComponent, LLMUsable):
     """工具组件基类。
 
     工具提供特定的功能接口供 LLM 调用，例如计算器、翻译器等。
@@ -23,16 +26,16 @@ class BaseTool(ABC, LLMUsable):
 
     Class Attributes:
         plugin_name: 所属插件名称（由插件管理器在注册时注入，插件开发者无需填写）
-        tool_name: 工具名称
-        tool_description: 工具描述
+        name: 工具名称
+        description: 工具描述
         chatter_allow: 支持的 Chatter 列表
         chat_type: 支持的聊天类型
         associated_platforms: 关联的平台列表
 
     Examples:
         >>> class CalculatorTool(BaseTool):
-        ...     tool_name = "calculator"
-        ...     tool_description = "数学计算器"
+        ...     name = "calculator"
+        ...     description = "数学计算器"
         ...
         ...     async def execute(self, expression: str) -> tuple[bool, str]:
         ...         try:
@@ -44,9 +47,15 @@ class BaseTool(ABC, LLMUsable):
     _plugin_: str
     _signature_: str
 
-    # 工具元数据
+    component_type = "tool"
+    _legacy_name_attr = "tool_name"
+    _legacy_desc_attr = "tool_description"
     tool_name: str = ""
     tool_description: str = ""
+
+    # 工具元数据
+    name: str = ""
+    description: str = ""
 
     chatter_allow: list[str] = []
     chat_type: ChatType = ChatType.ALL
@@ -85,23 +94,6 @@ class BaseTool(ABC, LLMUsable):
             return message_stream_id
         return str(self.stream_id or "").strip()
 
-    @classmethod
-    def get_signature(cls) -> str | None:
-        """获取工具组件的唯一签名。
-
-        Returns:
-            str | None: 组件签名，格式为 "plugin_name:tool:tool_name"，如果还未注入插件名称则返回 None
-
-        Examples:
-            >>> signature = CalculatorTool.get_signature()
-            >>> "my_plugin:tool:calculator"
-        """
-        if hasattr(cls, "_signature_") and cls._signature_:
-            return cls._signature_
-        if hasattr(cls, "_plugin_") and cls._plugin_ and cls.tool_name:
-            return f"{cls._plugin_}:tool:{cls.tool_name}"
-        return None
-    
     @abstractmethod
     async def execute(
         self, *args: Any, **kwargs: Any
@@ -173,4 +165,4 @@ class BaseTool(ABC, LLMUsable):
             ... }
         """
         # 使用 utils 中的共同方法生成 schema，name 前缀加上组件类型
-        return parse_function_signature(cls.execute, f"tool-{cls.tool_name}", cls.tool_description)
+        return parse_function_signature(cls.execute, f"tool-{cls.name}", cls.description)

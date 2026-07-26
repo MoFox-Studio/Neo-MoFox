@@ -62,8 +62,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.kernel.db import AggregateQuery, CRUDBase, QueryBuilder
+from src.kernel.db.core.cache import invalidate_model_cache
 from src.kernel.logger import get_logger
 from src.kernel.storage import JSONStore
+
+API_VERSION = "1.0.0"
 
 logger = get_logger("plugin.storage", display="插件存储")
 
@@ -281,6 +284,13 @@ class PluginDatabase:
         """
         return AggregateQuery(model, session_factory=self._require_initialized())
 
+    def invalidate(self, model: type[Any]) -> None:
+        """使原始 SQL 写入后该模型的进程内读缓存失效。"""
+        invalidate_model_cache(
+            model,
+            session_factory=self._require_initialized(),
+        )
+
     @asynccontextmanager
     async def session(self) -> AsyncGenerator[AsyncSession, None]:
         """获取原始 :class:`~sqlalchemy.ext.asyncio.AsyncSession`，用于复杂操作。
@@ -329,6 +339,7 @@ class PluginDatabase:
 
 
 __all__ = [
+    "API_VERSION",
     # JSON 存储
     "JSONStore",
     "save_json",

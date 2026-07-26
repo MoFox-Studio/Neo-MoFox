@@ -1,5 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class RetryDecision:
+    """请求失败后的重试决策。"""
+
+    retryable: bool
+    reason: str
 
 
 class LLMError(RuntimeError):
@@ -77,6 +90,103 @@ class LLMAPIError(LLMError):
         self.model = model
 
 
+def decide_retry(error: BaseException) -> RetryDecision:
+    """判断标准化异常是否应交由现有策略重试。
+
+    Args:
+        error: 经 :func:`classify_exception` 标准化后的请求异常。
+
+    Returns:
+        包含是否可重试及决策原因的 :class:`RetryDecision`。认证、配置、
+        Token 超限、内容过滤及不可恢复的 API 请求错误不会重试；限流、
+        超时、连接错误、HTTP 408、HTTP 429 和 5xx 错误允许重试。
+    """
+    if isinstance(error, LLMAuthenticationError):
+        return RetryDecision(False, "authentication_error")
+    if isinstance(error, LLMTokenLimitError):
+        return RetryDecision(False, "token_limit")
+    if isinstance(error, LLMContentFilterError):
+        return RetryDecision(False, "content_filter")
+    if isinstance(error, LLMConfigurationError):
+        return RetryDecision(False, "configuration_error")
+    if isinstance(error, LLMRateLimitError):
+        return RetryDecision(True, "rate_limit")
+    if isinstance(error, (LLMTimeoutError, TimeoutError, ConnectionError)):
+        return RetryDecision(True, "transient_transport_error")
+    if isinstance(error, LLMAPIError):
+        status_code = error.status_code
+        if status_code in (408, 429) or (
+            isinstance(status_code, int) and 500 <= status_code < 600
+        ):
+            return RetryDecision(True, "transient_api_error")
+        return RetryDecision(False, "api_request_error")
+    return RetryDecision(False, "unknown_error")
+
+
+def _valid_retry_after(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        delay = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return delay
+
+
+def _get_header(headers: Any, name: str) -> object | None:
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        value = getter(name)
+        if value is not None:
+            return value
+    items = getattr(headers, "items", None)
+    if callable(items):
+        for key, value in items():
+            if str(key).casefold() == name.casefold():
+                return value
+    return None
+
+
+def _extract_retry_after(error: BaseException) -> float | None:
+    """从 SDK 异常中提取服务端建议的重试等待时间。
+
+    按 ``retry-after-ms``、``Retry-After`` 数值秒、``Retry-After``
+    HTTP-date、异常 ``retry_after`` 属性的顺序解析。无效、负数或非有限值
+    会被忽略，已过期的 HTTP-date 返回 ``0.0``。
+
+    Args:
+        error: 可能携带 HTTP 响应头或 ``retry_after`` 属性的 SDK 异常。
+
+    Returns:
+        解析后的非负等待秒数；没有合法值时返回 ``None``。
+    """
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        retry_after_ms = _valid_retry_after(_get_header(headers, "retry-after-ms"))
+        if retry_after_ms is not None:
+            return retry_after_ms / 1000.0
+
+        retry_after_value = _get_header(headers, "retry-after")
+        retry_after = _valid_retry_after(retry_after_value)
+        if retry_after is not None:
+            return retry_after
+        if isinstance(retry_after_value, str):
+            try:
+                retry_at = parsedate_to_datetime(retry_after_value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+                if math.isfinite(delay):
+                    return max(0.0, delay)
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+    return _valid_retry_after(getattr(error, "retry_after", None))
+
+
 def classify_exception(error: BaseException, model: str | None = None) -> BaseException:
     """将第三方 SDK 异常转换为标准化的 LLM 异常。
 
@@ -89,6 +199,7 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
     try:
         from openai import (
             APITimeoutError,
+            APIConnectionError,
             RateLimitError,
             AuthenticationError,
             BadRequestError,
@@ -96,12 +207,14 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
         )
 
         if isinstance(error, RateLimitError):
-            # 尝试从错误中提取 retry_after
-            retry_after = getattr(error, "retry_after", None)
+            retry_after = _extract_retry_after(error)
             return LLMRateLimitError(str(error), retry_after=retry_after, model=model)
 
         if isinstance(error, APITimeoutError):
             return LLMTimeoutError(str(error), model=model)
+
+        if isinstance(error, APIConnectionError):
+            return ConnectionError(str(error))
 
         if isinstance(error, AuthenticationError):
             return LLMAuthenticationError(str(error), model=model)
@@ -126,6 +239,7 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
     try:
         from anthropic import (
             APITimeoutError as AnthropicAPITimeoutError,
+            APIConnectionError as AnthropicAPIConnectionError,
             APIError as AnthropicAPIError,
             APIStatusError as AnthropicAPIStatusError,
             AuthenticationError as AnthropicAuthenticationError,
@@ -134,11 +248,14 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
         )
 
         if isinstance(error, AnthropicRateLimitError):
-            retry_after = getattr(error, "retry_after", None)
+            retry_after = _extract_retry_after(error)
             return LLMRateLimitError(str(error), retry_after=retry_after, model=model)
 
         if isinstance(error, AnthropicAPITimeoutError):
             return LLMTimeoutError(str(error), model=model)
+
+        if isinstance(error, AnthropicAPIConnectionError):
+            return ConnectionError(str(error))
 
         if isinstance(error, AnthropicAuthenticationError):
             return LLMAuthenticationError(str(error), model=model)

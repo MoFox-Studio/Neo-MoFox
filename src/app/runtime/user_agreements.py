@@ -18,7 +18,7 @@ from src.kernel.telemetry.cloud import (
     CloudTelemetryIdentityStore,
 )
 
-from .console_ui import ConsoleUIManager, UILevel
+from .console_ui import ConsoleUIManager
 
 InputFunc = Callable[[str], str]
 
@@ -390,7 +390,6 @@ async def ensure_cloud_telemetry_consent(
 
 async def ensure_startup_agreements(
     config_path: str,
-    ui_level: UILevel,
     *,
     input_func: InputFunc = input,
 ) -> bool:
@@ -398,7 +397,7 @@ async def ensure_startup_agreements(
 
     config = init_core_config(config_path)
     project_root = _project_root_from_config_path(config_path)
-    ui = ConsoleUIManager(level=ui_level)
+    ui = ConsoleUIManager()
 
     eula_accepted = await ensure_eula_accepted(
         config,

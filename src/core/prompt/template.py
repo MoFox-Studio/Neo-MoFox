@@ -30,10 +30,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.core.components.types import EventType
 from src.core.prompt.policies import RenderPolicy, optional
-
-# 事件名常量，供订阅方引用
-PROMPT_BUILD_EVENT = "on_prompt_build"
 
 
 @dataclass
@@ -149,9 +147,9 @@ class PromptTemplate:
             from src.kernel.event import get_event_bus
 
             event_bus = get_event_bus()
-            if event_bus.get_subscribers(PROMPT_BUILD_EVENT):
+            if event_bus.get_subscribers(EventType.ON_PROMPT_BUILD):
                 _, final_params = await event_bus.publish(
-                    PROMPT_BUILD_EVENT,
+                    EventType.ON_PROMPT_BUILD,
                     {
                         "name": self.name,
                         "template": effective_template,

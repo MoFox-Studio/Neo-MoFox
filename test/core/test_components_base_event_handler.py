@@ -11,8 +11,8 @@ from src.kernel.event import EventDecision
 class ConcreteEventHandler(BaseEventHandler):
     """具体的 EventHandler 实现用于测试。"""
 
-    handler_name = "test_handler"
-    handler_description = "Test event handler"
+    name = "test_handler"
+    description = "Test event handler"
     weight = 10
     intercept_message = False
     init_subscribe = []
@@ -38,13 +38,13 @@ class TestBaseEventHandler:
         if original_plugin_name:
             ConcreteEventHandler._plugin_ = original_plugin_name
         elif hasattr(ConcreteEventHandler, "_plugin_"):
-            delattr(ConcreteEventHandler, "_plugin_")
+            ConcreteEventHandler._plugin_ = ""
 
     def test_event_handler_initialization(self, mock_plugin):
         """测试 EventHandler 初始化。"""
         handler = ConcreteEventHandler(mock_plugin)
         assert handler.plugin == mock_plugin
-        assert handler.handler_name == "test_handler"
+        assert handler.name == "test_handler"
         assert handler.weight == 10
         assert handler.intercept_message is False
         assert handler._subscribed_events == set()
@@ -153,7 +153,7 @@ class TestBaseEventHandler:
     def test_init_subscribe(self, mock_plugin):
         """测试初始订阅。"""
         class InitSubHandler(BaseEventHandler):
-            handler_name = "init_handler"
+            name = "init_handler"
             init_subscribe = [EventType.ON_START, EventType.ON_STOP, "custom"]
 
             async def execute(self, event_name: str, params: dict) -> tuple[EventDecision, dict]:
@@ -171,8 +171,8 @@ class TestEventHandlerAttributes:
     def test_handler_with_custom_attributes(self, mock_plugin):
         """测试自定义属性的 Handler。"""
         class CustomHandler(BaseEventHandler):
-            handler_name = "custom_handler"
-            handler_description = "Custom handler description"
+            name = "custom_handler"
+            description = "Custom handler description"
             weight = 100
             intercept_message = True
             dependencies = ["other_plugin:service:log"]
@@ -181,8 +181,8 @@ class TestEventHandlerAttributes:
                 return EventDecision.STOP, params
 
         handler = CustomHandler(mock_plugin)
-        assert handler.handler_name == "custom_handler"
-        assert handler.handler_description == "Custom handler description"
+        assert handler.name == "custom_handler"
+        assert handler.description == "Custom handler description"
         assert handler.weight == 100
         assert handler.intercept_message is True
         assert handler.dependencies == ["other_plugin:service:log"]
@@ -199,7 +199,7 @@ class TestEventHandlerAttributes:
                 f"WeightHandler_{test_weight}",
                 (BaseEventHandler,),
                 {
-                    "handler_name": f"handler_{test_weight}",
+                    "name": f"handler_{test_weight}",
                     "weight": test_weight,
                     "execute": execute,
                     "__module__": __name__,
@@ -225,7 +225,7 @@ class TestEventHandlerExecuteResults:
 
         for decision in test_cases:
             class ResultHandler(BaseEventHandler):
-                handler_name = "result_handler"
+                name = "result_handler"
                 _expected_decision = decision
 
                 async def execute(self, event_name: str, params: dict) -> tuple[EventDecision, dict]:

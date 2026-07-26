@@ -9,8 +9,8 @@ from src.core.components.base.config import BaseConfig, Field, SectionBase, conf
 class OneBotAdapterConfig(BaseConfig):
     """OneBot 适配器配置"""
 
-    config_name: ClassVar[str] = "config"
-    config_description: ClassVar[str] = "OneBot 11 适配器配置"
+    name: ClassVar[str] = "config"
+    description: ClassVar[str] = "OneBot 11 适配器配置"
 
     @config_section("plugin", title="插件设置", tag="plugin")
     class PluginSection(SectionBase):

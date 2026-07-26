@@ -91,8 +91,8 @@ class EmojiSenderPlugin(BasePlugin):
         if isinstance(self.config, EmojiSenderConfig):
             custom = self.config.prompt.custom_instructions.strip()
             if custom:
-                SendEmojiMemeAction.action_description = (
-                    SendEmojiMemeAction.action_description.rstrip() + "\n\n自定义指令：\n" + custom
+                SendEmojiMemeAction.description = (
+                    SendEmojiMemeAction.description.rstrip() + "\n\n自定义指令：\n" + custom
                 )
                 logger.debug("已将自定义场景说明追加到 send_emoji_meme 描述")
 

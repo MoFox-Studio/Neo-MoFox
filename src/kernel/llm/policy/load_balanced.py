@@ -11,7 +11,9 @@ from __future__ import annotations
 import threading
 from typing import Any, NamedTuple
 
+from .utils import normalize_max_retry, retry_delay
 from .base import ModelStep, Policy, PolicySession
+
 
 class ModelUsageStats(NamedTuple):
     """模型使用统计，用于负载均衡评分。"""
@@ -21,22 +23,6 @@ class ModelUsageStats(NamedTuple):
     usage_penalty: int
     avg_latency: float
     request_count: int
-
-
-def _normalize_max_retry(value: object) -> int:
-    try:
-        max_retry = int(value) if value is not None else 2
-    except Exception:
-        max_retry = 0
-    return max(0, max_retry)
-
-
-def _normalize_retry_interval(value: object) -> float:
-    try:
-        delay = float(value) if value is not None else 3.0
-    except Exception:
-        delay = 0.0
-    return max(0.0, delay)
 
 
 class LoadBalancedPolicy(Policy):
@@ -143,7 +129,7 @@ class _LoadBalancedSession(PolicySession):
         # 计算最大尝试次数
         self._max_total_attempts = 0
         for m in model_set:
-            self._max_total_attempts += 1 + _normalize_max_retry(m.get("max_retry"))
+            self._max_total_attempts += 1 + normalize_max_retry(m.get("max_retry"))
         if self._max_total_attempts <= 0:
             self._max_total_attempts = len(model_set)
 
@@ -190,13 +176,17 @@ class _LoadBalancedSession(PolicySession):
             return ModelStep(model=None, meta={"reason": "model_not_found"})
         
         # 获取重试配置
-        max_retry_int = _normalize_max_retry(current_model.get("max_retry"))
-        delay = _normalize_retry_interval(current_model.get("retry_interval"))
-        
+        max_retry_int = normalize_max_retry(current_model.get("max_retry"))
+
         # 判断是否应该重试当前模型
         if self._model_retry_used < max_retry_int and self._attempts_used < self._max_total_attempts:
             self._model_retry_used += 1
             self._attempts_used += 1
+            delay = retry_delay(
+                model=current_model,
+                error=error,
+                retry_ordinal=self._model_retry_used,
+            )
             return ModelStep(
                 model=current_model,
                 delay_seconds=delay,
@@ -219,6 +209,12 @@ class _LoadBalancedSession(PolicySession):
         if next_model is None:
             return ModelStep(model=None, meta={"reason": "all_models_failed"})
         
+        switch_ordinal = max(1, self._model_retry_used + 1)
+        delay = retry_delay(
+            model=current_model,
+            error=error,
+            retry_ordinal=switch_ordinal,
+        )
         next_model_name = next_model.get("model_identifier", "unknown")
         self._current_model_name = next_model_name
         self._model_retry_used = 0
@@ -229,6 +225,7 @@ class _LoadBalancedSession(PolicySession):
         
         return ModelStep(
             model=next_model,
+            delay_seconds=delay,
             meta={
                 "model_name": next_model_name,
                 "attempt": self._attempts_used,
