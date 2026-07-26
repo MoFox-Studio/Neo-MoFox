@@ -6,6 +6,7 @@
   （带 ``neo_default_chatter:`` 前缀）。第三方既可 ``init_subscribe = [NdfcEvent.X]``
   也可 ``init_subscribe = ["neo_default_chatter:X"]``，两种写法等价（``StrEnum`` 的
   ``str()`` 返回值即事件名）。
+- :class:`PreprocessDecision`：``:preprocess`` 事件合并后的最终决策。
 - :class:`NdfcPublisher`：16 个静态方法（15 Tier II + 1 Tier III ``:preprocess``），
   封装 ``publish_event + payload 预填 + result 读回`` 样板。session.py / tool_flow.py
   调用点保持单行，并在上一行写行内注释 ``# 默认: defaults/<file>.py`` 指向默认实现。
@@ -15,6 +16,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -29,7 +31,6 @@ if TYPE_CHECKING:
         ToolRegistry,
     )
     from src.app.plugin_system.base import WaitResumeEvent
-    from .preprocess import PreprocessDecision
     from ..components.config import NeoChatterConfig
 
 
@@ -65,6 +66,24 @@ class NdfcEvent(StrEnum):
     SESSION_TRANSITION = "neo_default_chatter:session_transition"
 
 
+@dataclass(slots=True)
+class PreprocessDecision:
+    """``:preprocess`` 事件合并后的最终决策。
+
+    由 :meth:`NdfcPublisher.preprocess` 构造并返回。字段直接取自事件 params，
+    不做容错解析——订阅 ``:preprocess`` 的处理器必须按 :class:`NdfcPublisher`
+    预填的 key 集合与约定类型就地修改字段值。
+    """
+
+    proceed: bool = False
+    reason: str = ""
+    extra: str = ""
+    force_stop_minutes: float | None = None
+    #: 是否真的发布了事件（无订阅者 / 无处理器改动决策时为 False，会直接放行）
+    published: bool = False
+    raw_params: dict[str, Any] = field(default_factory=dict)
+
+
 class NdfcPublisher:
     """NDFC 统一事件发布器。
 
@@ -79,9 +98,9 @@ class NdfcPublisher:
       ``core.py:334-338`` 的 key 集合稳定约束会让 handler 影响被丢弃）。
     - **返回值直接是结果**（如 ``list``、``str``、``Message``），不是 ``result["params"]``
       ——session.py 调用点最简洁。
-    - **``:preprocess`` 例外**：决策合并逻辑（4 字段 coerce + fail-open + ``published``
-      标记）复杂，方法内部委托 :func:`utils.preprocess.run_preprocess`，但事件名常量
-      统一为 :attr:`NdfcEvent.PREPROCESS`。
+    - **``:preprocess`` 不再例外**：决策合并逻辑（预填 → 发布 → 读回 → ``published``
+      标记 → 日志）已内联到 :meth:`preprocess`，与其它 15 个方法一致；不再做容错解析，
+      订阅者必须按约定类型就地修改字段值。
     - **不注册为 Service**：NDFC 内部直接用类，不绕 ``service_api``；第三方想手动触发
       NDFC 事件（罕见场景）用框架 ``event_api.publish_event(NdfcEvent.X, ...)``。
     """
@@ -433,16 +452,75 @@ class NdfcPublisher:
     ) -> "PreprocessDecision":
         """发布 ``:preprocess``，返回 :class:`PreprocessDecision`。
 
-        注意：``:preprocess`` 涉及复杂决策合并逻辑（4 字段 coerce + fail-open +
-        ``published`` 标记），方法内部委托 :func:`utils.preprocess.run_preprocess`，
-        但事件名常量统一为 :attr:`NdfcEvent.PREPROCESS`。
+        预填决策字段 → 发布事件 → 直接读回字段值构造 :class:`PreprocessDecision`，
+        **不做容错解析**：订阅 ``:preprocess`` 的处理器必须按约定类型就地修改字段值。
+        发布本身抛异常时 fail-open（返回 ``proceed=True``），避免框架瞬时故障导致
+        所有消息被拦截。
         """
-        from .preprocess import run_preprocess
+        # 决策字段预先用默认值填好，处理器只能修改这些 key 的值，
+        # 不能新增 key（否则 EventBus 会因 key 集合不一致丢弃其影响）。
+        params: dict[str, Any] = {
+            "stream_id": chat_stream.stream_id,
+            "chat_type": str(chat_stream.chat_type or ""),
+            "chat_stream": chat_stream,
+            "unreads": list(unreads),
+            "history_text": history_text,
+            "config": config,
+            "proceed": False,
+            "reason": "",
+            "mutations": "",
+            "force_stop_minutes": None,
+        }
 
-        return await run_preprocess(
-            chat_stream=chat_stream,
-            unreads=unreads,
-            history_text=history_text,
-            config=config,
-            logger=logger,
+        try:
+            result = await publish_event(NdfcEvent.PREPROCESS, params)
+        except Exception as error:  # noqa: BLE001
+            if logger is not None:
+                logger.warning(
+                    f"预处理事件发布失败，按放行处理: {error}",
+                    exc_info=True,
+                )
+            return PreprocessDecision(proceed=True, published=False)
+
+        final_params: dict[str, Any] = (result.get("params") if result else None) or {}
+
+        proceed = final_params.get("proceed", False)
+        reason = final_params.get("reason", "")
+        extra = final_params.get("mutations", "")
+        force_stop_minutes = final_params.get("force_stop_minutes")
+
+        # 「是否真的发布」= 是否有处理器真的改写了任一决策字段（偏离默认值）。
+        # 无订阅者或所有处理器都未改动决策时为 False，避免无谓的日志噪音。
+        published = (
+            proceed is True
+            or bool(reason)
+            or bool(extra)
+            or force_stop_minutes is not None
         )
+
+        decision = PreprocessDecision(
+            proceed=proceed,
+            reason=reason,
+            extra=extra,
+            force_stop_minutes=force_stop_minutes,
+            published=published,
+            raw_params=dict(final_params),
+        )
+
+        if published and logger is not None:
+            if decision.proceed:
+                logger.info(
+                    f"[预处理] 放行：{decision.reason or '无理由'}"
+                    + (f" | extra+{len(decision.extra)}字符" if decision.extra else "")
+                )
+            else:
+                logger.info(
+                    f"[预处理] 拦截：{decision.reason or '未提供理由'}"
+                    + (
+                        f" → 进入 Stop({decision.force_stop_minutes}分钟)"
+                        if decision.force_stop_minutes is not None
+                        else " → 等待新消息"
+                    )
+                )
+
+        return decision

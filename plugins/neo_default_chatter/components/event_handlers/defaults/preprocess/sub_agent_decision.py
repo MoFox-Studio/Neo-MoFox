@@ -31,13 +31,13 @@ from src.app.plugin_system.types import (
 )
 from src.kernel.event import EventDecision
 
-from ..config import NeoChatterConfig
-from ...utils.event_publisher import NdfcEvent
-from ...utils.prompt_builder import NeoChatterPromptBuilder
+from ....config import NeoChatterConfig
+from .....utils.event_publisher import NdfcEvent
+from .....utils.prompt_builder import NeoChatterPromptBuilder
 
 logger = get_logger("neo_default_chatter.preprocess.sub_agent")
 
-#: NFC 预处理事件名。与 ``utils.preprocess.PREPROCESS_EVENT`` 同源。
+#: NFC 预处理事件名。
 _PREPROCESS_EVENT = NdfcEvent.PREPROCESS
 
 
@@ -87,7 +87,7 @@ class SubAgentDecisionHandler(BaseEventHandler):
             return EventDecision.SUCCESS, params
 
         # 上游处理器已放行（proceed=True）则不再判定，保持放行
-        if _coerce_proceed(params.get("proceed")) is True:
+        if params.get("proceed") is True:
             return EventDecision.SUCCESS, params
 
         unreads = self._extract_unreads(params)
@@ -232,20 +232,6 @@ class SubAgentDecisionHandler(BaseEventHandler):
 
         # 3) 解析失败：默认放行，避免误拦截
         return True, "判定解析失败，默认放行"
-
-
-def _coerce_proceed(value: Any) -> bool:
-    """容错解析 ``proceed`` 字段，缺省视为 False。"""
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "1", "yes", "on"}:
-            return True
-        return False
-    return bool(value)
 
 
 def _first_line(text: str) -> str:

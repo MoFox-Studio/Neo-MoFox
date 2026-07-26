@@ -9,6 +9,10 @@
 - 16 个 Tier II 默认 handler (weight=0)：NDFC 自带的可替换 seam 兜底实现，
   位于 :mod:`.defaults` 子包；第三方用更高 weight 即可替换或协作。
 
+``ProbabilityBypassHandler`` 与 ``SubAgentDecisionHandler`` 也位于 :mod:`.defaults`
+子包下的 :mod:`.defaults.preprocess`——它们与 16 个 Tier II 兜底 handler 性质不同
+（是 NDFC 自带的具体预处理策略而非可替换 seam），因此单独成包。
+
 所有处理逻辑均自包含在处理器内部，不依赖额外的工具模块。
 """
 
@@ -30,8 +34,10 @@ from .defaults import (
     RunToolCallDefaultHandler,
     SessionTransitionDefaultHandler,
 )
-from .probability_bypass import ProbabilityBypassHandler
-from .sub_agent_decision import SubAgentDecisionHandler
+from .defaults.preprocess import (
+    ProbabilityBypassHandler,
+    SubAgentDecisionHandler,
+)
 
 __all__ = [
     "ProbabilityBypassHandler",
