@@ -146,7 +146,7 @@ class NeoChatterPlugin(BasePlugin):
 
     def get_components(self) -> list[type]:
         """返回插件注册的组件类。"""
-        if not self.config.enabled:
+        if not self.config.plugin.enabled:
             logger.info("Neo-Default-Chatter 插件未启用")
             return [] 
         return [
