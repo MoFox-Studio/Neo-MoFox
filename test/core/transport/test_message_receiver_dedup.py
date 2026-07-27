@@ -4,13 +4,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.core.components.types import EventType
 from src.core.models.message import Message
 from src.core.transport.message_receive.receiver import MessageReceiver
 
 
 @pytest.mark.asyncio
-async def test_receive_envelope_dedups_same_message_in_window() -> None:
-    """同一条入站消息在去重窗口内只应分发一次。"""
+async def test_receive_envelope_publishes_before_then_on_message_received() -> None:
+    """同一封入站信封会先发 BEFORE_MESSAGE_RECEIVED，再发 ON_MESSAGE_RECEIVED。"""
     message = Message(
         message_id="msg-001",
         content="hello",
@@ -46,8 +47,18 @@ async def test_receive_envelope_dedups_same_message_in_window() -> None:
     await receiver.receive_envelope(envelope, "plugin:adapter:qq")
     await receiver.receive_envelope(envelope, "plugin:adapter:qq")
 
-    assert converter.envelope_to_message.await_count == 1
-    assert event_manager.publish_event.await_count == 1
+    # 没有 receiver 层去重，所以每条消息都会跑一次 envelope_to_message，
+    # 并触发 BEFORE_MESSAGE_RECEIVED + ON_MESSAGE_RECEIVED 两个事件。
+    assert converter.envelope_to_message.await_count == 2
+    assert event_manager.publish_event.await_count == 4
+
+    published_events = [call.args[0] for call in event_manager.publish_event.call_args_list]
+    assert published_events == [
+        EventType.BEFORE_MESSAGE_RECEIVED,
+        EventType.ON_MESSAGE_RECEIVED,
+        EventType.BEFORE_MESSAGE_RECEIVED,
+        EventType.ON_MESSAGE_RECEIVED,
+    ]
 
 
 @pytest.mark.asyncio
@@ -107,4 +118,4 @@ async def test_receive_envelope_different_message_ids_not_deduped() -> None:
     await receiver.receive_envelope(envelope2, "plugin:adapter:qq")
 
     assert converter.envelope_to_message.await_count == 2
-    assert event_manager.publish_event.await_count == 2
+    assert event_manager.publish_event.await_count == 4
