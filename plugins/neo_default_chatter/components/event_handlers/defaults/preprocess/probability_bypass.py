@@ -46,13 +46,13 @@ class ProbabilityBypassHandler(BaseEventHandler):
     最终概率封顶 ``1.0``。
 
     Class Attributes:
-        weight: 100，高于 sub_agent 处理器，确保先执行。
+        weight: 1，高于 sub_agent 处理器，确保先执行。
         init_subscribe: 订阅 ``neo_default_chatter:preprocess`` 事件。
     """
 
     name = "probability_bypass"
     description = "概率直通处理器 - 按概率跳过 sub_agent LLM 决策直接放行"
-    weight = 100
+    weight = 1
     init_subscribe = [_PREPROCESS_EVENT]
 
     async def execute(

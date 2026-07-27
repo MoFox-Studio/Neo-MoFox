@@ -21,6 +21,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from src.app.plugin_system.api.event_api import publish_event
+from src.app.plugin_system.api.log_api import Logger
 
 if TYPE_CHECKING:
     from src.app.plugin_system.types import (
@@ -448,7 +449,7 @@ class NdfcPublisher:
         unreads: list,
         history_text: str,
         config: "NeoChatterConfig | None",
-        logger: Any = None,
+        logger: Logger | None = None,
     ) -> "PreprocessDecision":
         """发布 ``:preprocess``，返回 :class:`PreprocessDecision`。
 

@@ -52,13 +52,13 @@ class SubAgentDecisionHandler(BaseEventHandler):
     自包含在本处理器内部，不依赖 sub_agent 协作管理器或持久化子代理会话。
 
     Class Attributes:
-        weight: 50，低于 概率直通处理器（100），确保 概率直通处理器先执行。
+        weight: 0，低于 概率直通处理器（1），确保 概率直通处理器先执行。
         init_subscribe: 订阅 ``neo_default_chatter:preprocess`` 事件。
     """
 
     name = "sub_agent_decision"
     description = "sub_agent 轻量 LLM 判定处理器 - 单轮判定是否值得主 chatter 立即回复"
-    weight = 50
+    weight = 0
     init_subscribe = [_PREPROCESS_EVENT]
 
     async def execute(

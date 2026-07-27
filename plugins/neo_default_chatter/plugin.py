@@ -29,6 +29,7 @@ from .components.event_handlers import (
     InjectUnreadPayloadDefaultHandler,
     InjectUsablesDefaultHandler,
     PickTriggerMessageDefaultHandler,
+    PrivateChatBypassHandler,
     ProbabilityBypassHandler,
     RunToolCallDefaultHandler,
     SessionTransitionDefaultHandler,
@@ -156,6 +157,7 @@ class NeoChatterPlugin(BasePlugin):
             SendTextAction,
             PassAndWaitAction,
             StopConversationAction,
+            PrivateChatBypassHandler,
             ProbabilityBypassHandler,
             SubAgentDecisionHandler,
             # Tier II 默认 handler（16 个）：NDFC 自带的可替换 seam 兜底实现
