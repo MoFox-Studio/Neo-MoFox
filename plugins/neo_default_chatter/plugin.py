@@ -72,6 +72,7 @@ class NeoChatterPlugin(BasePlugin):
             template=system_prompt,
             policies={
                 "nickname": optional(personality.nickname),
+                "bot_nickname": optional("未设置"),
                 "alias_names": optional("、".join(personality.alias_names)),
                 "personality_core": optional(personality.personality_core),
                 "personality_side": optional(personality.personality_side),

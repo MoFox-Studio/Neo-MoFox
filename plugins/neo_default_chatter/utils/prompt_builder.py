@@ -82,7 +82,7 @@ class NeoChatterPromptBuilder:
         if not tmpl:
             return ""
         return await (
-            tmpl.set("nickname", chat_stream.bot_nickname)
+            tmpl.set("bot_nickname", chat_stream.bot_nickname or "")
             .set("theme_guide", NeoChatterPromptBuilder._select_theme_guide(plugin_config, chat_stream))
             .set(
                 "action_suspend_guidance",
