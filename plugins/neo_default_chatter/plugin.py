@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from src.app.plugin_system.base import BasePlugin, register_plugin
+from src.app.plugin_system.api.log_api import get_logger
 from src.core.config import get_core_config
 from src.core.prompt import get_prompt_manager, min_len, optional, wrap
 
@@ -46,6 +47,7 @@ _USER_TEMPLATE_NAME = "neo_default_chatter_user_prompt"
 _SUB_AGENT_SYSTEM_TEMPLATE_NAME = "neo_default_chatter_sub_agent_system_prompt"
 _SUB_AGENT_USER_TEMPLATE_NAME = "neo_default_chatter_sub_agent_user_prompt"
 
+logger = get_logger("Neo-Default-Chatter")
 
 @register_plugin
 class NeoChatterPlugin(BasePlugin):
@@ -144,6 +146,9 @@ class NeoChatterPlugin(BasePlugin):
 
     def get_components(self) -> list[type]:
         """返回插件注册的组件类。"""
+        if not self.config.enabled:
+            logger.info("Neo-Default-Chatter 插件未启用")
+            return [] 
         return [
             NeoChatter,
             NeoChatterService,
