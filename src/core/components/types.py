@@ -49,6 +49,7 @@ class EventType(str, Enum):
 
     ON_START = "on_start"
     ON_STOP = "on_stop"
+    BEFORE_MESSAGE_RECEIVED = "before_message_received"
     ON_MESSAGE_RECEIVED = "on_message_received"
     ON_MESSAGE_SENT = "on_message_sent"
     AFTER_MESSAGE_SENT = "after_message_sent"

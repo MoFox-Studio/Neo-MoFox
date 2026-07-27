@@ -537,6 +537,62 @@ AI 编写 Adapter 时必须遵守以下认知：
 - 该模型应被理解为“核心骨架 + 常见运行时扩展”，不是封闭 schema。运行时可能会读写额外字段，例如 `message_info.message_type`、`message_info.extra`、`user_info.role`。
 - Adapter 的职责是把平台原始事件转换为统一 envelope，再把统一消息发回平台，不负责对话决策、工具选择或业务编排。
 
+### 7.1 入站信封预处理事件 `BEFORE_MESSAGE_RECEIVED`
+
+当 `MessageReceiver` 收到一封 `direction == "incoming"` 且带 `message_info` 的 `MessageEnvelope` 后，**在路由到 `_handle_message` / `_handle_other` 之前**会先发布 `EventType.BEFORE_MESSAGE_RECEIVED`。订阅该事件的 EventHandler 可：
+
+- 就地修改 `params["envelope"]` 的任意字段（例如改写 `message_segment`、调整 `message_info.message_type` 让它进入标准消息或 notice 路由、追加 `extra`）。
+- 通过返回 `EventDecision.STOP` 直接拦截该消息：消息不再进入转换与下游 `ON_MESSAGE_RECEIVED` 事件。
+- 通过返回 `EventDecision.SUCCESS` 并把回写的 envelope 放回 `params["envelope"]`，使后续 `_handle_message` / `_handle_other` 拿到改写后的 envelope。
+- 通过返回 `EventDecision.PASS` 跳过本处理器，链路继续。
+
+事件参数 schema：
+
+```python
+{
+    "envelope": MessageEnvelope,        # 可就地修改，或回写新引用
+    "adapter_signature": str,           # 发送方适配器签名
+}
+```
+
+注意事项：
+
+- 与 `neo_default_chatter:preprocess` 不同，本事件发生在**接收管线入口**，先于 `MessageConverter` 转换，先于 `ON_MESSAGE_RECEIVED` 分发，先于 chatter tick。
+- 任何处理器抛异常都会被 EventBus 转成 `PASS`，不会阻断链路；要拦截必须显式返回 `STOP`。
+- 若 `publish_event` 自身抛异常，receiver 会按放行处理（继续后续路由），并记录 error 日志。
+
+最小示例：
+
+```python
+from typing import Any
+
+from src.app.plugin_system.base import BaseEventHandler
+from src.core.components.types import EventType
+from src.kernel.event import EventDecision
+
+
+class RewriteTextHandler(BaseEventHandler):
+    """把入站信封里的文本内容统一改写为小写。"""
+
+    name = "rewrite_text"
+    description = "入站信封预处理：把 message_segment 文本改写为小写"
+    init_subscribe: list[EventType | str] = [EventType.BEFORE_MESSAGE_RECEIVED]
+
+    async def execute(
+        self, event_name: str, params: dict[str, Any]
+    ) -> tuple[EventDecision, dict[str, Any]]:
+        envelope = params["envelope"]
+        seg = envelope.get("message_segment")
+        if isinstance(seg, list):
+            for item in seg:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    data = item.get("data") or {}
+                    if isinstance(data.get("text"), str):
+                        data["text"] = data["text"].lower()
+                        item["data"] = data
+        return EventDecision.SUCCESS, params
+```
+
 ## 8. 跨组件硬规则
 
 以下规则必须直接遵守。
