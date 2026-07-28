@@ -302,9 +302,9 @@ class BaseAgent(BaseComponent, LLMUsable):
         if not usable_cls:
             raise ValueError(f"Agent 私有 usable 不存在: {usable_name}")
 
-        from src.core.utils.llm_tool_call import exec_llm_usable
+        from src.app.plugin_system.api import llm_api
 
-        return await exec_llm_usable(
+        return await llm_api.exec_llm_usable(
             usable_cls,
             plugin=self.plugin,
             stream_id=self.stream_id,

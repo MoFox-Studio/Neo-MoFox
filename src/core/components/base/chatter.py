@@ -407,14 +407,14 @@ class BaseChatter(BaseComponent):
             return self.plugin
 
         try:
+            from src.app.plugin_system.api import plugin_api
             from src.core.components.types import parse_signature
-            from src.core.managers import get_plugin_manager
 
             plugin_name = parse_signature(signature)["plugin_name"]
         except Exception:
             return self.plugin
 
-        target_plugin = get_plugin_manager().get_plugin(plugin_name)
+        target_plugin = plugin_api.get_plugin(plugin_name)
         if target_plugin:
             return target_plugin
 
@@ -462,10 +462,10 @@ class BaseChatter(BaseComponent):
         if not issubclass(usable_cls, (BaseTool, BaseAction, BaseAgent)):
             raise ValueError("未知的 LLMUsable 组件类型，无法执行")
 
-        from src.core.utils.llm_tool_call import exec_llm_usable
+        from src.app.plugin_system.api import llm_api
 
         owner_plugin = self._resolve_component_plugin(sig)
-        return await exec_llm_usable(
+        return await llm_api.exec_llm_usable(
             usable_cls,
             plugin=owner_plugin,
             stream_id=self.stream_id,
@@ -602,9 +602,9 @@ class BaseChatter(BaseComponent):
             list[tuple[bool, bool]]: 与 ``calls`` 顺序一致的结果列表。
             每项为 ``(是否已写回 TOOL_RESULT, execute 是否成功)``。
         """
-        from src.core.utils.llm_tool_call import run_tool_call
+        from src.app.plugin_system.api import llm_api
 
-        return await run_tool_call(
+        return await llm_api.run_tool_call(
             calls=calls,
             response=response,
             usable_map=usable_map,
@@ -700,12 +700,11 @@ class BaseChatter(BaseComponent):
         Returns:
             tuple[str, list[Message]]: (格式化后的未读消息文本，每条消息占一行, 未读消息列表)
         """
-        from src.core.managers import get_stream_manager
-        
+        from src.app.plugin_system.api import stream_api
+
         logger = get_logger("chatter")
 
-        sm = get_stream_manager()
-        chat_stream = sm._streams.get(self.stream_id)
+        chat_stream = await stream_api.get_stream(stream_id=self.stream_id)
 
         if not chat_stream:
             logger.warning(
@@ -733,15 +732,14 @@ class BaseChatter(BaseComponent):
         Returns:
             int: 实际 flush 的消息数量
         """
-        from src.core.managers import get_stream_manager
-        
+        from src.app.plugin_system.api import stream_api
+
         logger = get_logger("chatter")
 
         if not unread_messages:
             return 0
 
-        sm = get_stream_manager()
-        chat_stream = sm._streams.get(self.stream_id)
+        chat_stream = await stream_api.get_stream(stream_id=self.stream_id)
 
         if not chat_stream:
             logger.warning(

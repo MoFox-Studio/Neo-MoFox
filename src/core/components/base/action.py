@@ -9,7 +9,6 @@ from __future__ import annotations
 import random
 from abc import abstractmethod
 from typing import Annotated, Any, TYPE_CHECKING
-from uuid import uuid4
 
 from src.core.components.base.component import BaseComponent
 from src.core.components.types import ChatType
@@ -18,7 +17,7 @@ from src.core.components.utils import (
     validate_associated_types,
 )
 from src.kernel.llm import LLMUsable, LLMUsableExecution
-from src.core.models.message import Message, MessageType
+from src.core.models.message import Message
 
 if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
@@ -372,9 +371,14 @@ class BaseAction(BaseComponent, LLMUsable):
     ) -> bool:
         """发送任意内容到指定聊天流。
 
+        通过 :mod:`src.app.plugin_system.api.send_api` 暴露的稳定入口发送消息，
+        自动复用 ``send_api`` 的 ``adapter_signature`` 透传、私聊 ``user_id``
+        查询、``extra_media`` 自定义段与批量发送等强化能力。
+
         Args:
-            content: 要发送的内容（支持 Message 对象、字符串、或其他类型）
-            stream_id: 要发送的聊天流 ID，留空则使用当前聊天流
+            content: 要发送的内容。``Message`` 实例走 :func:`send_api.send_message`，
+                其余类型按字符串走 :func:`send_api.send_text`。
+            stream_id: 要发送的聊天流 ID，留空则使用当前聊天流。
 
         Returns:
             bool: 发送是否成功
@@ -389,73 +393,16 @@ class BaseAction(BaseComponent, LLMUsable):
             >>> msg = Message(content="Hi", platform="qq", stream_id="xxx")
             >>> await self._send_to_stream(msg)
             >>> True
-
-        Note:
-            此方法通过 transport 层的 MessageSender 发送消息
         """
-        from src.core.transport.message_send import get_message_sender
-        from src.core.managers.adapter_manager import get_adapter_manager
+        from src.app.plugin_system.api import send_api
+
         try:
-            # 如果传入的是 Message 对象，直接发送
             if isinstance(content, Message):
-                message = content
-            else:
-                # 否则构建新的 Message 对象
-                # 从当前 chat_stream 获取上下文信息
-                target_stream_id = stream_id or self.chat_stream.stream_id
-                platform = self.chat_stream.platform
-                chat_type = self.chat_stream.chat_type
-                context = self.chat_stream.context
+                return await send_api.send_message(content)
 
-                bot_info =await get_adapter_manager().get_bot_info_by_platform(platform)
-
-                # 转换 content 为字符串
-                content_str = str(content) if not isinstance(content, str) else content
-
-                target_user_id = None
-                target_user_name = None
-                target_group_id = None
-                target_group_name = None
-
-                last_msg = self._get_context_message_for_target()
-
-                if chat_type == "group":
-                    if last_msg:
-                        target_group_id = last_msg.extra.get("group_id")
-                        target_group_name = last_msg.extra.get("group_name")
-                else:
-                    target_user_id = context.triggering_user_id
-                    if not target_user_id and last_msg:
-                        target_user_id = last_msg.sender_id
-                        target_user_name = last_msg.sender_name
-
-                extra: dict[str, Any] = {}
-                if target_user_id:
-                    extra["target_user_id"] = target_user_id
-                if target_user_name:
-                    extra["target_user_name"] = target_user_name
-                if target_group_id:
-                    extra["target_group_id"] = target_group_id
-                if target_group_name:
-                    extra["target_group_name"] = target_group_name
-
-                message = Message(
-                    message_id=f"action_{self.name}_{uuid4().hex}",
-                    content=content_str,
-                    processed_plain_text=content_str,
-                    message_type=MessageType.TEXT,
-                    sender_id=bot_info.get("bot_id", "") if bot_info else "",
-                    sender_name=bot_info.get("bot_name", "Bot") if bot_info else "Bot",
-                    platform=platform,
-                    chat_type=chat_type,
-                    stream_id=target_stream_id,
-                    **extra,
-                )
-
-            # 获取 MessageSender 并发送消息
-            sender = get_message_sender()
-            return await sender.send_message(message)
-
+            target_stream_id = stream_id or self.chat_stream.stream_id
+            content_str = content if isinstance(content, str) else str(content)
+            return await send_api.send_text(content_str, target_stream_id)
         except Exception as e:
             from src.kernel.logger import get_logger
 

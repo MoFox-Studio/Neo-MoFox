@@ -30,13 +30,14 @@ class TestBaseAction:
     @pytest.fixture(autouse=True)
     def reset_class_attributes(self):
         """在每个测试前重置类属性。"""
-        # 备份原始值
+        # 备份原始值：仅关心 ConcreteAction 自身 __dict__ 上的 _plugin_
+        had_plugin = "_plugin_" in ConcreteAction.__dict__
         original_plugin_name = getattr(ConcreteAction, "_plugin_", None)
         yield
         # 恢复原始值
-        if original_plugin_name:
-            ConcreteAction._plugin_ = original_plugin_name
-        elif hasattr(ConcreteAction, "_plugin_"):
+        if had_plugin:
+            ConcreteAction._plugin_ = original_plugin_name  # type: ignore[assignment]
+        elif "_plugin_" in ConcreteAction.__dict__:
             delattr(ConcreteAction, "_plugin_")
 
     def test_action_initialization(self, mock_chat_stream, mock_plugin):
@@ -260,32 +261,41 @@ class TestBaseAction:
             # 超时时应该默认激活
             assert result is True
 
-    @patch("src.core.transport.message_send.get_message_sender")
-    def test_send_to_stream_with_string(self, mock_get_sender, mock_chat_stream, mock_plugin):
+    @patch("src.app.plugin_system.api.send_api.send_text", new_callable=AsyncMock)
+    def test_send_to_stream_with_string(self, mock_send_text, mock_chat_stream, mock_plugin):
         """测试 _send_to_stream 发送字符串内容。"""
         import asyncio
 
-        # Mock MessageSender
-        mock_sender = MagicMock()
-        mock_sender.send_message = AsyncMock(return_value=True)
-        mock_get_sender.return_value = mock_sender
+        mock_send_text.return_value = True
 
         action = ConcreteAction(mock_chat_stream, mock_plugin)
         result = asyncio.run(action._send_to_stream("test content"))
 
         assert result is True
-        mock_sender.send_message.assert_called_once()
+        mock_send_text.assert_awaited_once_with("test content", "test_stream_123")
 
-    @patch("src.core.transport.message_send.get_message_sender")
-    def test_send_to_stream_with_message(self, mock_get_sender, mock_chat_stream, mock_plugin):
+    @patch("src.app.plugin_system.api.send_api.send_text", new_callable=AsyncMock)
+    def test_send_to_stream_with_string_uses_explicit_stream_id(
+        self, mock_send_text, mock_chat_stream, mock_plugin
+    ):
+        """测试 _send_to_stream 显式 stream_id 优先于 chat_stream.stream_id。"""
+        import asyncio
+
+        mock_send_text.return_value = True
+
+        action = ConcreteAction(mock_chat_stream, mock_plugin)
+        result = asyncio.run(action._send_to_stream("hi", stream_id="other_stream"))
+
+        assert result is True
+        mock_send_text.assert_awaited_once_with("hi", "other_stream")
+
+    @patch("src.app.plugin_system.api.send_api.send_message", new_callable=AsyncMock)
+    def test_send_to_stream_with_message(self, mock_send_message, mock_chat_stream, mock_plugin):
         """测试 _send_to_stream 发送 Message 对象。"""
         import asyncio
         from src.core.models.message import Message, MessageType
 
-        # Mock MessageSender
-        mock_sender = MagicMock()
-        mock_sender.send_message = AsyncMock(return_value=True)
-        mock_get_sender.return_value = mock_sender
+        mock_send_message.return_value = True
 
         # 创建 Message 对象
         message = Message(
@@ -300,17 +310,27 @@ class TestBaseAction:
         result = asyncio.run(action._send_to_stream(message))
 
         assert result is True
-        mock_sender.send_message.assert_called_once_with(message)
+        mock_send_message.assert_awaited_once_with(message)
 
-    @patch("src.core.transport.message_send.get_message_sender")
-    def test_send_to_stream_failure(self, mock_get_sender, mock_chat_stream, mock_plugin):
+    @patch("src.app.plugin_system.api.send_api.send_text", new_callable=AsyncMock)
+    def test_send_to_stream_failure(self, mock_send_text, mock_chat_stream, mock_plugin):
         """测试 _send_to_stream 发送失败的情况。"""
         import asyncio
 
-        # Mock MessageSender 返回 False
-        mock_sender = MagicMock()
-        mock_sender.send_message = AsyncMock(return_value=False)
-        mock_get_sender.return_value = mock_sender
+        # send_api 返回 False
+        mock_send_text.return_value = False
+
+        action = ConcreteAction(mock_chat_stream, mock_plugin)
+        result = asyncio.run(action._send_to_stream("test content"))
+
+        assert result is False
+
+    @patch("src.app.plugin_system.api.send_api.send_text", new_callable=AsyncMock)
+    def test_send_to_stream_swallows_exception(self, mock_send_text, mock_chat_stream, mock_plugin):
+        """测试 _send_to_stream 在 send_api 抛异常时返回 False 而不向上传播。"""
+        import asyncio
+
+        mock_send_text.side_effect = RuntimeError("boom")
 
         action = ConcreteAction(mock_chat_stream, mock_plugin)
         result = asyncio.run(action._send_to_stream("test content"))
