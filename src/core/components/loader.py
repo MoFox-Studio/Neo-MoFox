@@ -505,8 +505,7 @@ class PluginLoader:
 
         - major 不一致 → 拒绝（破坏性变更）
         - core 低于插件要求 → 拒绝（核心过旧）
-        - core 高于插件要求 → 警告但允许（可能存在非兼容变更）
-        - 否则 → 兼容
+        - 否则 → 兼容（次版本号一般保持兼容，不再发出警告）
         """
         from src.app.plugin_system.api import PLUGIN_API_VERSIONS  # lazy import
 
@@ -532,7 +531,6 @@ class PluginLoader:
 
         # 3) 逐模块比对
         reject_reasons: list[str] = []
-        warn_reasons: list[str] = []
         for api_name, plugin_req_str in plugin_reqs.items():
             core_ver_str = PLUGIN_API_VERSIONS[api_name]
             try:
@@ -561,23 +559,11 @@ class PluginLoader:
                 )
                 continue
 
-            if core_api.minor > plugin_req.minor:
-                warn_reasons.append(
-                    f"API '{api_name}' 核心 {core_ver_str} 高于插件要求 {plugin_req_str}"
-                )
-
         # 4) 聚合结果
         if reject_reasons:
             reason = "；".join(reject_reasons)
             logger.warning(f"插件 '{manifest.name}' API 版本不兼容：{reason}")
             return False, reason
-
-        if warn_reasons:
-            reason = "部分 API 次版本不一致，可能存在非兼容变更：" + "；".join(
-                warn_reasons
-            )
-            logger.warning(f"插件 '{manifest.name}' {reason}")
-            return True, reason
 
         return True, "兼容"
 
