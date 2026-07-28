@@ -25,6 +25,11 @@ async def main() -> None:
     await load_all_plugins(str(REPO_ROOT / "plugins"))
     config_api.initialize_all_configs()
 
+    # 读取 Core 层核心配置（只读访问）
+    core_config = config_api.get_core_config()
+    print(f"Core 日志级别: {core_config.bot.log_level}")
+    print(f"Core 数据目录: {core_config.bot.data_dir}")
+
     loaded_plugins = config_api.get_loaded_plugins()
     print(f"已加载配置的插件数量: {len(loaded_plugins)}")
 

@@ -1,7 +1,7 @@
 """
 Config API 模块。
 
-提供插件配置加载、重载与查询能力。
+提供插件配置加载、重载与查询能力，以及 Core 层核心配置的读取入口。
 """
 
 from __future__ import annotations
@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Type
 
 from src.core.components.base.config import BaseConfig
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 if TYPE_CHECKING:
+    from src.core.config.core_config import CoreConfig
     from src.core.managers.config_manager import ConfigManager
 
 
@@ -151,6 +152,32 @@ def initialize_all_configs() -> None:
     _get_config_manager().initialize_all_configs()
 
 
+def get_core_config() -> "CoreConfig":
+    """获取全局 Core 配置实例。
+
+    Core 配置由框架启动流程通过 ``init_core_config`` 初始化，本函数为插件
+    提供只读访问入口。返回的实例为全局单例，调用方应将其视为只读对象，
+    不要就地修改字段值。
+
+    Returns:
+        CoreConfig: 全局核心配置实例
+
+    Raises:
+        RuntimeError: 如果 Core 配置尚未初始化
+
+    Examples:
+        ```python
+        from src.app.plugin_system.api import config_api
+
+        core_config = config_api.get_core_config()
+        print(core_config.bot.log_level)
+        ```
+    """
+    from src.core.config import get_core_config as _get_core_config
+
+    return _get_core_config()
+
+
 __all__ = [
     "API_VERSION",
     "load_config",
@@ -159,4 +186,5 @@ __all__ = [
     "remove_config",
     "get_loaded_plugins",
     "initialize_all_configs",
+    "get_core_config",
 ]
