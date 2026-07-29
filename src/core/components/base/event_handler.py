@@ -28,6 +28,8 @@ class BaseEventHandler(BaseComponent):
         weight: 处理器权重（影响执行顺序，数值越大优先级越高）
         intercept_message: 是否拦截消息（拦截后消息不再传递给后续处理器）
         init_subscribe: 初始订阅的事件类型列表
+        timeout: 订阅者级超时秒数。``None`` 沿用全局默认（30s），
+            ``<= 0`` 禁用超时保护。长耗时处理器（如 agent 工具调用）应设 ``0``。
 
     Examples:
         >>> class MyEventHandler(BaseEventHandler):
@@ -58,6 +60,11 @@ class BaseEventHandler(BaseComponent):
     weight: int = 0
     intercept_message: bool = False
     init_subscribe: list[EventType | str] = []
+
+    # 订阅者级超时秒数。``None`` 沿用 EventBus 全局默认（30s）；
+    # ``<= 0`` 禁用超时保护——适用于可能长耗时的处理器（如 agent 工具调用、
+    # 多轮 LLM 编排）。EventBus 在订阅时读取本属性下传给订阅者。
+    timeout: float | None = None
 
     # 组件级依赖（精确到组件签名）
     dependencies: list[str] = []  # 例如 ["other_plugin:service:log"]

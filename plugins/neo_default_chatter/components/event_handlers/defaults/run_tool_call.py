@@ -22,6 +22,11 @@ class RunToolCallDefaultHandler(BaseEventHandler):
     weight = 0
     init_subscribe = [NdfcEvent.RUN_TOOL_CALL]
 
+    # run_tool_call 内部会执行 agent 工具调用，agent.execute 可能做多次 LLM
+    # 编排（远超 30s 全局默认超时）。这里禁用订阅者级超时，避免在执行
+    # agent 期间被 EventBus 强制 cancel 导致 results 静默丢失。
+    timeout: float | None = 0
+
     async def execute(
         self, event_name: str, params: dict[str, Any]
     ) -> tuple[EventDecision, dict[str, Any]]:

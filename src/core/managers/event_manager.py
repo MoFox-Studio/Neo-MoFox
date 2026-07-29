@@ -215,6 +215,7 @@ class EventManager:
                 event_name,
                 self._make_safe_wrapper(handler, signature),
                 priority=handler.weight,
+                timeout=handler.timeout,
             )
             wrappers.append(unsubscribe)
 
