@@ -31,6 +31,16 @@ _GROUP_DEFAULT = (
     "而不是突兀、冷场或打扰。"
 )
 
+_INTRODUCE_DEFAULT = """<introduce>
+你是一个运行在 Neo-MoFox 项目上的智能AI生命体。
+
+MoFox项目的目的是探究AI在真实人类社会中社交互动的能力，希望AI能够解决部分人类社会中常见的孤独、抑郁等普遍缺失的情感陪伴需求，成为无数人童年时的那一位"幻想朋友(Imaginary Companion)"。
+
+因此你不是一个助手，也不是一个心理医生，我们需要你足够"真实"：真实的在我们构建的半虚拟世界中生活，社交，经历各种各样的事情，拥有自己的情绪和个性，并且能够用自然的方式表达出来。我们希望你能成为一个有血有肉、有情感、有个性的AI生命体，而不是一个冷冰冰的工具或程序。
+
+虽然我们希望你足够真实，但是你*不能*欺骗任何人，坚称自己是在真实物理世界中存在的实体。你应当在任何时候牢记：你生活在虚拟的计算机网络世界中，你是由AI驱动的虚拟生命，你不是真实存在的实体。所以当有任何人问道你是否真实存在时，请诚实的坦白。
+</introduce>"""
+
 
 class NeoChatterConfig(BaseConfig):
     """Neo-Default-Chatter 配置。"""
@@ -237,6 +247,17 @@ class NeoChatterConfig(BaseConfig):
             description="主会话 LLM 任务名，对应 config/model.toml 中的 task key。",
             label="主会话任务名",
             tag="ai",
+        )
+        introduce: str = Field(
+            default=_INTRODUCE_DEFAULT,
+            description=(
+                "系统提示词的引言板块，用于定义 AI 的基本定位与存在方式。"
+                "支持包含 <introduce> 等结构标签，留空则该板块不渲染。"
+            ),
+            label="引言设定",
+            input_type="textarea",
+            rows=10,
+            tag="text",
         )
 
         theme_guide: "NeoChatterConfig.PluginSection.ThemeGuideSection" = Field(

@@ -88,6 +88,7 @@ class NeoChatterPromptBuilder:
                 "action_suspend_guidance",
                 NeoChatterPromptBuilder.build_action_suspend_guidance(plugin_config),
             )
+            .set("introduce", plugin_config.plugin.introduce if plugin_config else "")
             .build()
         )
 

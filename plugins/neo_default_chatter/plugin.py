@@ -91,6 +91,7 @@ class NeoChatterPlugin(BasePlugin):
                 "negative_behaviors": optional("\n".join(personality.negative_behaviors)),
                 "theme_guide": optional(""),
                 "action_suspend_guidance": optional(""),
+                "introduce": optional(""),
             },
         )
 
