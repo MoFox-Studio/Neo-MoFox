@@ -90,6 +90,94 @@ class TestUserQueryHelper:
             assert is_new is True
             helper.person_crud.create.assert_called_once()
 
+    def test_get_or_create_person_updates_last_interaction_each_call(self):
+        """每次调用 get_or_create_person 都应更新 last_interaction（不被缓存）。"""
+        import asyncio
+        import time
+
+        mock_person = MagicMock()
+        mock_person.id = 1
+        mock_person.interaction_count = 5
+
+        with patch("src.core.utils.user_query_helper.CRUDBase"):
+            helper = UserQueryHelper()
+            helper.person_crud.get_by = AsyncMock(return_value=mock_person)
+            helper.person_crud.update = AsyncMock()
+
+            # 连续调用两次（相同参数），都应该触发数据库 update
+            asyncio.run(helper.get_or_create_person("telegram", "user123"))
+            # 稍作停顿以确保时间戳不同
+            time.sleep(0.01)
+            asyncio.run(helper.get_or_create_person("telegram", "user123"))
+
+            # update 应被调用两次（缓存装饰器移除后不再跳过写操作）
+            assert helper.person_crud.update.call_count == 2
+
+            # 第二次 update 的 last_interaction 应大于等于第一次
+            # 调用签名：update(id, obj_in_dict)
+            first_obj_in = helper.person_crud.update.call_args_list[0].args[1]
+            second_obj_in = helper.person_crud.update.call_args_list[1].args[1]
+            assert (
+                second_obj_in["last_interaction"]
+                >= first_obj_in["last_interaction"]
+            )
+            assert second_obj_in["interaction_count"] == 6
+
+    def test_update_person_info_updates_last_interaction_and_count(self):
+        """update_person_info 应更新 last_interaction 和 interaction_count（消息接收流程实际调用此方法）。"""
+        import asyncio
+
+        mock_person = MagicMock()
+        mock_person.id = 42
+        mock_person.interaction_count = 7
+
+        with patch("src.core.utils.user_query_helper.CRUDBase"):
+            helper = UserQueryHelper()
+            helper.person_crud.get_by = AsyncMock(return_value=mock_person)
+            helper.person_crud.update = AsyncMock()
+
+            result = asyncio.run(
+                helper.update_person_info(
+                    "telegram", "user123", nickname="Nick", cardname="Card"
+                )
+            )
+
+            assert result is True
+            helper.person_crud.update.assert_called_once()
+            # 调用签名：update(id, obj_in_dict)
+            obj_in = helper.person_crud.update.call_args.args[1]
+            # 必须包含 last_interaction 和 interaction_count 字段
+            assert "last_interaction" in obj_in
+            assert "interaction_count" in obj_in
+            assert obj_in["interaction_count"] == 8
+            assert obj_in["nickname"] == "Nick"
+            assert obj_in["cardname"] == "Card"
+
+    def test_update_person_info_not_blocked_by_cache(self):
+        """同一用户连续调用 update_person_info 不应被缓存跳过（写操作必须每次执行）。"""
+        import asyncio
+
+        mock_person = MagicMock()
+        mock_person.id = 42
+        mock_person.interaction_count = 0
+
+        with patch("src.core.utils.user_query_helper.CRUDBase"):
+            helper = UserQueryHelper()
+            helper.person_crud.get_by = AsyncMock(return_value=mock_person)
+            helper.person_crud.update = AsyncMock()
+
+            # 连续三次相同参数调用，都应该都触发 update
+            for _ in range(3):
+                asyncio.run(
+                    helper.update_person_info(
+                        "telegram", "user123", nickname="Nick", cardname="Card"
+                    )
+                )
+
+            assert helper.person_crud.update.call_count == 3
+
+
+
     @patch("src.core.utils.user_query_helper.QueryBuilder")
     def test_get_user_streams(self, mock_query_builder):
         """测试获取用户聊天流。"""

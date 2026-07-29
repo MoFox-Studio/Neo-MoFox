@@ -5,9 +5,8 @@
 
 import time
 import hashlib
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from functools import lru_cache
-from async_lru import alru_cache
 
 from src.kernel.db import CRUDBase, QueryBuilder
 from src.kernel.logger import get_logger
@@ -58,7 +57,6 @@ class UserQueryHelper:
         """
         return hashlib.sha256(f"{platform}_{user_id}".encode()).hexdigest()
 
-    @alru_cache(maxsize=256)
     async def get_or_create_person(
         self,
         platform: str,
@@ -111,8 +109,7 @@ class UserQueryHelper:
         person = await self.person_crud.create(person_data)
         logger.info(f"创建新用户：{person_id} ({nickname})")
         return person, True
-    
-    @alru_cache(maxsize=256)
+
     async def update_person_info(
         self,
         platform: str,
@@ -139,10 +136,11 @@ class UserQueryHelper:
             logger.info(f"用户不存在，已创建新用户：{person_id} ({nickname})")
             return True
 
-        update_data = {
-            "updated_at": time.time(),
-            "nickname": None,
-            "cardname": None
+        now = time.time()
+        update_data: dict[str, Any] = {
+            "updated_at": now,
+            "last_interaction": now,
+            "interaction_count": person.interaction_count + 1,
         }
 
         if nickname is not None:
