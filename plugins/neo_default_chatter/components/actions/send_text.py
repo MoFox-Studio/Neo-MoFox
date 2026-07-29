@@ -18,10 +18,12 @@ from src.app.plugin_system.api.send_api import send_message
 from src.app.plugin_system.base import BaseAction
 from src.app.plugin_system.types import Message, MessageType
 
+from ...components.config import NeoChatterConfig
+
 logger = get_logger("neo_default_chatter")
 
-_TYPING_DELAY_PER_CHAR = 0.5
-_TYPING_DELAY_MAX_SECONDS = 10.0
+_TYPING_DELAY_PER_CHAR_DEFAULT = 0.5
+_TYPING_DELAY_MAX_SECONDS_DEFAULT = 10.0
 _LAST_SEND_TIME_ATTR = "_neo_default_chatter_last_send_text_time"
 
 
@@ -41,11 +43,21 @@ class SendTextAction(BaseAction):
     chatter_allow: list[str] = ["neo_default_chatter"]
     associated_types = ["text"]
 
-    @staticmethod
-    def _typing_delay_seconds(content: str) -> float:
+    def _typing_delay_seconds(self, content: str) -> float:
         """根据文本长度估算发送前的打字等待时间。"""
-        return min(len(content) * _TYPING_DELAY_PER_CHAR, _TYPING_DELAY_MAX_SECONDS)
+        per_char, max_seconds = self._read_typing_delay_config()
+        if per_char <= 0 or max_seconds <= 0:
+            return 0.0
+        return min(len(content) * per_char, max_seconds)
 
+    def _read_typing_delay_config(self) -> tuple[float, float]:
+        """从插件配置读取打字延迟参数，配置缺失时回退默认值。"""
+        config = self.plugin.config
+        return (
+                float(config.plugin.typing_delay_per_char),
+                float(config.plugin.typing_delay_max_seconds),
+            )
+        
     async def _sleep_for_typing_delay(self, content: str) -> None:
         """在连续发送文本时等待剩余的模拟打字时间。"""
         last_send_time = float(

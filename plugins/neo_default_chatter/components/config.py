@@ -222,6 +222,24 @@ class NeoChatterConfig(BaseConfig):
             label="默认 stop 冷却分钟",
             tag="ai",
         )
+        typing_delay_per_char: float = Field(
+            default=0.5,
+            description=(
+                "send_text 模拟打字延迟时每个字符的等待秒数，"
+                "总延迟 = min(字符数 * 该值, typing_delay_max_seconds)。"
+                "设为 0 可关闭打字延迟。"
+            ),
+            label="打字延迟(每字符秒)",
+            tag="performance",
+            hint="值越大回复前等待越久；0 表示无打字延迟。",
+        )
+        typing_delay_max_seconds: float = Field(
+            default=10.0,
+            description="send_text 模拟打字延迟的单条消息最大等待秒数上限。",
+            label="打字延迟上限(秒)",
+            tag="performance",
+            hint="无论文本多长，单次打字等待不会超过该值。",
+        )
         enable_cooldown: bool = Field(
             default=True,
             description=(
