@@ -18,6 +18,7 @@ from src.app.plugin_system.api import log_api
 from src.app.plugin_system.api import media_api
 from src.app.plugin_system.api import message_api
 from src.app.plugin_system.api import permission_api
+from src.app.plugin_system.api import person_api
 from src.app.plugin_system.api import plugin_api
 from src.app.plugin_system.api import prompt_api
 from src.app.plugin_system.api import router_api
@@ -47,6 +48,7 @@ PLUGIN_API_VERSIONS: dict[str, str] = {
     "media_api": media_api.API_VERSION,
     "message_api": message_api.API_VERSION,
     "permission_api": permission_api.API_VERSION,
+    "person_api": person_api.API_VERSION,
     "plugin_api": plugin_api.API_VERSION,
     "prompt_api": prompt_api.API_VERSION,
     "router_api": router_api.API_VERSION,
@@ -70,6 +72,7 @@ __all__ = [
     "media_api",
     "message_api",
     "permission_api",
+    "person_api",
     "plugin_api",
     "prompt_api",
     "router_api",

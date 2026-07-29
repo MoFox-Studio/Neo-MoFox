@@ -396,6 +396,16 @@ class PersonInfo(Base):
         nullable=True,
         comment="群名片或备注名"
     )
+    nickname_history: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="用户昵称历史（JSON 列表，每项 {name, retired_at}）"
+    )
+    cardname_history: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="群名片历史（JSON 列表，每项 {name, retired_at}）"
+    )
 
     # 记忆与关系字段
     impression: Mapped[str | None] = mapped_column(

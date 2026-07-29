@@ -130,6 +130,11 @@ class TestUserQueryHelper:
         mock_person = MagicMock()
         mock_person.id = 42
         mock_person.interaction_count = 7
+        # 显式置空名称相关字段，避免 MagicMock 默认值干扰改名检测
+        mock_person.nickname = None
+        mock_person.cardname = None
+        mock_person.nickname_history = None
+        mock_person.cardname_history = None
 
         with patch("src.core.utils.user_query_helper.CRUDBase"):
             helper = UserQueryHelper()
@@ -152,6 +157,9 @@ class TestUserQueryHelper:
             assert obj_in["interaction_count"] == 8
             assert obj_in["nickname"] == "Nick"
             assert obj_in["cardname"] == "Card"
+            # 旧名为空，不应写入历史
+            assert "nickname_history" not in obj_in
+            assert "cardname_history" not in obj_in
 
     def test_update_person_info_not_blocked_by_cache(self):
         """同一用户连续调用 update_person_info 不应被缓存跳过（写操作必须每次执行）。"""
@@ -160,6 +168,10 @@ class TestUserQueryHelper:
         mock_person = MagicMock()
         mock_person.id = 42
         mock_person.interaction_count = 0
+        mock_person.nickname = None
+        mock_person.cardname = None
+        mock_person.nickname_history = None
+        mock_person.cardname_history = None
 
         with patch("src.core.utils.user_query_helper.CRUDBase"):
             helper = UserQueryHelper()
@@ -175,6 +187,197 @@ class TestUserQueryHelper:
                 )
 
             assert helper.person_crud.update.call_count == 3
+
+    def test_update_person_info_records_nickname_change_in_history(self):
+        """nickname 变更时，旧名应进入 nickname_history，新名替换当前。"""
+        import asyncio
+        import json
+
+        mock_person = MagicMock()
+        mock_person.id = 100
+        mock_person.interaction_count = 3
+        mock_person.nickname = "OldNick"
+        mock_person.cardname = None
+        mock_person.nickname_history = None
+        mock_person.cardname_history = None
+
+        with patch("src.core.utils.user_query_helper.CRUDBase"):
+            helper = UserQueryHelper()
+            helper.person_crud.get_by = AsyncMock(return_value=mock_person)
+            helper.person_crud.update = AsyncMock()
+
+            asyncio.run(
+                helper.update_person_info(
+                    "telegram", "user123", nickname="NewNick"
+                )
+            )
+
+            helper.person_crud.update.assert_called_once()
+            obj_in = helper.person_crud.update.call_args.args[1]
+            assert obj_in["nickname"] == "NewNick"
+            # 旧名应被推入历史
+            assert "nickname_history" in obj_in
+            history = json.loads(obj_in["nickname_history"])
+            assert len(history) == 1
+            assert history[0]["name"] == "OldNick"
+            assert isinstance(history[0]["retired_at"], float)
+            # cardname 未传入，不应改
+            assert "cardname" not in obj_in
+            assert "cardname_history" not in obj_in
+
+    def test_update_person_info_records_cardname_change_in_history(self):
+        """cardname 变更时，旧名应进入 cardname_history。"""
+        import asyncio
+        import json
+
+        mock_person = MagicMock()
+        mock_person.id = 101
+        mock_person.interaction_count = 1
+        mock_person.nickname = None
+        mock_person.cardname = "OldCard"
+        mock_person.nickname_history = None
+        mock_person.cardname_history = json.dumps(
+            [{"name": "AncientCard", "retired_at": 1000.0}]
+        )
+
+        with patch("src.core.utils.user_query_helper.CRUDBase"):
+            helper = UserQueryHelper()
+            helper.person_crud.get_by = AsyncMock(return_value=mock_person)
+            helper.person_crud.update = AsyncMock()
+
+            asyncio.run(
+                helper.update_person_info(
+                    "telegram", "user123", cardname="NewCard"
+                )
+            )
+
+            obj_in = helper.person_crud.update.call_args.args[1]
+            assert obj_in["cardname"] == "NewCard"
+            history = json.loads(obj_in["cardname_history"])
+            # 原有 1 条 + 新增 1 条 = 2 条
+            assert len(history) == 2
+            assert history[0]["name"] == "AncientCard"
+            assert history[1]["name"] == "OldCard"
+            # nickname 未传入，不应改
+            assert "nickname" not in obj_in
+            assert "nickname_history" not in obj_in
+
+    def test_update_person_info_no_history_when_name_unchanged(self):
+        """nickname/cardname 与旧值相同时，不应写入历史。"""
+        import asyncio
+
+        mock_person = MagicMock()
+        mock_person.id = 102
+        mock_person.interaction_count = 1
+        mock_person.nickname = "SameNick"
+        mock_person.cardname = "SameCard"
+        mock_person.nickname_history = None
+        mock_person.cardname_history = None
+
+        with patch("src.core.utils.user_query_helper.CRUDBase"):
+            helper = UserQueryHelper()
+            helper.person_crud.get_by = AsyncMock(return_value=mock_person)
+            helper.person_crud.update = AsyncMock()
+
+            asyncio.run(
+                helper.update_person_info(
+                    "telegram",
+                    "user123",
+                    nickname="SameNick",
+                    cardname="SameCard",
+                )
+            )
+
+            obj_in = helper.person_crud.update.call_args.args[1]
+            assert obj_in["nickname"] == "SameNick"
+            assert obj_in["cardname"] == "SameCard"
+            # 名字没变，不应写历史
+            assert "nickname_history" not in obj_in
+            assert "cardname_history" not in obj_in
+
+    def test_update_person_info_empty_new_name_does_not_clear_current(self):
+        """传入空字符串新名时不应清空当前名，也不应写入历史。"""
+        import asyncio
+
+        mock_person = MagicMock()
+        mock_person.id = 103
+        mock_person.interaction_count = 1
+        mock_person.nickname = "ExistingNick"
+        mock_person.cardname = "ExistingCard"
+        mock_person.nickname_history = None
+        mock_person.cardname_history = None
+
+        with patch("src.core.utils.user_query_helper.CRUDBase"):
+            helper = UserQueryHelper()
+            helper.person_crud.get_by = AsyncMock(return_value=mock_person)
+            helper.person_crud.update = AsyncMock()
+
+            asyncio.run(
+                helper.update_person_info(
+                    "telegram", "user123", nickname="", cardname=""
+                )
+            )
+
+            obj_in = helper.person_crud.update.call_args.args[1]
+            # 空字符串 strip 后为 None，不应更新 nickname/cardname 字段
+            assert "nickname" not in obj_in
+            assert "cardname" not in obj_in
+            assert "nickname_history" not in obj_in
+            assert "cardname_history" not in obj_in
+
+    def test_append_name_history_dedupes_consecutive_same_name(self):
+        """连续相同旧名不应重复写入历史。"""
+        import json
+
+        from src.core.utils.user_query_helper import _append_name_history
+
+        existing = json.dumps([{"name": "Foo", "retired_at": 1.0}])
+        result = _append_name_history(existing, "Foo", 2.0)
+        history = json.loads(result)
+        assert len(history) == 1
+        assert history[0]["name"] == "Foo"
+        assert history[0]["retired_at"] == 1.0
+
+    def test_append_name_history_caps_max_entries(self):
+        """历史条数超过上限时应丢弃最旧的。"""
+        import json
+
+        from src.core.utils.user_query_helper import _append_name_history
+
+        # 预填 50 条
+        existing = json.dumps(
+            [{"name": f"n{i}", "retired_at": float(i)} for i in range(50)]
+        )
+        result = _append_name_history(existing, "new_old", 99.0, max_entries=50)
+        history = json.loads(result)
+        assert len(history) == 50
+        # 最旧的 n0 应被丢弃
+        assert history[0]["name"] == "n1"
+        # 最新追加的应在末尾
+        assert history[-1]["name"] == "new_old"
+        assert history[-1]["retired_at"] == 99.0
+
+    def test_append_name_history_ignores_empty_old_name(self):
+        """空旧名不应入历史。"""
+        import json
+
+        from src.core.utils.user_query_helper import _append_name_history
+
+        result = _append_name_history(None, "", 1.0)
+        assert json.loads(result) == []
+        result2 = _append_name_history(None, "   ", 1.0)
+        assert json.loads(result2) == []
+
+    def test_append_name_history_recovers_from_corrupt_json(self):
+        """历史 JSON 损坏时应容错为空列表。"""
+        import json
+
+        from src.core.utils.user_query_helper import _append_name_history
+
+        result = _append_name_history("not valid json {{{", "OldName", 1.0)
+        history = json.loads(result)
+        assert len(history) == 1
+        assert history[0]["name"] == "OldName"
 
 
 
