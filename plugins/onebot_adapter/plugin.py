@@ -260,7 +260,7 @@ class OneBotAdapter(BaseAdapter):
             logger.error(f"处理 OneBot 事件失败: {e}, 原始数据: {raw}")
             return None
 
-    async def _send_platform_message(self, envelope: MessageEnvelope) -> None:  # type: ignore[override]
+    async def _send_platform_message(self, envelope: MessageEnvelope) -> dict[str, Any] | None:  # type: ignore[override]
         """
         将 MessageEnvelope 转换并发送到 OneBot
 
@@ -268,9 +268,10 @@ class OneBotAdapter(BaseAdapter):
         而是调用 OneBot API（send_group_msg, send_private_msg 等）
         """
         try:
-            await self.send_handler.handle_message(envelope)
+            return await self.send_handler.handle_message(envelope)
         except Exception as e:
             logger.error(f"发送 OneBot 消息失败: {e}")
+            return None
 
     async def send_onebot_api(self, action: str, params: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
         """

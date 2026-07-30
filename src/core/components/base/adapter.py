@@ -245,7 +245,7 @@ class BaseAdapter(BaseComponent, AdapterBase):
         """
         ...
 
-    async def _send_platform_message(self, envelope: MessageEnvelope) -> None:
+    async def _send_platform_message(self, envelope: MessageEnvelope) -> dict[str, Any] | None:
         """发送消息到平台。
 
         如果使用了自动传输配置，此方法会自动处理。
@@ -254,12 +254,15 @@ class BaseAdapter(BaseComponent, AdapterBase):
         Args:
             envelope: 要发送的消息信封
 
+        Returns:
+            dict[str, Any] | None: 平台发送响应；未提供响应时返回 None
+
         Raises:
             NotImplementedError: 如果未配置自动传输且未重写此方法
         """
         # 如果配置了自动传输，调用父类方法
         if hasattr(self, "_transport_config") and self._transport_config:  # type: ignore
-            await super()._send_platform_message(envelope)  # type: ignore
+            return await super()._send_platform_message(envelope)  # type: ignore
         else:
             raise NotImplementedError(
                 f"适配器 {self.name} 未配置自动传输，必须重写 _send_platform_message 方法"

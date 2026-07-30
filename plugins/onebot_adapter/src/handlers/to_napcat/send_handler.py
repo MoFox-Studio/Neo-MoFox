@@ -24,7 +24,7 @@ class SendHandler:
     def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
 
-    async def handle_message(self, envelope: MessageEnvelope) -> None:
+    async def handle_message(self, envelope: MessageEnvelope) -> dict[str, Any] | None:
         """
         处理来自核心的消息，将其转换为 OneBot 可接受的格式并发送
         """
@@ -55,7 +55,7 @@ class SendHandler:
 
         return await self.send_normal_message(envelope)
 
-    async def send_normal_message(self, envelope: MessageEnvelope) -> None:
+    async def send_normal_message(self, envelope: MessageEnvelope) -> dict[str, Any] | None:
         """
         处理普通消息发送
         """
@@ -117,6 +117,7 @@ class SendHandler:
             logger.info("消息发送成功")
         else:
             logger.warning(f"消息发送失败，onebot返回：{response!s}")
+        return response
 
     async def send_command(self, envelope: MessageEnvelope) -> None:
         """

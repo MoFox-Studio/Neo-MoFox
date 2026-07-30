@@ -120,8 +120,9 @@ class MessageSender:
                 )
                 return True  # 返回成功，因为拦截是预期行为
 
-            # 6. 发送
-            await adapter._send_platform_message(envelope)
+            # 6. 发送，并使用平台返回的消息 ID 记录已发送消息。
+            response = await adapter._send_platform_message(envelope)
+            self._apply_platform_message_id(message, response)
 
             # 7. 写入历史消息
             await self._persist_sent_message_to_history(message)
@@ -153,6 +154,20 @@ class MessageSender:
                 exc_info=True,
             )
             return False
+
+    @staticmethod
+    def _apply_platform_message_id(message: "Message", response: Any) -> None:
+        """使用平台发送响应中的消息 ID 更新待持久化消息。"""
+        if not isinstance(response, dict) or response.get("status") != "ok":
+            return
+
+        data = response.get("data")
+        if not isinstance(data, dict):
+            return
+
+        platform_message_id = data.get("message_id")
+        if platform_message_id is not None:
+            message.message_id = str(platform_message_id)
 
     async def _apply_bot_sender_info(self, message: "Message", adapter: Any) -> None:
         """在发送前将消息发送者信息设置为 Bot 信息。"""

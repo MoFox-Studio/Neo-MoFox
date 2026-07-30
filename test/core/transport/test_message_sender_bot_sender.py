@@ -56,3 +56,47 @@ async def test_send_message_overrides_sender_with_bot_info(monkeypatch: pytest.M
     adapter._send_platform_message.assert_awaited_once()
     fake_stream_manager.get_or_create_stream.assert_awaited_once()
     fake_stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+
+
+@pytest.mark.asyncio
+async def test_send_message_uses_platform_message_id_for_sent_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """平台返回消息 ID 后，应使用该 ID 写入已发送消息历史。"""
+    sender = MessageSender()
+
+    adapter = SimpleNamespace(
+        get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
+        _send_platform_message=AsyncMock(
+            return_value={"status": "ok", "data": {"message_id": 123456789}}
+        ),
+    )
+    sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
+    sender._converter = SimpleNamespace(  # type: ignore[assignment]
+        message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
+    )
+
+    fake_stream_manager = SimpleNamespace(
+        get_or_create_stream=AsyncMock(return_value=SimpleNamespace()),
+        add_sent_message_to_history=AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: fake_stream_manager,
+    )
+
+    message = Message(
+        message_id="action_send_text_internal",
+        content="hello",
+        message_type=MessageType.TEXT,
+        platform="qq",
+        chat_type="group",
+        stream_id="stream-1",
+        target_group_id="12345",
+    )
+
+    ok = await sender.send_message(message, adapter_signature="onebot_adapter:adapter:onebot_adapter")
+
+    assert ok is True
+    assert message.message_id == "123456789"
+    fake_stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
