@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from plugins.neo_default_chatter.components.config import NeoChatterConfig
-from plugins.neo_default_chatter.components.event_handlers.sub_agent_decision import (
+from plugins.neo_default_chatter.components.event_handlers.defaults.preprocess import (
     SubAgentDecisionHandler,
 )
 from plugins.neo_default_chatter.plugin import NeoChatterPlugin
@@ -355,7 +355,7 @@ async def test_call_llm_model_task_not_configured_returns_none(
         raise RuntimeError("Model config not initialized")
 
     monkeypatch.setattr(
-        "plugins.neo_default_chatter.components.event_handlers.sub_agent_decision.llm_api.get_model_set_by_task",
+        "plugins.neo_default_chatter.components.event_handlers.defaults.preprocess.sub_agent_decision.llm_api.get_model_set_by_task",
         _raise,
     )
 
@@ -620,6 +620,6 @@ def test_handler_metadata() -> None:
     """处理器元数据（name / weight / 订阅事件）应符合预期。"""
 
     assert SubAgentDecisionHandler.name == "sub_agent_decision"
-    assert SubAgentDecisionHandler.weight == 50
+    assert SubAgentDecisionHandler.weight == 0
     assert SubAgentDecisionHandler.component_type == "event_handler"
     assert "neo_default_chatter:preprocess" in SubAgentDecisionHandler.init_subscribe

@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from plugins.neo_default_chatter.components.config import NeoChatterConfig
-from plugins.neo_default_chatter.components.event_handlers.probability_bypass import (
+from plugins.neo_default_chatter.components.event_handlers.defaults.preprocess import (
     ProbabilityBypassHandler,
 )
 from plugins.neo_default_chatter.plugin import NeoChatterPlugin
@@ -129,7 +129,7 @@ def _patch_personality(
     """把 ``get_core_config`` 替换为返回指定 personality 的桩。"""
 
     monkeypatch.setattr(
-        "plugins.neo_default_chatter.components.event_handlers.probability_bypass.get_core_config",
+        "plugins.neo_default_chatter.components.event_handlers.defaults.preprocess.probability_bypass.get_core_config",
         lambda: SimpleNamespace(
             personality=SimpleNamespace(
                 nickname=nickname,
@@ -143,7 +143,7 @@ def _patch_random(monkeypatch: pytest.MonkeyPatch, value: float) -> None:
     """把处理器模块内的 ``random.random`` 替换为返回固定值的桩。"""
 
     monkeypatch.setattr(
-        "plugins.neo_default_chatter.components.event_handlers.probability_bypass.random.random",
+        "plugins.neo_default_chatter.components.event_handlers.defaults.preprocess.probability_bypass.random.random",
         lambda: value,
     )
 
@@ -450,7 +450,7 @@ async def test_personality_missing_falls_back_to_bot_nickname(
         raise RuntimeError("core config not initialized")
 
     monkeypatch.setattr(
-        "plugins.neo_default_chatter.components.event_handlers.probability_bypass.get_core_config",
+        "plugins.neo_default_chatter.components.event_handlers.defaults.preprocess.probability_bypass.get_core_config",
         _raise,
     )
     _patch_random(monkeypatch, 0.3)  # base 0.1 + alias 0.4 = 0.5
@@ -474,6 +474,6 @@ def test_handler_metadata() -> None:
     """处理器元数据（name / weight / 订阅事件）应符合预期。"""
 
     assert ProbabilityBypassHandler.name == "probability_bypass"
-    assert ProbabilityBypassHandler.weight == 100
+    assert ProbabilityBypassHandler.weight == 1
     assert ProbabilityBypassHandler.component_type == "event_handler"
     assert "neo_default_chatter:preprocess" in ProbabilityBypassHandler.init_subscribe

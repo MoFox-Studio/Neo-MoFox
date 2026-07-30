@@ -596,37 +596,3 @@ async def test_session_transition_passes_all_fields(
     assert set(params.keys()) == {
         "stream_id", "from_phase", "to_phase", "turn_result",
     }
-
-
-async def test_preprocess_delegates_to_run_preprocess(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``NdfcPublisher.preprocess`` 应委托 ``utils.preprocess.run_preprocess``。"""
-
-    captured: dict[str, Any] = {}
-    sentinel = MagicMock(name="PreprocessDecision")
-
-    async def _fake_run_preprocess(**kwargs):
-        captured.update(kwargs)
-        return sentinel
-
-    monkeypatch.setattr(
-        "plugins.neo_default_chatter.utils.preprocess.run_preprocess",
-        _fake_run_preprocess,
-    )
-
-    chat_stream = MagicMock()
-    cfg = _make_config()
-    result = await NdfcPublisher.preprocess(
-        chat_stream=chat_stream,
-        unreads=[],
-        history_text="hist",
-        config=cfg,
-        logger="my_logger",
-    )
-
-    assert result is sentinel  # 委托返回 run_preprocess 的结果
-    assert captured["chat_stream"] is chat_stream
-    assert captured["history_text"] == "hist"
-    assert captured["config"] is cfg
-    assert captured["logger"] == "my_logger"

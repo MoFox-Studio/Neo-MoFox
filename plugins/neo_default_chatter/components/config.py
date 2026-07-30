@@ -278,18 +278,18 @@ class NeoChatterConfig(BaseConfig):
             tag="text",
         )
 
-        theme_guide: "NeoChatterConfig.PluginSection.ThemeGuideSection" = Field(
-            default_factory=lambda: NeoChatterConfig.PluginSection.ThemeGuideSection(),
+        theme_guide: ThemeGuideSection = Field(
+            default_factory=ThemeGuideSection,
             description="按聊天类型区分的额外提示词",
             label="场景引导配置",
         )
-        preprocess_probability_bypass: "NeoChatterConfig.PluginSection.PreprocessProbabilityBypassSection" = Field(
-            default_factory=lambda: NeoChatterConfig.PluginSection.PreprocessProbabilityBypassSection(),
+        preprocess_probability_bypass: PreprocessProbabilityBypassSection = Field(
+            default_factory=PreprocessProbabilityBypassSection,
             description="消息预处理 概率直通门参数",
             label="概率直通配置",
         )
-        preprocess_sub_agent: "NeoChatterConfig.PluginSection.PreprocessSubAgentSection" = Field(
-            default_factory=lambda: NeoChatterConfig.PluginSection.PreprocessSubAgentSection(),
+        preprocess_sub_agent: PreprocessSubAgentSection = Field(
+            default_factory=PreprocessSubAgentSection,
             description="消息预处理 sub_agent 轻量 LLM 判定参数",
             label="SubAgent 判定配置",
         )

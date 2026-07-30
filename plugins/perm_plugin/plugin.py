@@ -13,7 +13,6 @@ from .commands.perm_command import PermCommand
 
 logger = get_logger("perm_plugin")
 
-
 @register_plugin
 class PermPlugin(BasePlugin):
     """系统权限管理插件。
