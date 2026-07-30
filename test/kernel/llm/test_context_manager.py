@@ -397,7 +397,12 @@ def test_context_manager_dynamic_once_reminder_is_consumed_per_manager(reminder_
     assert cast(Text, payloads[2].content[0]).text == "second"
 
 
-def test_context_manager_dynamic_once_reminder_isolated_between_managers(reminder_store) -> None:
+def test_context_manager_dynamic_once_reminder_consumed_globally_across_managers(reminder_store) -> None:
+    """once reminder 被任意 manager 消费后应从 store 删除，后续 manager 不再读到。
+
+    验证 once 模式的全局一次性语义：由于 LLMContextManager 每次请求都新建实例，
+    消费状态必须持久化到 store 层面，而非实例级别。
+    """
     manager_a = make_manager("actor", wrap_with_system_tag=True)
     manager_b = make_manager("actor", wrap_with_system_tag=True)
 
@@ -414,10 +419,14 @@ def test_context_manager_dynamic_once_reminder_isolated_between_managers(reminde
     payloads_a = manager_a.add_payload(payloads_a, LLMPayload(ROLE.USER, Text("again")))
     payloads_b = manager_b.add_payload([], LLMPayload(ROLE.USER, Text("B")))
 
-    assert cast(Text, payloads_a[0].content[0]).text == "A"
-    assert cast(Text, payloads_a[2].content[0]).text == "again"
-    assert cast(Text, payloads_b[0].content[0]).text == "<system_reminder>\n[screen]\none shot\n</system_reminder>"
-    assert cast(Text, payloads_b[0].content[1]).text == "B"
+    # manager_a 第三次 add user 时，第一轮注入的 reminder 被剥离（once 已消费）
+    a0_texts = [c.text for c in payloads_a[0].content if hasattr(c, "text")]
+    assert a0_texts == ["A"]
+    a2_texts = [c.text for c in payloads_a[2].content if hasattr(c, "text")]
+    assert a2_texts == ["again"]
+    # manager_b 读不到已从 store 删除的 once reminder
+    b0_texts = [c.text for c in payloads_b[0].content if hasattr(c, "text")]
+    assert b0_texts == ["B"]
 
 
 def test_context_manager_dynamic_once_reminder_reappears_after_content_refresh(reminder_store) -> None:
