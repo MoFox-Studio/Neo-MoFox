@@ -32,6 +32,20 @@ logger = get_logger("message_converter")
 _MAX_NESTING_DEPTH: int = 5
 
 
+def _compute_media_image_id(data: str) -> str | None:
+    """计算二进制媒体的 image_id（SHA256 哈希），用于按哈希回查 Images 表。
+
+    与 MediaManager 识别流程使用相同算法。失败时返回 None，不影响消息解析。
+    """
+    try:
+        from src.core.managers.media_manager import MediaManager
+
+        return MediaManager.compute_media_hash(data)
+    except Exception:
+        logger.warning("媒体 image_id 计算失败", exc_info=True)
+        return None
+
+
 def _merge_message_extra_with_format_info(
     message_info: MessageInfoPayload,
     envelope: MessageEnvelope | None = None,
@@ -154,13 +168,9 @@ class MessageConverter:
         else:
             segments = list(raw_segments)
 
-        # 递归解析段列表
+        # 递归解析段列表；二进制媒体项的 image_id 在各段处理器中直接注入，
+        # 保证 VLM 跳过/早退时 image_id 仍存在，便于后续按哈希回查 Images 表。
         result = self._parse_segments(segments, depth=0)
-
-        # 为二进制媒体项注入 image_id（哈希），便于后续按哈希从 Images 表回查图片信息。
-        # 必须在 _recognize_media_with_manager 之前执行，保证 VLM 跳过/早退时 image_id 仍注入。
-        if result.media:
-            self._enrich_media_image_ids(result.media)
 
         # 如果解析过程中发现有媒体资源，则后续需要考虑是否运行视觉语言模型识别
         if result.media:
@@ -454,6 +464,7 @@ class MessageConverter:
             result.media.append({
                 "type": "image",
                 "data": normalized_data,
+                "image_id": _compute_media_image_id(normalized_data),
             })
             
             # 添加图片描述占位符，等待异步识别
@@ -474,6 +485,7 @@ class MessageConverter:
             result.media.append({
                 "type": "emoji",
                 "data": normalized_data,
+                "image_id": _compute_media_image_id(normalized_data),
             })
             
             # 表情包同样支持 VLM 识别，文本先占位
@@ -486,9 +498,11 @@ class MessageConverter:
     def _handle_voice(data: Any, result: _ParseResult) -> None:
         """处理语音段（适配器已编码为 base64）。"""
         if isinstance(data, str):
+            normalized_data = normalize_base64(data)
             result.media.append({
                 "type": "voice",
-                "data": normalize_base64(data),
+                "data": normalized_data,
+                "image_id": _compute_media_image_id(normalized_data),
             })
             result.text_parts.append("[语音]")
 
@@ -638,31 +652,6 @@ class MessageConverter:
         }
 
         return type_mapping.get(first_media_type, MessageType.UNKNOWN)
-
-    def _enrich_media_image_ids(self, media_list: list[dict[str, Any]]) -> None:
-        """为二进制媒体项注入 image_id（哈希），与 MediaManager 识别流程一致。
-
-        对 type ∈ {image, emoji, voice} 且 data 为字符串、尚未带 image_id 的媒体项，
-        计算 SHA256 哈希写入 ``image_id`` 字段。后续入库剔除 ``data`` 后 ``image_id``
-        仍保留，可据此从 Images 表回查图片描述/文件路径。
-
-        Args:
-            media_list: 解析得到的媒体项列表，原地修改
-        """
-        try:
-            from src.core.managers.media_manager import MediaManager
-
-            for media in media_list:
-                if media.get("type") not in ("image", "emoji", "voice"):
-                    continue
-                if "image_id" in media:
-                    continue
-                data = media.get("data")
-                if not isinstance(data, str):
-                    continue
-                media["image_id"] = MediaManager.compute_media_hash(data)
-        except Exception:
-            logger.warning("媒体 image_id 注入失败", exc_info=True)
 
     async def _recognize_media_with_manager(
         self,
