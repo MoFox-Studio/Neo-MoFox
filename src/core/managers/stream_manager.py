@@ -47,8 +47,9 @@ def _get_content_size_bytes(content: Any) -> int:
 def _strip_oversized_media_data(item: dict[str, Any]) -> dict[str, Any]:
     """移除超出阈值的媒体 data 字段，保留其余元信息。
 
-    媒体项的 ``image_id``（哈希）由 ``MessageConverter`` 在创建媒体项时注入，
-    此处剔除 ``data`` 后 ``image_id`` 自然保留，便于后续按哈希回查图片信息。
+    媒体项的媒体 ID（``image_id`` / ``voice_id`` / ``video_id``）由
+    ``MessageConverter`` 在创建媒体项时注入，此处剔除 ``data`` 后媒体 ID
+    自然保留，便于后续按哈希回查 Images/Voices/Videos 表。
     """
     media_data = item.get("data")
     if media_data is None:
@@ -66,8 +67,8 @@ def _serialize_content_for_db(content: Any) -> str:
     内存中的 content 字典可能包含图片/表情包/语音的原始 base64 数据（供 Chatter 多模态
     使用），但这些数据不需要持久化，持久化会造成数据库存储暴涨。本函数在序列化前检查
     image/emoji/voice 媒体项中的 ``data`` 实际大小，超过阈值时剔除该字段，其余元信息保留。
-    媒体项的 ``image_id``（哈希）由 ``MessageConverter`` 在创建时注入，剔除 ``data`` 后保留，
-    后续可按 ``image_id`` 从 Images 表回查图片信息。
+    媒体项的媒体 ID（``image_id`` / ``voice_id`` / ``video_id``）由 ``MessageConverter``
+    在创建时注入，剔除 ``data`` 后保留，后续可按对应 ID 从 Images/Voices/Videos 表回查信息。
     """
     if not isinstance(content, dict):
         return str(content)

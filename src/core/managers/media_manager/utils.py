@@ -135,11 +135,16 @@ def compute_hash(data: str) -> str:
 
 
 def compute_media_hash(data: str) -> str:
-    """计算媒体数据的哈希值（即 Images 表的 image_id）。
+    """计算媒体数据的哈希值，作为各媒体表的主键。
 
-    与内部识别流程使用相同的哈希算法，确保哈希值可在 Images 表中回查。
+    同一哈希值在不同媒体类型下分别对应：
+    - image/emoji → ``Images.image_id``
+    - voice       → ``Voices.voice_id``
+    - video       → ``Videos.video_id``
+
+    与内部识别流程使用相同的哈希算法，确保哈希值可在对应表中回查。
     供外部模块（如 StreamManager 序列化入库时）在剔除 base64 ``data`` 前
-    计算并保留 image_id，避免 data 被丢弃后无法按哈希找回图片信息。
+    计算并保留媒体 ID，避免 data 被丢弃后无法按哈希找回媒体信息。
 
     Args:
         data: 待哈希的数据（base64 字符串）

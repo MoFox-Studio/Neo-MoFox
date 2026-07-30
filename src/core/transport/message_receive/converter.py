@@ -33,8 +33,12 @@ logger = get_logger("message_converter")
 _MAX_NESTING_DEPTH: int = 5
 
 
-def _compute_media_image_id(data: str) -> str | None:
-    """计算二进制媒体的 image_id（SHA256 哈希），用于按哈希回查 Images 表。
+def _compute_media_hash(data: str) -> str | None:
+    """计算二进制媒体的哈希（SHA256），作为各媒体表的主键回查依据。
+
+    - image/emoji → Images.image_id
+    - voice       → Voices.voice_id
+    - video       → Videos.video_id
 
     与 MediaManager 识别流程使用相同算法。失败时返回 None，不影响消息解析。
     """
@@ -43,7 +47,7 @@ def _compute_media_image_id(data: str) -> str | None:
 
         return MediaManager.compute_media_hash(data)
     except Exception:
-        logger.warning("媒体 image_id 计算失败", exc_info=True)
+        logger.warning("媒体哈希计算失败", exc_info=True)
         return None
 
 
@@ -169,8 +173,9 @@ class MessageConverter:
         else:
             segments = list(raw_segments)
 
-        # 递归解析段列表；二进制媒体项的 image_id 在各段处理器中直接注入，
-        # 保证 VLM 跳过/早退时 image_id 仍存在，便于后续按哈希回查 Images 表。
+        # 递归解析段列表；二进制媒体项的媒体 ID（image_id/voice_id/video_id）
+        # 在各段处理器中直接注入，保证 VLM/ASR 跳过/早退时 ID 仍存在，
+        # 便于后续按哈希回查 Images/Voices/Videos 表。
         result = self._parse_segments(segments, depth=0)
 
         # 如果有引用消息，从数据库获取已识别的 processed_plain_text 构建引用预览
@@ -471,7 +476,7 @@ class MessageConverter:
             result.media.append({
                 "type": "image",
                 "data": normalized_data,
-                "image_id": _compute_media_image_id(normalized_data),
+                "image_id": _compute_media_hash(normalized_data),
             })
             
             # 添加图片描述占位符，等待异步识别
@@ -492,7 +497,7 @@ class MessageConverter:
             result.media.append({
                 "type": "emoji",
                 "data": normalized_data,
-                "image_id": _compute_media_image_id(normalized_data),
+                "image_id": _compute_media_hash(normalized_data),
             })
             
             # 表情包同样支持 VLM 识别，文本先占位
@@ -509,7 +514,7 @@ class MessageConverter:
             result.media.append({
                 "type": "voice",
                 "data": normalized_data,
-                "image_id": _compute_media_image_id(normalized_data),
+                "voice_id": _compute_media_hash(normalized_data),
             })
             result.text_parts.append("[语音]")
 
@@ -527,7 +532,7 @@ class MessageConverter:
             result.media.append({
                 "type": "video",
                 "data": normalized_data,
-                "image_id": _compute_media_image_id(normalized_data),
+                "video_id": _compute_media_hash(normalized_data),
             })
             result.text_parts.append("[视频]")
         elif isinstance(data, dict):
@@ -537,7 +542,7 @@ class MessageConverter:
                 media_item: dict[str, Any] = {
                     "type": "video",
                     "data": normalized_data,
-                    "image_id": _compute_media_image_id(normalized_data),
+                    "video_id": _compute_media_hash(normalized_data),
                 }
                 # 保留适配器提供的元数据（filename/size_mb/url 等）
                 for key in ("filename", "size_mb", "url"):
