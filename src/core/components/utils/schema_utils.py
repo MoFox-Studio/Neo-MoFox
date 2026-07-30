@@ -9,6 +9,8 @@ import types
 from enum import Enum
 from typing import Any, Callable, Literal, get_args, get_origin, get_type_hints
 
+from pydantic import BaseModel
+
 
 # Python 类型到 JSON Schema 类型的映射
 _TYPE_MAPPING: dict[type, str] = {
@@ -65,6 +67,16 @@ def build_type_schema(type_hint: Any) -> dict[str, Any]:
 
     if normalized is type(None):
         return {"type": "null"}
+
+    if inspect.isclass(normalized) and issubclass(normalized, BaseModel):
+        model_schema = normalized.model_json_schema()
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": model_schema.get("properties", {}),
+        }
+        if model_schema.get("required"):
+            schema["required"] = model_schema["required"]
+        return schema
 
     origin = get_origin(normalized)
     if origin is Literal:

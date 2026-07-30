@@ -4,12 +4,21 @@ from __future__ import annotations
 
 from typing import Annotated
 
+from pydantic import BaseModel
 
 from src.core.components.utils.schema_utils import (
     extract_description_from_docstring,
     map_type_to_json,
     parse_function_signature,
 )
+
+
+class ForwardNodeSchemaTestModel(BaseModel):
+    """用于验证 Tool Schema 的合并转发节点。"""
+
+    uin: str
+    nick: str
+    content: str
 
 
 class TestMapTypeToJson:
@@ -516,3 +525,19 @@ class TestSchemaUtilsEdgeCases:
 
         # 返回类型不应该在 schema 中
         assert "return" not in schema["function"]["parameters"]
+
+
+def test_parse_function_with_pydantic_model_list() -> None:
+    """Pydantic 列表参数应在 Tool Schema 中展开节点字段。"""
+    def send_forward(messages: list[ForwardNodeSchemaTestModel]) -> None:
+        """发送合并转发消息。"""
+
+    schema = parse_function_signature(send_forward, "send_forward", "发送合并转发消息")
+    items = schema["function"]["parameters"]["properties"]["messages"]["items"]
+
+    assert items["type"] == "object"
+    assert set(items["properties"]) == {"uin", "nick", "content"}
+    assert items["properties"]["uin"]["type"] == "string"
+    assert items["properties"]["nick"]["type"] == "string"
+    assert items["properties"]["content"]["type"] == "string"
+    assert items["required"] == ["uin", "nick", "content"]
