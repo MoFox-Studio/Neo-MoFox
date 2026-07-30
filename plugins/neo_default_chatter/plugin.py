@@ -1,6 +1,7 @@
 """Neo-Default-Chatter 插件类与生命周期实现。"""
 
 from __future__ import annotations
+from typing import cast
 
 from src.app.plugin_system.base import BasePlugin, register_plugin
 from src.app.plugin_system.api.log_api import get_logger
@@ -149,7 +150,8 @@ class NeoChatterPlugin(BasePlugin):
 
     def get_components(self) -> list[type]:
         """返回插件注册的组件类。"""
-        if not self.config.plugin.enabled:
+        config = cast(NeoChatterConfig, self.config)
+        if not config.plugin.enabled:
             logger.info("Neo-Default-Chatter 插件未启用")
             return [] 
         return [

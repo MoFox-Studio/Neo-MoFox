@@ -108,7 +108,7 @@ class TestBaseChatter:
         """测试 create_request 默认启用基于 token 的上下文压缩。"""
         chatter = ConcreteChatter("stream_123", mock_plugin)
 
-        with patch("src.core.config.get_model_config") as mock_model_config:
+        with patch("src.app.plugin_system.api.llm_api.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
 
             request = chatter.create_request("actor")
@@ -125,7 +125,7 @@ class TestBaseChatter:
         store = get_system_reminder_store()
         store.set("actor", "goal", "跟随最后一条", insert_type=SystemReminderInsertType.DYNAMIC)
 
-        with patch("src.core.config.get_model_config") as mock_model_config:
+        with patch("src.app.plugin_system.api.llm_api.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
 
             request = chatter.create_request("actor", with_reminder="actor")
@@ -142,7 +142,7 @@ class TestBaseChatter:
         store = get_system_reminder_store()
         store.set("actor", "goal", "先给结论")
 
-        with patch("src.core.config.get_model_config") as mock_model_config:
+        with patch("src.app.plugin_system.api.llm_api.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
 
             request = chatter.create_request("actor", with_reminder="actor")
@@ -171,7 +171,7 @@ class TestBaseChatter:
             consume=SystemReminderConsumeType.ONCE,
         )
 
-        with patch("src.core.config.get_model_config") as mock_model_config:
+        with patch("src.app.plugin_system.api.llm_api.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
 
             request = chatter.create_request("actor", with_reminder="actor")
