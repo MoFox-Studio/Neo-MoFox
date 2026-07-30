@@ -71,12 +71,6 @@ class LLMContextManager:
     _reminder_sources: list[RegisteredReminderSource] | None = field(
         default=None, init=False, repr=False
     )
-    _consumed_once_reminder_keys: set[tuple[str, str, str]] = field(
-        default_factory=set,
-        init=False,
-        repr=False,
-    )
-
     def __post_init__(self) -> None:
         """把配置期的 reminder 源规范化成运行时记录。"""
         if not self.reminder_sources:
@@ -173,12 +167,6 @@ class LLMContextManager:
         seen_targets: set[tuple[int, str]] = set()
         consumed_now: set[tuple[str, str, str]] = set()
         for reminder in resolved_reminders:
-            if (
-                reminder.consume_type == SystemReminderConsumeType.ONCE
-                and reminder.source_key in self._consumed_once_reminder_keys
-            ):
-                continue
-
             target_index = (
                 first_user_index
                 if reminder.insert_type == SystemReminderInsertType.FIXED
@@ -217,7 +205,6 @@ class LLMContextManager:
 
         if consumed_now:
             self._delete_consumed_once_reminders(consumed_now)
-        self._consumed_once_reminder_keys.update(consumed_now)
         return updated
 
     @staticmethod
