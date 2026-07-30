@@ -101,10 +101,12 @@ class MediaEngine(str, Enum):
     Attributes:
         VLM: 图片/表情包视觉识别引擎
         ASR: 语音转文字引擎
+        VIDEO: 视频内容识别引擎（无内置实现，由第三方插件订阅事件回写）
     """
 
     VLM = "vlm"
     ASR = "asr"
+    VIDEO = "video"
 
 
 class ComponentState(Enum):

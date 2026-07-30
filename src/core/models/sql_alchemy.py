@@ -342,6 +342,42 @@ class VoiceDescriptions(Base):
     )
 
 
+class Videos(Base):
+    """视频信息模型 - 镜像 Voices 表结构，记录视频 ID、文件路径与识别结果"""
+
+    __tablename__ = "videos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    video_id: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="视频哈希值（唯一标识）")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="视频识别文字")
+    path: Mapped[str] = mapped_column(get_string_field(500), nullable=False, unique=True, comment="视频文件路径")
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="出现次数")
+    timestamp: Mapped[float] = mapped_column(Float, nullable=False, comment="记录时间戳")
+    type: Mapped[str] = mapped_column(Text, nullable=False, comment="媒体类型，固定为 video")
+    video_processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否已通过视频识别")
+
+    __table_args__ = (
+        Index("idx_videos_path", "path"),
+    )
+
+
+class VideoDescriptions(Base):
+    """视频描述信息模型 - 镜像 VoiceDescriptions 表结构，缓存视频识别结果避免重复识别"""
+
+    __tablename__ = "video_descriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    type: Mapped[str] = mapped_column(Text, nullable=False, comment="媒体类型，固定为 video")
+    video_description_hash: Mapped[str] = mapped_column(get_string_field(64), nullable=False, index=True, comment="视频哈希值")
+    description: Mapped[str] = mapped_column(Text, nullable=False, comment="视频识别文字")
+    timestamp: Mapped[float] = mapped_column(Float, nullable=False, comment="记录时间戳")
+
+    __table_args__ = (
+        Index("idx_videodesc_hash", "video_description_hash"),
+        UniqueConstraint("video_description_hash", "type", name="uq_videodesc_hash_type"),
+    )
+
+
 class OnlineTime(Base):
     """在线时长记录模型"""
 

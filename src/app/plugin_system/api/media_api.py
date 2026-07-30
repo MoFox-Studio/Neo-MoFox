@@ -3,16 +3,17 @@ Media API 模块。
 
 提供媒体识别、批量识别与媒体信息查询能力。
 
-支持三类媒体，统一通过 ``media_type`` 路由：
+支持四类媒体，统一通过 ``media_type`` 路由：
 - ``image`` / ``emoji``：通过 VLM 识别，写入 ``Images`` / ``ImageDescriptions`` 表
 - ``voice``：通过 ASR 识别，写入 ``Voices`` / ``VoiceDescriptions`` 表，并落盘到 voices 目录
+- ``video``：通过事件链交给第三方插件识别（无内置引擎），写入 ``Videos`` / ``VideoDescriptions`` 表，并落盘到 videos 目录
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 if TYPE_CHECKING:
     from src.core.managers.media_manager import MediaManager
@@ -52,8 +53,8 @@ def _validate_media_type(media_type: str) -> None:
     Returns:
         None
     """
-    if media_type not in {"image", "emoji", "voice"}:
-        raise ValueError("media_type 必须是 'image'、'emoji' 或 'voice'")
+    if media_type not in {"image", "emoji", "voice", "video"}:
+        raise ValueError("media_type 必须是 'image'、'emoji'、'voice' 或 'video'")
 
 
 async def recognize_media(
@@ -61,15 +62,17 @@ async def recognize_media(
     media_type: str,
     use_cache: bool = True,
 ) -> str | None:
-    """识别媒体内容（图片、表情包或语音）。
+    """识别媒体内容（图片、表情包、语音或视频）。
 
     按 ``media_type`` 路由到 MediaManager 的对应识别引擎：
     - ``image`` / ``emoji``：VLM 识别
     - ``voice``：ASR 识别，识别后音频文件落盘到 voices 目录
+    - ``video``：通过事件链交给第三方插件识别（无内置引擎，无插件时返回 None），
+      视频文件落盘到 videos 目录
 
     Args:
         base64_data: Base64 编码的媒体内容（语音为 WAV）
-        media_type: 媒体类型，``image`` / ``emoji`` / ``voice``
+        media_type: 媒体类型，``image`` / ``emoji`` / ``voice`` / ``video``
         use_cache: 是否使用缓存
 
     Returns:
@@ -125,13 +128,14 @@ async def save_media_info(
     按 ``media_type`` 路由：
     - ``image`` / ``emoji``：写入 ``Images`` 表，``vlm_processed`` 标记 VLM 识别状态
     - ``voice``：写入 ``Voices`` 表，``vlm_processed`` 映射为 ``asr_processed``
+    - ``video``：写入 ``Videos`` 表，``vlm_processed`` 映射为 ``video_processed``
 
     Args:
-        media_hash: 媒体哈希（语音时即 voice_hash）
+        media_hash: 媒体哈希（语音时即 voice_hash，视频时即 video_hash）
         media_type: 媒体类型
         file_path: 文件路径，可选
-        description: 媒体描述（语音时为 ASR 文本），可选
-        vlm_processed: 是否已完成识别（语音时映射为 asr_processed）
+        description: 媒体描述（语音时为 ASR 文本，视频时为识别文本），可选
+        vlm_processed: 是否已完成识别（语音时映射为 asr_processed，视频时映射为 video_processed）
 
     Returns:
         None
@@ -148,6 +152,13 @@ async def save_media_info(
             description=description,
             asr_processed=vlm_processed,
         )
+    if media_type == "video":
+        return await manager.save_video_info(
+            video_hash=media_hash,
+            file_path=file_path,
+            description=description,
+            video_processed=vlm_processed,
+        )
     return await manager.save_media_info(
         media_hash=media_hash,
         media_type=media_type,
@@ -160,7 +171,7 @@ async def save_media_info(
 async def get_media_info(media_hash: str) -> dict[str, Any] | None:
     """根据哈希值或路径获取媒体信息。
 
-    依次查询 ``Images`` 与 ``Voices`` 表，命中即返回。
+    依次查询 ``Images``、``Voices`` 与 ``Videos`` 表，命中即返回。
 
     Args:
         media_hash: 媒体哈希或文件路径
@@ -172,7 +183,7 @@ async def get_media_info(media_hash: str) -> dict[str, Any] | None:
     info = await _get_media_manager().get_media_info(media_hash)
     if info is not None:
         return info
-    from src.core.models.sql_alchemy import Images, Voices
+    from src.core.models.sql_alchemy import Images, Videos, Voices
     from src.kernel.db import QueryBuilder
 
     media = await QueryBuilder(Images).filter(image_id=media_hash).first()
@@ -199,6 +210,19 @@ async def get_media_info(media_hash: str) -> dict[str, Any] | None:
             "count": voice.count,
             "timestamp": voice.timestamp,
             "asr_processed": voice.asr_processed,
+        }
+
+    video = await QueryBuilder(Videos).filter(video_id=media_hash).first()
+    if video:
+        return {
+            "id": video.id,
+            "video_id": video.video_id,
+            "path": video.path,
+            "type": video.type,
+            "description": video.description,
+            "count": video.count,
+            "timestamp": video.timestamp,
+            "video_processed": video.video_processed,
         }
     return None
 
