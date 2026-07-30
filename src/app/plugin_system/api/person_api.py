@@ -161,8 +161,9 @@ async def update_person_info(
     """更新用户信息（消息接收流程实际调用的入口）。
 
     - 刷新 ``last_interaction`` / ``interaction_count`` / ``updated_at``
-    - 当传入的 ``nickname`` 或 ``cardname`` 与数据库现有值不同且都非空时，
-      自动把旧值推入对应的 ``*_history`` 列表，再用新值替换当前字段
+    - 当传入的 ``nickname`` 与数据库现有值不同且都非空时，自动把旧值推入
+      ``nickname_history`` 列表，再用新值替换当前字段
+    - ``cardname`` 仅更新当前值（不再维护历史）
     - 用户不存在时自动创建
 
     此函数为**异步函数**。
@@ -266,36 +267,9 @@ async def get_nickname_history(
     """
     _validate_non_empty(platform, "platform")
     _validate_non_empty(user_id, "user_id")
-    return await _get_user_query_helper().get_name_history(
+    return await _get_user_query_helper().get_nickname_history(
         platform=platform,
         user_id=user_id,
-        field="nickname",
-    )
-
-
-async def get_cardname_history(
-    platform: str,
-    user_id: str,
-) -> list[dict[str, Any]]:
-    """获取用户群名片变更历史。
-
-    列表按 ``retired_at`` 升序排列，每项形如
-    ``{"name": str, "retired_at": float | None}``。
-    用户不存在或无历史时返回空列表。此函数为**异步函数**。
-
-    Args:
-        platform: 平台标识
-        user_id: 平台内部用户ID
-
-    Returns:
-        历史群名片列表
-    """
-    _validate_non_empty(platform, "platform")
-    _validate_non_empty(user_id, "user_id")
-    return await _get_user_query_helper().get_name_history(
-        platform=platform,
-        user_id=user_id,
-        field="cardname",
     )
 
 
@@ -407,7 +381,6 @@ __all__ = [
     "update_user_attitude",
     # 名称变更历史
     "get_nickname_history",
-    "get_cardname_history",
     # 用户关联查询
     "get_user_streams",
     "get_user_recent_messages",

@@ -166,8 +166,9 @@ class UserQueryHelper:
     ) -> bool:
         """更新用户信息
 
-        当传入的 nickname/cardname 与数据库中现有值不同（且都不为空）时，
-        自动把旧值推入对应的 *_history 列表，再用新值替换当前字段。
+        当传入的 nickname 与数据库中现有值不同（且都不为空）时，
+        自动把旧值推入 nickname_history 列表，再用新值替换当前字段。
+        cardname 仅更新当前值（不再维护历史）。
 
         Args:
             platform: 平台标识
@@ -205,13 +206,8 @@ class UserQueryHelper:
                 )
             update_data["nickname"] = new_nickname
 
-        # cardname 改名检测：同上
+        # cardname 直接更新（不再维护历史）
         if cardname is not None and new_cardname is not None:
-            old_cardname = (person.cardname or "").strip() or None
-            if old_cardname is not None and new_cardname != old_cardname:
-                update_data["cardname_history"] = _append_name_history(
-                    person.cardname_history, old_cardname, now
-                )
             update_data["cardname"] = new_cardname
 
         await self.person_crud.update(person.id, update_data)
@@ -239,40 +235,35 @@ class UserQueryHelper:
         person_id = self.generate_person_id(platform, user_id)
         return await self.person_crud.get_by(person_id=person_id)
 
-    async def get_name_history(
+    async def get_nickname_history(
         self,
         platform: str,
         user_id: str,
-        field: str,
     ) -> list[dict[str, Any]]:
-        """解析并返回 nickname 或 cardname 的历史记录。
+        """解析并返回 nickname 的历史记录。
 
         历史 JSON 列表格式：``[{"name": str, "retired_at": float}, ...]``，
-        按时间从旧到新排列。``field`` 必须是 ``"nickname"`` 或 ``"cardname"``。
+        按时间从旧到新排列。
 
         Args:
             platform: 平台标识
             user_id: 平台内部用户ID
-            field: 取 ``"nickname"`` 或 ``"cardname"``
 
         Returns:
-            历史名字列表；用户不存在或字段为空时返回空列表
+            历史昵称列表；用户不存在或字段为空时返回空列表
         """
-        if field not in ("nickname", "cardname"):
-            raise ValueError("field 必须是 'nickname' 或 'cardname'")
-
         person = await self.get_person(platform, user_id)
         if person is None:
             return []
 
-        raw = getattr(person, f"{field}_history", None)
+        raw = person.nickname_history
         if not raw:
             return []
 
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            logger.warning(f"{field}_history JSON 解析失败: {person.person_id}")
+            logger.warning(f"nickname_history JSON 解析失败: {person.person_id}")
             return []
 
         if not isinstance(data, list):

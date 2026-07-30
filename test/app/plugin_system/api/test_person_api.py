@@ -4,7 +4,7 @@
 - generate_person_id / generate_raw_person_id
 - get_or_create_person / get_person / update_person_info
 - update_user_impression / update_user_attitude
-- get_nickname_history / get_cardname_history
+- get_nickname_history
 - get_user_streams / get_user_recent_messages / resolve_user_id
 - enrich_message_with_person_info
 - 参数校验
@@ -30,7 +30,7 @@ def _make_helper_mock() -> MagicMock:
     helper.update_person_info = AsyncMock(return_value=True)
     helper.update_user_impression = AsyncMock(return_value=True)
     helper.update_user_attitude = AsyncMock(return_value=60)
-    helper.get_name_history = AsyncMock(return_value=[{"name": "Old", "retired_at": 1.0}])
+    helper.get_nickname_history = AsyncMock(return_value=[{"name": "Old", "retired_at": 1.0}])
     helper.get_user_streams = AsyncMock(return_value=[MagicMock()])
     helper.get_user_recent_messages = AsyncMock(return_value=[MagicMock()])
     helper.resolve_user_id = AsyncMock(return_value="123456")
@@ -162,20 +162,7 @@ class TestPersonAPI:
         ):
             result = await person_api.get_nickname_history("qq", "123")
             assert result == [{"name": "Old", "retired_at": 1.0}]
-            helper.get_name_history.assert_awaited_once()
-            assert helper.get_name_history.call_args.kwargs["field"] == "nickname"
-
-    @pytest.mark.asyncio
-    async def test_get_cardname_history(self) -> None:
-        helper = _make_helper_mock()
-        with patch(
-            "src.app.plugin_system.api.person_api._get_user_query_helper",
-            return_value=helper,
-        ):
-            result = await person_api.get_cardname_history("qq", "123")
-            assert result == [{"name": "Old", "retired_at": 1.0}]
-            helper.get_name_history.assert_awaited_once()
-            assert helper.get_name_history.call_args.kwargs["field"] == "cardname"
+            helper.get_nickname_history.assert_awaited_once()
 
     # ── 用户关联查询（异步） ──
 
@@ -238,7 +225,7 @@ class TestPersonAPI:
 
     @pytest.mark.asyncio
     async def test_name_history_round_trip_through_helper(self) -> None:
-        """端到端：让 person_api 调用真实 UserQueryHelper 的 get_name_history。"""
+        """端到端：让 person_api 调用真实 UserQueryHelper 的 get_nickname_history。"""
         from src.core.utils.user_query_helper import UserQueryHelper
 
         mock_person = MagicMock()
@@ -249,7 +236,6 @@ class TestPersonAPI:
                 {"name": "Alyssa", "retired_at": 200.0},
             ]
         )
-        mock_person.cardname_history = None
 
         with patch("src.core.utils.user_query_helper.CRUDBase"):
             helper = UserQueryHelper()
@@ -263,7 +249,3 @@ class TestPersonAPI:
                 assert history[0]["name"] == "Alice"
                 assert history[1]["name"] == "Alyssa"
                 assert history[0]["retired_at"] == 100.0
-
-                # cardname 历史为空
-                card_history = await person_api.get_cardname_history("qq", "123")
-                assert card_history == []

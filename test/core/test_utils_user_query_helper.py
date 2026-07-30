@@ -134,7 +134,6 @@ class TestUserQueryHelper:
         mock_person.nickname = None
         mock_person.cardname = None
         mock_person.nickname_history = None
-        mock_person.cardname_history = None
 
         with patch("src.core.utils.user_query_helper.CRUDBase"):
             helper = UserQueryHelper()
@@ -159,7 +158,6 @@ class TestUserQueryHelper:
             assert obj_in["cardname"] == "Card"
             # 旧名为空，不应写入历史
             assert "nickname_history" not in obj_in
-            assert "cardname_history" not in obj_in
 
     def test_update_person_info_not_blocked_by_cache(self):
         """同一用户连续调用 update_person_info 不应被缓存跳过（写操作必须每次执行）。"""
@@ -171,7 +169,6 @@ class TestUserQueryHelper:
         mock_person.nickname = None
         mock_person.cardname = None
         mock_person.nickname_history = None
-        mock_person.cardname_history = None
 
         with patch("src.core.utils.user_query_helper.CRUDBase"):
             helper = UserQueryHelper()
@@ -199,7 +196,6 @@ class TestUserQueryHelper:
         mock_person.nickname = "OldNick"
         mock_person.cardname = None
         mock_person.nickname_history = None
-        mock_person.cardname_history = None
 
         with patch("src.core.utils.user_query_helper.CRUDBase"):
             helper = UserQueryHelper()
@@ -223,44 +219,6 @@ class TestUserQueryHelper:
             assert isinstance(history[0]["retired_at"], float)
             # cardname 未传入，不应改
             assert "cardname" not in obj_in
-            assert "cardname_history" not in obj_in
-
-    def test_update_person_info_records_cardname_change_in_history(self):
-        """cardname 变更时，旧名应进入 cardname_history。"""
-        import asyncio
-        import json
-
-        mock_person = MagicMock()
-        mock_person.id = 101
-        mock_person.interaction_count = 1
-        mock_person.nickname = None
-        mock_person.cardname = "OldCard"
-        mock_person.nickname_history = None
-        mock_person.cardname_history = json.dumps(
-            [{"name": "AncientCard", "retired_at": 1000.0}]
-        )
-
-        with patch("src.core.utils.user_query_helper.CRUDBase"):
-            helper = UserQueryHelper()
-            helper.person_crud.get_by = AsyncMock(return_value=mock_person)
-            helper.person_crud.update = AsyncMock()
-
-            asyncio.run(
-                helper.update_person_info(
-                    "telegram", "user123", cardname="NewCard"
-                )
-            )
-
-            obj_in = helper.person_crud.update.call_args.args[1]
-            assert obj_in["cardname"] == "NewCard"
-            history = json.loads(obj_in["cardname_history"])
-            # 原有 1 条 + 新增 1 条 = 2 条
-            assert len(history) == 2
-            assert history[0]["name"] == "AncientCard"
-            assert history[1]["name"] == "OldCard"
-            # nickname 未传入，不应改
-            assert "nickname" not in obj_in
-            assert "nickname_history" not in obj_in
 
     def test_update_person_info_no_history_when_name_unchanged(self):
         """nickname/cardname 与旧值相同时，不应写入历史。"""
@@ -272,7 +230,6 @@ class TestUserQueryHelper:
         mock_person.nickname = "SameNick"
         mock_person.cardname = "SameCard"
         mock_person.nickname_history = None
-        mock_person.cardname_history = None
 
         with patch("src.core.utils.user_query_helper.CRUDBase"):
             helper = UserQueryHelper()
@@ -293,7 +250,6 @@ class TestUserQueryHelper:
             assert obj_in["cardname"] == "SameCard"
             # 名字没变，不应写历史
             assert "nickname_history" not in obj_in
-            assert "cardname_history" not in obj_in
 
     def test_update_person_info_empty_new_name_does_not_clear_current(self):
         """传入空字符串新名时不应清空当前名，也不应写入历史。"""
@@ -305,7 +261,6 @@ class TestUserQueryHelper:
         mock_person.nickname = "ExistingNick"
         mock_person.cardname = "ExistingCard"
         mock_person.nickname_history = None
-        mock_person.cardname_history = None
 
         with patch("src.core.utils.user_query_helper.CRUDBase"):
             helper = UserQueryHelper()
@@ -323,7 +278,6 @@ class TestUserQueryHelper:
             assert "nickname" not in obj_in
             assert "cardname" not in obj_in
             assert "nickname_history" not in obj_in
-            assert "cardname_history" not in obj_in
 
     def test_append_name_history_dedupes_consecutive_same_name(self):
         """连续相同旧名不应重复写入历史。"""
