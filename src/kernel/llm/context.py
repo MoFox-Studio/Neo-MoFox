@@ -71,12 +71,6 @@ class LLMContextManager:
     _reminder_sources: list[RegisteredReminderSource] | None = field(
         default=None, init=False, repr=False
     )
-    _consumed_once_reminder_keys: set[tuple[str, str, str]] = field(
-        default_factory=set,
-        init=False,
-        repr=False,
-    )
-
     def __post_init__(self) -> None:
         """把配置期的 reminder 源规范化成运行时记录。"""
         if not self.reminder_sources:
@@ -173,12 +167,6 @@ class LLMContextManager:
         seen_targets: set[tuple[int, str]] = set()
         consumed_now: set[tuple[str, str, str]] = set()
         for reminder in resolved_reminders:
-            if (
-                reminder.consume_type == SystemReminderConsumeType.ONCE
-                and reminder.source_key in self._consumed_once_reminder_keys
-            ):
-                continue
-
             target_index = (
                 first_user_index
                 if reminder.insert_type == SystemReminderInsertType.FIXED
@@ -215,8 +203,30 @@ class LLMContextManager:
             rebuilt = list(new_parts.get(user_index, [])) + content_parts
             updated[user_index] = LLMPayload(ROLE.USER, rebuilt)
 
-        self._consumed_once_reminder_keys.update(consumed_now)
+        if consumed_now:
+            self._delete_consumed_once_reminders(consumed_now)
         return updated
+
+    @staticmethod
+    def _delete_consumed_once_reminders(
+        consumed_keys: set[tuple[str, str, str]],
+    ) -> None:
+        """从全局 store 中删除已消费的 once reminder。
+
+        once reminder 的语义是"消费一次后不再出现"。
+        由于 ``LLMContextManager`` 每次请求都会新建实例，
+        实例级 ``_consumed_once_reminder_keys`` 无法跨请求持久化，
+        因此必须在消费后直接从 store 删除，确保后续请求不再读到。
+
+        Args:
+            consumed_keys: 已消费的 reminder source_key 集合，
+                每个元素为 ``(bucket, name, rendered_content)``。
+        """
+        from src.core.prompt import get_system_reminder_store
+
+        store = get_system_reminder_store()
+        for bucket, name, _rendered in consumed_keys:
+            store.delete(bucket, name)
 
     def _resolve_reminders(
         self,
