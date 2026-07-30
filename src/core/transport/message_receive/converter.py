@@ -747,16 +747,23 @@ class MessageConverter:
                         voice_texts.append((i, None))
 
             # 将识别结果应用回 text_parts，替换占位符
+            # 占位符格式：[图片(media_id):description] / [表情包(media_id):description] / [语音(media_id):text]
+            # media_id 为该媒体的 sha256 哈希，AI 可据此精确引用历史媒体
             new_text_parts = []
             media_idx = 0
             voice_idx = 0
             for part in result.text_parts:
                 if part in ("[图片]", "[表情包]"):
                     if media_idx < len(descriptions):
-                        _, description = descriptions[media_idx]
+                        media_i, description = descriptions[media_idx]
                         media_idx += 1
-                        if description:
-                            label = "图片" if part == "[图片]" else "表情包"
+                        label = "图片" if part == "[图片]" else "表情包"
+                        media_id = result.media[media_i].get("image_id", "")
+                        if media_id and description:
+                            new_text_parts.append(f"[{label}({media_id}):{description}]")
+                        elif media_id:
+                            new_text_parts.append(f"[{label}({media_id})]")
+                        elif description:
                             new_text_parts.append(f"[{label}:{description}]")
                         else:
                             new_text_parts.append(part)
@@ -764,9 +771,14 @@ class MessageConverter:
                         new_text_parts.append(part)
                 elif part == "[语音]":
                     if voice_idx < len(voice_texts):
-                        _, text = voice_texts[voice_idx]
+                        voice_i, text = voice_texts[voice_idx]
                         voice_idx += 1
-                        if text:
+                        media_id = result.media[voice_i].get("image_id", "")
+                        if media_id and text:
+                            new_text_parts.append(f"[语音({media_id}):{text}]")
+                        elif media_id:
+                            new_text_parts.append(f"[语音({media_id})]")
+                        elif text:
                             new_text_parts.append(f"[语音:{text}]")
                         else:
                             new_text_parts.append(part)
