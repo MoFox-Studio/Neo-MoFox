@@ -104,18 +104,25 @@ def create_llm_request(
             reminder_sources=reminder_sources,
         )
 
-    final_meta_data: dict[str, Any] = {}
+    final_meta_data: dict[str, Any] | None = None
     if stream_id:
-        final_meta_data["stream_id"] = stream_id
+        final_meta_data = {"stream_id": stream_id}
     if meta_data:
-        final_meta_data.update(meta_data)
+        final_meta_data = {**(final_meta_data or {}), **meta_data}
 
-    request = LLMRequest(
-        model_set=model_set,
-        request_name=request_name,
-        context_manager=context_manager,
-        meta_data=final_meta_data,
-    )
+    if final_meta_data is not None:
+        request = LLMRequest(
+            model_set=model_set,
+            request_name=request_name,
+            context_manager=context_manager,
+            meta_data=final_meta_data,
+        )
+    else:
+        request = LLMRequest(
+            model_set=model_set,
+            request_name=request_name,
+            context_manager=context_manager,
+        )
 
     return request
 
