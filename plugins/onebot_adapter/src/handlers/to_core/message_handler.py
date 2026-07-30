@@ -336,10 +336,24 @@ class MessageHandler:
         prefix_text = f"[回复<{sender_nickname}({sender_id})>：" if sender_id else f"[回复<{sender_nickname}>："
         suffix_text = "]，说："
 
-        # 将被引用的消息段落转换为可读的文本占位，避免嵌套的 base64 污染
-        brief_segments = [
-            {"type": seg.get("type", "text"), "data": seg.get("data", "")} for seg in reply_segments
-        ] or [{"type": "text", "data": "[无法获取被引用的消息]"}]
+        # 优先从数据库获取已识别的 processed_plain_text（含 media_id 和描述），
+        # 避免重新解析原始段导致识别内容丢失
+        brief_segments: list[dict[str, Any]] = []
+        try:
+            from src.app.plugin_system.api.database_api import get_by
+            from src.core.models.sql_alchemy import Messages
+
+            msg_record = await get_by(Messages, message_id=str(message_id))
+            if msg_record and msg_record.processed_plain_text:
+                brief_segments = [{"type": "text", "data": msg_record.processed_plain_text}]
+        except Exception as e:
+            logger.warning(f"查询被引用消息记录失败: {e}")
+
+        # 数据库没查到则 fallback 到重新解析原始段
+        if not brief_segments:
+            brief_segments = [
+                {"type": seg.get("type", "text"), "data": seg.get("data", "")} for seg in reply_segments
+            ] or [{"type": "text", "data": "[无法获取被引用的消息]"}]
 
         return {
             "type": "seglist",
