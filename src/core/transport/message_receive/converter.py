@@ -157,6 +157,10 @@ class MessageConverter:
         # 递归解析段列表
         result = self._parse_segments(segments, depth=0)
 
+        # 如果有引用消息，从数据库获取已识别的 processed_plain_text 构建引用预览
+        if result.reply_to:
+            await self._build_reply_preview(result)
+
         # 为二进制媒体项注入 image_id（哈希），便于后续按哈希从 Images 表回查图片信息。
         # 必须在 _recognize_media_with_manager 之前执行，保证 VLM 跳过/早退时 image_id 仍注入。
         if result.media:
@@ -538,6 +542,35 @@ class MessageConverter:
 
         result.at_users.append({"nickname": nickname, "user_id": user_id})
         result.text_parts.append(f"@<{nickname}:{user_id}> ")
+
+    async def _build_reply_preview(self, result: _ParseResult) -> None:
+        """从数据库获取被引用消息的 processed_plain_text，构建引用预览文本。
+
+        当适配器只返回 reply 段（data 为 message_id）时，由 converter 端
+        查数据库获取已识别的内容（含 VLM/ASR 识别结果），构建
+        ``[回复：引用内容]`` 文本注入 text_parts。
+
+        Args:
+            result: 解析结果，需已包含 reply_to
+        """
+        if not result.reply_to:
+            return
+        try:
+            from src.core.models.sql_alchemy import Messages
+            from src.kernel.db import QueryBuilder
+
+            msg_record = await (
+                QueryBuilder(Messages)
+                .filter(message_id=result.reply_to)
+                .first()
+            )
+            if msg_record:
+                reply_text = getattr(msg_record, "processed_plain_text", None)
+                if reply_text:
+                    # 在 text_parts 最前面插入引用预览
+                    result.text_parts.insert(0, f"[回复：{reply_text}]")
+        except Exception as e:
+            logger.warning(f"查询被引用消息记录失败: {e!s}")
 
     def _handle_reply(
         self,

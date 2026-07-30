@@ -29,7 +29,6 @@ from ..utils import (
     get_group_info,
     get_image_base64,
     get_member_info,
-    get_message_detail,
     get_record_detail,
     get_self_info,
     sanitize_text,
@@ -295,9 +294,9 @@ class MessageHandler:
     async def _handle_reply_message(self, segment: dict, raw_message: dict, in_reply: bool) -> Seg | None:
         """处理回复消息。
 
-        返回的 seglist 会前置一个 ``reply`` 段（data 为被引用消息 ID），
-        以便框架 ``MessageConverter`` 解析出 ``Message.reply_to``；其后保留
-        可读的 ``[回复<昵称(QQ号)>：...]`` 文本预览。
+        只返回 ``reply`` 段（data 为被引用消息 ID），引用内容的文本预览
+        由框架 ``MessageConverter`` 查数据库 ``processed_plain_text`` 构建，
+        避免适配器重新解析原始段导致识别内容丢失。
         """
         if in_reply:
             return None
@@ -310,46 +309,7 @@ class MessageHandler:
         if not message_id:
             return None
 
-        message_detail = await get_message_detail(message_id)
-        if not message_detail:
-            logger.warning("获取被引用的消息详情失败")
-            return {"type": "text", "data": "[无法获取被引用的消息]"}
-
-        # 递归处理被引用的消息
-        reply_segments: list[Seg] = []
-        for reply_seg in message_detail.get("message", []):
-            if isinstance(reply_seg, dict):
-                reply_result = await self.handle_single_segment(reply_seg, raw_message, in_reply=True)
-                if reply_result:
-                    reply_segments.append(reply_result)
-
-        sender_info = message_detail.get("sender", {})
-        sender_id = sender_info.get("user_id")
-        self_id = raw_message.get("self_id")
-
-        # 若被引用的是 bot 自己发的消息，昵称用 "你"，避免协议端不填昵称时回退成 "未知用户"
-        if sender_id and self_id and str(sender_id) == str(self_id):
-            sender_nickname = "你"
-        else:
-            sender_nickname = sender_info.get("nickname") or "未知用户"
-
-        prefix_text = f"[回复<{sender_nickname}({sender_id})>：" if sender_id else f"[回复<{sender_nickname}>："
-        suffix_text = "]，说："
-
-        # 将被引用的消息段落转换为可读的文本占位，避免嵌套的 base64 污染
-        brief_segments = [
-            {"type": seg.get("type", "text"), "data": seg.get("data", "")} for seg in reply_segments
-        ] or [{"type": "text", "data": "[无法获取被引用的消息]"}]
-
-        return {
-            "type": "seglist",
-            "data": [
-                {"type": "reply", "data": str(message_id)},
-                {"type": "text", "data": prefix_text},
-                *brief_segments,
-                {"type": "text", "data": suffix_text},
-            ],
-        }
+        return {"type": "reply", "data": str(message_id)}
 
     async def _handle_record_message(self, segment: dict) -> Seg | None:
         """处理语音消息"""
