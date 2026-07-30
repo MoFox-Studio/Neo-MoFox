@@ -506,11 +506,11 @@ class BaseChatter(BaseComponent):
         Raises:
             KeyError: 当 task 在模型配置中不存在时
         """
-        from src.core.config import get_model_config
+        from src.app.plugin_system.api import llm_api
         from src.core.prompt import STREAM_BUCKET_PREFIX
-        from src.kernel.llm import LLMRequest, LLMContextManager, ReminderSourceSpec
+        from src.kernel.llm import LLMContextManager, ReminderSourceSpec
 
-        model_set = get_model_config().get_task(task)
+        model_set = llm_api.get_model_set_by_task(task)
         reminder_sources = None
         if with_reminder is not None:
             bucket = with_reminder
@@ -543,14 +543,12 @@ class BaseChatter(BaseComponent):
                 f"timeout={first.get('timeout')}"
             )
 
-        request = LLMRequest(
+        return llm_api.create_llm_request(
             model_set=model_set,
             request_name=request_name or self.name,
-            meta_data={"stream_id": self.stream_id},
             context_manager=context_manager,
+            stream_id=self.stream_id,
         )
-
-        return request
 
     async def inject_usables(self, request: Any) -> "ToolRegistry":
         """将可用工具过滤后注入 LLM 请求，返回工具注册表。
@@ -564,14 +562,13 @@ class BaseChatter(BaseComponent):
         Returns:
             ToolRegistry: 注册了所有可用工具的注册表
         """
-        from src.kernel.llm import ToolRegistry, LLMPayload, ROLE
+        from src.app.plugin_system.api import llm_api
+        from src.kernel.llm import LLMPayload, ROLE
 
         usables = await self.get_llm_usables()
         usables = await self.modify_llm_usables(usables)
 
-        registry = ToolRegistry()
-        for usable in usables:
-            registry.register(usable)
+        registry = llm_api.create_tool_registry(tools=usables)
 
         if registry.get_all():
             request.add_payload(LLMPayload(ROLE.TOOL, registry.get_all()))  # type: ignore[arg-type]

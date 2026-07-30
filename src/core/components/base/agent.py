@@ -24,7 +24,6 @@ from src.kernel.llm import (
     LLMPayload,
     LLMUsableExecution,
     ROLE,
-    ReminderSourceSpec,
 )
 from src.kernel.logger import get_logger
 
@@ -232,32 +231,21 @@ class BaseAgent(BaseComponent, LLMUsable):
             request_name: 请求名称
             context_manager: 上下文管理器
             with_usables: 是否自动注入 Agent 私有 usables 到 TOOL payload
-            with_reminder: 可选的 system reminder bucket；传入后会自动登记到上下文管理器
+            with_reminder: 可选的 system reminder bucket；传入后会自动登记
+                全局桶与流私有桶两个 source 到上下文管理器（流私有桶仅在
+                ``self.stream_id`` 非空时追加）
 
         Returns:
             LLMRequest: LLM 请求对象
         """
-        if context_manager is not None and with_reminder is not None:
-            raise ValueError(
-                "with_reminder 不能与自定义 context_manager 同时使用；"
-                "请在构造 context_manager 时直接配置 ReminderSourceSpec"
-            )
+        from src.app.plugin_system.api import llm_api
 
-        request = LLMRequest(
+        request = llm_api.create_llm_request(
             model_set=model_set,
             request_name=request_name,
-            context_manager=(
-                context_manager
-                if context_manager is not None or with_reminder is None
-                else LLMContextManager(
-                    reminder_sources=[
-                        ReminderSourceSpec(
-                            bucket=str(with_reminder),
-                            wrap_with_system_tag=True,
-                        )
-                    ]
-                )
-            ),
+            context_manager=context_manager,
+            with_reminder=with_reminder,
+            stream_id=self.stream_id,
         )
 
         if with_usables:
