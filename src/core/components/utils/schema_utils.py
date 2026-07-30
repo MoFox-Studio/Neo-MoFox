@@ -9,8 +9,6 @@ import types
 from enum import Enum
 from typing import Any, Callable, Literal, get_args, get_origin, get_type_hints
 
-from pydantic import BaseModel
-
 
 # Python 类型到 JSON Schema 类型的映射
 _TYPE_MAPPING: dict[type, str] = {
@@ -52,6 +50,66 @@ def _unwrap_optional_type(type_hint: Any) -> Any:
     return type_hint
 
 
+def _is_typed_dict(type_hint: Any) -> bool:
+    """判断类型注解是否为 ``TypedDict``。
+
+    ``TypedDict`` 在运行时是 ``dict`` 的子类，且带有 ``__required_keys__``
+    / ``__optional_keys__`` 属性，据此与普通 ``dict`` 区分。
+
+    Args:
+        type_hint: 待检测的类型注解。
+
+    Returns:
+        bool: 是否为 ``TypedDict``。
+    """
+    return (
+        inspect.isclass(type_hint)
+        and issubclass(type_hint, dict)
+        and hasattr(type_hint, "__required_keys__")
+        and hasattr(type_hint, "__optional_keys__")
+    )
+
+
+def _build_typed_dict_schema(typed_dict: type) -> dict[str, Any]:
+    """将 ``TypedDict`` 转换为 JSON Schema 对象片段。
+
+    通过 ``get_type_hints(include_extras=True)`` 解析字段，保留
+    ``Annotated`` 元数据中的描述字符串；``__required_keys__`` 决定
+    ``required`` 列表。
+
+    Args:
+        typed_dict: ``TypedDict`` 类型。
+
+    Returns:
+        dict[str, Any]: JSON Schema 对象片段，含 ``type``/``properties``/
+        ``required``。
+    """
+    try:
+        hints = get_type_hints(typed_dict, include_extras=True)
+    except Exception:
+        hints = getattr(typed_dict, "__annotations__", {})
+
+    properties: dict[str, Any] = {}
+    for field_name, field_type in hints.items():
+        field_schema = build_type_schema(field_type)
+        # 提取 Annotated[..., "描述"] 中的描述字符串
+        metadata = getattr(field_type, "__metadata__", None)
+        if metadata:
+            for meta in metadata:
+                if isinstance(meta, str):
+                    field_schema["description"] = meta
+                    break
+        properties[field_name] = field_schema
+
+    schema: dict[str, Any] = {"type": "object", "properties": properties}
+
+    required_keys = getattr(typed_dict, "__required_keys__", frozenset())
+    if required_keys:
+        schema["required"] = sorted(required_keys)
+
+    return schema
+
+
 def build_type_schema(type_hint: Any) -> dict[str, Any]:
     """将 Python 类型注解转换为 JSON Schema 片段。"""
     annotated_origin = getattr(type_hint, "__origin__", None)
@@ -68,15 +126,8 @@ def build_type_schema(type_hint: Any) -> dict[str, Any]:
     if normalized is type(None):
         return {"type": "null"}
 
-    if inspect.isclass(normalized) and issubclass(normalized, BaseModel):
-        model_schema = normalized.model_json_schema()
-        schema: dict[str, Any] = {
-            "type": "object",
-            "properties": model_schema.get("properties", {}),
-        }
-        if model_schema.get("required"):
-            schema["required"] = model_schema["required"]
-        return schema
+    if _is_typed_dict(normalized):
+        return _build_typed_dict_schema(normalized)
 
     origin = get_origin(normalized)
     if origin is Literal:
