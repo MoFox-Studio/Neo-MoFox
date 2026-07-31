@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core.models.message import Message, MessageType
+from src.core.components.base.adapter import PlatformSendError
 from src.core.transport.message_send.message_sender import MessageSender
 
 
@@ -151,7 +152,53 @@ async def test_send_message_returns_false_and_skips_history_when_send_fails(
 
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
-        _send_platform_message=AsyncMock(side_effect=RuntimeError("OneBot 消息发送失败")),
+        _send_platform_message=AsyncMock(
+            side_effect=PlatformSendError(
+                "OneBot 消息发送失败: {'status': 'error'}", response={"status": "error"}
+            )
+        ),
+    )
+    sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
+    sender._converter = SimpleNamespace(  # type: ignore[assignment]
+        message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
+    )
+
+    fake_stream_manager = SimpleNamespace(
+        get_or_create_stream=AsyncMock(),
+        add_sent_message_to_history=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: fake_stream_manager,
+    )
+
+    message = Message(
+        message_id="action_send_text_internal",
+        content="hello",
+        message_type=MessageType.TEXT,
+        platform="qq",
+        chat_type="group",
+        stream_id="stream-1",
+        target_group_id="12345",
+    )
+
+    ok = await sender.send_message(message, adapter_signature="onebot_adapter:adapter:onebot_adapter")
+
+    assert ok is False
+    fake_stream_manager.get_or_create_stream.assert_not_awaited()
+    fake_stream_manager.add_sent_message_to_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_message_returns_false_on_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 PlatformSendError 的异常（如代码 bug）走外层兜底，同样不写历史。"""
+    sender = MessageSender()
+
+    adapter = SimpleNamespace(
+        get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
+        _send_platform_message=AsyncMock(side_effect=KeyError("some_bug")),
     )
     sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
     sender._converter = SimpleNamespace(  # type: ignore[assignment]

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from mofox_wire import MessageEnvelope
 
+from src.core.components.base.adapter import PlatformSendError
 from src.kernel.logger import get_logger
 
 if TYPE_CHECKING:
@@ -121,7 +122,14 @@ class MessageSender:
                 return True  # 返回成功，因为拦截是预期行为
 
             # 6. 发送，并使用平台返回的消息 ID 记录已发送消息。
-            response = await adapter._send_platform_message(envelope)
+            try:
+                response = await adapter._send_platform_message(envelope)
+            except PlatformSendError as e:
+                logger.warning(
+                    f"平台发送失败，跳过历史写入: message_id={message.message_id}, "
+                    f"reason={e}"
+                )
+                return False
             self._apply_platform_message_id(message, response)
 
             # 7. 写入历史消息

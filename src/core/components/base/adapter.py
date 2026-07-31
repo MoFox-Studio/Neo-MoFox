@@ -19,6 +19,22 @@ if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
 
 
+class PlatformSendError(Exception):
+    """适配器向平台发送消息失败时抛出。
+
+    与泛化异常不同，此异常专门表达"发送失败"语义，供调用方
+    （如 MessageSender）精确识别并跳过历史写入；普通代码 bug
+    引发的异常不会被误判为发送失败。
+
+    Attributes:
+        response: 平台返回的原始响应（如有）
+    """
+
+    def __init__(self, reason: str = "", *, response: Any = None) -> None:
+        super().__init__(reason)
+        self.response = response
+
+
 class BaseAdapter(BaseComponent, AdapterBase):
     """适配器组件基类。
 
@@ -259,7 +275,7 @@ class BaseAdapter(BaseComponent, AdapterBase):
 
         Raises:
             NotImplementedError: 如果未配置自动传输且未重写此方法
-            RuntimeError: 平台拒绝或发送失败时抛出，MessageSender 据此判定发送失败
+            PlatformSendError: 平台拒绝或发送失败时抛出，MessageSender 据此判定发送失败
         """
         # 如果配置了自动传输，调用父类方法
         if hasattr(self, "_transport_config") and self._transport_config:  # type: ignore

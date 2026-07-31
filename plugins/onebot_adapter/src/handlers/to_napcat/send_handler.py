@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from mofox_wire import GroupInfoPayload, MessageEnvelope, MessageInfoPayload, SegPayload, UserInfoPayload
 
 from src.app.plugin_system.api.log_api import get_logger
+from src.core.components.base.adapter import PlatformSendError
 
 from ...event_models import CommandType
 from ..utils import convert_image_to_gif, get_image_format
@@ -32,7 +33,7 @@ class SendHandler:
             str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
 
         Raises:
-            RuntimeError: 平台拒绝或发送失败时抛出
+            PlatformSendError: 平台拒绝或发送失败时抛出
         """
         logger.debug("接收到来自MoFox-Bot的消息，处理中")
 
@@ -71,7 +72,7 @@ class SendHandler:
             str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
 
         Raises:
-            RuntimeError: 平台拒绝或发送失败时抛出
+            PlatformSendError: 平台拒绝或发送失败时抛出
         """
         message_info: MessageInfoPayload = envelope.get("message_info", {})
         message_segment: SegPayload = envelope.get("message_segment", {})  # type: ignore[assignment]
@@ -131,7 +132,7 @@ class SendHandler:
             logger.info("消息发送成功")
         else:
             logger.warning(f"消息发送失败，onebot返回：{response!s}")
-            raise RuntimeError(f"OneBot 消息发送失败: {response!s}")
+            raise PlatformSendError(f"OneBot 消息发送失败: {response!s}", response=response)
 
         # 提取平台返回的消息 ID，没有则返回 None
         data = response.get("data")
