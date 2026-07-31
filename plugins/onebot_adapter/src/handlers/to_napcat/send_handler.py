@@ -24,15 +24,18 @@ class SendHandler:
     def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
 
-    async def handle_message(self, envelope: MessageEnvelope) -> dict[str, Any] | None:
+    async def handle_message(self, envelope: MessageEnvelope) -> str | None:
         """
         处理来自核心的消息，将其转换为 OneBot 可接受的格式并发送
+
+        Returns:
+            str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
         """
         logger.debug("接收到来自MoFox-Bot的消息，处理中")
 
         if not envelope:
             logger.warning("空的消息，跳过处理")
-            return
+            return None
 
         message_segment = envelope.get("message_segment")
         if isinstance(message_segment, list):
@@ -45,19 +48,24 @@ class SendHandler:
 
             if seg_type == "command":
                 logger.debug("处理命令")
-                return await self.send_command(envelope)
+                await self.send_command(envelope)
+                return None
             if seg_type == "adapter_command":
                 logger.debug("处理适配器命令")
-                return await self.handle_adapter_command(envelope)
+                await self.handle_adapter_command(envelope)
+                return None
             if seg_type == "adapter_response":
                 logger.debug("收到adapter_response消息，此消息应该由Bot端处理，跳过")
                 return None
 
         return await self.send_normal_message(envelope)
 
-    async def send_normal_message(self, envelope: MessageEnvelope) -> dict[str, Any] | None:
+    async def send_normal_message(self, envelope: MessageEnvelope) -> str | None:
         """
         处理普通消息发送
+
+        Returns:
+            str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
         """
         message_info: MessageInfoPayload = envelope.get("message_info", {})
         message_segment: SegPayload = envelope.get("message_segment", {})  # type: ignore[assignment]
@@ -117,7 +125,15 @@ class SendHandler:
             logger.info("消息发送成功")
         else:
             logger.warning(f"消息发送失败，onebot返回：{response!s}")
-        return response
+            return None
+
+        # 提取平台返回的消息 ID，没有则返回 None
+        data = response.get("data")
+        if isinstance(data, dict):
+            message_id = data.get("message_id")
+            if message_id is not None:
+                return str(message_id)
+        return None
 
     async def send_command(self, envelope: MessageEnvelope) -> None:
         """
@@ -192,11 +208,7 @@ class SendHandler:
 
             logger.debug(f"执行适配器命令: {action}")
 
-            # 执行命令
-            if action == "get_cookies":
-                response = await self.send_message_to_onebot(action, params, timeout=40.0)
-            else:
-                response = await self.send_message_to_onebot(action, params, timeout=timeout)
+            response = await self.send_message_to_onebot(action, params, timeout=timeout)
 
             # 构建adapter_response消息信封发回核心
             if request_id and self.adapter.core_sink:

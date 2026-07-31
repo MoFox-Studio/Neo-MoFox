@@ -157,17 +157,19 @@ class MessageSender:
 
     @staticmethod
     def _apply_platform_message_id(message: "Message", response: Any) -> None:
-        """使用平台发送响应中的消息 ID 更新待持久化消息。"""
-        if not isinstance(response, dict) or response.get("status") != "ok":
+        """使用平台发送响应中的消息 ID 更新待持久化消息。
+
+        适配器返回值支持两种形态：
+        - str: 直接的平台消息 ID（推荐，适配器已提取）
+        - dict: 平台原始响应，从中提取 data.message_id
+        """
+        if response is None:
             return
 
-        data = response.get("data")
-        if not isinstance(data, dict):
+        # 适配器已提取出消息 ID（str 类型）
+        if isinstance(response, str):
+            message.message_id = response
             return
-
-        platform_message_id = data.get("message_id")
-        if platform_message_id is not None:
-            message.message_id = str(platform_message_id)
 
     async def _apply_bot_sender_info(self, message: "Message", adapter: Any) -> None:
         """在发送前将消息发送者信息设置为 Bot 信息。"""

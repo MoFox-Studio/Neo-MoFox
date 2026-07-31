@@ -245,7 +245,7 @@ class BaseAdapter(BaseComponent, AdapterBase):
         """
         ...
 
-    async def _send_platform_message(self, envelope: MessageEnvelope) -> dict[str, Any] | None:
+    async def _send_platform_message(self, envelope: MessageEnvelope) -> str | None:
         """发送消息到平台。
 
         如果使用了自动传输配置，此方法会自动处理。
@@ -255,7 +255,7 @@ class BaseAdapter(BaseComponent, AdapterBase):
             envelope: 要发送的消息信封
 
         Returns:
-            dict[str, Any] | None: 平台发送响应；未提供响应时返回 None
+            str | None: 平台返回的消息 ID；发送失败或平台未返回 ID 时返回 None
 
         Raises:
             NotImplementedError: 如果未配置自动传输且未重写此方法

@@ -260,12 +260,15 @@ class OneBotAdapter(BaseAdapter):
             logger.error(f"处理 OneBot 事件失败: {e}, 原始数据: {raw}")
             return None
 
-    async def _send_platform_message(self, envelope: MessageEnvelope) -> dict[str, Any] | None:  # type: ignore[override]
+    async def _send_platform_message(self, envelope: MessageEnvelope) -> str | None:  # type: ignore[override]
         """
         将 MessageEnvelope 转换并发送到 OneBot
 
         这里不直接通过 WebSocket 发送 envelope，
         而是调用 OneBot API（send_group_msg, send_private_msg 等）
+
+        Returns:
+            str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
         """
         try:
             return await self.send_handler.handle_message(envelope)
