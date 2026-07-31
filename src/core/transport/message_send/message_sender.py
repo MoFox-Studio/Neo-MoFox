@@ -125,10 +125,7 @@ class MessageSender:
             try:
                 response = await adapter._send_platform_message(envelope)
             except PlatformSendError as e:
-                logger.warning(
-                    f"平台发送失败，跳过历史写入: message_id={message.message_id}, "
-                    f"reason={e}"
-                )
+                logger.warning(f"平台发送失败，该消息未写入历史: {e}")
                 return False
             self._apply_platform_message_id(message, response)
 
