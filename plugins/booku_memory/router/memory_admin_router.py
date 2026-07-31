@@ -201,7 +201,8 @@ class BookuMemoryAdminRouter(BaseRouter):
             bucket: str | None = Query(default=None, description="bucket"),
             include_archived: bool = Query(default=True, description="是否包含 archived"),
             include_deleted: bool = Query(default=False, description="是否包含软删除"),
-            limit: int = Query(default=60, ge=1, le=200, description="返回上限"),
+            page: int = Query(default=1, ge=1, description="页码"),
+            page_size: int = Query(default=60, ge=1, le=200, description="每页条数"),
         ) -> dict[str, Any]:
             """按条件列出记忆。"""
 
@@ -214,7 +215,8 @@ class BookuMemoryAdminRouter(BaseRouter):
                 bucket=self._normalize_single(bucket),
                 include_archived=include_archived,
                 include_deleted=include_deleted,
-                limit=limit,
+                page=page,
+                page_size=page_size,
             )
 
         @self.app.get("/api/memories/{memory_id}")

@@ -91,6 +91,7 @@ class StubMemoryService:
             ),
         }
         self.last_create: dict[str, Any] | None = None
+        self.last_list: dict[str, Any] | None = None
         self.last_update: dict[str, Any] | None = None
         self.last_move: dict[str, Any] | None = None
         self.last_delete: dict[str, Any] | None = None
@@ -128,6 +129,7 @@ class StubMemoryService:
     async def list_memory_entries(self, **kwargs: Any) -> dict[str, Any]:
         """返回记忆列表。"""
 
+        self.last_list = kwargs
         bucket = kwargs.get("bucket")
         include_deleted = bool(kwargs.get("include_deleted", False))
         items = []
@@ -144,7 +146,17 @@ class StubMemoryService:
                 "is_truncated": item["is_truncated"],
                 "metadata": deepcopy(metadata),
             })
-        return {"action": "list_memory_entries", "total": len(items), "items": items}
+        page = max(1, int(kwargs.get("page", 1)))
+        page_size = max(1, int(kwargs.get("page_size", 60)))
+        total = len(items)
+        offset = (page - 1) * page_size
+        return {
+            "action": "list_memory_entries",
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "items": items[offset : offset + page_size],
+        }
 
     async def get_memory_detail(self, *, memory_id: str, include_deleted: bool = True) -> dict[str, Any]:
         """返回单条记忆详情。"""
@@ -288,6 +300,60 @@ async def test_admin_pages_return_html(client: AsyncClient) -> None:
     assert memory_response.status_code == 200
     assert "常规记忆" in memory_response.text
     assert "memory" in memory_response.text
+    assert 'id="previous-page-button"' in memory_response.text
+    assert 'id="next-page-button"' in memory_response.text
+    assert 'id="page-indicator"' in memory_response.text
+    assert "loadedPage: 1" in memory_response.text
+    assert "listRequestId: 0" in memory_response.text
+    assert "listLoading: false" in memory_response.text
+    assert "const requestId = ++state.listRequestId;" in memory_response.text
+    assert "if (requestId !== state.listRequestId) return;" in memory_response.text
+    assert "state.listLoading || state.page <= 1" in memory_response.text
+    assert "state.listLoading || state.page >= totalPages" in memory_response.text
+
+    fallback_start = memory_response.text.index(
+        "if (allowPageFallback && page > totalPages)"
+    )
+    fallback_end = memory_response.text.index(
+        "\n        }\n\n        state.items = items;",
+        fallback_start,
+    )
+    fallback_block = memory_response.text[fallback_start:fallback_end]
+    fallback_call = "return loadList(preserveSelection, false);"
+    assert fallback_call in fallback_block
+    assert fallback_block.index("state.loadedPage = totalPages;") < fallback_block.index(
+        fallback_call
+    )
+    assert fallback_block.index("state.items = [];") < fallback_block.index(fallback_call)
+    assert fallback_block.index("state.selectedId = null;") < fallback_block.index(
+        fallback_call
+    )
+
+    reset_start = memory_response.text.index("function resetListQueryState()")
+    reset_end = memory_response.text.index("\n    }", reset_start)
+    reset_block = memory_response.text[reset_start:reset_end]
+    assert "state.listRequestId += 1;" in reset_block
+    assert "state.loadedPage = 1;" in reset_block
+    assert "state.items = [];" in reset_block
+    assert "state.total = 0;" in reset_block
+
+    change_start = memory_response.text.index(
+        "[filterFolder, filterType, filterStatus, filterDeleted].forEach"
+    )
+    change_end = memory_response.text.index("let keywordTimer", change_start)
+    change_handler = memory_response.text[change_start:change_end]
+    assert change_handler.index("resetListQueryState();") < change_handler.index(
+        "await loadStatus();"
+    )
+
+    keyword_start = memory_response.text.index(
+        "filterKeyword.addEventListener('input'"
+    )
+    keyword_end = memory_response.text.index("async function boot()", keyword_start)
+    keyword_handler = memory_response.text[keyword_start:keyword_end]
+    assert keyword_handler.index("resetListQueryState();") < keyword_handler.index(
+        "window.setTimeout"
+    )
 
     knowledge_response = await client.get("/knowledge")
     assert knowledge_response.status_code == 200
@@ -302,6 +368,8 @@ async def test_list_and_create_memory(client: AsyncClient, stub_service: StubMem
     list_response = await client.get("/api/memories")
     assert list_response.status_code == 200
     assert list_response.json()["total"] == 1
+    assert list_response.json()["page"] == 1
+    assert list_response.json()["page_size"] == 60
 
     folders_response = await client.get("/api/folders")
     assert folders_response.status_code == 200
@@ -329,6 +397,33 @@ async def test_list_and_create_memory(client: AsyncClient, stub_service: StubMem
     assert detail["item"]["metadata"]["bucket"] == "knowledge"
     assert stub_service.last_create is not None
     assert stub_service.last_create["folder_id"] == "project-a"
+
+
+@pytest.mark.asyncio
+async def test_list_memories_passes_pagination_to_service(
+    client: AsyncClient,
+    stub_service: StubMemoryService,
+) -> None:
+    """列表接口应透传分页参数并返回分页元数据。"""
+
+    for index in range(40):
+        memory_id = f"m-{index + 2}"
+        stub_service.items[memory_id] = _build_item(
+            memory_id,
+            title=f"记忆 {index + 2}",
+            content=f"正文 {index + 2}",
+        )
+
+    response = await client.get("/api/memories?page=2&page_size=20")
+
+    assert response.status_code == 200
+    assert stub_service.last_list is not None
+    assert stub_service.last_list["page"] == 2
+    assert stub_service.last_list["page_size"] == 20
+    assert response.json()["total"] == 41
+    assert response.json()["page"] == 2
+    assert response.json()["page_size"] == 20
+    assert len(response.json()["items"]) == 20
 
 
 @pytest.mark.asyncio

@@ -246,6 +246,23 @@
       padding-right: 6px;
     }
 
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .pagination button {
+      padding: 9px 14px;
+    }
+
+    .pagination .helper {
+      text-align: center;
+      white-space: nowrap;
+    }
+
     .memory-card {
       border: 1px solid rgba(148, 110, 77, 0.14);
       border-radius: 18px;
@@ -322,6 +339,13 @@
     button:hover {
       transform: translateY(-1px);
       box-shadow: 0 14px 24px rgba(124, 45, 18, 0.12);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.45;
+      transform: none;
+      box-shadow: none;
     }
 
     button.primary {
@@ -504,6 +528,11 @@
             </div>
           </div>
           <div class="memory-list" id="memory-list"></div>
+          <div class="pagination">
+            <button class="secondary" id="previous-page-button" type="button">上一页</button>
+            <span class="helper" id="page-indicator">第 1 / 1 页</span>
+            <button class="secondary" id="next-page-button" type="button">下一页</button>
+          </div>
         </div>
 
         <div class="editor-panel panel">
@@ -668,6 +697,12 @@
     const state = {
       selectedId: null,
       items: [],
+      page: 1,
+      pageSize: 60,
+      total: 0,
+      loadedPage: 1,
+      listRequestId: 0,
+      listLoading: false,
       counts: {
         memory: 0,
         knowledge: 0
@@ -682,6 +717,9 @@
     const filterDeleted = document.getElementById('filter-deleted');
     const memoryList = document.getElementById('memory-list');
     const listSummary = document.getElementById('list-summary');
+    const previousPageButton = document.getElementById('previous-page-button');
+    const nextPageButton = document.getElementById('next-page-button');
+    const pageIndicator = document.getElementById('page-indicator');
     const statusBar = document.getElementById('status-bar');
     const form = document.getElementById('editor-form');
 
@@ -734,7 +772,8 @@
       if (filterStatus.value) params.set('status', filterStatus.value);
       params.set('include_deleted', String(filterDeleted.checked));
       params.set('include_archived', 'true');
-      params.set('limit', '60');
+      params.set('page', String(state.page));
+      params.set('page_size', String(state.pageSize));
       return params;
     }
 
@@ -771,14 +810,36 @@
       renderMetrics();
     }
 
+    function resetListQueryState() {
+      state.listRequestId += 1;
+      state.page = 1;
+      state.loadedPage = 1;
+      state.listLoading = false;
+      state.items = [];
+      state.total = 0;
+      state.selectedId = null;
+      renderList();
+      renderPagination();
+    }
+
+    function renderPagination() {
+      const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+      pageIndicator.textContent = `第 ${state.page} / ${totalPages} 页`;
+      previousPageButton.disabled = state.listLoading || state.page <= 1;
+      nextPageButton.disabled = state.listLoading || state.page >= totalPages;
+    }
+
     function renderList() {
       if (!state.items.length) {
         memoryList.innerHTML = '<div class="empty">当前过滤条件下没有记录</div>';
-        listSummary.textContent = '共 0 条';
+        listSummary.textContent = '第 0-0 条，共 0 条';
+        renderPagination();
         return;
       }
 
-      listSummary.textContent = `共 ${state.items.length} 条`;
+      const rangeStart = (state.page - 1) * state.pageSize + 1;
+      const rangeEnd = Math.min(rangeStart + state.items.length - 1, state.total);
+      listSummary.textContent = `第 ${rangeStart}-${rangeEnd} 条，共 ${state.total} 条`;
       memoryList.innerHTML = state.items.map((item) => {
         const metadata = item.metadata || {};
         const isActive = item.id === state.selectedId ? 'active' : '';
@@ -798,16 +859,51 @@
       memoryList.querySelectorAll('.memory-card').forEach((card) => {
         card.addEventListener('click', () => loadDetail(card.dataset.id));
       });
+      renderPagination();
     }
 
-    async function loadList(preserveSelection = true) {
-      const result = await request(`/memories?${currentFilters().toString()}`);
-      state.items = Array.isArray(result.items) ? result.items : [];
-      if (!preserveSelection || !state.items.some((item) => item.id === state.selectedId)) {
-        state.selectedId = null;
+    async function loadList(preserveSelection = true, allowPageFallback = true) {
+      const requestId = ++state.listRequestId;
+      state.listLoading = true;
+      renderPagination();
+      try {
+        const result = await request(`/memories?${currentFilters().toString()}`);
+        if (requestId !== state.listRequestId) return;
+
+        const items = Array.isArray(result.items) ? result.items : [];
+        const total = Math.max(0, Number(result.total) || 0);
+        const page = Math.max(1, Number(result.page) || state.page);
+        const pageSize = Math.max(1, Number(result.page_size) || state.pageSize);
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        if (allowPageFallback && page > totalPages) {
+          state.page = totalPages;
+          state.loadedPage = totalPages;
+          state.pageSize = pageSize;
+          state.total = total;
+          state.items = [];
+          state.selectedId = null;
+          renderList();
+          return loadList(preserveSelection, false);
+        }
+
+        state.items = items;
+        state.total = total;
+        state.page = page;
+        state.pageSize = pageSize;
+        if (!preserveSelection || !state.items.some((item) => item.id === state.selectedId)) {
+          state.selectedId = null;
+        }
+        state.loadedPage = state.page;
+        state.listLoading = false;
+        renderList();
+        renderMetrics();
+      } catch (error) {
+        if (requestId !== state.listRequestId) return;
+        state.page = state.loadedPage;
+        state.listLoading = false;
+        renderPagination();
+        throw error;
       }
-      renderList();
-      renderMetrics();
     }
 
     function fillField(id, value) {
@@ -970,8 +1066,30 @@
     document.getElementById('hard-delete-button').addEventListener('click', () => removeMemory(true));
     form.addEventListener('submit', saveMemory);
 
+    previousPageButton.addEventListener('click', async () => {
+      if (state.listLoading || state.page <= 1) return;
+      state.page -= 1;
+      try {
+        await loadList(false);
+      } catch (error) {
+        setStatus(`翻页失败：${error.message}`, true);
+      }
+    });
+
+    nextPageButton.addEventListener('click', async () => {
+      const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize));
+      if (state.listLoading || state.page >= totalPages) return;
+      state.page += 1;
+      try {
+        await loadList(false);
+      } catch (error) {
+        setStatus(`翻页失败：${error.message}`, true);
+      }
+    });
+
     [filterFolder, filterType, filterStatus, filterDeleted].forEach((node) => {
       node.addEventListener('change', async () => {
+        resetListQueryState();
         try {
           await loadStatus();
           await loadList(false);
@@ -983,6 +1101,7 @@
 
     let keywordTimer = null;
     filterKeyword.addEventListener('input', () => {
+      resetListQueryState();
       window.clearTimeout(keywordTimer);
       keywordTimer = window.setTimeout(async () => {
         try {

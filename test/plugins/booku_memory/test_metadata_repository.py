@@ -10,11 +10,13 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import update
 
 from plugins.booku_memory.service.metadata_repository import (
     BookuMemoryMetadataRepository,
     BookuMemoryRecord,
 )
+from plugins.booku_memory.service.models import BookuMemoryRecordModel
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +275,64 @@ async def test_list_records_by_bucket_filters_and_limits(
 
     limited = await repo.list_records_by_bucket(bucket="memory", folder_id=None, limit=1)
     assert len(limited) == 1
+
+
+@pytest.mark.asyncio
+async def test_paginate_records_returns_second_page_and_filtered_total(
+    repo: BookuMemoryMetadataRepository,
+) -> None:
+    """paginate_records 应在 SQL 过滤 bucket 后返回准确总数与第二页。"""
+
+    for index in range(65):
+        await repo.upsert_record(
+            **_sample_kwargs(f"memory-{index:02d}", bucket="memory")
+        )
+    for index in range(3):
+        await repo.upsert_record(
+            **_sample_kwargs(f"knowledge-{index:02d}", bucket="knowledge")
+        )
+
+    records, total = await repo.paginate_records(
+        bucket="memory",
+        page=2,
+        page_size=60,
+    )
+
+    assert total == 65
+    assert len(records) == 5
+    assert all(record.bucket == "memory" for record in records)
+
+
+@pytest.mark.asyncio
+async def test_paginate_records_uses_memory_id_as_stable_tiebreaker(
+    repo: BookuMemoryMetadataRepository,
+) -> None:
+    """相同激活和更新时间的记录跨页时应按 memory_id 稳定倒序。"""
+
+    memory_ids = [f"stable-{index}" for index in range(5)]
+    for memory_id in memory_ids:
+        await repo.upsert_record(**_sample_kwargs(memory_id))
+
+    async with repo._db.session() as session:  # pyright: ignore[reportPrivateUsage]
+        await session.execute(
+            update(BookuMemoryRecordModel)
+            .where(BookuMemoryRecordModel.memory_id.in_(memory_ids))
+            .values(last_activated_at=100.0, updated_at=100.0)
+        )
+
+    pages = [
+        await repo.paginate_records(page=page, page_size=2)
+        for page in range(1, 4)
+    ]
+    paged_ids = [
+        record.memory_id
+        for records, _ in pages
+        for record in records
+    ]
+
+    assert [total for _, total in pages] == [5, 5, 5]
+    assert paged_ids == sorted(memory_ids, reverse=True)
+    assert len(paged_ids) == len(set(paged_ids)) == len(memory_ids)
 
 
 @pytest.mark.asyncio

@@ -915,6 +915,83 @@ class BookuMemoryMetadataRepository:
         rows = await qb.order_by("-updated_at").limit(max(1, int(limit))).all()
         return [self._to_record(r) for r in rows]  # type: ignore[arg-type]
 
+    async def paginate_records(
+        self,
+        *,
+        keyword: str | None = None,
+        memory_type: str | None = None,
+        status: str | None = None,
+        person_id: str | None = None,
+        folder_id: str | None = None,
+        bucket: str | None = None,
+        include_archived: bool = True,
+        include_deleted: bool = False,
+        page: int = 1,
+        page_size: int = 60,
+    ) -> tuple[list[BookuMemoryRecord], int]:
+        """按结构化约束分页查询记忆记录及过滤后的总数。"""
+
+        R = BookuMemoryRecordModel
+        normalized_page = max(1, int(page))
+        normalized_page_size = max(1, int(page_size))
+
+        stmt = select(R)
+        if folder_id is not None:
+            stmt = stmt.where(R.folder_id == folder_id)
+        if memory_type:
+            stmt = stmt.where(R.memory_type == memory_type)
+        if status:
+            stmt = stmt.where(R.status == status)
+        if person_id:
+            stmt = stmt.where(R.person_id == person_id)
+        if bucket:
+            stmt = stmt.where(R.bucket == bucket)
+        if not include_archived:
+            stmt = stmt.where(R.status != "archived")
+        if not include_deleted:
+            stmt = stmt.where(R.is_deleted == 0)
+
+        cleaned_keyword = (keyword or "").strip()
+        if cleaned_keyword:
+            like_value = f"%{cleaned_keyword}%"
+            stmt = stmt.where(
+                or_(
+                    R.title.like(like_value),
+                    R.content.like(like_value),
+                    R.memory_id.like(like_value),
+                )
+            )
+
+        count_stmt = select(func.count()).select_from(
+            stmt.order_by(None).subquery()
+        )
+        page_stmt = (
+            stmt.order_by(
+                R.last_activated_at.desc(),
+                R.updated_at.desc(),
+                R.memory_id.desc(),
+            )
+            .offset((normalized_page - 1) * normalized_page_size)
+            .limit(normalized_page_size)
+        )
+        async with self._db.session() as s:
+            total = int((await s.execute(count_stmt)).scalar_one())
+            rows = (await s.execute(page_stmt)).scalars().all()
+
+        if not rows:
+            return [], total
+
+        ids = [row.memory_id for row in rows]
+        records_by_id = await self.get_records_map(
+            ids,
+            include_deleted=include_deleted,
+        )
+        return [
+            records_by_id[row.memory_id]
+            for row in rows
+            if row.memory_id in records_by_id
+        ], total
+
     async def search_records(
         self,
         *,

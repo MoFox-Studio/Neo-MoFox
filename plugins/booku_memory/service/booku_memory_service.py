@@ -2208,9 +2208,10 @@ class BookuMemoryService(BaseService):
         bucket: str | None = None,
         include_archived: bool = True,
         include_deleted: bool = False,
-        limit: int = 50,
+        page: int = 1,
+        page_size: int = 60,
     ) -> dict[str, Any]:
-        """按后台管理所需的结构化条件列出记忆。
+        """按后台管理所需的结构化条件分页列出记忆。
 
         Args:
             keyword: 标题、正文、ID 的模糊关键词。
@@ -2219,12 +2220,13 @@ class BookuMemoryService(BaseService):
             person_id: 人物 ID 过滤。
             folder_id: folder 过滤。
             bucket: bucket 过滤。
-            include_archived: 是否包含 archived bucket，默认 True。
+            include_archived: 是否包含 archived 状态，默认 True。
             include_deleted: 是否包含软删除记录，默认 False。
-            limit: 最大返回条数。
+            page: 页码，从 1 开始。
+            page_size: 每页条数。
 
         Returns:
-            包含 action、total、items 字段的字典。
+            包含 action、total、page、page_size、items 字段的字典。
         """
         repo = await self._get_repo()
         config = self._get_config()
@@ -2236,29 +2238,27 @@ class BookuMemoryService(BaseService):
             )
 
         normalized_bucket = (bucket or "").strip().lower() or None
-        records = await repo.search_records(
+        normalized_page = max(1, int(page))
+        normalized_page_size = max(1, int(page_size))
+        records, total = await repo.paginate_records(
             keyword=(keyword or "").strip() or None,
             memory_type=(memory_type or "").strip().lower() or None,
             status=(status or "").strip().lower() or None,
             person_id=(person_id or "").strip() or None,
             folder_id=normalized_folder_id,
+            bucket=normalized_bucket,
+            include_archived=include_archived,
             include_deleted=include_deleted,
-            limit=max(1, int(limit)),
+            page=normalized_page,
+            page_size=normalized_page_size,
         )
-
-        filtered_records: list[Any] = []
-        for record in records:
-            record_bucket = str(getattr(record, "bucket", "") or "").strip().lower()
-            if normalized_bucket and record_bucket != normalized_bucket:
-                continue
-            if not include_archived and record_bucket == "archived":
-                continue
-            filtered_records.append(record)
 
         return {
             "action": "list_memory_entries",
-            "total": len(filtered_records),
-            "items": [self._build_record_item(record) for record in filtered_records],
+            "total": total,
+            "page": normalized_page,
+            "page_size": normalized_page_size,
+            "items": [self._build_record_item(record) for record in records],
         }
 
     async def update_activated(self, memory_id: str) -> None:
