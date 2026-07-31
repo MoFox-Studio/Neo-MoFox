@@ -574,8 +574,9 @@ class MessageConverter:
         if not result.reply_to:
             return
         try:
-            from src.core.models.sql_alchemy import Messages, PersonInfo
+            from src.core.models.sql_alchemy import Messages
             from src.kernel.db import QueryBuilder
+            from src.core.utils.user_query_helper import get_user_query_helper
 
             msg_record = cast(Messages | None, await (
                 QueryBuilder(Messages)
@@ -591,12 +592,12 @@ class MessageConverter:
                 if person_id == "bot":
                     # Bot 自己发的消息，显示为"你"
                     sender_display = "你"
-                elif person_id:
-                    person_record = cast(PersonInfo | None, await (
-                        QueryBuilder(PersonInfo)
-                        .filter(person_id=person_id)
-                        .first()
-                    ))
+                elif person_id and ":" in person_id:
+                    # person_id 格式为 platform:user_id
+                    platform, user_id_str = person_id.split(":", 1)
+                    person_record = await get_user_query_helper().get_person(
+                        platform=platform, user_id=user_id_str
+                    )
                     if person_record:
                         nickname = person_record.nickname or ""
                         cardname = person_record.cardname or ""
