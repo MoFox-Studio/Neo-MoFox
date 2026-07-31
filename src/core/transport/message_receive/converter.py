@@ -588,7 +588,10 @@ class MessageConverter:
                 # 通过 person_id 关联 PersonInfo 表获取发送者昵称和 ID
                 sender_display = ""
                 person_id = msg_record.person_id
-                if person_id:
+                if person_id == "bot":
+                    # Bot 自己发的消息，显示为"你"
+                    sender_display = "你"
+                elif person_id:
                     person_record = cast(PersonInfo | None, await (
                         QueryBuilder(PersonInfo)
                         .filter(person_id=person_id)
@@ -598,7 +601,7 @@ class MessageConverter:
                         nickname = person_record.nickname or ""
                         cardname = person_record.cardname or ""
                         user_id = person_record.user_id or ""
-                        # 参考格式：群名片和昵称不同时同时显示，否则只显示一个
+                        # 群名片和昵称不同时同时显示，否则只显示一个
                         if cardname and cardname != nickname:
                             name_part = f"群名片:{cardname}$昵称:{nickname}"
                         else:
