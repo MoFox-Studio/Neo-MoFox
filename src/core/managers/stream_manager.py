@@ -448,10 +448,27 @@ class StreamManager:
         lock = self._get_stream_lock(stream_id)
         async with lock:
 
+            # 使用 _resolve_person_id_from_message 解析真实的 person_id
+            # （格式为 platform:bot_id），以便后续通过 PersonInfo 表查询 Bot 信息
+            person_id = self._resolve_person_id_from_message(message) or "bot"
+
+            # 确保 Bot 的 PersonInfo 记录存在（get_or_create 语义）
+            if message.sender_id and message.platform:
+                try:
+                    from src.core.utils.user_query_helper import get_user_query_helper
+                    await get_user_query_helper().get_or_create_person(
+                        platform=message.platform,
+                        user_id=str(message.sender_id),
+                        nickname=message.sender_name or "",
+                        cardname=message.sender_cardname,
+                    )
+                except Exception:
+                    pass
+
             message_data = {
                 "message_id": message.message_id,
                 "stream_id": stream_id,
-                "person_id": "bot",
+                "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
                 "content": str(message.content),

@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 from mofox_wire import MessageEnvelope, MessageInfoPayload, SegPayload
 
@@ -558,11 +558,15 @@ class MessageConverter:
         result.text_parts.append(f"@<{nickname}:{user_id}> ")
 
     async def _build_reply_preview(self, result: _ParseResult) -> None:
-        """从数据库获取被引用消息的 processed_plain_text，构建引用预览文本。
+        """从数据库获取被引用消息的 processed_plain_text 和发送者信息，构建引用预览文本。
 
         当适配器只返回 reply 段（data 为 message_id）时，由 converter 端
-        查数据库获取已识别的内容（含 VLM/ASR 识别结果），构建
-        ``[回复：引用内容]`` 文本注入 text_parts。
+        查数据库获取已识别的内容（含 VLM/ASR 识别结果），并通过 person_id
+        关联 PersonInfo 表获取被引用消息的发送者昵称和 ID，构建
+        ``[回复<昵称(ID)>：引用内容]`` 文本注入 text_parts。
+
+        Bot 发送的消息 person_id 为 ``"bot"``，在 PersonInfo 表中查不到，
+        此时发送者显示为 ``"Bot"``。
 
         Args:
             result: 解析结果，需已包含 reply_to
@@ -570,19 +574,49 @@ class MessageConverter:
         if not result.reply_to:
             return
         try:
-            from src.core.models.sql_alchemy import Messages
+            from src.core.models.sql_alchemy import Messages, PersonInfo
             from src.kernel.db import QueryBuilder
 
-            msg_record = await (
+            msg_record = cast(Messages | None, await (
                 QueryBuilder(Messages)
                 .filter(message_id=result.reply_to)
                 .first()
-            )
+            ))
             if msg_record:
-                reply_text = getattr(msg_record, "processed_plain_text", None)
-                if reply_text:
-                    # 在 text_parts 最前面插入引用预览
-                    result.text_parts.insert(0, f"[回复：{reply_text}]")
+                reply_text = msg_record.processed_plain_text or ""
+
+                # 通过 person_id 关联 PersonInfo 表获取发送者昵称和 ID
+                sender_display = ""
+                person_id = msg_record.person_id
+                if person_id:
+                    person_record = cast(PersonInfo | None, await (
+                        QueryBuilder(PersonInfo)
+                        .filter(person_id=person_id)
+                        .first()
+                    ))
+                    if person_record:
+                        nickname = person_record.nickname or ""
+                        cardname = person_record.cardname or ""
+                        user_id = person_record.user_id or ""
+                        # 参考格式：群名片和昵称不同时同时显示，否则只显示一个
+                        if cardname and cardname != nickname:
+                            name_part = f"群名片:{cardname}$昵称:{nickname}"
+                        else:
+                            name_part = cardname or nickname
+                        if name_part and user_id:
+                            sender_display = f"{name_part}({user_id})"
+                        elif name_part:
+                            sender_display = name_part
+
+                # 构建引用预览：包含发送者信息
+                # reply_text 为空时使用占位符，确保回复关系仍可感知
+                display_text = reply_text or "[消息内容为空]"
+                if sender_display:
+                    result.text_parts.insert(
+                        0, f"[回复<{sender_display}>：{display_text}]"
+                    )
+                else:
+                    result.text_parts.insert(0, f"[回复：{display_text}]")
         except Exception as e:
             logger.warning(f"查询被引用消息记录失败: {e!s}")
 
