@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -44,6 +45,70 @@ class _HangingWebSocket:
         """模拟永远无法及时完成的发送。"""
 
         await asyncio.sleep(1)
+
+
+def _make_adapter(mode: str) -> OneBotAdapter:
+    """创建指定 WebSocket 模式的最小 OneBotAdapter。"""
+
+    config = OneBotAdapterConfig.from_dict(
+        {
+            "plugin": {"enabled": True, "config_version": "2.0.0"},
+            "bot": {"qq_id": "123456789", "qq_nickname": "MoFoxBot"},
+            "onebot_server": {
+                "mode": mode,
+                "host": "localhost",
+                "port": 8095,
+                "access_token": "",
+            },
+            "features": {
+                "group_list_type": "blacklist",
+                "group_list": [],
+                "private_list_type": "blacklist",
+                "private_list": [],
+                "ban_user_id": [],
+                "enable_poke": True,
+                "ignore_non_self_poke": False,
+                "poke_debounce_seconds": 2.0,
+                "enable_emoji_like": True,
+                "enable_reply_at": True,
+                "reply_at_rate": 0.5,
+                "enable_video_processing": True,
+                "video_max_size_mb": 100,
+                "video_download_timeout": 60,
+            },
+        }
+    )
+    plugin = OneBotAdapterPlugin(config=config)
+    return OneBotAdapter(core_sink=cast(Any, _FakeCoreSink()), plugin=plugin)
+
+
+@pytest.mark.asyncio
+async def test_health_check_reverse_uses_websocket_server_state() -> None:
+    """reverse 模式应以 WebSocket 服务端是否启动判断健康状态。"""
+
+    adapter = _make_adapter("reverse")
+    adapter._ws = None
+    adapter._ws_server = cast(Any, object())
+
+    assert await adapter.health_check() is True
+
+    adapter._ws_server = None
+
+    assert await adapter.health_check() is False
+
+
+@pytest.mark.asyncio
+async def test_health_check_direct_uses_websocket_connection_state() -> None:
+    """direct 模式应继续以 WebSocket 连接状态判断健康状态。"""
+
+    adapter = _make_adapter("direct")
+    adapter._ws = cast(Any, SimpleNamespace(closed=False))
+
+    assert await adapter.health_check() is True
+
+    adapter._ws = cast(Any, SimpleNamespace(closed=True))
+
+    assert await adapter.health_check() is False
 
 
 class TestOneBotAdapterStartupValidation:

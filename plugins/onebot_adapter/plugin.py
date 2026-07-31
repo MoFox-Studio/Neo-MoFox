@@ -104,6 +104,16 @@ class OneBotAdapter(BaseAdapter):
         # 注册 utils 内部使用的适配器实例，便于工具方法自动获取 WS
         handler_utils.register_adapter(self)
 
+    async def health_check(self) -> bool:
+        """根据 OneBot WebSocket 模式检查连接健康状态。"""
+
+        if self.plugin and self.plugin.config:
+            config = cast(OneBotAdapterConfig, self.plugin.config)
+            if config.onebot_server.mode == "reverse":
+                return self._ws_server is not None
+
+        return await super().health_check()
+
     def _should_process_event(self, raw: dict[str, Any]) -> bool:
         """
         检查事件是否应该被处理（黑白名单过滤）
