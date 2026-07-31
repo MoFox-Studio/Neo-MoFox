@@ -30,6 +30,9 @@ class SendHandler:
 
         Returns:
             str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
+
+        Raises:
+            RuntimeError: 平台拒绝或发送失败时抛出
         """
         logger.debug("接收到来自MoFox-Bot的消息，处理中")
 
@@ -66,6 +69,9 @@ class SendHandler:
 
         Returns:
             str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
+
+        Raises:
+            RuntimeError: 平台拒绝或发送失败时抛出
         """
         message_info: MessageInfoPayload = envelope.get("message_info", {})
         message_segment: SegPayload = envelope.get("message_segment", {})  # type: ignore[assignment]
@@ -125,7 +131,7 @@ class SendHandler:
             logger.info("消息发送成功")
         else:
             logger.warning(f"消息发送失败，onebot返回：{response!s}")
-            return None
+            raise RuntimeError(f"OneBot 消息发送失败: {response!s}")
 
         # 提取平台返回的消息 ID，没有则返回 None
         data = response.get("data")

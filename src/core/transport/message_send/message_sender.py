@@ -159,17 +159,11 @@ class MessageSender:
     def _apply_platform_message_id(message: "Message", response: Any) -> None:
         """使用平台发送响应中的消息 ID 更新待持久化消息。
 
-        适配器返回值支持两种形态：
-        - str: 直接的平台消息 ID（推荐，适配器已提取）
-        - dict: 平台原始响应，从中提取 data.message_id
+        适配器应直接返回平台消息 ID（str 类型）；发送失败或平台未
+        返回消息 ID 时返回 None，此时保留原 message_id 不变。
         """
-        if response is None:
-            return
-
-        # 适配器已提取出消息 ID（str 类型）
-        if isinstance(response, str):
+        if isinstance(response, str) and response:
             message.message_id = response
-            return
 
     async def _apply_bot_sender_info(self, message: "Message", adapter: Any) -> None:
         """在发送前将消息发送者信息设置为 Bot 信息。"""

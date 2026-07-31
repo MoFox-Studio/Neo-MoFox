@@ -255,10 +255,11 @@ class BaseAdapter(BaseComponent, AdapterBase):
             envelope: 要发送的消息信封
 
         Returns:
-            str | None: 平台返回的消息 ID；发送失败或平台未返回 ID 时返回 None
+            str | None: 平台返回的消息 ID；发送成功但平台未返回 ID 时返回 None
 
         Raises:
             NotImplementedError: 如果未配置自动传输且未重写此方法
+            RuntimeError: 平台拒绝或发送失败时抛出，MessageSender 据此判定发送失败
         """
         # 如果配置了自动传输，调用父类方法
         if hasattr(self, "_transport_config") and self._transport_config:  # type: ignore

@@ -269,12 +269,11 @@ class OneBotAdapter(BaseAdapter):
 
         Returns:
             str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
+
+        Raises:
+            RuntimeError: 平台拒绝或发送失败时抛出，由调用方（MessageSender）感知并处理
         """
-        try:
-            return await self.send_handler.handle_message(envelope)
-        except Exception as e:
-            logger.error(f"发送 OneBot 消息失败: {e}")
-            return None
+        return await self.send_handler.handle_message(envelope)
 
     async def send_onebot_api(self, action: str, params: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
         """
