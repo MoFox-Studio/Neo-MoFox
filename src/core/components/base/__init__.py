@@ -3,7 +3,7 @@
 from .component import BaseComponent
 from .action import BaseAction
 from .agent import BaseAgent
-from .adapter import BaseAdapter, PlatformSendError
+from .adapter import BaseAdapter, PlatformSendResult
 from .chatter import BaseChatter, Failure, Success, Wait, WaitResumeEvent, Stop
 from .command import BaseCommand, CommandNode
 from .config import BaseConfig
@@ -18,7 +18,7 @@ __all__ = [
     "BaseAction",
     "BaseAgent",
     "BaseAdapter",
-    "PlatformSendError",
+    "PlatformSendResult",
     "BaseChatter",
     "BaseCommand",
     "BaseConfig",

@@ -7,6 +7,7 @@ Adapter 负责与外部平台通信，实现消息的接收和发送。
 
 import asyncio
 from abc import abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mofox_wire import AdapterBase
@@ -19,20 +20,27 @@ if TYPE_CHECKING:
     from src.core.components.base.plugin import BasePlugin
 
 
-class PlatformSendError(Exception):
-    """适配器向平台发送消息失败时抛出。
+@dataclass(slots=True)
+class PlatformSendResult:
+    """适配器向平台发送消息的结果。
 
-    与泛化异常不同，此异常专门表达"发送失败"语义，供调用方
-    （如 MessageSender）精确识别并跳过历史写入；普通代码 bug
-    引发的异常不会被误判为发送失败。
+    与异常不同，此对象同时携带"成功/失败"状态与平台消息 ID，
+    供调用方（如 MessageSender）精确区分以下三种情况：
+    - 发送成功且平台返回消息 ID：``success=True, message_id=ID``
+    - 发送成功但平台未返回 ID：``success=True, message_id=None``
+    - 发送失败：``success=False``（``error`` 描述原因）
 
     Attributes:
-        response: 平台返回的原始响应（如有）
+        success: 是否发送成功
+        message_id: 平台返回的消息 ID（如平台未返回则为 None）
+        error: 失败原因描述（成功时为 None）
+        response: 平台返回的原始响应（如有），便于排查
     """
 
-    def __init__(self, reason: str = "", *, response: Any = None) -> None:
-        super().__init__(reason)
-        self.response = response
+    success: bool
+    message_id: str | None = None
+    error: str | None = None
+    response: Any = None
 
 
 class BaseAdapter(BaseComponent, AdapterBase):
@@ -261,7 +269,7 @@ class BaseAdapter(BaseComponent, AdapterBase):
         """
         ...
 
-    async def _send_platform_message(self, envelope: MessageEnvelope) -> str | None:
+    async def _send_platform_message(self, envelope: MessageEnvelope) -> PlatformSendResult:
         """发送消息到平台。
 
         如果使用了自动传输配置，此方法会自动处理。
@@ -271,11 +279,10 @@ class BaseAdapter(BaseComponent, AdapterBase):
             envelope: 要发送的消息信封
 
         Returns:
-            str | None: 平台返回的消息 ID；发送成功但平台未返回 ID 时返回 None
+            PlatformSendResult: 发送结果，包含成功/失败状态与平台消息 ID
 
         Raises:
             NotImplementedError: 如果未配置自动传输且未重写此方法
-            PlatformSendError: 平台拒绝或发送失败时抛出，MessageSender 据此判定发送失败
         """
         # 如果配置了自动传输，调用父类方法
         if hasattr(self, "_transport_config") and self._transport_config:  # type: ignore

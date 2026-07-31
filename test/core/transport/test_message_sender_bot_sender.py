@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core.models.message import Message, MessageType
-from src.core.components.base.adapter import PlatformSendError
+from src.core.components.base.adapter import PlatformSendResult
 from src.core.transport.message_send.message_sender import MessageSender
 
 
@@ -68,7 +68,9 @@ async def test_send_message_uses_platform_message_id_for_sent_history(
 
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
-        _send_platform_message=AsyncMock(return_value="123456789"),
+        _send_platform_message=AsyncMock(
+            return_value=PlatformSendResult(success=True, message_id="123456789")
+        ),
     )
     sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
     sender._converter = SimpleNamespace(  # type: ignore[assignment]
@@ -110,7 +112,7 @@ async def test_send_message_keeps_placeholder_id_when_platform_returns_none(
 
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
-        _send_platform_message=AsyncMock(return_value=None),
+        _send_platform_message=AsyncMock(return_value=PlatformSendResult(success=True)),
     )
     sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
     sender._converter = SimpleNamespace(  # type: ignore[assignment]
@@ -147,14 +149,16 @@ async def test_send_message_keeps_placeholder_id_when_platform_returns_none(
 async def test_send_message_returns_false_and_skips_history_when_send_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """适配器发送失败抛异常时，应返回 False 且不写入历史。"""
+    """适配器返回失败结果时，应返回 False 且不写入历史。"""
     sender = MessageSender()
 
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
         _send_platform_message=AsyncMock(
-            side_effect=PlatformSendError(
-                "OneBot 消息发送失败: {'status': 'error'}", response={"status": "error"}
+            return_value=PlatformSendResult(
+                success=False,
+                error="OneBot 消息发送失败: {'status': 'error'}",
+                response={"status": "error"},
             )
         ),
     )
@@ -193,7 +197,7 @@ async def test_send_message_returns_false_and_skips_history_when_send_fails(
 async def test_send_message_returns_false_on_unexpected_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """非 PlatformSendError 的异常（如代码 bug）走外层兜底，同样不写历史。"""
+    """非 Result 契约的异常（如代码 bug）走外层兜底，同样不写历史。"""
     sender = MessageSender()
 
     adapter = SimpleNamespace(

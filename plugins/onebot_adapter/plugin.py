@@ -19,7 +19,7 @@ from mofox_wire import CoreSink, MessageEnvelope, WebSocketAdapterOptions
 
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.core.components.base import BaseAdapter, BasePlugin
+from src.core.components.base import BaseAdapter, BasePlugin, PlatformSendResult
 from src.core.components.loader import register_plugin
 
 from .config import OneBotAdapterConfig
@@ -260,7 +260,7 @@ class OneBotAdapter(BaseAdapter):
             logger.error(f"处理 OneBot 事件失败: {e}, 原始数据: {raw}")
             return None
 
-    async def _send_platform_message(self, envelope: MessageEnvelope) -> str | None:  # type: ignore[override]
+    async def _send_platform_message(self, envelope: MessageEnvelope) -> PlatformSendResult:  # type: ignore[override]
         """
         将 MessageEnvelope 转换并发送到 OneBot
 
@@ -268,10 +268,7 @@ class OneBotAdapter(BaseAdapter):
         而是调用 OneBot API（send_group_msg, send_private_msg 等）
 
         Returns:
-            str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
-
-        Raises:
-            RuntimeError: 平台拒绝或发送失败时抛出，由调用方（MessageSender）感知并处理
+            PlatformSendResult: 发送结果，包含成功/失败状态与平台消息 ID
         """
         return await self.send_handler.handle_message(envelope)
 
