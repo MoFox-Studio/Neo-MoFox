@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from src.core.config import get_core_config
 from src.kernel.concurrency import get_watchdog
 from src.core.transport.distribution.tick import ConversationTick
-from src.core.components.base.chatter import Wait, WaitResumeEvent, Success, Failure, Stop
+from src.core.components.types import Wait, WaitResumeEvent, Success, Failure, Stop
 from src.kernel.logger import get_logger, COLOR
 
 if TYPE_CHECKING:

@@ -6,11 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.core.components.base.chatter import BaseChatter, ChatterResult, Failure, Success, Wait
+from src.core.components.base.chatter import BaseChatter
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
-from src.core.components.types import ChatType
+from src.core.components.types import ChatType, ChatterResult, Failure, Success, Wait
 from src.core.models.message import Message
 from src.core.prompt.system_reminder import (
     SystemReminderConsumeType,

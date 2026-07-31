@@ -9,11 +9,14 @@ from __future__ import annotations
 from abc import abstractmethod
 import asyncio
 from datetime import datetime
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, cast
 
 from src.core.components.base.component import BaseComponent
-from src.core.components.types import ChatType
+from src.core.components.types import (
+    ChatterResult,
+    ChatType,
+    WaitResumeEvent,
+)
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
@@ -29,97 +32,6 @@ if TYPE_CHECKING:
     from src.core.models.message import Message
     from src.kernel.llm import LLMRequest
     from src.kernel.llm.payload.tooling import LLMUsable, ToolRegistry
-
-
-@dataclass
-class Wait:
-    """等待结果。
-
-    表示 Chatter 需要等待一段时间。
-
-    Attributes:
-        time: 等待时间（秒），如果为 None 则表示无限等待直到有新消息；
-            如果为数字，则表示到期后由框架主动恢复生成器，不依赖新消息
-        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
-    """
-
-    time: float | int | None = None
-    step_data: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class WaitResumeEvent:
-    """Wait/Stop 结束后由框架送回生成器的恢复事件。
-
-    框架内置 source 约定值（不是硬性限制）：
-    - ``"message"`` 新消息唤醒
-    - ``"timer"`` 定时器到期
-    - ``"sub_agent"`` 子代理完成
-    - ``"internal_context"`` 内部上下文到达
-
-    外部插件可以通过 ``trigger_external_resume()`` 注入任意 source 的事件，
-    通过 ``extra`` 字段传递自定义数据。
-    对未知 source 的处理由各 Chatter 自行决定。
-    """
-
-    source: str
-    wait_time: float | int | None = None
-    unread_count: int = 0
-    context_key: str = ""
-    extra: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class Success:
-    """成功结果。
-
-    表示 Chatter 成功完成执行。
-
-    Attributes:
-        message: 成功消息
-        data: 可选的附加数据
-        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
-    """
-
-    message: str
-    data: dict[str, Any] | None = None
-    step_data: dict[str, Any] | None = None
-
-
-@dataclass
-class Failure:
-    """失败结果。
-
-    表示 Chatter 执行失败。
-
-    Attributes:
-        error: 错误消息
-        exception: 可选的异常对象
-        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
-    """
-
-    error: str
-    exception: Exception | None = None
-    step_data: dict[str, Any] | None = None
-
-@dataclass
-class Stop:
-    """停止结果。
-
-    表示 Chatter 将在一段时间后重新开始对话。
-
-    Attributes:
-        time: 停止时间（秒）
-        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
-    """
-
-    time: float | int
-    direct_message_wake_enabled: bool = False
-    direct_message_wake_probability: float = 0.0
-    step_data: dict[str, Any] | None = None
-
-# 类型别名
-ChatterResult = Wait | Success | Failure | Stop
 
 
 class BaseChatter(BaseComponent):

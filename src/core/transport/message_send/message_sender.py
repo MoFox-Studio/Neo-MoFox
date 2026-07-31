@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from mofox_wire import MessageEnvelope
 
-from src.core.components.base.adapter import PlatformSendResult
+from src.core.components.types import PlatformSendResult
 from src.kernel.logger import get_logger
 
 if TYPE_CHECKING:
@@ -125,8 +125,7 @@ class MessageSender:
             result = await adapter._send_platform_message(envelope)
             if result is None:
                 result = PlatformSendResult(success=True)
-            elif isinstance(result, str):
-                result = PlatformSendResult(success=True, message_id=result)
+
             if not result.success:
                 logger.warning(
                     f"平台发送失败，该消息未写入历史: {result.error or result.response}"

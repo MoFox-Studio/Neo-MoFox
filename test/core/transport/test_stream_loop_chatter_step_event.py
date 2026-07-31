@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.core.components.base.chatter import Success, Wait, WaitResumeEvent
+from src.core.components.types import Success, Wait, WaitResumeEvent
 from src.core.components.types import EventType
 from src.core.transport.distribution.loop import run_chat_stream
 from src.core.transport.distribution.stream_loop_manager import StreamLoopManager

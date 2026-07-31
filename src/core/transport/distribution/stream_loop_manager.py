@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, AsyncGenerator
 from src.kernel.logger import get_logger, COLOR
 
 if TYPE_CHECKING:
-    from src.core.components.base.chatter import ChatterResult, Stop, Wait, WaitResumeEvent
+    from src.core.components.types import ChatterResult, Stop, Wait, WaitResumeEvent
     from src.core.models.stream import ChatStream, StreamContext
     from src.core.models.message import Message
 
@@ -523,7 +523,7 @@ class StreamLoopManager:
         Returns:
             bool: 是否可以继续执行 (True: 满足条件或无等待, False: 仍在等待)
         """
-        from src.core.components.base.chatter import Wait, WaitResumeEvent, Stop
+        from src.core.components.types import Wait, WaitResumeEvent, Stop
 
         # 外部恢复事件（例如子代理后台完成）可能先于本轮 Wait/Stop 状态落库。
         # 这时需要优先消费 pending resume，避免新写入的 wait_state 把恢复信号永久挡住。

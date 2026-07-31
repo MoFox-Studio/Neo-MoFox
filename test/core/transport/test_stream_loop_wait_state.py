@@ -7,7 +7,7 @@ from typing import cast
 from src.core.models.message import Message
 from src.core.models.stream import StreamContext
 from src.core.transport.distribution.stream_loop_manager import StreamLoopManager
-from src.core.components.base.chatter import Wait, Stop, WaitResumeEvent
+from src.core.components.types import Wait, Stop, WaitResumeEvent
 
 
 def test_wait_state_check_requires_new_message_after_stop() -> None:

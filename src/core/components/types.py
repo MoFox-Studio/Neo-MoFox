@@ -4,8 +4,9 @@
 以及用于解析组件签名的实用函数。
 """
 
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import TypedDict
+from typing import Any, TypedDict
 
 
 class ChatType(Enum):
@@ -336,3 +337,119 @@ def build_signature(
         'my_plugin:action:send_message'
     """
     return f"{plugin_name}:{component_type.value}:{component_name}"
+
+
+@dataclass(slots=True)
+class PlatformSendResult:
+    """适配器向平台发送消息的结果。
+
+    与异常不同，此对象同时携带"成功/失败"状态与平台消息 ID，
+    供调用方（如 MessageSender）精确区分以下三种情况：
+    - 发送成功且平台返回消息 ID：``success=True, message_id=ID``
+    - 发送成功但平台未返回 ID：``success=True, message_id=None``
+    - 发送失败：``success=False``（``error`` 描述原因）
+
+    Attributes:
+        success: 是否发送成功
+        message_id: 平台返回的消息 ID（如平台未返回则为 None）
+        error: 失败原因描述（成功时为 None）
+        response: 平台返回的原始响应（如有），便于排查
+    """
+
+    success: bool
+    message_id: str | None = None
+    error: str | None = None
+    response: Any = None
+
+
+@dataclass
+class Wait:
+    """等待结果。
+
+    表示 Chatter 需要等待一段时间。
+
+    Attributes:
+        time: 等待时间（秒），如果为 None 则表示无限等待直到有新消息；
+            如果为数字，则表示到期后由框架主动恢复生成器，不依赖新消息
+        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
+    """
+
+    time: float | int | None = None
+    step_data: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class WaitResumeEvent:
+    """Wait/Stop 结束后由框架送回生成器的恢复事件。
+
+    框架内置 source 约定值（不是硬性限制）：
+    - ``"message"`` 新消息唤醒
+    - ``"timer"`` 定时器到期
+    - ``"sub_agent"`` 子代理完成
+    - ``"internal_context"`` 内部上下文到达
+
+    外部插件可以通过 ``trigger_external_resume()`` 注入任意 source 的事件，
+    通过 ``extra`` 字段传递自定义数据。
+    对未知 source 的处理由各 Chatter 自行决定。
+    """
+
+    source: str
+    wait_time: float | int | None = None
+    unread_count: int = 0
+    context_key: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Success:
+    """成功结果。
+
+    表示 Chatter 成功完成执行。
+
+    Attributes:
+        message: 成功消息
+        data: 可选的附加数据
+        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
+    """
+
+    message: str
+    data: dict[str, Any] | None = None
+    step_data: dict[str, Any] | None = None
+
+
+@dataclass
+class Failure:
+    """失败结果。
+
+    表示 Chatter 执行失败。
+
+    Attributes:
+        error: 错误消息
+        exception: 可选的异常对象
+        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
+    """
+
+    error: str
+    exception: Exception | None = None
+    step_data: dict[str, Any] | None = None
+
+
+@dataclass
+class Stop:
+    """停止结果。
+
+    表示 Chatter 将在一段时间后重新开始对话。
+
+    Attributes:
+        time: 停止时间（秒）
+        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
+    """
+
+    time: float | int
+    direct_message_wake_enabled: bool = False
+    direct_message_wake_probability: float = 0.0
+    step_data: dict[str, Any] | None = None
+
+
+# 类型别名
+ChatterResult = Wait | Success | Failure | Stop

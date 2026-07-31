@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core.models.message import Message, MessageType
-from src.core.components.base.adapter import PlatformSendResult
+from src.core.components.types import PlatformSendResult
 from src.core.transport.message_send.message_sender import MessageSender
 
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from mofox_wire import GroupInfoPayload, MessageEnvelope, MessageInfoPayload, SegPayload, UserInfoPayload
 
 from src.app.plugin_system.api.log_api import get_logger
-from src.core.components.base.adapter import PlatformSendResult
+from src.app.plugin_system.base import PlatformSendResult
 
 from ...event_models import CommandType
 from ..utils import convert_image_to_gif, get_image_format

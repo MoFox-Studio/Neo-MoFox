@@ -8,17 +8,7 @@ from typing import Any
 
 from .exceptions import LLMError
 
-try:
-    from json_repair import repair_json
-except ImportError:  # pragma: no cover - fallback for minimal local environments
-    def repair_json(raw: str, return_objects: bool = False) -> Any:
-        try:
-            parsed = json.loads(raw)
-        except Exception as exc:  # noqa: BLE001
-            raise LLMError(f"tool_call_compat JSON repair 不可用且原始 JSON 解析失败: {exc}") from exc
-        if return_objects:
-            return parsed
-        return json.dumps(parsed, ensure_ascii=False)
+from json_repair import repair_json
 
 
 def build_tool_call_compat_prompt(tool_schemas: list[dict[str, Any]]) -> str:
