@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from mofox_wire import MessageEnvelope
 
+from src.core.components.base.adapter import PlatformSendResult
 from src.kernel.logger import get_logger
 
 if TYPE_CHECKING:
@@ -121,8 +122,17 @@ class MessageSender:
                 return True  # 返回成功，因为拦截是预期行为
 
             # 6. 发送，并使用平台返回的消息 ID 记录已发送消息。
-            response = await adapter._send_platform_message(envelope)
-            self._apply_platform_message_id(message, response)
+            result = await adapter._send_platform_message(envelope)
+            if result is None:
+                result = PlatformSendResult(success=True)
+            elif isinstance(result, str):
+                result = PlatformSendResult(success=True, message_id=result)
+            if not result.success:
+                logger.warning(
+                    f"平台发送失败，该消息未写入历史: {result.error or result.response}"
+                )
+                return False
+            self._apply_platform_message_id(message, result.message_id)
 
             # 7. 写入历史消息
             await self._persist_sent_message_to_history(message)
@@ -156,20 +166,13 @@ class MessageSender:
             return False
 
     @staticmethod
-    def _apply_platform_message_id(message: "Message", response: Any) -> None:
-        """使用平台发送响应中的消息 ID 更新待持久化消息。
+    def _apply_platform_message_id(message: "Message", message_id: str | None) -> None:
+        """使用平台返回的消息 ID 更新待持久化消息。
 
-        适配器返回值支持两种形态：
-        - str: 直接的平台消息 ID（推荐，适配器已提取）
-        - dict: 平台原始响应，从中提取 data.message_id
+        平台未返回消息 ID（None 或空串）时保留原 message_id 不变。
         """
-        if response is None:
-            return
-
-        # 适配器已提取出消息 ID（str 类型）
-        if isinstance(response, str):
-            message.message_id = response
-            return
+        if isinstance(message_id, str) and message_id:
+            message.message_id = message_id
 
     async def _apply_bot_sender_info(self, message: "Message", adapter: Any) -> None:
         """在发送前将消息发送者信息设置为 Bot 信息。"""

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.core.models.message import Message, MessageType
+from src.core.components.base.adapter import PlatformSendResult
 from src.core.transport.message_send.message_sender import MessageSender
 
 
@@ -68,7 +69,7 @@ async def test_send_message_uses_platform_message_id_for_sent_history(
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
         _send_platform_message=AsyncMock(
-            return_value={"status": "ok", "data": {"message_id": 123456789}}
+            return_value=PlatformSendResult(success=True, message_id="123456789")
         ),
     )
     sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
@@ -100,3 +101,135 @@ async def test_send_message_uses_platform_message_id_for_sent_history(
     assert ok is True
     assert message.message_id == "123456789"
     fake_stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+
+
+@pytest.mark.asyncio
+async def test_send_message_keeps_placeholder_id_when_platform_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """平台未返回消息 ID 时，应保留原 message_id 写入历史。"""
+    sender = MessageSender()
+
+    adapter = SimpleNamespace(
+        get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
+        _send_platform_message=AsyncMock(return_value=PlatformSendResult(success=True)),
+    )
+    sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
+    sender._converter = SimpleNamespace(  # type: ignore[assignment]
+        message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
+    )
+
+    fake_stream_manager = SimpleNamespace(
+        get_or_create_stream=AsyncMock(return_value=SimpleNamespace()),
+        add_sent_message_to_history=AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: fake_stream_manager,
+    )
+
+    message = Message(
+        message_id="action_send_text_internal",
+        content="hello",
+        message_type=MessageType.TEXT,
+        platform="qq",
+        chat_type="group",
+        stream_id="stream-1",
+        target_group_id="12345",
+    )
+
+    ok = await sender.send_message(message, adapter_signature="onebot_adapter:adapter:onebot_adapter")
+
+    assert ok is True
+    assert message.message_id == "action_send_text_internal"
+    fake_stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+
+
+@pytest.mark.asyncio
+async def test_send_message_returns_false_and_skips_history_when_send_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """适配器返回失败结果时，应返回 False 且不写入历史。"""
+    sender = MessageSender()
+
+    adapter = SimpleNamespace(
+        get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
+        _send_platform_message=AsyncMock(
+            return_value=PlatformSendResult(
+                success=False,
+                error="OneBot 消息发送失败: {'status': 'error'}",
+                response={"status": "error"},
+            )
+        ),
+    )
+    sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
+    sender._converter = SimpleNamespace(  # type: ignore[assignment]
+        message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
+    )
+
+    fake_stream_manager = SimpleNamespace(
+        get_or_create_stream=AsyncMock(),
+        add_sent_message_to_history=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: fake_stream_manager,
+    )
+
+    message = Message(
+        message_id="action_send_text_internal",
+        content="hello",
+        message_type=MessageType.TEXT,
+        platform="qq",
+        chat_type="group",
+        stream_id="stream-1",
+        target_group_id="12345",
+    )
+
+    ok = await sender.send_message(message, adapter_signature="onebot_adapter:adapter:onebot_adapter")
+
+    assert ok is False
+    fake_stream_manager.get_or_create_stream.assert_not_awaited()
+    fake_stream_manager.add_sent_message_to_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_message_returns_false_on_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 Result 契约的异常（如代码 bug）走外层兜底，同样不写历史。"""
+    sender = MessageSender()
+
+    adapter = SimpleNamespace(
+        get_bot_info=AsyncMock(return_value={"bot_id": "bot-001", "bot_name": "NeoBot"}),
+        _send_platform_message=AsyncMock(side_effect=KeyError("some_bug")),
+    )
+    sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
+    sender._converter = SimpleNamespace(  # type: ignore[assignment]
+        message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
+    )
+
+    fake_stream_manager = SimpleNamespace(
+        get_or_create_stream=AsyncMock(),
+        add_sent_message_to_history=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_stream_manager",
+        lambda: fake_stream_manager,
+    )
+
+    message = Message(
+        message_id="action_send_text_internal",
+        content="hello",
+        message_type=MessageType.TEXT,
+        platform="qq",
+        chat_type="group",
+        stream_id="stream-1",
+        target_group_id="12345",
+    )
+
+    ok = await sender.send_message(message, adapter_signature="onebot_adapter:adapter:onebot_adapter")
+
+    assert ok is False
+    fake_stream_manager.get_or_create_stream.assert_not_awaited()
+    fake_stream_manager.add_sent_message_to_history.assert_not_awaited()

@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Annotated
-
+from typing import Annotated, TypedDict
 
 from src.core.components.utils.schema_utils import (
     extract_description_from_docstring,
     map_type_to_json,
     parse_function_signature,
 )
+
+
+class ForwardNodeSchemaTestModel(TypedDict):
+    """用于验证 Tool Schema 的合并转发节点。"""
+
+    uin: Annotated[str, "原消息发送者的 QQ 号"]
+    nick: Annotated[str, "原消息发送者的昵称"]
+    content: Annotated[str, "原消息文本"]
 
 
 class TestMapTypeToJson:
@@ -516,3 +523,22 @@ class TestSchemaUtilsEdgeCases:
 
         # 返回类型不应该在 schema 中
         assert "return" not in schema["function"]["parameters"]
+
+
+def test_parse_function_with_typed_dict_list() -> None:
+    """TypedDict 列表参数应在 Tool Schema 中展开节点字段与描述。"""
+    def send_forward(messages: list[ForwardNodeSchemaTestModel]) -> None:
+        """发送合并转发消息。"""
+
+    schema = parse_function_signature(send_forward, "send_forward", "发送合并转发消息")
+    items = schema["function"]["parameters"]["properties"]["messages"]["items"]
+
+    assert items["type"] == "object"
+    assert set(items["properties"]) == {"uin", "nick", "content"}
+    assert items["properties"]["uin"]["type"] == "string"
+    assert items["properties"]["uin"]["description"] == "原消息发送者的 QQ 号"
+    assert items["properties"]["nick"]["type"] == "string"
+    assert items["properties"]["nick"]["description"] == "原消息发送者的昵称"
+    assert items["properties"]["content"]["type"] == "string"
+    assert items["properties"]["content"]["description"] == "原消息文本"
+    assert items["required"] == ["content", "nick", "uin"]

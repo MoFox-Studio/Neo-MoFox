@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from mofox_wire import GroupInfoPayload, MessageEnvelope, MessageInfoPayload, SegPayload, UserInfoPayload
 
 from src.app.plugin_system.api.log_api import get_logger
+from src.core.components.base.adapter import PlatformSendResult
 
 from ...event_models import CommandType
 from ..utils import convert_image_to_gif, get_image_format
@@ -24,18 +25,18 @@ class SendHandler:
     def __init__(self, adapter: "OneBotAdapter"):
         self.adapter = adapter
 
-    async def handle_message(self, envelope: MessageEnvelope) -> str | None:
+    async def handle_message(self, envelope: MessageEnvelope) -> PlatformSendResult:
         """
         处理来自核心的消息，将其转换为 OneBot 可接受的格式并发送
 
         Returns:
-            str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
+            PlatformSendResult: 发送结果；命令类消息视为执行成功但无消息 ID
         """
         logger.debug("接收到来自MoFox-Bot的消息，处理中")
 
         if not envelope:
             logger.warning("空的消息，跳过处理")
-            return None
+            return PlatformSendResult(success=True)
 
         message_segment = envelope.get("message_segment")
         if isinstance(message_segment, list):
@@ -49,23 +50,23 @@ class SendHandler:
             if seg_type == "command":
                 logger.debug("处理命令")
                 await self.send_command(envelope)
-                return None
+                return PlatformSendResult(success=True)
             if seg_type == "adapter_command":
                 logger.debug("处理适配器命令")
                 await self.handle_adapter_command(envelope)
-                return None
+                return PlatformSendResult(success=True)
             if seg_type == "adapter_response":
                 logger.debug("收到adapter_response消息，此消息应该由Bot端处理，跳过")
-                return None
+                return PlatformSendResult(success=True)
 
         return await self.send_normal_message(envelope)
 
-    async def send_normal_message(self, envelope: MessageEnvelope) -> str | None:
+    async def send_normal_message(self, envelope: MessageEnvelope) -> PlatformSendResult:
         """
         处理普通消息发送
 
         Returns:
-            str | None: 发送成功且平台返回了消息 ID 时返回该 ID，否则返回 None
+            PlatformSendResult: 发送结果；成功但平台未返回 ID 时 message_id 为 None
         """
         message_info: MessageInfoPayload = envelope.get("message_info", {})
         message_segment: SegPayload = envelope.get("message_segment", {})  # type: ignore[assignment]
@@ -86,11 +87,11 @@ class SendHandler:
             processed_message = await self.handle_seg_recursive(seg_data, user_info or {}, is_group=is_group)
         except Exception as e:
             logger.error(f"处理消息时发生错误: {e}")
-            return None
+            return PlatformSendResult(success=True)
 
         if not processed_message:
             logger.critical("现在暂时不支持解析此回复！")
-            return None
+            return PlatformSendResult(success=True)
 
         # 🔧 确保 reply 消息段始终在列表最前面
         # 排序原则：reply 类型优先级最高（排序值为 0），其他类型保持原有顺序（排序值为 1）
@@ -109,7 +110,7 @@ class SendHandler:
             id_name = "user_id"
         else:
             logger.error("无法识别的消息类型")
-            return
+            return PlatformSendResult(success=True)
         logger.debug(
             f"准备发送到 onebot 的消息体: action='{action}', {id_name}='{target_id}', "
             f"message={str(processed_message)[:500]}"
@@ -121,19 +122,23 @@ class SendHandler:
                 "message": processed_message,
             },
         )
-        if response.get("status") == "ok":
-            logger.info("消息发送成功")
-        else:
+        if response.get("status") != "ok":
             logger.warning(f"消息发送失败，onebot返回：{response!s}")
-            return None
+            return PlatformSendResult(
+                success=False,
+                error=f"OneBot 消息发送失败: {response!s}",
+                response=response,
+            )
+
+        logger.info("消息发送成功")
 
         # 提取平台返回的消息 ID，没有则返回 None
         data = response.get("data")
         if isinstance(data, dict):
             message_id = data.get("message_id")
             if message_id is not None:
-                return str(message_id)
-        return None
+                return PlatformSendResult(success=True, message_id=str(message_id))
+        return PlatformSendResult(success=True)
 
     async def send_command(self, envelope: MessageEnvelope) -> None:
         """
