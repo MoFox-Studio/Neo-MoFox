@@ -1,8 +1,8 @@
 {
-    "name": "booku_memory",
-    "display_name": "Booku 记忆",
+    "name": "neo_booku_memory",
+    "display_name": "Neo Booku 记忆",
     "version": "1.0.0",
-    "description": "命令驱动的 Booku 记忆系统插件，提供长期记忆工具 memory_command 和短期便签工具 temporary_memo。",
+    "description": "命令驱动的 Neo Booku 记忆系统插件，与 booku_memory_store 组合可完美平替原有 booku_memory 插件。",
     "author": "MoFox Team",
     "dependencies": {
         "plugins": [],
@@ -21,17 +21,7 @@
         },
         {
             "component_type": "service",
-            "component_name": "booku_memory",
-            "dependencies": []
-        },
-        {
-            "component_type": "service",
-            "component_name": "booku_knowledge",
-            "dependencies": []
-        },
-        {
-            "component_type": "router",
-            "component_name": "memory_admin",
+            "component_name": "neo_booku_memory",
             "dependencies": []
         }
     ],

@@ -1,0 +1,218 @@
+"""Shameimaru Memory 存储层与工具函数测试。"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from plugins.shameimaru_memory.config import ShameimaruMemoryConfig
+from plugins.shameimaru_memory.models import (
+    GroupSummary,
+    NewsEntry,
+    PersonRef,
+    SummaryEntry,
+)
+from plugins.shameimaru_memory.store import ShameimaruMemoryStore
+from plugins.shameimaru_memory.sub_agent import extract_json_array
+from plugins.shameimaru_memory.utils import (
+    format_local_time,
+    is_group_message,
+    message_time,
+    person_id_of,
+    person_name_of,
+)
+from src.core.models.message import Message
+
+
+def _config(tmp_path: Path) -> ShameimaruMemoryConfig:
+    config = ShameimaruMemoryConfig()
+    config.storage.data_dir = str(tmp_path)
+    return config
+
+
+def _message(
+    *,
+    platform: str = "qq",
+    sender_id: str = "123",
+    sender_name: str = "小明",
+    text: str = "你好",
+    chat_type: str = "group",
+    time: float = 1000.0,
+) -> Message:
+    return Message(
+        message_id=f"msg-{sender_id}-{text}",
+        time=time,
+        processed_plain_text=text,
+        sender_id=sender_id,
+        sender_name=sender_name,
+        platform=platform,
+        chat_type=chat_type,
+    )
+
+
+# ----------------------------------------------------------------------
+# utils
+# ----------------------------------------------------------------------
+
+
+def test_person_id_of_builds_platform_prefixed_id() -> None:
+    assert person_id_of(_message(platform="qq", sender_id="123")) == "qq:123"
+
+
+def test_person_id_of_keeps_existing_prefixed_id() -> None:
+    message = _message(platform="qq", sender_id="qq:123")
+    assert person_id_of(message) == "qq:123"
+
+
+def test_person_id_of_empty_when_missing_info() -> None:
+    assert person_id_of(_message(platform="", sender_id="123")) == ""
+    assert person_id_of(_message(platform="qq", sender_id="")) == ""
+
+
+def test_person_name_of_falls_back_to_sender_id() -> None:
+    message = _message(sender_name="", sender_id="999")
+    assert person_name_of(message) == "999"
+
+
+def test_message_time_and_group_detection() -> None:
+    assert message_time(_message(time=42.0)) == 42.0
+    assert is_group_message(_message(chat_type="group")) is True
+    assert is_group_message(_message(chat_type="private")) is False
+
+
+def test_format_local_time() -> None:
+    formatted = format_local_time(0.0)
+    assert isinstance(formatted, str) and len(formatted) == 5
+
+
+# ----------------------------------------------------------------------
+# models 序列化
+# ----------------------------------------------------------------------
+
+
+def test_models_roundtrip() -> None:
+    summary = SummaryEntry(
+        timestamp=1.0,
+        content="第一段内容。\n\n第二段内容。",
+        participants=[PersonRef(person_id="qq:1", name="A")],
+    )
+    restored = SummaryEntry.from_dict(summary.to_dict())
+    assert restored is not None
+    assert restored.content == summary.content
+    assert restored.participants[0].person_id == "qq:1"
+
+    news = NewsEntry(
+        id="news-1",
+        timestamp=2.0,
+        title="标题",
+        content="内容",
+        participants=[PersonRef(person_id="qq:1", name="A")],
+    )
+    news_restored = NewsEntry.from_dict(news.to_dict())
+    assert news_restored is not None
+    assert news_restored.id == "news-1"
+    assert news_restored.participants[0].person_id == "qq:1"
+
+    group = GroupSummary(stream_id="s1", group_name="测试群", entries=[summary])
+    group_restored = GroupSummary.from_dict(group.to_dict())
+    assert group_restored is not None
+    assert len(group_restored.entries) == 1
+    assert group_restored.group_name == "测试群"
+
+
+# ----------------------------------------------------------------------
+# store
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_store_summary_cap_eviction(tmp_path: Path) -> None:
+    store = ShameimaruMemoryStore(_config(tmp_path))
+    for index in range(3):
+        await store.append_summary(
+            "s1",
+            SummaryEntry(
+                timestamp=float(index),
+                content=f"摘要{index}",
+                participants=[PersonRef(person_id="qq:1", name="A")],
+            ),
+            platform="qq",
+            group_id="10001",
+            group_name="测试群",
+            max_entries=2,
+        )
+
+    group = await store.get_group_summary("s1")
+    assert [entry.content for entry in group.entries] == ["摘要1", "摘要2"]
+    assert group.group_name == "测试群"
+
+    # 新 store 实例（模拟重启）仍能读取
+    store2 = ShameimaruMemoryStore(_config(tmp_path))
+    group2 = await store2.get_group_summary("s1")
+    assert len(group2.entries) == 2
+
+
+@pytest.mark.asyncio
+async def test_store_news_eviction_returns_evicted(tmp_path: Path) -> None:
+    store = ShameimaruMemoryStore(_config(tmp_path))
+    first = NewsEntry(id="n0", timestamp=0.0, title="t0", content="c0")
+    evicted: list[NewsEntry] = []
+    evicted.extend(await store.append_news(first, max_entries=2))
+    evicted.extend(
+        await store.append_news(
+            NewsEntry(id="n1", timestamp=1.0, title="t1", content="c1"), max_entries=2
+        )
+    )
+    evicted.extend(
+        await store.append_news(
+            NewsEntry(id="n2", timestamp=2.0, title="t2", content="c2"), max_entries=2
+        )
+    )
+    assert [entry.id for entry in evicted] == ["n0"]
+    assert [entry.id for entry in await store.get_news()] == ["n1", "n2"]
+
+
+@pytest.mark.asyncio
+async def test_store_remove_news_and_personas(tmp_path: Path) -> None:
+    store = ShameimaruMemoryStore(_config(tmp_path))
+    await store.append_news(
+        NewsEntry(id="a", timestamp=1.0, title="t", content="c"), max_entries=10
+    )
+    await store.append_news(
+        NewsEntry(id="b", timestamp=2.0, title="t2", content="c2"), max_entries=10
+    )
+    removed = await store.remove_news(["a", "missing"])
+    assert [entry.id for entry in removed] == ["a"]
+    assert [entry.id for entry in await store.get_news()] == ["b"]
+
+    assert await store.get_persona("qq:1") == ""
+    await store.set_persona("qq:1", "他喜欢摄影。")
+    assert await store.get_persona("qq:1") == "他喜欢摄影。"
+    assert await store.get_all_personas() == {"qq:1": "他喜欢摄影。"}
+
+
+# ----------------------------------------------------------------------
+# sub_agent 解析
+# ----------------------------------------------------------------------
+
+
+def test_extract_json_array_plain() -> None:
+    assert extract_json_array('[{"title": "a"}]') == [{"title": "a"}]
+
+
+def test_extract_json_array_with_fence() -> None:
+    text = '```json\n[{"title": "a"}, {"title": "b"}]\n```'
+    assert extract_json_array(text) == [{"title": "a"}, {"title": "b"}]
+
+
+def test_extract_json_array_embedded() -> None:
+    text = '解释一下。\n[{"title": "a"}]\n以上。'
+    assert extract_json_array(text) == [{"title": "a"}]
+
+
+def test_extract_json_array_invalid_returns_empty() -> None:
+    assert extract_json_array("没有任何值得整理的内容") == []
+    assert extract_json_array("") == []
+    assert extract_json_array("[]") == []

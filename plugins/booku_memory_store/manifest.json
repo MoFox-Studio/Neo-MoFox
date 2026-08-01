@@ -1,0 +1,25 @@
+{
+    "name": "booku_memory_store",
+    "display_name": "Booku Memory Store",
+    "version": "1.0.0",
+    "description": "纯记忆数据库子插件，提供高级检索与存储能力，不包含工具/代理/闪回等高级机制。",
+    "author": "MoFox Team",
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "service",
+            "component_name": "booku_memory_store",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "api_version": {
+        "llm_api": "1.0.0",
+        "log_api": "1.0.0",
+        "storage_api": "1.0.0"
+    },
+    "min_core_version": "1.2.0-rc.2"
+}

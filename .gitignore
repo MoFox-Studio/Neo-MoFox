@@ -103,7 +103,8 @@ skills-lock.json
 
 !plugins/default_chatter/
 !plugins/onebot_adapter/
-!plugins/booku_memory/
+!plugins/booku_memory_store/
+!plugins/neo_booku_memory/
 !plugins/emoji_sender/
 !plugins/perm_plugin/
 !plugins/utility_commands/

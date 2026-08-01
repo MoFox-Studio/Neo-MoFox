@@ -1,4 +1,4 @@
-"""Booku Memory Agent 插件 SQLAlchemy 数据库模型定义。
+"""Booku Memory Store 插件 SQLAlchemy 数据库模型定义。
 
 使用独立的 declarative_base，与主程序数据库的 Base 完全隔离。
 由 PluginDatabase 负责在指定 SQLite 文件中按需建表。
@@ -10,7 +10,6 @@ from sqlalchemy import Float, Index, Integer, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import Mapped, mapped_column
 
-# 独立 Base，与核心数据库隔离
 Base = declarative_base()
 
 
@@ -49,9 +48,9 @@ class BookuMemoryRecordModel(Base):
     activation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="激活次数")
 
     __table_args__ = (
-        Index("idx_booku_memory_folder_bucket", "folder_id", "bucket", "is_archived"),
-        Index("idx_booku_memory_type_status", "memory_type", "status", "last_activated_at"),
-        Index("idx_booku_memory_person_id", "person_id"),
+        Index("idx_booku_ms_folder_bucket", "folder_id", "bucket", "is_archived"),
+        Index("idx_booku_ms_type_status", "memory_type", "status", "last_activated_at"),
+        Index("idx_booku_ms_person_id", "person_id"),
     )
 
 
@@ -66,26 +65,7 @@ class BookuMemoryTagModel(Base):
     tag_value: Mapped[str] = mapped_column(Text, nullable=False, comment="标签值")
 
     __table_args__ = (
-        Index("idx_booku_memory_tags_memory", "memory_id", "tag_type"),
-    )
-
-
-class BookuTemporaryMemoModel(Base):
-    """临时备忘录表，对应 booku_temporary_memos。"""
-
-    __tablename__ = "booku_temporary_memos"
-
-    memo_id: Mapped[str] = mapped_column(Text, primary_key=True, comment="备忘录唯一 ID")
-    stream_id: Mapped[str] = mapped_column(Text, nullable=False, default="", comment="关联聊天流 ID")
-    content: Mapped[str] = mapped_column(Text, nullable=False, comment="备忘录内容")
-    expires_at: Mapped[float] = mapped_column(Float, nullable=False, comment="过期时间戳")
-    created_at: Mapped[float] = mapped_column(Float, nullable=False, comment="创建时间戳")
-    updated_at: Mapped[float] = mapped_column(Float, nullable=False, comment="最后更新时间戳")
-
-    __table_args__ = (
-        Index("idx_booku_temporary_memos_stream_id", "stream_id"),
-        Index("idx_booku_temporary_memos_expires_at", "expires_at"),
-        Index("idx_booku_temporary_memos_updated_at", "updated_at"),
+        Index("idx_booku_ms_tags_memory", "memory_id", "tag_type"),
     )
 
 
@@ -93,5 +73,4 @@ __all__ = [
     "Base",
     "BookuMemoryRecordModel",
     "BookuMemoryTagModel",
-    "BookuTemporaryMemoModel",
 ]
