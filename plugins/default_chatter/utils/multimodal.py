@@ -1,4 +1,10 @@
-"""Default Chatter 图片提取与多模态内容构建函数。"""
+"""Default Chatter 图片提取与多模态内容构建函数。
+
+多模态模式下（``native_multimodal=True``），框架 converter 跳过 VLM 识别，
+占位符格式为 ``[图片(media_id)]``，其中 ``media_id`` 是媒体数据的 SHA256 哈希。
+DFC 通过 ``media_id`` 在消息的 media 列表中精确定位图片 base64，避免全局
+顺序匹配导致的多模态错位。
+"""
 
 from __future__ import annotations
 
@@ -8,8 +14,10 @@ from typing import Any
 from src.app.plugin_system.types import Content, Image, LLMUsable, Message, Text
 
 _IMAGE_PLACEHOLDER = "[图片]"
-_IMAGE_TOKEN_TEMPLATE = "[[DFC_IMAGE:{message_index}:{image_index}]]"
-_IMAGE_TOKEN_PATTERN = re.compile(r"\[\[DFC_IMAGE:(\d+):(\d+)\]\]")
+_IMAGE_TOKEN_TEMPLATE = "[[DFC_IMAGE:{media_id}]]"
+_IMAGE_TOKEN_PATTERN = re.compile(r"\[\[DFC_IMAGE:([0-9a-fA-F]+)\]\]")
+# 匹配 [图片(media_id)] 格式占位符，media_id 为 64 字符 SHA256 哈希
+_MEDIA_ID_PLACEHOLDER_PATTERN = re.compile(r"\[图片\(([0-9a-fA-F]+)\)\]")
 
 
 def get_image_media_list(msg: Message) -> list[dict[str, Any]]:
@@ -66,63 +74,64 @@ def tokenize_message_scoped_image_placeholders(
     text: str,
     messages: list[Message],
 ) -> str:
-    """将图片占位符按未读消息顺序转换为带来源索引的标记。"""
-    message_image_indices = [0 for _ in messages]
-    message_index = 0
+    """将 ``[图片(media_id)]`` 占位符替换为内部标记 ``[[DFC_IMAGE:media_id]]``。
+
+    通过 media_id 精确关联占位符与消息中的图片，不依赖全局顺序匹配，
+    彻底消除历史消息占位符与未读消息占位符相互干扰导致的错位问题。
+
+    Args:
+        text: 包含 ``[图片(media_id)]`` 占位符的完整文本
+        messages: 未读消息列表（用于建立 media_id 到图片数据的索引）
+
+    Returns:
+        占位符已被 ``[[DFC_IMAGE:media_id]]`` 标记替换的文本
+    """
+    del messages  # media_id 已编码在占位符中，无需按消息顺序匹配
 
     def replace_placeholder(match: re.Match[str]) -> str:
-        """替换一个图片占位符。"""
-        nonlocal message_index
-        del match
-        while message_index < len(messages):
-            images = get_image_media_list(messages[message_index])
-            image_index = message_image_indices[message_index]
-            if image_index < len(images):
-                message_image_indices[message_index] += 1
-                return _IMAGE_TOKEN_TEMPLATE.format(
-                    message_index=message_index,
-                    image_index=image_index,
-                )
-            message_index += 1
-        return _IMAGE_PLACEHOLDER
+        """提取 media_id 并生成内部标记。"""
+        media_id = match.group(1)
+        return _IMAGE_TOKEN_TEMPLATE.format(media_id=media_id)
 
-    return re.sub(re.escape(_IMAGE_PLACEHOLDER), replace_placeholder, text)
+    return _MEDIA_ID_PLACEHOLDER_PATTERN.sub(replace_placeholder, text)
 
 
 def inline_message_images_into_text(
     text: str,
     messages: list[Message],
 ) -> list[Content | LLMUsable]:
-    """按消息级标记将图片内联到文本，而不是按全局图片序号配对。
+    """按 media_id 标记将图片内联到文本。
 
-    每个标记只允许引用其对应消息中的图片。若标记损坏或超出该消息图片
-    数量，则保留标记文本并记录可由调用方观察到的结构异常，不会借用其他
-    消息的图片填补，从而避免一次错位扩散到后续消息。
+    每个 ``[[DFC_IMAGE:media_id]]`` 标记通过 media_id 在所有消息的
+    media 列表中精确查找 ``image_id == media_id`` 的图片：
+
+    - 找到：在标记位置插入 ``[图片(media_id)]`` 文本 + ``Image(base64)``，
+      AI 可据此文本标记与图片的邻接关系建立关联。
+    - 找不到（如历史消息中的占位符在未读消息中无对应图片）：还原为
+      ``[图片(media_id)]`` 文本，不暴露内部标记给 LLM。
 
     Args:
-        text: 包含 ``[[DFC_IMAGE:消息序号:图片序号]]`` 标记的文本
-        messages: 与标记消息序号对应的消息列表
+        text: 包含 ``[[DFC_IMAGE:media_id]]`` 标记的文本
+        messages: 用于查找图片的消息列表
 
     Returns:
         Text/Image 交替排列的内容列表
     """
+    media_index = _build_media_id_index(messages)
+
     content_list: list[Content | LLMUsable] = []
     cursor = 0
     for match in _IMAGE_TOKEN_PATTERN.finditer(text):
         if match.start() > cursor:
             content_list.append(Text(text[cursor:match.start()]))
 
-        message_index = int(match.group(1))
-        image_index = int(match.group(2))
-        image: dict[str, Any] | None = None
-        if 0 <= message_index < len(messages):
-            images = get_image_media_list(messages[message_index])
-            if 0 <= image_index < len(images):
-                image = images[image_index]
+        media_id = match.group(1)
+        image = media_index.get(media_id)
 
         if image is None:
-            content_list.append(Text(match.group(0)))
+            content_list.append(Text(f"[图片({media_id})]"))
         else:
+            content_list.append(Text(f"[图片({media_id})]"))
             content_list.append(Image(str(image["data"])))
         cursor = match.end()
 
@@ -131,6 +140,19 @@ def inline_message_images_into_text(
     if not content_list:
         content_list.append(Text(text))
     return content_list
+
+
+def _build_media_id_index(
+    messages: list[Message],
+) -> dict[str, dict[str, Any]]:
+    """构建 media_id → 图片媒体字典的索引。"""
+    index: dict[str, dict[str, Any]] = {}
+    for msg in messages:
+        for item in get_image_media_list(msg):
+            image_id = item.get("image_id")
+            if isinstance(image_id, str) and image_id:
+                index[image_id] = item
+    return index
 
 
 def inline_images_into_text(

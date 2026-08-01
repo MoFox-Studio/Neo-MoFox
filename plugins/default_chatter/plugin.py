@@ -144,9 +144,9 @@ class DefaultChatter(BaseChatter):
     ) -> None:
         """在未发送前合并未读消息到最后一个 USER payload。
 
-        当 ``native_multimodal`` 启用时，先将占位符转换为带消息序号和
-        消息内图片序号的标记，再依据标记从对应 Message 取图，避免跨消息
-        按全局图片顺序配对。
+        当 ``native_multimodal`` 启用时，先将 ``[图片(media_id)]`` 占位符
+        转换为内部标记，再按 media_id 在消息列表中精确查找对应图片并内联，
+        避免全局顺序匹配导致的多模态错位。
         """
         content_list: list[Content | LLMUsable]
         if native_multimodal and unread_msgs:
