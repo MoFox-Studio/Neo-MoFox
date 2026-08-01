@@ -1,9 +1,11 @@
 """Default Chatter 图片提取与多模态内容构建函数。
 
-多模态模式下（``native_multimodal=True``），框架 converter 跳过 VLM 识别，
-占位符格式为 ``[图片(media_id)]``，其中 ``media_id`` 是媒体数据的 SHA256 哈希。
-DFC 通过 ``media_id`` 在消息的 media 列表中精确定位图片 base64，避免全局
-顺序匹配导致的多模态错位。
+多模态模式下（``native_multimodal=True``），框架 converter 生成两种占位符格式：
+- ``[图片(media_id):description]`` — VLM 识别成功，带描述
+- ``[图片(media_id)]`` — VLM 跳过/早退，无描述
+
+其中 ``media_id`` 是媒体数据的 SHA256 哈希。DFC 通过 ``media_id`` 在消息的
+media 列表中精确定位图片 base64，避免全局顺序匹配导致的多模态错位。
 """
 
 from __future__ import annotations
@@ -16,8 +18,11 @@ from src.app.plugin_system.types import Content, Image, LLMUsable, Message, Text
 _IMAGE_PLACEHOLDER = "[图片]"
 _IMAGE_TOKEN_TEMPLATE = "[[DFC_IMAGE:{media_id}]]"
 _IMAGE_TOKEN_PATTERN = re.compile(r"\[\[DFC_IMAGE:([0-9a-fA-F]+)\]\]")
-# 匹配 [图片(media_id)] 格式占位符，media_id 为 64 字符 SHA256 哈希
-_MEDIA_ID_PLACEHOLDER_PATTERN = re.compile(r"\[图片\(([0-9a-fA-F]+)\)\]")
+# 匹配 [图片(media_id)] 或 [图片(media_id):description] 格式占位符，
+# media_id 为 64 字符 SHA256 哈希，description 为 VLM 识别后的图片描述
+_MEDIA_ID_PLACEHOLDER_PATTERN = re.compile(
+    r"\[图片\(([0-9a-fA-F]+)\)(?::([^]]*))?\]"
+)
 
 
 def get_image_media_list(msg: Message) -> list[dict[str, Any]]:
@@ -74,13 +79,18 @@ def tokenize_message_scoped_image_placeholders(
     text: str,
     messages: list[Message],
 ) -> str:
-    """将 ``[图片(media_id)]`` 占位符替换为内部标记 ``[[DFC_IMAGE:media_id]]``。
+    """将 ``[图片(media_id)]`` 或 ``[图片(media_id):description]`` 占位符
+    替换为内部标记 ``[[DFC_IMAGE:media_id]]``。
 
     通过 media_id 精确关联占位符与消息中的图片，不依赖全局顺序匹配，
     彻底消除历史消息占位符与未读消息占位符相互干扰导致的错位问题。
+    带描述的占位符（VLM 识别成功）和不带描述的占位符（VLM 跳过）统一处理，
+    描述信息在替换时丢弃——native_multimodal 模式下图片以 Image 形式
+    直接传给 LLM，无需文本描述。
 
     Args:
-        text: 包含 ``[图片(media_id)]`` 占位符的完整文本
+        text: 包含 ``[图片(media_id)]`` 或 ``[图片(media_id):description]``
+            占位符的完整文本
         messages: 未读消息列表（用于建立 media_id 到图片数据的索引）
 
     Returns:
@@ -89,7 +99,7 @@ def tokenize_message_scoped_image_placeholders(
     del messages  # media_id 已编码在占位符中，无需按消息顺序匹配
 
     def replace_placeholder(match: re.Match[str]) -> str:
-        """提取 media_id 并生成内部标记。"""
+        """提取 media_id 并生成内部标记，忽略可选的描述部分。"""
         media_id = match.group(1)
         return _IMAGE_TOKEN_TEMPLATE.format(media_id=media_id)
 

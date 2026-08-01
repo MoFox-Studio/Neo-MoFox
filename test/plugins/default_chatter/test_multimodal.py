@@ -242,3 +242,42 @@ class TestMediaIdImageBinding:
         assert [type(item).__name__ for item in content] == [
             "Text", "Image", "Text", "Text", "Image",
         ]
+
+    def test_placeholder_with_description_is_tokenized(self) -> None:
+        """带描述的占位符 [图片(media_id):description] 也能被正确 tokenize。"""
+        msg = _make_msg(
+            media=[{"type": "image", "data": _VALID_B64, "image_id": _HASH_A}],
+        )
+        text = f"张三[m1]：[图片({_HASH_A}):一只猫]"
+
+        scoped_text = tokenize_message_scoped_image_placeholders(text, [msg])
+        assert scoped_text == f"张三[m1]：[[DFC_IMAGE:{_HASH_A}]]"
+
+        content = inline_message_images_into_text(scoped_text, [msg])
+        assert [type(item).__name__ for item in content] == [
+            "Text", "Text", "Image",
+        ]
+
+    def test_mixed_described_and_undescribed_placeholders(self) -> None:
+        """混合带描述和不带描述的占位符，均按 media_id 精确匹配。"""
+        first = _make_msg(
+            message_id="m1",
+            media=[{"type": "image", "data": _VALID_B64, "image_id": _HASH_A}],
+        )
+        second = _make_msg(
+            message_id="m2",
+            media=[{"type": "image", "data": "aGVsbG8=", "image_id": _HASH_B}],
+        )
+        # 第一张带描述（VLM 识别成功），第二张不带描述（VLM 跳过）
+        text = f"张三[m1]：[图片({_HASH_A}):一只猫]\\n李四[m2]：[图片({_HASH_B})]"
+
+        scoped_text = tokenize_message_scoped_image_placeholders(text, [first, second])
+        assert scoped_text == (
+            f"张三[m1]：[[DFC_IMAGE:{_HASH_A}]]"
+            f"\\n李四[m2]：[[DFC_IMAGE:{_HASH_B}]]"
+        )
+
+        content = inline_message_images_into_text(scoped_text, [first, second])
+        assert [type(item).__name__ for item in content] == [
+            "Text", "Text", "Image", "Text", "Text", "Image",
+        ]
