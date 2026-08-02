@@ -16,11 +16,11 @@ from typing import Any
 from src.app.plugin_system.types import Content, Image, LLMUsable, Message, Text
 
 _IMAGE_TOKEN_TEMPLATE = "[[NDFC_IMAGE:{media_id}]]"
-_IMAGE_TOKEN_PATTERN = re.compile(r"\[\[NDFC_IMAGE:([0-9a-fA-F]+)\]\]")
+_IMAGE_TOKEN_PATTERN = re.compile(r"\[\[NDFC_IMAGE:([0-9a-fA-F]{64})\]\]")
 # 匹配 [图片(media_id)] 或 [图片(media_id):description] 格式占位符，
 # media_id 为 64 字符 SHA256 哈希，description 为 VLM 识别后的图片描述
 _MEDIA_ID_PLACEHOLDER_PATTERN = re.compile(
-    r"\[图片\(([0-9a-fA-F]+)\)(?::([^]]*))?\]"
+    r"\[图片\(([0-9a-fA-F]{64})\)(?::([^]]*))?\]"
 )
 
 

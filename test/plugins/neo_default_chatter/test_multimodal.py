@@ -290,3 +290,46 @@ class TestMediaIdImageBinding:
         assert [type(item).__name__ for item in content] == [
             "Text", "Text", "Image", "Text", "Text", "Image",
         ]
+
+
+class TestStrictMediaIdPattern:
+    """media_id 必须为 64 字符 SHA256 十六进制哈希。
+
+    非 64 位或非十六进制的内容不再被当作合法占位符，避免在含占位符或
+    格式异常的文本中误将非预期内容识别为合法标记。
+    """
+
+    def test_short_hex_media_id_not_tokenized(self) -> None:
+        """过短的十六进制 media_id 不被识别为图片占位符。"""
+        text = "[图片(abc123)]"
+        scoped_text = tokenize_message_scoped_image_placeholders(text, [])
+        assert scoped_text == text
+
+    def test_long_hex_media_id_not_tokenized(self) -> None:
+        """超过 64 位的十六进制 media_id 不被识别为图片占位符。"""
+        media_id = "a" * 65
+        text = f"[图片({media_id})]"
+        scoped_text = tokenize_message_scoped_image_placeholders(text, [])
+        assert scoped_text == text
+
+    def test_non_hex_media_id_not_tokenized(self) -> None:
+        """含非十六进制字符的 media_id 不被识别为图片占位符。"""
+        media_id = "a" * 63 + "g"  # 'g' 不是十六进制字符
+        text = f"[图片({media_id})]"
+        scoped_text = tokenize_message_scoped_image_placeholders(text, [])
+        assert scoped_text == text
+
+    def test_uppercase_hex_media_id_still_tokenized(self) -> None:
+        """大写 64 位十六进制 media_id 仍被识别（大小写不敏感）。"""
+        media_id = "A" * 64
+        text = f"[图片({media_id}):一只猫]"
+        scoped_text = tokenize_message_scoped_image_placeholders(text, [])
+        assert scoped_text == f"[[NDFC_IMAGE:{media_id}]]"
+
+    def test_short_media_id_token_not_inlined(self) -> None:
+        """非 64 位内部标记不被还原为 [图片(...)] 文本，保持原样。"""
+        text = "[[NDFC_IMAGE:abc123]]"
+        content = inline_message_images_into_text(text, [])
+        assert len(content) == 1
+        assert isinstance(content[0], Text)
+        assert content[0].text == text
