@@ -17,7 +17,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from plugins.neo_default_chatter.components.config import NeoChatterConfig
-from plugins.neo_default_chatter.utils.event_publisher import NdfcEvent, NdfcPublisher
+from plugins.neo_default_chatter.utils.event_publisher import (
+    NdfcEvent,
+    NdfcPublisher,
+    PreprocessDecision,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -596,3 +600,60 @@ async def test_session_transition_passes_all_fields(
     assert set(params.keys()) == {
         "stream_id", "from_phase", "to_phase", "turn_result",
     }
+
+
+async def test_preprocess_publishes_event_and_builds_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``NdfcPublisher.preprocess`` 应发布事件并构造最终决策。"""
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_publish(
+        event: Any,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert event == NdfcEvent.PREPROCESS
+        assert params is not None
+        captured.update(dict(params))
+        params["proceed"] = True
+        params["reason"] = "第三方策略放行"
+        params["mutations"] = "追加上下文"
+        params["force_stop_minutes"] = 2.5
+        return {"decision": None, "params": params}
+
+    monkeypatch.setattr(
+        "plugins.neo_default_chatter.utils.event_publisher.publish_event",
+        _fake_publish,
+    )
+
+    chat_stream = MagicMock()
+    cfg = _make_config()
+    logger = MagicMock()
+    result = await NdfcPublisher.preprocess(
+        chat_stream=chat_stream,
+        unreads=[],
+        history_text="hist",
+        config=cfg,
+        logger=logger,
+    )
+
+    assert isinstance(result, PreprocessDecision)
+    assert result.proceed is True
+    assert result.reason == "第三方策略放行"
+    assert result.extra == "追加上下文"
+    assert result.force_stop_minutes == 2.5
+    assert result.published is True
+    assert result.raw_params["chat_stream"] is chat_stream
+    assert captured["chat_stream"] is chat_stream
+    assert captured["history_text"] == "hist"
+    assert captured["config"] is cfg
+    assert captured["unreads"] == []
+    assert captured["proceed"] is False
+    assert captured["reason"] == ""
+    assert captured["mutations"] == ""
+    assert captured["force_stop_minutes"] is None
+    # published=True 且 proceed=True 时，仅以 debug 汇总，避免重复刷屏。
+    logger.debug.assert_any_call("[预处理] 放行：第三方策略放行")
+    logger.debug.assert_any_call("[预处理] extra+5字符")
+    logger.info.assert_not_called()

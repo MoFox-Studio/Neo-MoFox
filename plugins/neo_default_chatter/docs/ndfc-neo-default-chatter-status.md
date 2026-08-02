@@ -53,10 +53,12 @@ plugins/neo_default_chatter/
 │   ├── actions/
 │   │   ├── send_text.py           # SendTextAction（打字延迟 + reply_to + at）
 │   │   └── control.py             # PassAndWaitAction + StopConversationAction
-│   └── event_handlers/            # 【新增】设计文档未列出的子目录
-│       ├── probability_bypass.py  # ProbabilityBypassHandler (weight=100)
-│       ├── sub_agent_decision.py  # SubAgentDecisionHandler (weight=50)
-│       └── defaults/              # 【新增】16 个 Tier II 默认 handler (weight=0)
+│   └── event_handlers/
+│       └── defaults/              # 16 个 Tier II 默认 handler (weight=0) + 预处理门
+│           ├── preprocess/        # NDFC 自带预处理策略（weight>0，按权重顺序执行）
+│           │   ├── private_chat_bypass.py # PrivateChatBypassHandler (weight=2)
+│           │   ├── probability_bypass.py  # ProbabilityBypassHandler (weight=1)
+│           │   └── sub_agent_decision.py  # SubAgentDecisionHandler (weight=0)
 │           ├── _runtime_helper.py # 共享 NeoChatter 缓存（被 6 个委托 _runtime 的 handler 引用）
 │           ├── fetch_unreads.py
 │           ├── format_unread_line.py
@@ -127,8 +129,8 @@ WAIT_USER ──(收到未读/恢复事件)──▶ MODEL_TURN ──(LLM 响�
 | `SendTextAction` | Action | `send_text` | `components/actions/send_text.py` | §9.1 |
 | `PassAndWaitAction` | Action | `pass_and_wait` | `components/actions/control.py` | §9.2 |
 | `StopConversationAction` | Action | `stop_conversation` | `components/actions/control.py` | §8.1 / §9.3 |
-| `ProbabilityBypassHandler` | EventHandler | `probability_bypass` | `components/event_handlers/probability_bypass.py` | **设计未列出** |
-| `SubAgentDecisionHandler` | EventHandler | `sub_agent_decision` | `components/event_handlers/sub_agent_decision.py` | **设计未列出** |
+| `ProbabilityBypassHandler` | EventHandler | `probability_bypass` | `components/event_handlers/defaults/preprocess/probability_bypass.py` | 预处理概率直通 |
+| `SubAgentDecisionHandler` | EventHandler | `sub_agent_decision` | `components/event_handlers/defaults/preprocess/sub_agent_decision.py` | 预处理 LLM 判定 |
 | 16 个 Tier II 默认 handler | EventHandler | `<seam>_default` | `components/event_handlers/defaults/*.py` | ndfc-event-hooks.md §5 |
 
 > Config（`NeoChatterConfig`）通过 `plugin.configs = [NeoChatterConfig]` 注册，未在 `include` 里登记，符合规范。

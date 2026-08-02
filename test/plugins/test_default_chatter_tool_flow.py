@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from plugins.default_chatter import tool_flow as tool_flow_mod
+from plugins.default_chatter.utils import tool_flow as tool_flow_mod
 from src.kernel.llm import ROLE
 
 append_suspend_payload_if_action_only = cast(Any, tool_flow_mod.append_suspend_payload_if_action_only)
