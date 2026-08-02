@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Annotated, AsyncGenerator
+from typing import Annotated, AsyncGenerator, cast
 from uuid import uuid4
 
 from src.app.plugin_system.api.adapter_api import get_bot_info_by_platform
@@ -22,8 +22,6 @@ from ...components.config import NeoChatterConfig
 
 logger = get_logger("neo_default_chatter")
 
-_TYPING_DELAY_PER_CHAR_DEFAULT = 0.5
-_TYPING_DELAY_MAX_SECONDS_DEFAULT = 10.0
 _LAST_SEND_TIME_ATTR = "_neo_default_chatter_last_send_text_time"
 
 
@@ -51,13 +49,8 @@ class SendTextAction(BaseAction):
         return min(len(content) * per_char, max_seconds)
 
     def _read_typing_delay_config(self) -> tuple[float, float]:
-        """从插件配置读取打字延迟参数，配置缺失时回退默认值。"""
-        config = self.plugin.config
-        if not isinstance(config, NeoChatterConfig):
-            return (
-                _TYPING_DELAY_PER_CHAR_DEFAULT,
-                _TYPING_DELAY_MAX_SECONDS_DEFAULT,
-            )
+        """从插件配置读取打字延迟参数。"""
+        config = cast(NeoChatterConfig, self.plugin.config)
         return (
             float(config.plugin.typing_delay_per_char),
             float(config.plugin.typing_delay_max_seconds),
