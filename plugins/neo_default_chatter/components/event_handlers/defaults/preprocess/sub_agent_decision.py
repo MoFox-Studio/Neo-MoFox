@@ -114,14 +114,14 @@ class SubAgentDecisionHandler(BaseEventHandler):
             params["proceed"] = True
             params["reason"] = f"sub_agent 判定值得回复: {reason}"
             logger.info(
-                f"[SubAgent] 判定值得回复 stream={chat_stream.stream_id[:8]} "
+                f"[bright_cyan]子代理判定[/]: 值得回复 stream={chat_stream.stream_id[:8]} "
                 f"reason={reason}"
             )
         else:
             params["proceed"] = False
             params["reason"] = f"sub_agent 判定不值得回复: {reason}"
             logger.info(
-                f"[SubAgent] 判定不值得回复 stream={chat_stream.stream_id[:8]} "
+                f"[dim]子代理判定[/]: 不值得回复 stream={chat_stream.stream_id[:8]} "
                 f"reason={reason}"
             )
         return EventDecision.SUCCESS, params

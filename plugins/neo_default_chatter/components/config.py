@@ -186,15 +186,6 @@ class NeoChatterConfig(BaseConfig):
             tag="ai",
             hint="启用前请确认 actor 模型支持图片输入",
         )
-        image_placeholder_template: str = Field(
-            default="[图片-{idx}]",
-            description=(
-                "文本侧图片占位符模板，{idx} 为从 1 开始的序号，"
-                "与请求体里的 base64 图片一一对应，让模型区分每张图。"
-            ),
-            label="图片占位符模板",
-            tag="ai",
-        )
         enable_stop_direct_message_wake: bool = Field(
             default=False,
             description="是否允许私聊或 @Bot 消息按概率提前解除 stop 冷却。",
