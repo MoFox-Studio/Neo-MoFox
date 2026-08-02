@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import Annotated
+from typing import Annotated, AsyncGenerator
 from uuid import uuid4
 
 from src.app.plugin_system.api.adapter_api import get_bot_info_by_platform
@@ -53,11 +53,16 @@ class SendTextAction(BaseAction):
     def _read_typing_delay_config(self) -> tuple[float, float]:
         """从插件配置读取打字延迟参数，配置缺失时回退默认值。"""
         config = self.plugin.config
-        return (
-                float(config.plugin.typing_delay_per_char),
-                float(config.plugin.typing_delay_max_seconds),
+        if not isinstance(config, NeoChatterConfig):
+            return (
+                _TYPING_DELAY_PER_CHAR_DEFAULT,
+                _TYPING_DELAY_MAX_SECONDS_DEFAULT,
             )
-        
+        return (
+            float(config.plugin.typing_delay_per_char),
+            float(config.plugin.typing_delay_max_seconds),
+        )
+
     async def _sleep_for_typing_delay(self, content: str) -> None:
         """在连续发送文本时等待剩余的模拟打字时间。"""
         last_send_time = float(
@@ -88,8 +93,13 @@ class SendTextAction(BaseAction):
         content: Annotated[str, "要发送的文本内容，不用添加标记，只写你想说的话即可"],
         reply_to: Annotated[str | None, "可选，要引用回复的目标消息 ID"] = None,
         at: Annotated[str | None, "可选，不使用 reply_to 时指定要 @ 的对象（用户 ID）"] = None,
-    ) -> tuple[bool, str]:
-        """执行发送文本消息的逻辑。
+    ) -> AsyncGenerator[tuple[bool, str] | None, None]:
+        """执行发送文本消息的逻辑（异步生成器）。
+
+        写成异步生成器并在真正发送前 ``yield None`` 暂停到 ``"_READY"`` 状态：
+        统一调度器（``run_llm_usable_executions``）会按 tool call 顺序门控推进
+        异步生成器，从而把多个 ``send_text`` 的发送串行化，使打字延迟
+        （基于上次发送时间的差值）能真正逐条生效，而不是并发同时发出。
 
         Args:
             content: 要发送的文本内容，不用添加标记，只写你想说的话即可
@@ -111,16 +121,23 @@ class SendTextAction(BaseAction):
                 content = content[at_match.end():].lstrip()
 
         if not (content or at_prefix_hint):
-            return True, "内容为空，跳过发送"
+            yield True, "内容为空，跳过发送"
+            return
         if not content:
-            return True, "内容为空，跳过发送"
+            yield True, "内容为空，跳过发送"
+            return
 
         if reply_to:
-            return await self._send_with_reply(content, reply_to)
-        return await self._send_with_at(content, at or at_prefix_hint)
+            async for item in self._send_with_reply(content, reply_to):
+                yield item
+            return
+        async for item in self._send_with_at(content, at or at_prefix_hint):
+            yield item
 
-    async def _send_with_reply(self, content: str, reply_to: str) -> tuple[bool, str]:
-        """以引用回复方式发送。"""
+    async def _send_with_reply(
+        self, content: str, reply_to: str
+    ) -> AsyncGenerator[tuple[bool, str] | None, None]:
+        """以引用回复方式发送（异步生成器，发送前 yield None 进入顺序门控）。"""
         target_stream_id = self.chat_stream.stream_id
         platform = self.chat_stream.platform
         chat_type = self.chat_stream.chat_type
@@ -168,26 +185,33 @@ class SendTextAction(BaseAction):
         )
         message.extra.update(extra)
 
+        yield None
         await self._sleep_for_typing_delay(content)
         success = await send_message(message)
         if success:
             self._record_send_time()
-        return success, f"已发送消息:{content}"
+        yield success, f"已发送消息:{content}"
 
-    async def _send_with_at(self, content: str, at_hint: str | None) -> tuple[bool, str]:
-        """以 @ 用户或普通文本方式发送。"""
+    async def _send_with_at(
+        self, content: str, at_hint: str | None
+    ) -> AsyncGenerator[tuple[bool, str] | None, None]:
+        """以 @ 用户或普通文本方式发送（异步生成器，发送前 yield None 进入顺序门控）。"""
         at_hint = (at_hint or "").strip().lstrip("@").strip()
         if not at_hint:
+            yield None
             success = await self._send_plain_text(content)
-            return success, f"已发送消息:{content}"
+            yield success, f"已发送消息:{content}"
+            return
 
         target_stream_id = self.chat_stream.stream_id
         platform = self.chat_stream.platform
         chat_type = self.chat_stream.chat_type
 
         if chat_type != "group":
+            yield None
             success = await self._send_plain_text(content)
-            return success, f"已发送消息:{content}"
+            yield success, f"已发送消息:{content}"
+            return
 
         from src.core.utils.user_query_helper import get_user_query_helper
 
@@ -199,8 +223,10 @@ class SendTextAction(BaseAction):
 
         if not at_user_id:
             logger.info(f"无法定位 at 目标: {at_hint}，按普通文本发送")
+            yield None
             success = await self._send_plain_text(content)
-            return success, f"已发送消息:{content}"
+            yield success, f"已发送消息:{content}"
+            return
 
         target_group_id = None
         target_group_name = None
@@ -228,8 +254,9 @@ class SendTextAction(BaseAction):
         )
         message.extra.update(extra)
 
+        yield None
         await self._sleep_for_typing_delay(content)
         success = await send_message(message)
         if success:
             self._record_send_time()
-        return success, f"已发送消息:{content}"
+        yield success, f"已发送消息:{content}"
