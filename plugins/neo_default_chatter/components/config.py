@@ -135,7 +135,7 @@ class NeoChatterConfig(BaseConfig):
                 hint="关闭后，概率直通门未命中时也会直接放行给主 chatter。",
             )
             task_name: str = Field(
-                default="actor",
+                default="sub_actor",
                 description="判定请求使用的 LLM 任务名，对应 config/model.toml 中的 task key。",
                 label="判定任务名",
                 tag="ai",
