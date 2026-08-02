@@ -71,30 +71,33 @@ async def test_ingest_document_and_export_titles(
     monkeypatch.setattr(BookuMemoryService, "_embed_text", _fake_embed_text)
 
     service = BookuKnowledgeService(plugin=cast(Any, _DummyPlugin(config=cfg)))
-    result = await service.ingest_document(
-        title="测试知识",
-        content="第一段内容。\n\n第二段内容。\n\n第三段内容。",
-        source="unit_test",
-    )
+    try:
+        result = await service.ingest_document(
+            title="测试知识",
+            content="第一段内容。\n\n第二段内容。\n\n第三段内容。",
+            source="unit_test",
+        )
 
-    assert result["action"] == "booku_knowledge_ingest"
-    assert result["title"] == "《测试知识》"
-    assert result["chunk_count"] >= 1
-    assert result["collection"] == "booku_memory__knowledge__default"
+        assert result["action"] == "booku_knowledge_ingest"
+        assert result["title"] == "《测试知识》"
+        assert result["chunk_count"] >= 1
+        assert result["collection"] == "booku_memory__knowledge"
 
-    titles = await service.export_document_titles()
-    assert titles == ["《测试知识》"]
+        titles = await service.export_document_titles()
+        assert titles == ["《测试知识》"]
 
-    dumped = await service.dump_documents(limit=20)
-    assert dumped["action"] == "booku_knowledge_dump"
-    assert dumped["total"] == result["chunk_count"]
-    assert all(item["title"].startswith("《测试知识》-片段") for item in dumped["items"])
+        dumped = await service.dump_documents(limit=20)
+        assert dumped["action"] == "booku_knowledge_dump"
+        assert dumped["total"] == result["chunk_count"]
+        assert all(item["title"].startswith("《测试知识》-片段") for item in dumped["items"])
 
-    assert len(vector_db.calls) == 1
-    vector_call = vector_db.calls[0]
-    assert vector_call["collection_name"] == "booku_memory__knowledge__default"
-    assert len(vector_call["ids"]) == result["chunk_count"]
-    assert len(vector_call["embeddings"]) == result["chunk_count"]
+        assert len(vector_db.calls) == 1
+        vector_call = vector_db.calls[0]
+        assert vector_call["collection_name"] == "booku_memory__knowledge"
+        assert len(vector_call["ids"]) == result["chunk_count"]
+        assert len(vector_call["embeddings"]) == result["chunk_count"]
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio
@@ -123,4 +126,7 @@ async def test_remember_titles_json_returns_distinct_document_titles(
 
     monkeypatch.setattr(service, "_list_knowledge_records", _fake_list_knowledge_records)
 
-    assert await service.remember_titles_json() == '["《文档A》", "《文档B》"]'
+    try:
+        assert await service.remember_titles_json() == '["《文档A》", "《文档B》"]'
+    finally:
+        await service.close()

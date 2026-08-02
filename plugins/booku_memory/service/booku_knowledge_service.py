@@ -655,6 +655,15 @@ class BookuKnowledgeService(BaseService):
         config = self._get_config()
         return BookuMemoryMetadataRepository(db_path=config.storage.metadata_db_path)
 
+    async def close(self) -> None:
+        """关闭缓存的记忆服务连接。
+
+        在测试或插件卸载时调用，避免 aiosqlite 后台线程在事件循环关闭后回调。
+        """
+        if self._memory_service is not None:
+            await self._memory_service.close()
+            self._memory_service = None
+
     async def _list_knowledge_records(self, *, limit: int) -> list[Any]:
         """列出知识库记录。"""
         repo = self._create_repo()

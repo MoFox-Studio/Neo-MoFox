@@ -108,21 +108,24 @@ async def test_create_temporary_memo_refreshes_duplicate_content(tmp_path: Path)
     service = BookuMemoryService(plugin=cast(Any, _DummyPlugin(config=cfg)))
     reset_system_reminder_store()
 
-    first = await service.create_temporary_memo(
-        content="remember cross-group context",
-        stream_id="stream-a",
-    )
-    second = await service.create_temporary_memo(
-        content="remember cross-group context",
-        expire_hours=4.0,
-        stream_id="stream-a",
-    )
+    try:
+        first = await service.create_temporary_memo(
+            content="remember cross-group context",
+            stream_id="stream-a",
+        )
+        second = await service.create_temporary_memo(
+            content="remember cross-group context",
+            expire_hours=4.0,
+            stream_id="stream-a",
+        )
 
-    assert first["mode"] == "created"
-    assert second["mode"] == "refreshed"
-    assert first["memo_id"] == second["memo_id"]
-    assert second["active_memo_count"] == 1
-    assert float(second["expires_at"]) > float(first["expires_at"])
+        assert first["mode"] == "created"
+        assert second["mode"] == "refreshed"
+        assert first["memo_id"] == second["memo_id"]
+        assert second["active_memo_count"] == 1
+        assert float(second["expires_at"]) > float(first["expires_at"])
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio
@@ -134,19 +137,22 @@ async def test_create_temporary_memo_keeps_same_content_across_streams_separate(
     service = BookuMemoryService(plugin=cast(Any, _DummyPlugin(config=cfg)))
     reset_system_reminder_store()
 
-    first = await service.create_temporary_memo(
-        content="same content different stream",
-        stream_id="stream-a",
-    )
-    second = await service.create_temporary_memo(
-        content="same content different stream",
-        stream_id="stream-b",
-    )
+    try:
+        first = await service.create_temporary_memo(
+            content="same content different stream",
+            stream_id="stream-a",
+        )
+        second = await service.create_temporary_memo(
+            content="same content different stream",
+            stream_id="stream-b",
+        )
 
-    assert first["mode"] == "created"
-    assert second["mode"] == "created"
-    assert first["memo_id"] != second["memo_id"]
-    assert second["active_memo_count"] == 2
+        assert first["mode"] == "created"
+        assert second["mode"] == "created"
+        assert first["memo_id"] != second["memo_id"]
+        assert second["active_memo_count"] == 2
+    finally:
+        await service.close()
 
 
 @pytest.mark.asyncio

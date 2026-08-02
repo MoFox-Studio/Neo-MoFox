@@ -335,6 +335,16 @@ class BookuMemoryService(BaseService):
             self._repo_initialized = True
         return self._repo
 
+    async def close(self) -> None:
+        """关闭缓存的元数据仓储连接。
+
+        在测试或插件卸载时调用，避免 aiosqlite 后台线程在事件循环关闭后回调。
+        """
+        if self._repo is not None:
+            await self._repo.close()
+            self._repo = None
+            self._repo_initialized = False
+
     def _get_deduplicator(self) -> ResultDeduplicator:
         """获取结果去重器实例（懒加载单例）。
 
