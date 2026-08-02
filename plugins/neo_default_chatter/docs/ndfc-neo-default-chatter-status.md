@@ -141,7 +141,6 @@ WAIT_USER ──(收到未读/恢复事件)──▶ MODEL_TURN ──(LLM 响�
 | --- | --- | --- | --- |
 | `enabled` | `true` | **`false`** | 默认不启用，需用户显式开启 |
 | `native_multimodal` | `false` | `false` | 一致 |
-| `image_placeholder_template` | `[图片-{idx}]` | `[图片-{idx}]` | 一致 |
 | `enable_stop_direct_message_wake` | `false` | `false` | 一致 |
 | `stop_direct_message_wake_probability` | `0.5` | `0.5` | 一致 |
 | `reinforce_negative_behaviors` | `true` | `true` | 一致 |
@@ -295,5 +294,5 @@ async for result in session.execute():
 2. **同步更新设计文档**：把 §5.1 列出的偏差反向同步到 `nfc-neo-default-chatter-design.md`，或者把该文档标记为「历史设计稿」、本文档作为「事实现状」的唯一来源。
 3. **`enable_cooldown=false` 时的语义验证**：当前实现把 `Stop.time` 直接置 0，未在 chatter 层做特殊处理，需确认框架对 `Stop(time=0)` 的处理是否符合预期。
 4. **`actor_round` step_data 消费方落地**：`_consume_step_data` 已上报 `used_tools` 列表，但目前没有内置订阅者；可考虑提供一个默认的 `actor_round` EventHandler 供统计 / 审计使用。
-5. **设计 §7.4 占位符引用回写**：模型回复里写 `[图片-1]` 时由 `send_text` 自动改发原图片——本期未实现，作为后续扩展项跟踪。
+5. **设计 §7.4 占位符引用回写**：模型回复里写 `[图片(media_id)]` 时由 `send_text` 自动改发原图片——本期未实现，作为后续扩展项跟踪。
 6. **会话结束清理 ``_runtime_helper`` 缓存**：当前 :func:`drop_runtime` 已实现但未被 session 生命周期调用。可在 ``Stop / Failure`` 终态处调一次 ``drop_runtime(stream_id)``，避免长期运行时 ``_RUNTIME_CACHE`` 累积无用 ``NeoChatter`` 实例。

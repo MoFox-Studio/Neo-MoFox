@@ -1,7 +1,8 @@
 """``:inject_unread_payload`` 默认实现——内联图片或纯文本写入 USER payload。
 
-镜像 ``ConversationSession._append_user_payload`` 的原逻辑：原生多模态开启时
-从未读消息提取图片按占位符内联，否则把提示文本作为纯 :class:`Text` 追加。
+镜像 DFC 的多模态定位思路：原生多模态开启时，先把 ``[图片(media_id)]`` /
+``[图片(media_id):description]`` 占位符转换为内部标记，再按 media_id 在所有
+未读消息中精确查找对应图片并内联，避免全局顺序匹配导致的多模态错位。
 """
 
 from __future__ import annotations
@@ -13,13 +14,14 @@ from src.app.plugin_system.base import BaseEventHandler
 from src.app.plugin_system.types import Content, LLMPayload, LLMUsable, ROLE, Text
 from src.kernel.event import EventDecision
 
-from ....components.config import NeoChatterConfig
 from ....utils.event_publisher import NdfcEvent
-from ....utils.multimodal import extract_images_from_messages, inline_images_into_text
+from ....utils.multimodal import (
+    get_image_media_list,
+    inline_message_images_into_text,
+    tokenize_message_scoped_image_placeholders,
+)
 
 logger = get_logger("neo_default_chatter.defaults.inject_unread_payload")
-
-_DEFAULT_PLACEHOLDER = "[图片-{idx}]"
 
 
 class InjectUnreadPayloadDefaultHandler(BaseEventHandler):
@@ -47,15 +49,17 @@ class InjectUnreadPayloadDefaultHandler(BaseEventHandler):
             native_multimodal = bool(params.get("native_multimodal"))
 
             if native_multimodal and unread_msgs:
-                placeholder = self._read_placeholder()
-                images = extract_images_from_messages(unread_msgs)
-                content_list: list[Content | LLMUsable] = inline_images_into_text(
-                    formatted_text, images, placeholder
+                scoped_text = tokenize_message_scoped_image_placeholders(
+                    formatted_text, unread_msgs
                 )
-                if images:
-                    logger.debug(
-                        f"已内联 {len(images)} 张图片到占位符位置"
-                    )
+                content_list: list[Content | LLMUsable] = (
+                    inline_message_images_into_text(scoped_text, unread_msgs)
+                )
+                image_count = sum(
+                    len(get_image_media_list(msg)) for msg in unread_msgs
+                )
+                if image_count:
+                    logger.debug(f"已按 media_id 内联 {image_count} 张图片")
             else:
                 content_list = [Text(formatted_text)]
 
@@ -65,13 +69,6 @@ class InjectUnreadPayloadDefaultHandler(BaseEventHandler):
             # response.add_payload 失败会让 USER payload 缺失，LLM 请求会缺少本轮输入。
             # 让 EventBus 降级为 PASS，session 不会重复注入。
             return EventDecision.PASS, params
-
-    def _read_placeholder(self) -> str:
-        """从插件配置读取图片占位符模板，缺失时回退默认值。"""
-        config = getattr(self.plugin, "config", None)
-        if isinstance(config, NeoChatterConfig):
-            return str(config.plugin.image_placeholder_template)
-        return _DEFAULT_PLACEHOLDER
 
 
 __all__ = ["InjectUnreadPayloadDefaultHandler"]

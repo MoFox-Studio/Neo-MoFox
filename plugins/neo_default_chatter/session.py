@@ -498,7 +498,8 @@ class ConversationSession:
                             stop_result, chat_stream.chat_type
                         )
                         return
-                    logger.info(
+                    # 拦截主日志已在 event_publisher.preprocess 打印；此处补充「继续等待」细节，供调试
+                    logger.debug(
                         f"[预处理] 拦截但继续等待：{decision.reason or '未提供理由'}"
                     )
                     resume_event = yield Wait()

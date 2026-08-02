@@ -210,7 +210,6 @@ config/plugins/neo_default_chatter/config.toml
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | 是否启用 NFC |
 | `native_multimodal` | bool | `false` | 原生多模态：图片 base64 直接入 LLM 请求体，跳过媒体 API 描述；启用前需确认 actor 模型支持图片输入 |
-| `image_placeholder_template` | str | `"[图片-{idx}]"` | 文本侧图片占位符模板，`{idx}` 为从 1 开始的序号；与请求体里的 base64 一一对应 |
 | `enable_stop_direct_message_wake` | bool | `false` | 是否允许私聊或 @Bot 消息按概率提前解除 stop 冷却 |
 | `stop_direct_message_wake_probability` | float | `0.5` | 私聊或 @Bot 消息提前解除 stop 冷却的概率，范围 `0.0–1.0` |
 | `reinforce_negative_behaviors` | bool | `true` | 是否在每轮 user 提示词的 extra 板块中再次强调负面行为约束 |
@@ -239,7 +238,6 @@ config/plugins/neo_default_chatter/config.toml
 [plugin]
 enabled = true
 native_multimodal = true
-image_placeholder_template = "[图片-{idx}]"
 enable_stop_direct_message_wake = true
 stop_direct_message_wake_probability = 0.5
 reinforce_negative_behaviors = true
@@ -281,7 +279,6 @@ class NeoChatterConfig(BaseConfig):
 
         enabled: bool = Field(default=True, description="是否启用 Neo-Default-Chatter", tag="plugin")
         native_multimodal: bool = Field(default=False, description="原生多模态：图片 base64 直接进 LLM 请求体", tag="ai")
-        image_placeholder_template: str = Field(default="[图片-{idx}]", description="文本侧图片占位符模板", tag="ai")
         enable_stop_direct_message_wake: bool = Field(default=False, description="是否允许私聊或 @Bot 消息按概率提前解除 stop 冷却", tag="performance")
         stop_direct_message_wake_probability: float = Field(default=0.5, description="私聊或 @Bot 消息提前解除 stop 冷却的概率", tag="performance")
         reinforce_negative_behaviors: bool = Field(default=True, description="是否在每轮 user 提示词的 extra 板块中再次强调负面行为约束", tag="ai")
@@ -303,26 +300,28 @@ class NeoChatterConfig(BaseConfig):
 启用 `native_multimodal` 后，NFC **不调用** `media_api` 把图片转成文字描述，而是：
 
 1. 从未读消息中提取所有图片段。
-2. 给每张图分配一个**唯一占位符**，按 `image_placeholder_template` 渲染（默认 `[图片-1]`、`[图片-2]`…）。
-3. 在 user prompt 的文本里，把原来 `[图片]` 的位置替换成对应占位符，让模型从上下文知道「这张图属于哪条消息」。
-4. 在 LLM 请求体里，按占位符顺序追加 `Image` 内容段（base64），与文本侧一一对应。
+2. 框架 converter 已为每条消息生成带 `media_id`（图片 SHA256 哈希）的占位符：
+   - `[图片(media_id):description]` — VLM 识别成功，带描述
+   - `[图片(media_id)]` — VLM 跳过/早退，无描述
+3. 在 user prompt 的文本里，通过 `media_id` 精确关联每条消息的图片，把占位符替换为内部标记
+   `[[NDFC_IMAGE:media_id]]`，再按 `media_id` 在消息 media 列表中精确查找 base64 并内联。
+4. 在 LLM 请求体里，生成 Text/Image 交替排列的 content 列表——每张图物理插入到其所属
+   消息文本之后，模型既能看到文本标记，也能通过邻接关系理解图片归属。
 
 ### 7.2 占位符与请求体对应关系
 
 ```
-文本侧（USER payload 的 Text 部分）：
-  【10:23】小明 [msg_123]：你看这张图 [图片-1]
-  【10:24】小红 [msg_124]：还有这张 [图片-2]
-
-请求体侧（同一条 USER payload 的多模态 content list）：
-  [
-    Text("【10:23】小明 [msg_123]：你看这张图 [图片-1]\n【10:24】小红 [msg_124]：还有这张 [图片-2]"),
-    Image(base64=img1_b64),   # 对应 [图片-1]
-    Image(base64=img2_b64),   # 对应 [图片-2]
-  ]
+文本侧（USER payload 的 Text/Image 交替部分）：
+  Text("【10:23】小明 [msg_123]：你看这张图 [图片(abc123)]")
+  Image(base64=img1_b64)   # media_id == abc123
+  Text("【10:24】小红 [msg_124]：还有这张 [图片(def456)]")
+  Image(base64=img2_b64)   # media_id == def456
 ```
 
-实现上沿用 `default_chatter` 已验证的 `extract_images_from_messages` + `inline_images_into_text` 思路（见 `plugins/default_chatter/utils/multimodal.py`），但占位符模板从配置读取，便于不同模型适配（有的模型偏好 `<image_1>`、有的偏好 `[图片-1]`）。
+实现上沿用 `default_chatter` 已验证的 media_id 精确关联思路
+（`tokenize_message_scoped_image_placeholders` + `inline_message_images_into_text`，
+见 `plugins/default_chatter/utils/multimodal.py`），以图片哈希而非全局顺序定位，
+避免历史消息与未读消息占位符混合时的错位问题。
 
 ### 7.3 关闭时的行为
 
@@ -330,9 +329,14 @@ class NeoChatterConfig(BaseConfig):
 
 ### 7.4 实现注意
 
-- 占位符**全局唯一**：单次请求内 `idx` 从 1 递增；跨请求不复用（每次 `execute` 重新计数）。
-- 占位符**可被模型引用**：模型在回复里写 `[图片-1]` 时，`send_text` 等动作可识别并做相应处理（如改为发送原图片，留作后续扩展，本期不强制）。
-- 表情包图片**不进原生多模态**：与 `default_chatter` 一致，表情包仍走 VLM 识别以利用哈希缓存，避免每次都重算。
+- 占位符以 `media_id`（图片 SHA256 哈希）为唯一标识：`[图片(media_id)]` / `[图片(media_id):description]`。
+  `media_id` 是图片内容的哈希，天然全局唯一且跨请求稳定，不会因消息顺序变化而错位。
+- 描述在 tokenize 阶段**丢弃**：native_multimodal 下图片以 `Image(base64)` 形式直接传给 LLM，
+  文本侧不再需要 VLM 描述，避免冗余 token。
+- 找不到对应图片时（如历史消息占位符在本轮未读中无对应媒体）：还原为 `[图片(media_id)]` 纯文本，
+  不暴露内部标记给 LLM。
+- 表情包图片**不进原生多模态**：与 `default_chatter` 一致，表情包仍走 VLM 识别以利用哈希缓存，
+  避免每次都重算。
 
 ## 8. stop 冷却与直接唤醒
 
@@ -481,7 +485,7 @@ from ..components.service import NeoChatterService
 
 # session.py 内（如需 prompt/多模态工具）
 from .utils.preprocess import run_preprocess
-from .utils.multimodal import inline_images_into_text
+from .utils.multimodal import inline_message_images_into_text
 from .utils.prompt_builder import build_system_prompt, build_user_prompt
 ```
 

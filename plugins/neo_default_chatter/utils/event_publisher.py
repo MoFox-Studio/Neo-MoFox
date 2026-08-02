@@ -509,19 +509,19 @@ class NdfcPublisher:
         )
 
         if published and logger is not None:
+            # 各处理器（概率直通 / 兴趣值 / 子代理判定）已各自打印一行 INFO 决策日志，
+            # 这里仅作 debug 汇总，避免同一决策重复刷屏。
             if decision.proceed:
-                logger.info(
-                    f"[预处理] 放行：{decision.reason or '无理由'}"
-                    + (f" | extra+{len(decision.extra)}字符" if decision.extra else "")
+                logger.debug(f"[预处理] 放行：{decision.reason or '无理由'}")
+                if decision.extra:
+                    logger.debug(f"[预处理] extra+{len(decision.extra)}字符")
+            elif decision.force_stop_minutes is not None:
+                logger.debug(
+                    f"[预处理] 拦截：{decision.reason or '未提供理由'} "
+                    f"→ Stop({decision.force_stop_minutes}分钟)"
                 )
             else:
-                logger.info(
-                    f"[预处理] 拦截：{decision.reason or '未提供理由'}"
-                    + (
-                        f" → 进入 Stop({decision.force_stop_minutes}分钟)"
-                        if decision.force_stop_minutes is not None
-                        else " → 等待新消息"
-                    )
-                )
+                logger.debug(f"[预处理] 拦截：{decision.reason or '未提供理由'}")
+                logger.debug("[预处理] → 等待新消息")
 
         return decision

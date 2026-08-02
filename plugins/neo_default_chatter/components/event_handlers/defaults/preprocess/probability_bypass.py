@@ -87,14 +87,14 @@ class ProbabilityBypassHandler(BaseEventHandler):
             params["proceed"] = True
             params["reason"] = f"概率直通命中 (prob={probability:.2f}): {reason}"
             logger.info(
-                f"[概率直通] 概率直通命中 stream={chat_stream.stream_id[:8]} "
+                f"[green]概率直通[/]: 命中 stream={chat_stream.stream_id[:8]} "
                 f"prob={probability:.2f} ({reason})"
             )
             return EventDecision.STOP, params
 
         logger.debug(
-            f"[概率直通] 概率直通未命中 stream={chat_stream.stream_id[:8]} "
-            f"prob={probability:.2f} ({reason}) → 交由 sub_agent 判定"
+            f"[yellow]概率直通[/]: 未命中 stream={chat_stream.stream_id[:8]} "
+            f"prob={probability:.2f} ({reason}) → 交由后续判定"
         )
         return EventDecision.SUCCESS, params
 
