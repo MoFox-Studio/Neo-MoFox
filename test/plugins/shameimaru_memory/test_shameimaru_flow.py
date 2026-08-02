@@ -39,6 +39,7 @@ def _message(
     text: str = "你好",
     time: float = 1000.0,
     group_id: str = "",
+    sender_role: str | None = None,
 ) -> Message:
     return Message(
         message_id=f"msg-{sender_id}-{time}",
@@ -46,6 +47,7 @@ def _message(
         processed_plain_text=text,
         sender_id=sender_id,
         sender_name=sender_name,
+        sender_role=sender_role,
         platform=platform,
         chat_type="group",
         group_id=group_id,
@@ -84,7 +86,6 @@ async def test_summary_job_generates_and_persists(tmp_path: Path, mocker) -> Non
             group_id="10001",
         ),
     ]
-    mocker.patch.object(job_module.stream_api, "get_stream_ids_from_db", AsyncMock(return_value=["s1"]))
     mocker.patch.object(job_module.stream_api, "get_stream_messages", AsyncMock(return_value=messages))
     mocker.patch.object(job_module.stream_api, "get_stream", AsyncMock(return_value=None))
     mocker.patch.object(job_module.stream_api, "get_stream_info", AsyncMock(return_value=None))
@@ -95,30 +96,31 @@ async def test_summary_job_generates_and_persists(tmp_path: Path, mocker) -> Non
     )
     plugin = _plugin(tmp_path)
 
+    # 摘要任务只处理摘要文件中已注册的群聊，需先注册
+    store = job_module._build_store(plugin)
+    await store.ensure_group("s1")
+
     stats = await job_module.run_summary_job(plugin)
     assert stats["summarized"] == 1
 
-    store = ShameimaruMemoryStore(plugin.config)
     group = await store.get_group_summary("s1")
     assert len(group.entries) == 1
     entry = group.entries[0]
     assert "爬山" in entry.content
     assert {ref.person_id for ref in entry.participants} == {"qq:1", "qq:2"}
-    assert group.last_summarized_at == 110.0
     # platform/group_id 应从消息兜底补全
     assert group.platform == "qq"
     assert group.group_id == "10001"
 
-    # 二次运行：无新消息，跳过
+    # 二次运行：无水位逻辑，同一消息窗口会被再次摘要并追加条目
     stats2 = await job_module.run_summary_job(plugin)
-    assert stats2["summarized"] == 0
-    assert (await store.get_group_summary("s1")).entries[0].content == entry.content
+    assert stats2["summarized"] == 1
+    assert len((await store.get_group_summary("s1")).entries) == 2
 
 
 @pytest.mark.asyncio
 async def test_summary_job_fills_platform_from_stream_info(tmp_path: Path, mocker) -> None:
     """DB 流记录提供 platform/group_id/group_name。"""
-    mocker.patch.object(job_module.stream_api, "get_stream_ids_from_db", AsyncMock(return_value=["s1"]))
     mocker.patch.object(
         job_module.stream_api,
         "get_stream_messages",
@@ -139,11 +141,12 @@ async def test_summary_job_fills_platform_from_stream_info(tmp_path: Path, mocke
     )
     mocker.patch.object(job_module, "call_sub_agent", AsyncMock(return_value="群里的寒暄。"))
     plugin = _plugin(tmp_path)
+    store = job_module._build_store(plugin)
+    await store.ensure_group("s1")
 
     stats = await job_module.run_summary_job(plugin)
     assert stats["summarized"] == 1
 
-    store = ShameimaruMemoryStore(plugin.config)
     group = await store.get_group_summary("s1")
     assert group.platform == "qq"
     assert group.group_id == "20002"
@@ -152,7 +155,6 @@ async def test_summary_job_fills_platform_from_stream_info(tmp_path: Path, mocke
 
 @pytest.mark.asyncio
 async def test_summary_job_skips_no_meaningful_content(tmp_path: Path, mocker) -> None:
-    mocker.patch.object(job_module.stream_api, "get_stream_ids_from_db", AsyncMock(return_value=["s1"]))
     mocker.patch.object(
         job_module.stream_api,
         "get_stream_messages",
@@ -161,10 +163,11 @@ async def test_summary_job_skips_no_meaningful_content(tmp_path: Path, mocker) -
     mocker.patch.object(job_module.stream_api, "get_stream", AsyncMock(return_value=None))
     mocker.patch.object(job_module, "call_sub_agent", AsyncMock(return_value="NO_MEANINGFUL_CONTENT"))
     plugin = _plugin(tmp_path)
+    store = job_module._build_store(plugin)
+    await store.ensure_group("s1")
 
     stats = await job_module.run_summary_job(plugin)
     assert stats["summarized"] == 0
-    store = ShameimaruMemoryStore(plugin.config)
     assert len((await store.get_group_summary("s1")).entries) == 0
 
 
@@ -178,7 +181,7 @@ async def test_news_job_creates_entries_and_updates_personas_on_eviction(
     tmp_path: Path, mocker
 ) -> None:
     plugin = _plugin(tmp_path)
-    store = ShameimaruMemoryStore(plugin.config)
+    store = job_module._build_store(plugin)
     await store.append_summary(
         "s1",
         SummaryEntry(
@@ -220,9 +223,10 @@ async def test_news_job_creates_entries_and_updates_personas_on_eviction(
     assert len(news) == 1
     assert news[0].title == "小红学画画"
 
-    # 参与处理的摘要已被立即清空（保留群元信息与 last_summarized_at）
+    # 参与处理的摘要被标记为废弃而非删除（保留供 Dreaming 读取）
     group = await fresh_store.get_group_summary("s1")
-    assert group.entries == []
+    assert len(group.entries) == 1
+    assert group.entries[0].deprecated is True
     assert group.group_name == "群A"
 
     # 被淘汰的新闻涉及小梅，人物背景应更新
@@ -242,12 +246,133 @@ async def test_news_job_skips_without_summaries(tmp_path: Path, mocker) -> None:
 
 
 @pytest.mark.asyncio
+async def test_news_job_keeps_summaries_on_sub_agent_failure(tmp_path: Path, mocker) -> None:
+    """子 agent 调用失败（空响应）时，已生成的摘要必须保留，等待下轮重试。"""
+    plugin = _plugin(tmp_path)
+    store = job_module._build_store(plugin)
+    await store.append_summary(
+        "s1",
+        SummaryEntry(
+            timestamp=1.0,
+            content="小梅宣布下个月要搬家了。",
+            participants=[PersonRef(person_id="qq:1", name="小梅")],
+        ),
+        group_name="群A",
+        max_entries=50,
+    )
+
+    mocker.patch.object(job_module, "call_sub_agent", AsyncMock(return_value=""))
+
+    stats = await job_module.run_news_job(plugin)
+    assert stats["processed"] == 1
+    assert stats["created"] == 0
+
+    # 摘要未被清空、未被标记废弃：下轮仍可重试消费
+    group = await store.get_group_summary("s1")
+    assert len(group.entries) == 1
+    assert group.entries[0].content == "小梅宣布下个月要搬家了。"
+    assert group.entries[0].deprecated is False
+
+
+@pytest.mark.asyncio
+async def test_news_job_does_not_reconsume_deprecated_summaries(
+    tmp_path: Path, mocker
+) -> None:
+    """已废弃的摘要不会被新闻层再次消费，防止生成重复新闻。"""
+    plugin = _plugin(tmp_path)
+    store = job_module._build_store(plugin)
+    await store.append_summary(
+        "s1",
+        SummaryEntry(
+            timestamp=1.0,
+            content="小梅宣布下个月要搬家了。",
+            participants=[PersonRef(person_id="qq:1", name="小梅")],
+        ),
+        group_name="群A",
+        max_entries=50,
+    )
+
+    call_log: list[str] = []
+
+    async def _fake_sub_agent(**kwargs: Any) -> str:
+        call_log.append(kwargs["request_name"])
+        if kwargs["request_name"] == "shameimaru_news":
+            return (
+                '[{"title": "小梅要搬家", "content": "小梅下月搬家。", '
+                '"participants": [{"person_id": "qq:1", "name": "小梅"}]}]'
+            )
+        return ""
+
+    mocker.patch.object(job_module, "call_sub_agent", side_effect=_fake_sub_agent)
+
+    # 第一轮：消费未废弃摘要并标记废弃
+    stats1 = await job_module.run_news_job(plugin)
+    assert stats1["created"] == 1
+    assert (await store.get_group_summary("s1")).entries[0].deprecated is True
+
+    # 第二轮：无未废弃摘要，不再调用子 agent、不再生成新闻
+    call_log.clear()
+    stats2 = await job_module.run_news_job(plugin)
+    assert stats2["processed"] == 0
+    assert stats2["created"] == 0
+    assert call_log == []
+    assert len(await store.get_news()) == 1
+
+
+@pytest.mark.asyncio
+async def test_dream_job_reads_deprecated_summaries(tmp_path: Path, mocker) -> None:
+    """知识层（Dreaming）会读取已被新闻层标记为废弃的摘要，了解群聊主题。"""
+    plugin = _plugin(tmp_path)
+    store = job_module._build_store(plugin)
+    await store.append_summary(
+        "s1",
+        SummaryEntry(
+            timestamp=1.0,
+            content="群里经常聊到小梅与小紫的关系。",
+            participants=[PersonRef(person_id="qq:1", name="小梅")],
+        ),
+        group_name="群A",
+        max_entries=50,
+    )
+
+    # 新闻层消费后，摘要被标记为废弃
+    async def _news_agent(**kwargs: Any) -> str:
+        if kwargs["request_name"] == "shameimaru_news":
+            return (
+                '[{"title": "小梅与小紫是姐妹", "content": "小梅和小紫是亲姐妹。", '
+                '"participants": [{"person_id": "qq:1", "name": "小梅"}]}]'
+            )
+        return ""
+
+    mocker.patch.object(job_module, "call_sub_agent", side_effect=_news_agent)
+    stats = await job_module.run_news_job(plugin)
+    assert stats["created"] == 1
+    assert (await store.get_group_summary("s1")).entries[0].deprecated is True
+
+    # Dreaming 子 agent 的输入应包含已废弃摘要的内容
+    captured_user: dict[str, str] = {}
+
+    async def _dream_agent(**kwargs: Any) -> str:
+        if kwargs["request_name"] == "shameimaru_dream":
+            captured_user["user"] = kwargs["user"]
+        return "[]"
+
+    fake_service = MagicMock()
+    fake_service.create = AsyncMock(return_value={"action": "create", "mode": "created"})
+    mocker.patch.object(job_module.service_api, "get_service", return_value=fake_service)
+    mocker.patch.object(job_module, "call_sub_agent", side_effect=_dream_agent)
+
+    await job_module.run_dream_job(plugin)
+    assert "小梅与小紫的关系" in captured_user["user"]
+
+
+@pytest.mark.asyncio
 async def test_news_job_resolves_participants_from_summary_roster(
     tmp_path: Path, mocker
 ) -> None:
     """子 agent 返回的 person_id 必须映射回摘要清单中的真实 ID，编造的丢弃。"""
     plugin = _plugin(tmp_path)
-    store = ShameimaruMemoryStore(plugin.config)
+    store = job_module._build_store(plugin)
     await store.append_summary(
         "s1",
         SummaryEntry(
@@ -288,15 +413,17 @@ async def test_news_job_resolves_participants_from_summary_roster(
     assert [ref.person_id for ref in news[0].participants] == ["qq:1"]
     assert news[0].participants[0].name == "小梅"
 
-    # 参与处理的摘要已清空
-    assert (await fresh_store.get_group_summary("s1")).entries == []
+    # 参与处理的摘要被标记为废弃（保留供 Dreaming 读取）
+    group = await fresh_store.get_group_summary("s1")
+    assert len(group.entries) == 1
+    assert group.entries[0].deprecated is True
 
 
 @pytest.mark.asyncio
 async def test_news_job_processes_each_group_separately(tmp_path: Path, mocker) -> None:
     """每个群聊单独分组调用一次子 agent，互不混合，摘要分别清空。"""
     plugin = _plugin(tmp_path)
-    store = ShameimaruMemoryStore(plugin.config)
+    store = job_module._build_store(plugin)
     await store.append_summary(
         "s1",
         SummaryEntry(
@@ -344,10 +471,10 @@ async def test_news_job_processes_each_group_separately(tmp_path: Path, mocker) 
     assert "小红开始学画画" not in group_a_user
     assert "A 群：小梅宣布搬家" not in group_b_user
 
-    # 两个群的摘要均已清空
+    # 两个群的摘要均被标记为废弃（保留供 Dreaming 读取）
     fresh_store = ShameimaruMemoryStore(plugin.config)
-    assert (await fresh_store.get_group_summary("s1")).entries == []
-    assert (await fresh_store.get_group_summary("s2")).entries == []
+    assert (await fresh_store.get_group_summary("s1")).entries[0].deprecated is True
+    assert (await fresh_store.get_group_summary("s2")).entries[0].deprecated is True
 
 
 # ----------------------------------------------------------------------
@@ -358,7 +485,7 @@ async def test_news_job_processes_each_group_separately(tmp_path: Path, mocker) 
 @pytest.mark.asyncio
 async def test_dream_job_knowledge_izes_news(tmp_path: Path, mocker) -> None:
     plugin = _plugin(tmp_path)
-    store = ShameimaruMemoryStore(plugin.config)
+    store = job_module._build_store(plugin)
     await store.append_summary(
         "s1",
         SummaryEntry(
@@ -405,6 +532,9 @@ async def test_dream_job_knowledge_izes_news(tmp_path: Path, mocker) -> None:
             lambda **kwargs: (
                 '[{"news_id": "n1", "title": "小梅与小紫为亲姐妹", '
                 '"content": "小梅与小紫是亲姐妹，小紫大三岁。", '
+                '"knowledge_type": "身份关系"}, '
+                '{"news_id": "n1", "title": "小梅与小紫为亲姐妹", '
+                '"content": "小梅与小紫是亲姐妹，小紫大三岁。", '
                 '"knowledge_type": "身份关系"}]'
                 if kwargs["request_name"] == "shameimaru_dream"
                 else "小梅与小紫是亲姐妹，两人关系密切。"
@@ -415,6 +545,9 @@ async def test_dream_job_knowledge_izes_news(tmp_path: Path, mocker) -> None:
     stats = await job_module.run_dream_job(plugin)
     assert stats["created"] == 1
     assert stats["deleted"] == 1
+
+    # 同一响应中重复的 news_id 只写入一次知识库
+    assert fake_service.create.await_count == 1
 
     # 使用全新 store 实例（模拟重启）验证落盘结果：n1 被知识化删除，n2 保留
     fresh_store = ShameimaruMemoryStore(plugin.config)
@@ -449,7 +582,7 @@ async def test_dream_job_skips_when_service_missing(tmp_path: Path, mocker) -> N
 
 def _build_prompt_params(stream_id: str = "stream-abc", extra: str = "") -> dict[str, Any]:
     return {
-        "name": "default_chatter_user_prompt",
+        "name": "neo_default_chatter_user_prompt",
         "template": "{extra}",
         "values": {"extra": extra, "stream_id": stream_id},
         "policies": {},
@@ -520,6 +653,55 @@ async def test_injector_writes_stream_reminders_for_unread_persons(
         "stream:stream-abc:actor", names=["相关人物背景"]
     )[0]
     assert item.insert_type.value == "dynamic"
+
+
+@pytest.mark.asyncio
+async def test_injector_collects_persons_from_flushed_history(tmp_path: Path, mocker) -> None:
+    """neo_default_chatter 时序：unread 已 flush 进 history 时，仍能收集当前对话人物。"""
+    from src.core.prompt import get_system_reminder_store, reset_system_reminder_store
+
+    reset_system_reminder_store()
+    plugin = _plugin(tmp_path)
+    store = job_module._build_store(plugin)
+    await store.append_news(
+        NewsEntry(
+            id="n1",
+            timestamp=1.0,
+            title="小梅新换了工作",
+            content="小梅从广告公司跳槽到了游戏公司。",
+            participants=[PersonRef(person_id="qq:1", name="小梅")],
+        ),
+        max_entries=50,
+    )
+
+    # 模拟 neo 的 flush 时序：unread 为空，当前对话消息已在 history 中
+    fake_stream = MagicMock()
+    fake_stream.chat_type = "group"
+    fake_stream.context.unread_messages = []
+    fake_stream.context.history_messages = [
+        _message(sender_id="9", sender_name="路人", text="很久以前", time=1.0),
+        _message(
+            sender_id="bot-id", sender_name="小狐狸", text="我在",
+            time=2.0, sender_role="bot",
+        ),
+        _message(sender_id="1", sender_name="小梅", text="在吗", time=3.0),
+    ]
+    mocker.patch.object(
+        __import__("plugins.shameimaru_memory.event_handler", fromlist=["stream_api"]).stream_api,
+        "get_stream",
+        AsyncMock(return_value=fake_stream),
+    )
+
+    handler = ShameimaruPromptInjector(plugin=plugin)
+    params = _build_prompt_params()
+    decision, out = await handler.execute(EventType.ON_PROMPT_BUILD, params)
+    assert decision is EventDecision.SUCCESS
+
+    # 历史中的小梅被识别，bot 消息被排除
+    news_reminder = get_system_reminder_store().get(
+        "stream:stream-abc:actor", names=["相关新闻"]
+    )
+    assert "小梅新换了工作" in news_reminder
 
 
 @pytest.mark.asyncio

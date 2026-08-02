@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -40,6 +41,7 @@ def _message(
     text: str = "你好",
     chat_type: str = "group",
     time: float = 1000.0,
+    sender_role: str | None = None,
 ) -> Message:
     return Message(
         message_id=f"msg-{sender_id}-{text}",
@@ -47,6 +49,7 @@ def _message(
         processed_plain_text=text,
         sender_id=sender_id,
         sender_name=sender_name,
+        sender_role=sender_role,
         platform=platform,
         chat_type=chat_type,
     )
@@ -155,6 +158,34 @@ async def test_store_summary_cap_eviction(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_deprecated_summaries_evicted_by_cap(tmp_path: Path) -> None:
+    """废弃摘要不占用新摘要名额：总数超上限时按时间淘汰最旧（含废弃）。"""
+    store = ShameimaruMemoryStore(_config(tmp_path))
+    for index in range(3):
+        await store.append_summary(
+            "s1",
+            SummaryEntry(timestamp=float(index), content=f"摘要{index}"),
+            max_entries=3,
+        )
+
+    # 全部标记为废弃
+    await store.deprecate_group_summaries("s1")
+    group = await store.get_group_summary("s1")
+    assert len(group.entries) == 3
+    assert all(entry.deprecated for entry in group.entries)
+
+    # 追加新摘要触发淘汰：最旧的废弃摘要（摘要0）被删除，新摘要保留
+    await store.append_summary(
+        "s1",
+        SummaryEntry(timestamp=3.0, content="新摘要"),
+        max_entries=3,
+    )
+    group = await store.get_group_summary("s1")
+    assert [entry.content for entry in group.entries] == ["摘要1", "摘要2", "新摘要"]
+    assert group.entries[-1].deprecated is False
+
+
+@pytest.mark.asyncio
 async def test_store_news_eviction_returns_evicted(tmp_path: Path) -> None:
     store = ShameimaruMemoryStore(_config(tmp_path))
     first = NewsEntry(id="n0", timestamp=0.0, title="t0", content="c0")
@@ -191,6 +222,86 @@ async def test_store_remove_news_and_personas(tmp_path: Path) -> None:
     await store.set_persona("qq:1", "他喜欢摄影。")
     assert await store.get_persona("qq:1") == "他喜欢摄影。"
     assert await store.get_all_personas() == {"qq:1": "他喜欢摄影。"}
+
+
+@pytest.mark.asyncio
+async def test_store_ensure_group_registers_once(tmp_path: Path) -> None:
+    store = ShameimaruMemoryStore(_config(tmp_path))
+    assert await store.ensure_group("s1", platform="qq", group_name="测试群") is True
+    assert await store.ensure_group("s1", platform="qq", group_name="测试群") is False
+
+    group = await store.get_group_summary("s1")
+    assert group.stream_id == "s1"
+    assert group.platform == "qq"
+    assert group.group_name == "测试群"
+    assert group.entries == []
+
+    # 新实例（模拟重启）仍能读取注册记录
+    store2 = ShameimaruMemoryStore(_config(tmp_path))
+    assert await store2.ensure_group("s1") is False
+
+
+@pytest.mark.asyncio
+async def test_store_news_eviction_by_timestamp_not_file_order(tmp_path: Path) -> None:
+    """淘汰按时间升序取最旧，与文件写入顺序无关。"""
+    store = ShameimaruMemoryStore(_config(tmp_path))
+    # 故意先写时间较新的，再写时间较旧的
+    await store.append_news(
+        NewsEntry(id="new", timestamp=99.0, title="t-new", content="c-new"),
+        max_entries=2,
+    )
+    await store.append_news(
+        NewsEntry(id="old", timestamp=1.0, title="t-old", content="c-old"),
+        max_entries=2,
+    )
+    # 第三条触发淘汰：应淘汰时间最旧的 old，而不是文件顺序靠前的 new
+    evicted = await store.append_news(
+        NewsEntry(id="mid", timestamp=50.0, title="t-mid", content="c-mid"),
+        max_entries=2,
+    )
+    assert [entry.id for entry in evicted] == ["old"]
+    assert [entry.id for entry in await store.get_news()] == ["mid", "new"]
+
+
+@pytest.mark.asyncio
+async def test_store_watcher_reloads_memory_on_external_change(tmp_path: Path) -> None:
+    """外部修改本地文件后，内存缓存应自动同步为文件内容。"""
+    import json
+
+    store = ShameimaruMemoryStore(_config(tmp_path), watch_interval=0.05)
+    await store.set_persona("qq:1", "旧文本")
+    assert await store.get_persona("qq:1") == "旧文本"
+
+    await store.start_watcher()
+    try:
+        # 外部进程直接改写文件（模拟 WebUI/其它进程修改）
+        store.personas_path.write_text(
+            json.dumps({"version": 1, "persons": {"qq:1": "外部改写"}}),
+            encoding="utf-8",
+        )
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if (await store.get_persona("qq:1")) == "外部改写":
+                break
+        assert await store.get_persona("qq:1") == "外部改写"
+    finally:
+        await store.close()
+
+
+async def test_collect_participants_skips_bot_messages() -> None:
+    """bot 自身消息不应进入参与人物清单。"""
+    from plugins.shameimaru_memory.job import _collect_participants
+
+    messages = [
+        _message(sender_id="1", sender_name="小明", text="你好"),
+        _message(
+            sender_id="bot-id", sender_name="小狐狸", text="我在",
+            sender_role="bot",
+        ),
+        _message(sender_id="2", sender_name="小红", text="在吗"),
+    ]
+    refs = _collect_participants(messages)
+    assert [ref.person_id for ref in refs] == ["qq:1", "qq:2"]
 
 
 # ----------------------------------------------------------------------
