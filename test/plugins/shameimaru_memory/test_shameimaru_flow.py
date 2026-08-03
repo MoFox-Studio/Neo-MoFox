@@ -197,6 +197,7 @@ async def test_news_job_creates_entries_and_updates_personas_on_eviction(
     # 第一次调用（新闻整理）：返回两条新闻
     # 第二次调用（人物背景更新）：返回人物背景文本
     call_log: list[str] = []
+    persona_users: list[str] = []
 
     async def _fake_sub_agent(**kwargs: Any) -> str:
         call_log.append(kwargs["request_name"])
@@ -209,6 +210,7 @@ async def test_news_job_creates_entries_and_updates_personas_on_eviction(
                 '"content": "小红开始学画画，报了周末班。", '
                 '"participants": [{"person_id": "qq:2", "name": "小红"}]}]'
             )
+        persona_users.append(kwargs["user"])
         return "小梅因工作调动即将搬家，她目前从事文案工作。"
 
     mocker.patch.object(job_module, "call_sub_agent", side_effect=_fake_sub_agent)
@@ -216,6 +218,10 @@ async def test_news_job_creates_entries_and_updates_personas_on_eviction(
     stats = await job_module.run_news_job(plugin)
     assert stats["created"] == 2
     assert stats["evicted"] == 1
+
+    # 人物层提示词应携带被维护人物的名字，避免 LLM 误把内容主角当作该人物
+    assert persona_users, "人物层应发起更新调用"
+    assert "人物名字：小梅" in persona_users[0]
 
     # 使用全新 store 实例（模拟重启）验证落盘结果
     fresh_store = ShameimaruMemoryStore(plugin.config)

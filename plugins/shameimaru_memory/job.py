@@ -73,9 +73,14 @@ def _collect_participants(messages: list[Message]) -> list[PersonRef]:
 
 
 def _build_chat_flow(messages: list[Message]) -> str:
-    """将消息列表格式化为聊天记录文本（按时间先后）。"""
+    """将消息列表格式化为聊天记录文本（按时间先后）。
+
+    排除 bot 自身消息，避免摘要/新闻以 Bot 为主角，导致人物信息被错误归属。
+    """
     lines: list[str] = []
     for message in messages:
+        if str(getattr(message, "sender_role", "") or "").lower() == "bot":
+            continue
         text = str(getattr(message, "processed_plain_text", "") or "").strip()
         if not text:
             continue
@@ -594,14 +599,25 @@ async def _update_persona(
 
     将旧文本与新内容一并交给 LLM 融合生成新文本（而非机械拼接），
     写入前按 ``max_text_length`` 硬截断兜底。
+    提示词中携带该人物在新闻中的名字，并强调以该人物本人为视角，
+    防止 LLM 把内容主角（如 Bot）误当作被维护的人物。
     """
     current = await store.get_persona(person_id)
+    person_name = ""
+    for entry in sorted(entries, key=lambda item: item.timestamp):
+        for ref in entry.participants:
+            if ref.person_id == person_id and ref.name:
+                person_name = ref.name
+                break
+        if person_name:
+            break
     content_lines = [
         f"- {entry.title}: {entry.content}"
         for entry in sorted(entries, key=lambda item: item.timestamp)
     ]
     user = (
         f"人物 ID：{person_id}\n"
+        f"人物名字：{person_name or '（未知，请根据新内容推断）'}\n"
         f"现有背景信息：\n{current or '（无）'}\n\n"
         f"关于该人物的新内容：\n" + "\n".join(content_lines)
     )

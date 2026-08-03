@@ -304,6 +304,24 @@ async def test_collect_participants_skips_bot_messages() -> None:
     assert [ref.person_id for ref in refs] == ["qq:1", "qq:2"]
 
 
+def test_build_chat_flow_excludes_bot_messages() -> None:
+    """摘要聊天记录应排除 bot 自身消息，防止记忆以 Bot 为主角。"""
+    from plugins.shameimaru_memory.job import _build_chat_flow
+
+    messages = [
+        _message(sender_id="1", sender_name="小明", text="今天去爬山了"),
+        _message(
+            sender_id="bot-id", sender_name="小狐狸", text="下次一起啊",
+            sender_role="bot",
+        ),
+        _message(sender_id="2", sender_name="小红", text="好啊"),
+    ]
+    flow = _build_chat_flow(messages)
+    assert "小明: 今天去爬山了" in flow
+    assert "小红: 好啊" in flow
+    assert "下次一起啊" not in flow
+
+
 # ----------------------------------------------------------------------
 # sub_agent 解析
 # ----------------------------------------------------------------------
