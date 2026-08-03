@@ -218,6 +218,11 @@ class MessageHandler:
                 return await self._handle_json_message(segment)
             case RealMessageType.file:
                 return await self._handle_file_message(segment)
+            case RealMessageType.flashtransfer:
+                return {
+                    "type": RealMessageType.flashtransfer,
+                    "data": segment.get("data", {}),
+                }
 
             case _:
                 logger.warning(f"Unsupported segment type: {seg_type}")
@@ -930,4 +935,3 @@ class MessageHandler:
         except Exception as e:
             logger.error(f"处理联系人名片分享消息时发生未知错误: {e}")
             return None
-

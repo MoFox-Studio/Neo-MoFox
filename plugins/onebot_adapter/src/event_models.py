@@ -61,6 +61,7 @@ class RealMessageType:  # 实际消息分类
     node = "node"  # 转发消息节点
     json = "json"  # json消息
     file = "file"  # 文件
+    flashtransfer = "flashtransfer"  # QQ 闪传
 
 
 class MessageSentType:
