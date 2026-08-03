@@ -16,7 +16,7 @@ class CoreConfig(ConfigBase):
     定义 Core 层的所有配置节。Core 层包含对话管理、用户管理、消息处理等业务逻辑。
     """
     
-    @config_section("bot")
+    @config_section("bot", title="Bot 基础配置", tag="general")
     class BotSection(SectionBase):
         """Bot 配置节
 
@@ -196,7 +196,7 @@ class CoreConfig(ConfigBase):
 
     bot: BotSection = Field(default_factory=BotSection)
 
-    @config_section("chat")
+    @config_section("chat", title="聊天配置", tag="ai")
     class ChatSection(SectionBase):
         """聊天配置节
 
@@ -296,7 +296,7 @@ class CoreConfig(ConfigBase):
 
     chat: ChatSection = Field(default_factory=ChatSection)
 
-    @config_section("llm")
+    @config_section("llm", title="LLM 配置", tag="ai")
     class LLMSection(SectionBase):
         """LLM 配置节。
 
@@ -315,7 +315,7 @@ class CoreConfig(ConfigBase):
 
     llm: LLMSection = Field(default_factory=LLMSection)
 
-    @config_section("llm_stats")
+    @config_section("llm_stats", title="LLM 统计", tag="performance")
     class LLMStatsSection(SectionBase):
         """LLM 统计配置节。"""
 
@@ -353,7 +353,7 @@ class CoreConfig(ConfigBase):
 
     llm_stats: LLMStatsSection = Field(default_factory=LLMStatsSection)
 
-    @config_section("telemetry")
+    @config_section("telemetry", title="遥测配置", tag="debug")
     class TelemetrySection(SectionBase):
         """通用遥测配置节。"""
 
@@ -450,7 +450,7 @@ class CoreConfig(ConfigBase):
 
     telemetry: TelemetrySection = Field(default_factory=TelemetrySection)
 
-    @config_section("cloud_telemetry")
+    @config_section("cloud_telemetry", title="云端遥测", tag="network")
     class CloudTelemetrySection(SectionBase):
         """云端遥测客户端配置节。"""
 
@@ -504,7 +504,7 @@ class CoreConfig(ConfigBase):
 
     cloud_telemetry: CloudTelemetrySection = Field(default_factory=CloudTelemetrySection)
 
-    @config_section("personality")
+    @config_section("personality", title="人格配置", tag="user")
     class PersonalitySection(SectionBase):
         """Bot 人格配置节
 
@@ -607,7 +607,7 @@ class CoreConfig(ConfigBase):
 
     personality: PersonalitySection = Field(default_factory=PersonalitySection)
 
-    @config_section("database")
+    @config_section("database", title="数据库配置", tag="database")
     class DatabaseSection(SectionBase):
         """数据库配置节
 
@@ -775,7 +775,7 @@ class CoreConfig(ConfigBase):
 
     database: DatabaseSection = Field(default_factory=DatabaseSection)
 
-    @config_section("permissions")
+    @config_section("permissions", title="权限配置", tag="security")
     class PermissionSection(SectionBase):
         """权限配置节
 
@@ -886,7 +886,7 @@ class CoreConfig(ConfigBase):
 
     permissions: PermissionSection = Field(default_factory=PermissionSection)
 
-    @config_section("http_router")
+    @config_section("http_router", title="HTTP 路由", tag="network")
     class HttpRouterSection(SectionBase):
         """HTTP 路由配置节
 
@@ -936,7 +936,7 @@ class CoreConfig(ConfigBase):
         )
     http_router: HttpRouterSection = Field(default_factory=HttpRouterSection)
 
-    @config_section("advanced")
+    @config_section("advanced", title="高级配置", tag="advanced")
     class AdvancedSection(SectionBase):
         """高级配置节
 
@@ -980,7 +980,7 @@ class CoreConfig(ConfigBase):
 
     advanced: AdvancedSection = Field(default_factory=AdvancedSection)
 
-    @config_section("plugin_deps")
+    @config_section("plugin_deps", title="插件依赖安装", tag="plugin")
     class PluginDepsSection(SectionBase):
         """插件依赖自动安装配置节
 
@@ -1015,7 +1015,7 @@ class CoreConfig(ConfigBase):
 
     plugin_deps: PluginDepsSection = Field(default_factory=PluginDepsSection)
 
-    @config_section("plugin_market")
+    @config_section("plugin_market", title="插件市场", tag="plugin")
     class PluginMarketSection(SectionBase):
         """插件市场接入配置节。"""
 
