@@ -7,9 +7,16 @@ from contextlib import contextmanager
 from io import StringIO
 from typing import Iterator
 
+import pytest
 from rich.console import Console
 
 from src.app.runtime import console_input
+
+# POSIX 专用（termios）逻辑在 Windows 上退化为无操作，
+# 这些测试通过 monkeypatch termios 实现，无法在 Windows 上运行。
+_skip_on_windows = pytest.mark.skipif(
+    sys.platform == "win32", reason="termios 仅在 POSIX 平台可用"
+)
 
 
 def test_patch_output_preserves_command_results_and_logs(monkeypatch) -> None:
@@ -60,6 +67,7 @@ def test_patch_output_preserves_command_results_and_logs(monkeypatch) -> None:
     assert sys.stderr is original_stderr
 
 
+@_skip_on_windows
 def test_save_and_restore_terminal_round_trip_on_tty(monkeypatch) -> None:
     """TTY 环境下 save_terminal_state 应快照属性，restore_terminal 应写回。"""
     import termios
@@ -100,6 +108,7 @@ def test_save_terminal_state_noop_on_non_tty(monkeypatch) -> None:
     assert console_input._saved_term_attrs[0] is None
 
 
+@_skip_on_windows
 def test_restore_terminal_noop_without_snapshot(monkeypatch) -> None:
     """没有快照时 restore_terminal 应为无操作，不应调用 tcsetattr。"""
     import termios
@@ -113,6 +122,7 @@ def test_restore_terminal_noop_without_snapshot(monkeypatch) -> None:
     assert tcsetattr_calls == []
 
 
+@_skip_on_windows
 def test_restore_terminal_swallows_errors(monkeypatch) -> None:
     """restore_terminal 在 tcsetattr 抛错时应静默，避免退出路径二次异常。"""
     import termios
@@ -131,6 +141,7 @@ def test_restore_terminal_swallows_errors(monkeypatch) -> None:
     assert console_input._saved_term_attrs[0] is None
 
 
+@_skip_on_windows
 def test_restore_terminal_is_idempotent(monkeypatch) -> None:
     """多次调用 restore_terminal 应安全：第二次因快照已清空而成为无操作。"""
     import termios
@@ -163,3 +174,21 @@ def test_maybe_register_atexit_is_idempotent(monkeypatch) -> None:
         console_input._atexit_registered = original
     assert len(calls) == 1
     assert calls[0] is console_input.restore_terminal
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows 平台 termios 退化为无操作"
+)
+def test_save_and_restore_terminal_noop_on_windows(monkeypatch) -> None:
+    """Windows 上 termios 为 None，save/restore 应为无操作且不抛异常。"""
+    monkeypatch.setattr(console_input.os, "isatty", lambda fd: True)
+    console_input._saved_term_attrs[0] = None
+
+    console_input.save_terminal_state()
+    assert console_input._saved_term_attrs[0] is None
+
+    # 即便误置快照，restore_terminal 也应因 termios is None 直接返回
+    console_input._saved_term_attrs[0] = ["attrs"]
+    console_input.restore_terminal()
+    # 未恢复但应清空快照，避免后续重复尝试
+    assert console_input._saved_term_attrs[0] is None

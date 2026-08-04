@@ -5,12 +5,19 @@ from __future__ import annotations
 import atexit
 import os
 import sys
-import termios
 from contextlib import contextmanager
 from typing import Any, Iterator
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
+
+# termios 仅在 POSIX 平台可用；Windows 上无等价 stdlib 抽象，
+# save_terminal_state/restore_terminal 退化为无操作，
+# 终端恢复完全依赖 prompt_toolkit 自身的 Windows 恢复逻辑。
+if sys.platform != "win32":
+    import termios
+else:  # pragma: no cover - Windows 平台分支
+    termios = None  # type: ignore[assignment]
 
 # 记录进入 raw 模式前的终端属性快照，用于强制退出路径同步恢复。
 # 仅在是 TTY 时启用；非 TTY（管道/重定向）保持 None，跳过恢复逻辑。
@@ -50,10 +57,10 @@ def _is_tty(fd: int | None = None) -> bool:
 def save_terminal_state() -> None:
     """快照当前终端属性，供强制退出路径同步恢复使用。
 
-    在非 TTY 环境下为无操作。重复调用会覆盖快照。
+    在非 TTY 环境、Windows 平台下为无操作。重复调用会覆盖快照。
     """
     _maybe_register_atexit()
-    if not _is_tty():
+    if termios is None or not _is_tty():
         _saved_term_attrs[0] = None
         return
     try:
@@ -66,11 +73,11 @@ def restore_terminal() -> None:
     """同步恢复终端到 raw 模式之前的属性。
 
     设计为可在任意线程、任意退出路径（含强制退出、atexit、KeyboardInterrupt）
-    上幂等调用：没有快照或非 TTY 时直接返回；恢复失败时静默忽略，
-    避免在异常退出路径上再抛异常掩盖原始错误。
+    上幂等调用：没有快照、非 TTY 或 Windows 平台时直接返回；恢复失败时
+    静默忽略，避免在异常退出路径上再抛异常掩盖原始错误。
     """
     attrs = _saved_term_attrs[0]
-    if attrs is None:
+    if attrs is None or termios is None:
         return
     if not _is_tty():
         return
