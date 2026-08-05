@@ -776,7 +776,8 @@ class MessageConverter:
                         video_texts.append((i, None))
 
             # 将识别结果应用回 text_parts，替换占位符
-            # 占位符格式：[图片(media_id):description] / [表情包(media_id):description] / [语音(media_id):text]
+            # 占位符格式：[图片(media_id):description] / [表情包(media_id):description]
+            #           / [语音(media_id):text] / [视频(media_id):text]
             # media_id 为该媒体的 sha256 哈希，AI 可据此精确引用历史媒体
             new_text_parts = []
             media_idx = 0
@@ -803,7 +804,7 @@ class MessageConverter:
                     if voice_idx < len(voice_texts):
                         voice_i, text = voice_texts[voice_idx]
                         voice_idx += 1
-                        media_id = result.media[voice_i].get("image_id", "")
+                        media_id = result.media[voice_i].get("voice_id", "")
                         if media_id and text:
                             new_text_parts.append(f"[语音({media_id}):{text}]")
                         elif media_id:
@@ -816,9 +817,14 @@ class MessageConverter:
                         new_text_parts.append(part)
                 elif part == "[视频]":
                     if video_idx < len(video_texts):
-                        _, text = video_texts[video_idx]
+                        video_i, text = video_texts[video_idx]
                         video_idx += 1
-                        if text:
+                        media_id = result.media[video_i].get("video_id", "")
+                        if media_id and text:
+                            new_text_parts.append(f"[视频({media_id}):{text}]")
+                        elif media_id:
+                            new_text_parts.append(f"[视频({media_id})]")
+                        elif text:
                             new_text_parts.append(f"[视频:{text}]")
                         else:
                             new_text_parts.append(part)
