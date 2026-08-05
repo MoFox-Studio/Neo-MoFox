@@ -227,10 +227,61 @@ async def get_media_info(media_hash: str) -> dict[str, Any] | None:
     return None
 
 
+async def save_description_cache(
+    media_hash: str,
+    media_type: str,
+    description: str,
+) -> None:
+    """保存媒体识别描述到对应的描述缓存表。
+
+    按 ``media_type`` 路由到 MediaManager：
+    - ``image`` / ``emoji`` → ``ImageDescriptions`` 表（type 为动态值）
+    - ``voice`` → ``VoiceDescriptions`` 表
+    - ``video`` → ``VideoDescriptions`` 表
+
+    描述写入缓存后，converter 收媒体时会以 ``use_cache=True`` 查该缓存，
+    命中后描述直接替换占位符进入上下文（如 ``[视频(media_id):描述]``）。
+
+    Args:
+        media_hash: 媒体哈希值（作为描述缓存的主键）
+        media_type: 媒体类型，``image`` / ``emoji`` / ``voice`` / ``video``
+        description: 媒体识别描述文本
+
+    Returns:
+        None
+    """
+    _validate_non_empty(media_hash, "media_hash")
+    _validate_media_type(media_type)
+    _validate_non_empty(description, "description")
+    await _get_media_manager().save_description_cache(
+        media_hash=media_hash,
+        media_type=media_type,
+        description=description,
+    )
+
+
+async def get_media_file(media_hash: str) -> str | None:
+    """根据媒体哈希读取落盘文件的 base64 内容。
+
+    先经 MediaManager 查询媒体记录的 path，再按该路径读文件并编码为
+    base64。文件不存在或读取失败（例如已被清理）时返回 None。
+
+    Args:
+        media_hash: 媒体哈希值（image_id / voice_id / video_id）
+
+    Returns:
+        base64 编码的文件内容；文件不存在或读取失败时返回 None
+    """
+    _validate_non_empty(media_hash, "media_hash")
+    return await _get_media_manager().get_media_file(media_hash)
+
+
 __all__ = [
     "API_VERSION",
     "recognize_media",
     "recognize_batch",
     "save_media_info",
     "get_media_info",
+    "save_description_cache",
+    "get_media_file",
 ]

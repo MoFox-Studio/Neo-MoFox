@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from src.core.managers.media_manager.cache import MediaCache
@@ -278,6 +280,70 @@ class MediaManager:
             视频信息字典，不存在返回 None
         """
         return await self._repository.get_video_info(video_hash)
+
+    async def save_description_cache(
+        self,
+        media_hash: str,
+        media_type: str,
+        description: str,
+    ) -> None:
+        """保存媒体识别描述到对应的描述缓存表。
+
+        按 ``media_type`` 路由到缓存组件：
+        - ``image`` / ``emoji`` → ``ImageDescriptions`` 表（type 为动态值）
+        - ``voice`` → ``VoiceDescriptions`` 表
+        - ``video`` → ``VideoDescriptions`` 表
+
+        converter 收媒体时会以 ``use_cache=True`` 查该缓存，命中后描述会
+        直接替换占位符进入上下文（如 ``[视频(media_id):描述]``）。
+
+        Args:
+            media_hash: 媒体哈希值（作为描述缓存的主键）
+            media_type: 媒体类型（image/emoji/voice/video）
+            description: 媒体识别描述文本
+        """
+        if media_type == "voice":
+            await self._cache.save_voice_description_cache(media_hash, description)
+        elif media_type == "video":
+            await self._cache.save_video_description_cache(media_hash, description)
+        else:
+            await self._cache.save_description_cache(
+                media_hash, media_type, description
+            )
+
+    async def get_media_file(self, media_hash: str) -> str | None:
+        """根据媒体哈希读取落盘文件的 base64 内容。
+
+        先经 ``get_media_info`` 获取媒体记录的 path，再按该路径读文件并
+        编码为 base64。文件不存在或读取失败时返回 None（例如已被清理）。
+
+        Args:
+            media_hash: 媒体哈希值（image_id/voice_id/video_id）
+
+        Returns:
+            base64 编码的文件内容；文件不存在或读取失败时返回 None
+        """
+        info = await self._repository.get_media_info(media_hash)
+        if not info:
+            return None
+        file_path = info.get("path")
+        if not file_path:
+            return None
+
+        try:
+            from src.core.utils.base64_helper import base64_encode_bytes
+
+            path = Path(file_path)
+            if not path.is_absolute():
+                path = Path(".") / path
+            if not path.exists():
+                logger.debug(f"媒体文件不存在: {path}")
+                return None
+            data = await asyncio.to_thread(path.read_bytes)
+            return base64_encode_bytes(data)
+        except Exception as e:
+            logger.warning(f"读取媒体文件失败: {file_path}: {e}")
+            return None
 
     # ──────────────────────────────────────────
     # 静态 API：哈希计算（供外部模块直接调用）
