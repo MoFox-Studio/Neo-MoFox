@@ -231,6 +231,16 @@ class CoreConfig(ConfigBase):
             placeholder="请描述这个表情包的内容...",
             hint="留空使用默认提示词",
         )
+        video_recognition_prompt: str = Field(
+            default="",
+            description="自定义视频识别提示词，留空则使用内置默认提示词",
+            label="视频识别提示词",
+            tag="ai",
+            input_type="textarea",
+            rows=3,
+            placeholder="请描述这个视频的内容...",
+            hint="留空使用默认提示词",
+        )
 
         # ========== 媒体缓存清理配置（pending 目录）==========
         media_cache_cleanup_enabled: bool = Field(

@@ -4,10 +4,11 @@
 双向转换。核心解析逻辑在 ``_parse_segments`` 中实现递归的 ``SegPayload`` 展开。
 
 设计原则：
-- 适配器传入的媒体数据（图片、语音等）**已经是 base64 编码**，转换器不做下载。
+- 适配器传入的媒体数据（图片、语音、视频等）**已经是 base64 编码**，转换器不做下载。
 - 嵌套 seglist 最多递归 3 层，超出以占位符替代。
 - 单个段解析失败不影响整体，用占位符保留位置。
-- 图片和表情包会通过 VLM 识别转换为文字描述。
+- 图片和表情包会通过 VLM 识别转换为文字描述；语音通过 ASR；视频通过事件链
+  交给第三方插件识别（无内置引擎，识别失败保留占位符）。
 """
 
 from __future__ import annotations
@@ -32,8 +33,12 @@ logger = get_logger("message_converter")
 _MAX_NESTING_DEPTH: int = 5
 
 
-def _compute_media_image_id(data: str) -> str | None:
-    """计算二进制媒体的 image_id（SHA256 哈希），用于按哈希回查 Images 表。
+def _compute_media_hash(data: str) -> str | None:
+    """计算二进制媒体的哈希（SHA256），作为各媒体表的主键回查依据。
+
+    - image/emoji → Images.image_id
+    - voice       → Voices.voice_id
+    - video       → Videos.video_id
 
     与 MediaManager 识别流程使用相同算法。失败时返回 None，不影响消息解析。
     """
@@ -42,7 +47,7 @@ def _compute_media_image_id(data: str) -> str | None:
 
         return MediaManager.compute_media_hash(data)
     except Exception:
-        logger.warning("媒体 image_id 计算失败", exc_info=True)
+        logger.warning("媒体哈希计算失败", exc_info=True)
         return None
 
 
@@ -168,8 +173,9 @@ class MessageConverter:
         else:
             segments = list(raw_segments)
 
-        # 递归解析段列表；二进制媒体项的 image_id 在各段处理器中直接注入，
-        # 保证 VLM 跳过/早退时 image_id 仍存在，便于后续按哈希回查 Images 表。
+        # 递归解析段列表；二进制媒体项的媒体 ID（image_id/voice_id/video_id）
+        # 在各段处理器中直接注入，保证 VLM/ASR 跳过/早退时 ID 仍存在，
+        # 便于后续按哈希回查 Images/Voices/Videos 表。
         result = self._parse_segments(segments, depth=0)
 
         # 如果解析过程中发现有媒体资源，则后续需要考虑是否运行视觉语言模型识别
@@ -428,6 +434,8 @@ class MessageConverter:
                 self._handle_emoji(data, result)
             case "voice":
                 self._handle_voice(data, result)
+            case "video":
+                self._handle_video(data, result)
             case "file":
                 self._handle_file(data, result)
             case "at":
@@ -464,7 +472,7 @@ class MessageConverter:
             result.media.append({
                 "type": "image",
                 "data": normalized_data,
-                "image_id": _compute_media_image_id(normalized_data),
+                "image_id": _compute_media_hash(normalized_data),
             })
             
             # 添加图片描述占位符，等待异步识别
@@ -485,7 +493,7 @@ class MessageConverter:
             result.media.append({
                 "type": "emoji",
                 "data": normalized_data,
-                "image_id": _compute_media_image_id(normalized_data),
+                "image_id": _compute_media_hash(normalized_data),
             })
             
             # 表情包同样支持 VLM 识别，文本先占位
@@ -502,9 +510,48 @@ class MessageConverter:
             result.media.append({
                 "type": "voice",
                 "data": normalized_data,
-                "image_id": _compute_media_image_id(normalized_data),
+                "voice_id": _compute_media_hash(normalized_data),
             })
             result.text_parts.append("[语音]")
+
+    @staticmethod
+    def _handle_video(data: Any, result: _ParseResult) -> None:
+        """处理视频段（适配器已编码为 base64）。
+
+        data 兼容两种形态：
+        - 字符串：直接的 base64 数据
+        - 字典：OneBot 适配器产出的 ``{"base64": ..., "filename": ..., "size_mb": ...}``，
+          从中提取 ``base64`` 字段参与识别，其余元数据保留在 media 项中。
+        """
+        if isinstance(data, str):
+            normalized_data = normalize_base64(data)
+            result.media.append({
+                "type": "video",
+                "data": normalized_data,
+                "video_id": _compute_media_hash(normalized_data),
+            })
+            result.text_parts.append("[视频]")
+        elif isinstance(data, dict):
+            base64_data = data.get("base64", "")
+            if isinstance(base64_data, str) and base64_data:
+                normalized_data = normalize_base64(base64_data)
+                media_item: dict[str, Any] = {
+                    "type": "video",
+                    "data": normalized_data,
+                    "video_id": _compute_media_hash(normalized_data),
+                }
+                # 保留适配器提供的元数据（filename/size_mb/url 等）
+                for key in ("filename", "size_mb", "url"):
+                    if key in data:
+                        media_item[key] = data[key]
+                result.media.append(media_item)
+                result.text_parts.append("[视频]")
+            else:
+                result.media.append({"type": "video", "data": data})
+                result.text_parts.append("[视频]")
+        elif isinstance(data, list):
+            result.media.append({"type": "video", "data": str(data)})
+            result.text_parts.append("[视频]")
 
     @staticmethod
     def _handle_file(data: Any, result: _ParseResult) -> None:
@@ -648,6 +695,7 @@ class MessageConverter:
             "image": MessageType.IMAGE,
             "emoji": MessageType.EMOJI,
             "voice": MessageType.VOICE,
+            "video": MessageType.VIDEO,
             "file": MessageType.FILE,
         }
 
@@ -658,12 +706,13 @@ class MessageConverter:
         result: _ParseResult,
         stream_id: str,
     ) -> _ParseResult:
-        """使用 MediaManager 识别媒体内容（图片、表情包、语音）并更新文本描述。
+        """使用 MediaManager 识别媒体内容（图片、表情包、语音、视频）并更新文本描述。
 
         遍历所有媒体项，对每个项调用 ``recognize_media``：
-        - image/emoji/voice：统一查询 ``should_skip_recognition``，
+        - image/emoji/voice/video：统一查询 ``should_skip_recognition``，
           skip=True 时仅落盘+入库，不识别；
-          否则走事件链（默认引擎处理器 + 第三方可拦截）
+          否则走事件链（默认引擎处理器 + 第三方可拦截）。
+          视频无内置引擎，识别结果可能始终为 None（保留占位符）。
 
         Args:
             result: 解析结果
@@ -679,6 +728,7 @@ class MessageConverter:
 
             descriptions: list[tuple[int, str | None]] = []
             voice_texts: list[tuple[int, str | None]] = []
+            video_texts: list[tuple[int, str | None]] = []
 
             for i, media in enumerate(result.media):
                 media_type = media["type"]
@@ -706,12 +756,24 @@ class MessageConverter:
                             skip_recognition=skip,
                         )
                         voice_texts.append((i, text))
+                    elif media_type == "video":
+                        skip = manager.should_skip_recognition(stream_id, "video")
+                        text = await manager.recognize_media(
+                            data,
+                            "video",
+                            use_cache=True,
+                            stream_id=stream_id,
+                            skip_recognition=skip,
+                        )
+                        video_texts.append((i, text))
                 except Exception as e:
                     logger.warning(f"识别{media_type}失败: {e}")
                     if media_type in ("image", "emoji"):
                         descriptions.append((i, None))
                     elif media_type == "voice":
                         voice_texts.append((i, None))
+                    elif media_type == "video":
+                        video_texts.append((i, None))
 
             # 将识别结果应用回 text_parts，替换占位符
             # 占位符格式：[图片(media_id):description] / [表情包(media_id):description] / [语音(media_id):text]
@@ -719,6 +781,7 @@ class MessageConverter:
             new_text_parts = []
             media_idx = 0
             voice_idx = 0
+            video_idx = 0
             for part in result.text_parts:
                 if part in ("[图片]", "[表情包]"):
                     if media_idx < len(descriptions):
@@ -747,6 +810,16 @@ class MessageConverter:
                             new_text_parts.append(f"[语音({media_id})]")
                         elif text:
                             new_text_parts.append(f"[语音:{text}]")
+                        else:
+                            new_text_parts.append(part)
+                    else:
+                        new_text_parts.append(part)
+                elif part == "[视频]":
+                    if video_idx < len(video_texts):
+                        _, text = video_texts[video_idx]
+                        video_idx += 1
+                        if text:
+                            new_text_parts.append(f"[视频:{text}]")
                         else:
                             new_text_parts.append(part)
                     else:
