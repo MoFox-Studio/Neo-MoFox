@@ -9,7 +9,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, _patch, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -38,7 +39,7 @@ def _make_envelope(segments: list[dict]) -> dict:
     }
 
 
-def _patch_manager(recognize_return: str | None = None) -> tuple[MagicMock, _patch]:
+def _patch_manager(recognize_return: str | None = None) -> tuple[MagicMock, Any]:
     """构造打桩的 media manager，并 patch converter 内的 get_media_manager。"""
     mock_manager = MagicMock()
     mock_manager.should_skip_recognition.return_value = False
@@ -87,7 +88,7 @@ async def test_video_placeholder_with_description() -> None:
 
 @pytest.mark.asyncio
 async def test_video_placeholder_without_video_id_keeps_legacy() -> None:
-    """media 项缺失 video_id 时，回退为旧的 ``[视频:desc]`` / ``[视频]`` 形态。"""
+    """media 项缺失 video_id 时，回退为旧的 ``[视频]`` 形态。"""
     _, patch_get = _patch_manager(recognize_return=None)
     with patch_get:
         converter = MessageConverter()
@@ -97,6 +98,19 @@ async def test_video_placeholder_without_video_id_keeps_legacy() -> None:
         result.text_parts.append("[视频]")
         updated = await converter._recognize_media_with_manager(result, "stream_1")
     assert updated.plain_text == "[视频]"
+
+
+@pytest.mark.asyncio
+async def test_video_placeholder_without_video_id_keeps_legacy_description() -> None:
+    """media 项缺失 video_id 但有识别文本时，回退为旧的 ``[视频:desc]`` 形态。"""
+    _, patch_get = _patch_manager(recognize_return="一段风景视频")
+    with patch_get:
+        converter = MessageConverter()
+        result = _ParseResult()
+        result.media.append({"type": "video", "data": _RAW_BASE64})
+        result.text_parts.append("[视频]")
+        updated = await converter._recognize_media_with_manager(result, "stream_1")
+    assert updated.plain_text == "[视频:一段风景视频]"
 
 
 @pytest.mark.asyncio
