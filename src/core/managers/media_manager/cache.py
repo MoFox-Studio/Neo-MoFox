@@ -60,31 +60,49 @@ class MediaCache:
         media_type: str,
         description: str,
     ) -> None:
-        """保存描述到缓存。
+        """保存媒体识别描述到对应的描述缓存表。
+
+        按 ``media_type`` 路由写入三张镜像结构表：
+        - ``image`` / ``emoji`` → ``ImageDescriptions``（type 为动态值）
+        - ``voice`` → ``VoiceDescriptions``（type 固定为 voice）
+        - ``video`` → ``VideoDescriptions``（type 固定为 video）
+
+        三张表结构镜像一致，差异仅在 ``*_description_hash`` 字段名与
+        ``type`` 取值，此处统一路由写入。
 
         Args:
-            media_hash: 媒体哈希值
-            media_type: 媒体类型
+            media_hash: 媒体哈希值（作为描述缓存的主键）
+            media_type: 媒体类型（image/emoji/voice/video）
             description: 描述文本
         """
+        if media_type == "voice":
+            model_cls = VoiceDescriptions
+            hash_field = "voice_description_hash"
+        elif media_type == "video":
+            model_cls = VideoDescriptions
+            hash_field = "video_description_hash"
+        else:
+            # image 与 emoji 共用 ImageDescriptions 表，仅 type 取值不同
+            model_cls = ImageDescriptions
+            hash_field = "image_description_hash"
         try:
             created = False
             async with get_db_session() as session:
                 stmt = (
-                    select(ImageDescriptions)
+                    select(model_cls)
                     .where(
-                        ImageDescriptions.image_description_hash == media_hash,
-                        ImageDescriptions.type == media_type,
+                        getattr(model_cls, hash_field) == media_hash,
+                        model_cls.type == media_type,
                     )
-                    .order_by(ImageDescriptions.timestamp.desc())
+                    .order_by(model_cls.timestamp.desc())
                     .limit(1)
                 )
                 result = await session.execute(stmt)
                 existing = result.scalars().first()
 
                 if not existing:
-                    new_desc = ImageDescriptions(
-                        image_description_hash=media_hash,
+                    new_desc = model_cls(
+                        **{hash_field: media_hash},
                         type=media_type,
                         description=description,
                         timestamp=time.time(),
@@ -94,7 +112,7 @@ class MediaCache:
                     await session.commit()
                     logger.debug(f"保存描述缓存: {media_hash[:8]}...")
             if created:
-                invalidate_model_cache(ImageDescriptions)
+                invalidate_model_cache(model_cls)
 
         except Exception as e:
             logger.error(f"保存描述缓存失败: {e}", exc_info=True)
@@ -124,52 +142,6 @@ class MediaCache:
             logger.debug(f"查询语音缓存失败: {e}")
             return None
 
-    async def save_voice_description_cache(
-        self,
-        voice_hash: str,
-        description: str,
-    ) -> None:
-        """保存语音识别结果到缓存。
-
-        镜像 :meth:`save_description_cache` 的语义，但写入 ``VoiceDescriptions`` 表。
-        type 固定为 ``voice``。
-
-        Args:
-            voice_hash: 语音哈希值
-            description: ASR 识别文本
-        """
-        try:
-            created = False
-            async with get_db_session() as session:
-                stmt = (
-                    select(VoiceDescriptions)
-                    .where(
-                        VoiceDescriptions.voice_description_hash == voice_hash,
-                        VoiceDescriptions.type == "voice",
-                    )
-                    .order_by(VoiceDescriptions.timestamp.desc())
-                    .limit(1)
-                )
-                result = await session.execute(stmt)
-                existing = result.scalars().first()
-
-                if not existing:
-                    new_desc = VoiceDescriptions(
-                        voice_description_hash=voice_hash,
-                        type="voice",
-                        description=description,
-                        timestamp=time.time(),
-                    )
-                    session.add(new_desc)
-                    created = True
-                    await session.commit()
-                    logger.debug(f"保存语音描述缓存: {voice_hash[:8]}...")
-            if created:
-                invalidate_model_cache(VoiceDescriptions)
-
-        except Exception as e:
-            logger.error(f"保存语音描述缓存失败: {e}", exc_info=True)
-
     async def get_cached_video_description(self, video_hash: str) -> str | None:
         """从数据库缓存获取视频识别结果。
 
@@ -195,48 +167,3 @@ class MediaCache:
             logger.debug(f"查询视频缓存失败: {e}")
             return None
 
-    async def save_video_description_cache(
-        self,
-        video_hash: str,
-        description: str,
-    ) -> None:
-        """保存视频识别结果到缓存。
-
-        镜像 :meth:`save_voice_description_cache` 的语义，但写入 ``VideoDescriptions`` 表。
-        type 固定为 ``video``。
-
-        Args:
-            video_hash: 视频哈希值
-            description: 视频识别文本
-        """
-        try:
-            created = False
-            async with get_db_session() as session:
-                stmt = (
-                    select(VideoDescriptions)
-                    .where(
-                        VideoDescriptions.video_description_hash == video_hash,
-                        VideoDescriptions.type == "video",
-                    )
-                    .order_by(VideoDescriptions.timestamp.desc())
-                    .limit(1)
-                )
-                result = await session.execute(stmt)
-                existing = result.scalars().first()
-
-                if not existing:
-                    new_desc = VideoDescriptions(
-                        video_description_hash=video_hash,
-                        type="video",
-                        description=description,
-                        timestamp=time.time(),
-                    )
-                    session.add(new_desc)
-                    created = True
-                    await session.commit()
-                    logger.debug(f"保存视频描述缓存: {video_hash[:8]}...")
-            if created:
-                invalidate_model_cache(VideoDescriptions)
-
-        except Exception as e:
-            logger.error(f"保存视频描述缓存失败: {e}", exc_info=True)

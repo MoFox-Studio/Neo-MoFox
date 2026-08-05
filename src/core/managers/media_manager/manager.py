@@ -289,11 +289,8 @@ class MediaManager:
     ) -> None:
         """保存媒体识别描述到对应的描述缓存表。
 
-        按 ``media_type`` 路由到缓存组件：
-        - ``image`` / ``emoji`` → ``ImageDescriptions`` 表（type 为动态值）
-        - ``voice`` → ``VoiceDescriptions`` 表
-        - ``video`` → ``VideoDescriptions`` 表
-
+        委托 :meth:`MediaCache.save_description_cache` 按 ``media_type`` 路由写入
+        ImageDescriptions / VoiceDescriptions / VideoDescriptions 三张表之一。
         converter 收媒体时会以 ``use_cache=True`` 查该缓存，命中后描述会
         直接替换占位符进入上下文（如 ``[视频(media_id):描述]``）。
 
@@ -302,14 +299,9 @@ class MediaManager:
             media_type: 媒体类型（image/emoji/voice/video）
             description: 媒体识别描述文本
         """
-        if media_type == "voice":
-            await self._cache.save_voice_description_cache(media_hash, description)
-        elif media_type == "video":
-            await self._cache.save_video_description_cache(media_hash, description)
-        else:
-            await self._cache.save_description_cache(
-                media_hash, media_type, description
-            )
+        await self._cache.save_description_cache(
+            media_hash, media_type, description
+        )
 
     async def get_media_file(self, media_hash: str) -> str | None:
         """根据媒体哈希读取落盘文件的 base64 内容。

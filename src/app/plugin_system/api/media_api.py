@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.2.0"
 
 if TYPE_CHECKING:
     from src.core.managers.media_manager import MediaManager
