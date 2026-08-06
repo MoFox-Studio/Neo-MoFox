@@ -267,14 +267,9 @@ class MediaRecognition:
             description: 识别结果文本
             file_path: 文件路径
         """
-        if media_type == "voice":
-            await self._cache.save_voice_description_cache(media_hash, description)
-        elif media_type == "video":
-            await self._cache.save_video_description_cache(media_hash, description)
-        else:
-            await self._cache.save_description_cache(
-                media_hash, media_type, description
-            )
+        await self._cache.save_description_cache(
+            media_hash, media_type, description
+        )
 
         await self._repository.save_recognized_media(
             media_hash,
