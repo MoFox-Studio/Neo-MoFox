@@ -143,17 +143,3 @@ async def test_restore_media_data_from_db_keeps_plain_text() -> None:
     mock_manager.get_media_file.assert_not_awaited()
 
 
-def test_content_to_plain_text_media_type_raw_string_placeholder() -> None:
-    """媒体类型的裸字符串 content（base64）应返回占位符，不产生 b64 文本。"""
-    assert _content_to_plain_text("iVBORw0KGgo=", "image") == "（非文本内容）"
-    assert "iVBORw0KGgo=" not in _content_to_plain_text("iVBORw0KGgo=", "emoji")
-    # 普通文本类型的裸字符串原样返回
-    assert _content_to_plain_text("hello", "text") == "hello"
-
-
-def test_serialize_content_for_db_strips_raw_string_media_content() -> None:
-    """媒体类型的裸字符串 content（base64）落库时不应包含 base64。"""
-    serialized = _serialize_content_for_db("iVBORw0KGgo=", "image")
-    assert "iVBORw0KGgo=" not in serialized
-    # 普通文本类型裸字符串原样落库
-    assert _serialize_content_for_db("hello", "text") == "hello"

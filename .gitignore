@@ -76,6 +76,7 @@ reports/
 
 # Ignore temporary files
 *.tmp
+tmp/
 ~*
 
 # Ignore build artifacts from poetry/uv if any

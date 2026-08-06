@@ -254,27 +254,48 @@ class MessageConverter:
         }
         if message.message_type in _MEDIA_TYPES:
             content = message.content
-            content_data: str
-            if isinstance(content, str):
-                content_data = content
-            elif isinstance(content, dict):
-                # send_file 等 API 传入 dict（如 {"path": "...", "name": "..."}）
-                # FILE 类型取 path 字段作为数据；其他类型取 data/path/url
-                if message.message_type == MessageType.FILE:
-                    content_data = content.get("path", "")
-                else:
-                    content_data = (
-                        content.get("data", "")
-                        or content.get("path", "")
-                        or content.get("url", "")
-                    )
+            # 结构化 content（send_image 等新路径）：{"text", "media": [...]}
+            # 媒体项与接收端 _build_content 产出同构：{type, data, image_id/...}
+            media_items: list[Any] | None = None
+            if isinstance(content, dict):
+                media_items = content.get("media")
+            if isinstance(media_items, list) and media_items:
+                for item in media_items:
+                    if isinstance(item, dict):
+                        seg_data = str(
+                            item.get("data", "")
+                            or item.get("path", "")
+                            or item.get("url", "")
+                        )
+                        seg_type = str(item.get("type") or message.message_type.value)
+                    else:
+                        seg_data = str(item)
+                        seg_type = message.message_type.value
+                    if seg_data:
+                        seg_list.append({"type": seg_type, "data": seg_data})
             else:
-                content_data = ""
-            if content_data:
-                seg_list.append({
-                    "type": message.message_type.value,
-                    "data": content_data,
-                })
+                # 兼容旧形态：裸字符串，或 {path}/{data}/{url} 等 dict
+                content_data: str
+                if isinstance(content, str):
+                    content_data = content
+                elif isinstance(content, dict):
+                    # send_file 等 API 传入 dict（如 {"path": "...", "name": "..."}）
+                    # FILE 类型取 path 字段作为数据；其他类型取 data/path/url
+                    if message.message_type == MessageType.FILE:
+                        content_data = content.get("path", "")
+                    else:
+                        content_data = (
+                            content.get("data", "")
+                            or content.get("path", "")
+                            or content.get("url", "")
+                        )
+                else:
+                    content_data = ""
+                if content_data:
+                    seg_list.append({
+                        "type": message.message_type.value,
+                        "data": content_data,
+                    })
         else:
             # 文本 / 混合消息
             text = message.processed_plain_text or (

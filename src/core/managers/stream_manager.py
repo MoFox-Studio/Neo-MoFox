@@ -53,21 +53,18 @@ def _strip_media_data(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key != "data"}
 
 
-def _serialize_content_for_db(content: Any, message_type: str = "text") -> str:
+def _serialize_content_for_db(content: Any) -> str:
     """将消息 content 序列化为数据库存储字符串。
 
-    内存中的 content 可能是：
-    - dict（收到消息/多模态）：``{"text": ..., "media": [{"type": "image", "data": ...}]}``
-    - 裸 base64 字符串（Bot 通过 ``send_image``/``send_emoji`` 等发送）：content 即媒体数据
-
-    二进制 base64 不应持久化（存储暴涨 + 反序列化时被当作文本参与 token 计数）。
-    本函数统一剔除二进制媒体项（dict 的 ``media[].data`` 或裸字符串媒体 content）
-    的 data，其余元信息保留；媒体 ID 由 ``MessageConverter`` 注入，剔除后仍可按哈希
-    回查媒体表。
+    内存中的 content 是接收/发送路径统一构建的结构化 dict：
+    ``{"text": ..., "media": [{"type": "image", "data": ..., "image_id": ...}]}``。
+    二进制 base64 不应持久化（存储暴涨 + 反序列化时被当作文本参与 token 计数），
+    本函数剔除二进制媒体项（``image``/``emoji``/``voice``/``video``）的 ``data``，
+    其余元信息保留；媒体 ID 由 ``MessageConverter``/``send_*`` 注入，剔除后仍可
+    按哈希回查媒体表。
 
     Args:
-        content: 消息 content（dict 或字符串）。
-        message_type: 消息类型（``MessageType`` 的 value），用于识别裸字符串媒体 content。
+        content: 消息 content（结构化 dict 或纯文本字符串）。
 
     Returns:
         序列化后的数据库存储字符串。
@@ -85,10 +82,6 @@ def _serialize_content_for_db(content: Any, message_type: str = "text") -> str:
                 stripped_media.append(item)
             return str({**content, "media": stripped_media})
         return str(content)
-
-    # 裸字符串：媒体类型的 content 即 base64，落库时用空占位替换，避免 b64 持久化
-    if message_type in _BINARY_MEDIA_TYPES:
-        return str({"text": "", "media": []})
 
     return str(content)
 
@@ -171,19 +164,15 @@ async def _restore_media_data_from_db(content: Any) -> Any:
     return {**parsed, "media": restored}
 
 
-def _content_to_plain_text(content: Any, message_type: str = "text") -> str:
+def _content_to_plain_text(content: Any) -> str:
     """从消息 content 提取纯文本，避免把媒体 base64 当作文本。
 
-    含媒体的 content 可能是：
-    - dict：``{"text": ..., "media": [...]}``，其中 ``media`` 项可能携带 base64
-    - 裸 base64 字符串（媒体消息 content 即数据）
-
-    直接 ``str(content)`` 会把 base64 拼进文本，导致 token 计数严重高估。
-    此函数仅提取 ``text`` 字段；媒体类型的裸字符串 content 返回占位符。
+    含媒体的 content 是结构化 dict：``{"text": ..., "media": [...]}``，其中
+    ``media`` 项可能携带 base64。直接 ``str(content)`` 会把 base64 拼进文本，
+    导致 token 计数严重高估；此函数仅提取 ``text`` 字段，缺失时返回占位符。
 
     Args:
         content: 数据库消息的 content 字段（字符串或 dict）。
-        message_type: 消息类型（``MessageType`` 的 value）。
 
     Returns:
         纯文本表示。
@@ -192,10 +181,6 @@ def _content_to_plain_text(content: Any, message_type: str = "text") -> str:
         text = content.get("text")
         if isinstance(text, str) and text:
             return text
-        return "（非文本内容）"
-
-    # 媒体类型的裸字符串 content 即 base64，不得当作文本返回
-    if message_type in _BINARY_MEDIA_TYPES:
         return "（非文本内容）"
 
     return str(content)
@@ -512,9 +497,7 @@ class StreamManager:
                 "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
-                "content": _serialize_content_for_db(
-                    message.content, message.message_type.value
-                ),
+                "content": _serialize_content_for_db(message.content),
                 "processed_plain_text": message.processed_plain_text,
                 "reply_to": message.reply_to,
                 "platform": message.platform,
@@ -567,9 +550,7 @@ class StreamManager:
                 "person_id": "bot",
                 "time": message.time,
                 "message_type": message.message_type.value,
-                "content": _serialize_content_for_db(
-                    message.content, message.message_type.value
-                ),
+                "content": _serialize_content_for_db(message.content),
                 "processed_plain_text": message.processed_plain_text,
                 "reply_to": message.reply_to,
                 "platform": message.platform,
@@ -1057,9 +1038,7 @@ class StreamManager:
 
         normalized_plain_text = db_message.processed_plain_text
         if normalized_plain_text is None:
-            normalized_plain_text = _content_to_plain_text(
-                db_message.content, db_message.message_type
-            )
+            normalized_plain_text = _content_to_plain_text(db_message.content)
 
         # 历史消息入库时已剔除 media 的 base64（见 _serialize_content_for_db），
         # 此处按 image_id 回查媒体表补回 data 到 content["media"]，
