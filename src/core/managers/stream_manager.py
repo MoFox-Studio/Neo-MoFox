@@ -30,65 +30,175 @@ if TYPE_CHECKING:
 
 logger = get_logger("stream_manager", display="StreamMgr")
 
-# 含原始二进制的媒体类型，序列化入库时仅在 payload 过大时剔除 data 字段
-_BINARY_MEDIA_TYPES: frozenset[str] = frozenset({"image", "emoji", "voice"})
-_MAX_MEDIA_DATA_BYTES = 1024
+# 含原始二进制的媒体类型，序列化入库时统一剔除 data 字段。
+# 二进制 base64 不应持久化：一是造成数据库存储暴涨，二是反序列化时
+# 会被当作普通文本参与 token 计数（触发上下文压缩误判）。媒体项经剔除
+# data 后仍保留 image_id/voice_id/video_id，可按哈希回查媒体表。
+# file 的 data 是元信息（name/size/id）而非二进制，不在此列。
+_BINARY_MEDIA_TYPES: frozenset[str] = frozenset(
+    {"image", "emoji", "voice", "video"}
+)
 
 
-def _get_content_size_bytes(content: Any) -> int:
-    """估算内容的 UTF-8 序列化字节数。"""
-    if isinstance(content, bytes):
-        return len(content)
-    if isinstance(content, str):
-        return len(content.encode("utf-8"))
-    return len(str(content).encode("utf-8"))
-
-
-def _strip_oversized_media_data(item: dict[str, Any]) -> dict[str, Any]:
-    """移除超出阈值的媒体 data 字段，保留其余元信息。
+def _strip_media_data(item: dict[str, Any]) -> dict[str, Any]:
+    """移除二进制媒体项的 data 字段，保留其余元信息。
 
     媒体项的媒体 ID（``image_id`` / ``voice_id`` / ``video_id``）由
     ``MessageConverter`` 在创建媒体项时注入，此处剔除 ``data`` 后媒体 ID
     自然保留，便于后续按哈希回查 Images/Voices/Videos 表。
     """
-    media_data = item.get("data")
-    if media_data is None:
-        return item
-
-    if _get_content_size_bytes(media_data) <= _MAX_MEDIA_DATA_BYTES:
+    if item.get("data") is None:
         return item
 
     return {key: value for key, value in item.items() if key != "data"}
 
 
-def _serialize_content_for_db(content: Any) -> str:
+def _serialize_content_for_db(content: Any, message_type: str = "text") -> str:
     """将消息 content 序列化为数据库存储字符串。
 
-    内存中的 content 字典可能包含图片/表情包/语音的原始 base64 数据（供 Chatter 多模态
-    使用），但这些数据不需要持久化，持久化会造成数据库存储暴涨。本函数在序列化前检查
-    image/emoji/voice 媒体项中的 ``data`` 实际大小，超过阈值时剔除该字段，其余元信息保留。
-    媒体项的媒体 ID（``image_id`` / ``voice_id`` / ``video_id``）由 ``MessageConverter``
-    在创建时注入，剔除 ``data`` 后保留，后续可按对应 ID 从 Images/Voices/Videos 表回查信息。
+    内存中的 content 可能是：
+    - dict（收到消息/多模态）：``{"text": ..., "media": [{"type": "image", "data": ...}]}``
+    - 裸 base64 字符串（Bot 通过 ``send_image``/``send_emoji`` 等发送）：content 即媒体数据
+
+    二进制 base64 不应持久化（存储暴涨 + 反序列化时被当作文本参与 token 计数）。
+    本函数统一剔除二进制媒体项（dict 的 ``media[].data`` 或裸字符串媒体 content）
+    的 data，其余元信息保留；媒体 ID 由 ``MessageConverter`` 注入，剔除后仍可按哈希
+    回查媒体表。
+
+    Args:
+        content: 消息 content（dict 或字符串）。
+        message_type: 消息类型（``MessageType`` 的 value），用于识别裸字符串媒体 content。
+
+    Returns:
+        序列化后的数据库存储字符串。
     """
-    if not isinstance(content, dict):
+    if isinstance(content, dict):
+        media = content.get("media")
+        if isinstance(media, list):
+            stripped_media = []
+            for item in media:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") in _BINARY_MEDIA_TYPES:
+                    stripped_media.append(_strip_media_data(item))
+                    continue
+                stripped_media.append(item)
+            return str({**content, "media": stripped_media})
         return str(content)
 
-    media = content.get("media")
+    # 裸字符串：媒体类型的 content 即 base64，落库时用空占位替换，避免 b64 持久化
+    if message_type in _BINARY_MEDIA_TYPES:
+        return str({"text": "", "media": []})
+
+    return str(content)
+
+
+def _parse_db_content(content: Any) -> dict[str, Any] | None:
+    """解析数据库消息的 content 字符串为 dict；非 dict 结构返回 None。
+
+    DB 中 content 由 ``_serialize_content_for_db`` 写入，含媒体的消息是
+    ``str({"text": ..., "media": [...]})``（Python dict 字面量，单引号）。
+    历史加载时需解析回 dict 以提取 ``image_id`` 等媒体元信息，因此使用
+    ``ast.literal_eval`` 而非 ``json.loads``（后者无法解析单引号字符串）。
+
+    Args:
+        content: 数据库消息的 content 字段。
+
+    Returns:
+        解析后的 dict；无法解析或非 dict 结构返回 None。
+    """
+    import ast
+
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        return None
+
+    try:
+        parsed = ast.literal_eval(content)
+    except (ValueError, SyntaxError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _restore_media_data_from_db(content: Any) -> Any:
+    """按媒体 ID 从媒体表回查 base64，补齐历史消息的图片数据。
+
+    ``_serialize_content_for_db`` 入库时剔除了二进制 media 的 ``data`` 字段，
+    历史消息反序列化后 content 里的 media 项只有 ``image_id`` 等元信息、无
+    base64。此函数按 ``image_id`` 回查 Images 表读取文件并编码 base64，
+    使历史图片在 native 多模态下仍可内联。
+
+    返回与传入 ``content`` 同构的结构：dict 返回回填后的 dict，纯字符串
+    原样返回，保证调用方对 content 的访问路径一致。
+
+    Args:
+        content: 数据库消息的 content 字段（字符串或 dict）。
+
+    Returns:
+        回填 data 后的 content；无媒体或回查失败时保持原结构。
+    """
+    parsed = _parse_db_content(content)
+    if parsed is None:
+        return content
+
+    media = parsed.get("media")
     if not isinstance(media, list):
-        return str(content)
+        return content
 
-    stripped_media = []
+    restored: list[dict[str, Any]] = []
     for item in media:
         if not isinstance(item, dict):
             continue
-
-        if item.get("type") in _BINARY_MEDIA_TYPES:
-            stripped_media.append(_strip_oversized_media_data(item))
+        image_id = item.get("image_id")
+        # 仅对缺失 data 的二进制媒体回查；已带 data（旧数据）直接保留
+        if item.get("data") is not None or not isinstance(image_id, str) or not image_id:
+            restored.append(item)
             continue
+        try:
+            from src.core.managers.media_manager import get_media_manager
 
-        stripped_media.append(item)
+            data = await get_media_manager().get_media_file(image_id)
+            if data:
+                restored.append({**item, "data": data})
+                continue
+        except Exception as exc:
+            logger.warning(
+                f"回查媒体 base64 失败: image_id={image_id[:8]}, error={exc}"
+            )
+        restored.append(item)
 
-    return str({**content, "media": stripped_media})
+    return {**parsed, "media": restored}
+
+
+def _content_to_plain_text(content: Any, message_type: str = "text") -> str:
+    """从消息 content 提取纯文本，避免把媒体 base64 当作文本。
+
+    含媒体的 content 可能是：
+    - dict：``{"text": ..., "media": [...]}``，其中 ``media`` 项可能携带 base64
+    - 裸 base64 字符串（媒体消息 content 即数据）
+
+    直接 ``str(content)`` 会把 base64 拼进文本，导致 token 计数严重高估。
+    此函数仅提取 ``text`` 字段；媒体类型的裸字符串 content 返回占位符。
+
+    Args:
+        content: 数据库消息的 content 字段（字符串或 dict）。
+        message_type: 消息类型（``MessageType`` 的 value）。
+
+    Returns:
+        纯文本表示。
+    """
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str) and text:
+            return text
+        return "（非文本内容）"
+
+    # 媒体类型的裸字符串 content 即 base64，不得当作文本返回
+    if message_type in _BINARY_MEDIA_TYPES:
+        return "（非文本内容）"
+
+    return str(content)
 
 
 class StreamManager:
@@ -402,7 +512,9 @@ class StreamManager:
                 "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
-                "content": _serialize_content_for_db(message.content),
+                "content": _serialize_content_for_db(
+                    message.content, message.message_type.value
+                ),
                 "processed_plain_text": message.processed_plain_text,
                 "reply_to": message.reply_to,
                 "platform": message.platform,
@@ -455,7 +567,9 @@ class StreamManager:
                 "person_id": "bot",
                 "time": message.time,
                 "message_type": message.message_type.value,
-                "content": str(message.content),
+                "content": _serialize_content_for_db(
+                    message.content, message.message_type.value
+                ),
                 "processed_plain_text": message.processed_plain_text,
                 "reply_to": message.reply_to,
                 "platform": message.platform,
@@ -943,13 +1057,20 @@ class StreamManager:
 
         normalized_plain_text = db_message.processed_plain_text
         if normalized_plain_text is None:
-            normalized_plain_text = str(db_message.content)
-        
+            normalized_plain_text = _content_to_plain_text(
+                db_message.content, db_message.message_type
+            )
+
+        # 历史消息入库时已剔除 media 的 base64（见 _serialize_content_for_db），
+        # 此处按 image_id 回查媒体表补回 data 到 content["media"]，
+        # 与运行时消息的属性结构保持一致（多模态内联仍可读 data）。
+        runtime_content = await _restore_media_data_from_db(db_message.content)
+
         return Message(
             message_id=db_message.message_id,
             time=db_message.time,
             reply_to=db_message.reply_to,
-            content=db_message.content,
+            content=runtime_content,
             processed_plain_text=normalized_plain_text,
             message_type=MessageType(db_message.message_type),
             sender_id=sender_id,
