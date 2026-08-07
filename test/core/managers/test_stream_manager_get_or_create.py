@@ -450,8 +450,8 @@ async def test_add_message_normalizes_direct_raw_person_id(monkeypatch) -> None:
     assert created_data["person_id"] == "hash_qq_user_123"
 
 
-def test_serialize_content_for_db_keeps_small_binary_media_data() -> None:
-    """小体积二进制媒体数据应保留，避免误删有效内容。"""
+def test_serialize_content_for_db_strips_small_binary_media_data() -> None:
+    """二进制媒体数据一律剔除（含小体积），避免 base64 落库后被当文本计数。"""
     content = {
         "text": "hello",
         "media": [{"type": "image", "data": "a" * 128, "name": "small.png"}],
@@ -459,8 +459,9 @@ def test_serialize_content_for_db_keeps_small_binary_media_data() -> None:
 
     serialized = _serialize_content_for_db(content)
 
-    assert "'data': '" in serialized
+    assert "'data': '" not in serialized
     assert "small.png" in serialized
+    assert "'type': 'image'" in serialized
 
 
 def test_serialize_content_for_db_strips_large_binary_media_data() -> None:

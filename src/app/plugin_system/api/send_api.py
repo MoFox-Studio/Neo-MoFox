@@ -10,6 +10,49 @@ from src.core.models.message import Message, MessageType
 
 API_VERSION = "1.0.0"
 
+
+def _build_media_content(
+    media_type: str,
+    media_data: str,
+    text: str,
+    media_id_key: str,
+) -> dict[str, Any]:
+    """将发送端媒体数据组装为与接收端一致的结构化 content。
+
+    发送路径（``send_image`` / ``send_emoji`` / ``send_voice`` / ``send_video``）
+    与接收路径（``MessageConverter.envelope_to_message`` 的 ``_build_content``）
+    采用相同的数据结构 ``{"text": ..., "media": [{"type", "data", "id"}]}``，
+    避免裸 base64 作为 ``Message.content`` 落库后被当作文本参与 token 计数。
+
+    媒体 ``data`` 经 ``normalize_base64`` 规范化、``id`` 用与 MediaManager 识别
+    流程相同的哈希算法计算，保证发送端媒体的 ``image_id`` / ``voice_id`` /
+    ``video_id`` 可在媒体表中回查，与接收端媒体项完全对称。
+
+    Args:
+        media_type: 媒体段类型（``image`` / ``emoji`` / ``voice`` / ``video``）。
+        media_data: 媒体数据（base64 或 URL）。
+        text: 消息的人类可读文本（占位符，如 ``[图片]``）。
+        media_id_key: 媒体 ID 字段名（``image_id`` / ``voice_id`` / ``video_id``）。
+
+    Returns:
+        结构化 content 字典。
+    """
+    from src.core.managers.media_manager import MediaManager
+    from src.core.transport.message_receive.utils import normalize_base64
+
+    normalized_data = normalize_base64(media_data)
+    return {
+        "text": text,
+        "media": [
+            {
+                "type": media_type,
+                "data": normalized_data,
+                media_id_key: MediaManager.compute_media_hash(normalized_data),
+            }
+        ],
+    }
+
+
 # =============================================================================
 # 基础消息发送
 # =============================================================================
@@ -88,7 +131,9 @@ async def send_image(
         )
     """
     return await _send_message(
-        content=image_data,
+        content=_build_media_content(
+            "image", image_data, processed_plain_text, "image_id"
+        ),
         message_type=MessageType.IMAGE,
         stream_id=stream_id,
         platform=platform,
@@ -128,7 +173,9 @@ async def send_emoji(
         )
     """
     return await _send_message(
-        content=emoji_data,
+        content=_build_media_content(
+            "emoji", emoji_data, processed_plain_text, "image_id"
+        ),
         message_type=MessageType.EMOJI,
         stream_id=stream_id,
         platform=platform,
@@ -166,7 +213,9 @@ async def send_voice(
         )
     """
     return await _send_message(
-        content=voice_data,
+        content=_build_media_content(
+            "voice", voice_data, processed_plain_text, "voice_id"
+        ),
         message_type=MessageType.VOICE,
         stream_id=stream_id,
         platform=platform,
@@ -204,7 +253,9 @@ async def send_video(
         )
     """
     return await _send_message(
-        content=video_data,
+        content=_build_media_content(
+            "video", video_data, processed_plain_text, "video_id"
+        ),
         message_type=MessageType.VIDEO,
         stream_id=stream_id,
         platform=platform,
