@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.core.models.message import Message, MessageType
-from src.kernel.llm import Text
+from src.kernel.llm import Image, Text
 
 from plugins.neo_default_chatter.utils.multimodal import (
     extract_images_from_messages,
@@ -290,6 +290,55 @@ class TestMediaIdImageBinding:
         assert [type(item).__name__ for item in content] == [
             "Text", "Text", "Image", "Text", "Text", "Image",
         ]
+
+    def test_same_media_id_inlined_only_once(self) -> None:
+        """同一 media_id 重复出现时，仅首次附加 Image(base64)。
+
+        未读消息与引用回复常携带同一张图片（回复内嵌被回复消息的图片），
+        重复占位符只保留文本标记，不重复内联相同 base64。
+        """
+        msg = _make_msg(
+            message_id="m1",
+            media=[{"type": "image", "data": _VALID_B64, "image_id": _HASH_A}],
+        )
+        text = (
+            f"原始消息：{_NDFC_TOKEN.format(media_id=_HASH_A)}\\n"
+            f"引用回复又提到同一张图：{_NDFC_TOKEN.format(media_id=_HASH_A)}\\n"
+            f"再次引用：{_NDFC_TOKEN.format(media_id=_HASH_A)}"
+        )
+
+        content = inline_message_images_into_text(text, [msg])
+
+        # 首次出现：Text → Text → Image；后续重复：仅 Text 标记
+        assert [type(item).__name__ for item in content] == [
+            "Text", "Text", "Image", "Text", "Text", "Text", "Text",
+        ]
+        images = [item for item in content if isinstance(item, Image)]
+        assert len(images) == 1
+        # 每次出现都保留 [图片(media_id)] 文本标记，仅去重 base64
+        text_parts = [item.text for item in content if isinstance(item, Text)]
+        assert text_parts.count(f"[图片({_HASH_A})]") == 3
+
+    def test_distinct_media_ids_both_inlined(self) -> None:
+        """不同 media_id 互不影响，每张图都完整内联。"""
+        first = _make_msg(
+            message_id="m1",
+            media=[{"type": "image", "data": _VALID_B64, "image_id": _HASH_A}],
+        )
+        second = _make_msg(
+            message_id="m2",
+            media=[{"type": "image", "data": "aGVsbG8=", "image_id": _HASH_B}],
+        )
+        text = (
+            f"{_NDFC_TOKEN.format(media_id=_HASH_A)}\\n"
+            f"{_NDFC_TOKEN.format(media_id=_HASH_B)}\\n"
+            f"{_NDFC_TOKEN.format(media_id=_HASH_A)}"
+        )
+
+        content = inline_message_images_into_text(text, [first, second])
+
+        images = [item for item in content if isinstance(item, Image)]
+        assert len(images) == 2
 
 
 class TestStrictMediaIdPattern:

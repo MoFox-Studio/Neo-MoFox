@@ -100,6 +100,11 @@ def inline_message_images_into_text(
     - 找不到（如历史消息中的占位符在未读消息中无对应图片）：还原为
       ``[图片(media_id)]`` 文本，不暴露内部标记给 LLM。
 
+    同一 ``media_id`` 在文本中出现多次时，仅首次出现会附加 ``Image(base64)``，
+    后续重复出现只保留 ``[图片(media_id)]`` 文本标记。未读消息与引用回复
+    常携带同一张图片（如回复内嵌被回复消息的图片），去重避免相同 base64
+    被重复传给 LLM 造成 token 浪费与上下文冗余。
+
     Args:
         text: 包含 ``[[NDFC_IMAGE:media_id]]`` 标记的文本
         messages: 用于查找图片的消息列表
@@ -108,6 +113,7 @@ def inline_message_images_into_text(
         Text/Image 交替排列的内容列表
     """
     media_index = _build_media_id_index(messages)
+    inlined_media_ids: set[str] = set()
 
     content_list: list[Content | LLMUsable] = []
     cursor = 0
@@ -122,7 +128,9 @@ def inline_message_images_into_text(
             content_list.append(Text(f"[图片({media_id})]"))
         else:
             content_list.append(Text(f"[图片({media_id})]"))
-            content_list.append(Image(str(image["data"])))
+            if media_id not in inlined_media_ids:
+                content_list.append(Image(str(image["data"])))
+                inlined_media_ids.add(media_id)
         cursor = match.end()
 
     if cursor < len(text):
