@@ -399,16 +399,20 @@ class SendHandler:
         result_seg = [at_seg, text_seg]
         return result_seg
 
+
     def handle_image_message(self, encoded_image: str) -> dict:
         """处理图片消息。
 
         Args:
             encoded_image: 图片数据。可以是：
                 - 原始 base64 字符串（不含前缀，自动补 base64://）
+                - MoFox 内部 base64| 格式（转换为 base64://）
                 - 已含 base64:// 前缀的字符串（直接透传，不重复添加前缀）
                 - HTTP/HTTPS URL（直接透传，onebot 会自行拉取）
         """
-        if encoded_image.startswith(("base64://", "http://", "https://")):
+        if encoded_image.startswith("base64|"):
+            file_value = f"base64://{encoded_image[7:]}"
+        elif encoded_image.startswith(("base64://", "http://", "https://")):
             file_value = encoded_image
         else:
             file_value = f"base64://{encoded_image}"
