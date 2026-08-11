@@ -83,14 +83,14 @@ class EmojiSenderPlugin(BasePlugin):
         """返回本插件提供的组件类。"""
         config = getattr(plugin, "config", None)
         if isinstance(config, EmojiSenderConfig) and not config.plugin.enabled:
-            return ""
+            return []
         return [EmojiSenderService, SendEmojiMemeAction]
 
     async def on_plugin_loaded(self) -> None:
         """插件加载完成后：初始化配置并注册周期任务。"""
         config = getattr(plugin, "config", None)
         if isinstance(config, EmojiSenderConfig) and not config.plugin.enabled:
-            return ""
+            return
         sync_emoji_sender_actor_reminder(self)
 
         # 将自定义场景说明追加到 action 的描述，使 Chatter 侧感知使用时机
