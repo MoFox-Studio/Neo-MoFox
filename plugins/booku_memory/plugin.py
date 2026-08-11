@@ -27,7 +27,6 @@ class BookuMemoryAgentPlugin(BasePlugin):
     """Booku 记忆插件。"""
 
     plugin_name: str = "booku_memory"
-    plugin_description: str = "命令驱动的 Booku 记忆系统"
 
     configs: list[type] = [BookuMemoryConfig]
     dependent_components: list[str] = []

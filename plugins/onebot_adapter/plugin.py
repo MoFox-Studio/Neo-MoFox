@@ -352,8 +352,6 @@ class OneBotAdapterPlugin(BasePlugin):
     """OneBot 适配器插件"""
 
     plugin_name: str = "onebot_adapter"
-    plugin_author: str = "MoFox Team"
-    plugin_description: str = "OneBot 11 适配器（基于 Neo-MoFox 重写）"
     configs: list[type] = [OneBotAdapterConfig]
 
 

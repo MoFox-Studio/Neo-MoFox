@@ -26,7 +26,6 @@ class UtilityCommandsPlugin(BasePlugin):
     """
 
     plugin_name: str = "utility_commands"
-    plugin_description: str = "实用命令集合插件，收纳常用运维/管理类命令"
 
     configs: list[type] = []
     dependent_components: list[str] = []

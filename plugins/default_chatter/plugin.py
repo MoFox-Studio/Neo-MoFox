@@ -248,8 +248,6 @@ class DefaultChatterPlugin(BasePlugin):
     """默认聊天插件。"""
 
     plugin_name = "default_chatter"
-    plugin_author = "MoFox Team"
-    plugin_description = "默认聊天组件，提供基础的消息处理和回复功能"
     configs = [DefaultChatterConfig]
 
     async def on_plugin_loaded(self) -> None:
