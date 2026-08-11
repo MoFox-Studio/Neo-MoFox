@@ -1,0 +1,39 @@
+{
+    "name": "shameimaru_memory",
+    "display_name": "Shameimaru Memory",
+    "version": "0.1.0",
+    "description": "四层记忆系统：摘要层（群聊摘要）、新闻层（总结性记忆）、知识层（Dreaming 知识沉淀）、人物层（人物背景信息）。",
+    "author": "MoFox Team",
+    "dependencies": {
+        "plugins": ["booku_memory_store"],
+        "components": []
+    },
+    "include": [
+        {
+            "component_type": "service",
+            "component_name": "shameimaru_memory",
+            "dependencies": ["booku_memory_store:service:booku_memory_store"]
+        },
+        {
+            "component_type": "tool",
+            "component_name": "read_knowledge",
+            "dependencies": ["booku_memory_store:service:booku_memory_store"]
+        },
+        {
+            "component_type": "event_handler",
+            "component_name": "shameimaru_prompt_injector",
+            "dependencies": []
+        }
+    ],
+    "entry_point": "plugin.py",
+    "api_version": {
+        "llm_api": "1.1.0",
+        "stream_api": "1.0.0",
+        "service_api": "1.0.0",
+        "prompt_api": "1.0.0",
+        "log_api": "1.0.0"
+    },
+    "min_core_version": "1.2.0",
+    "python_dependencies": [],
+    "dependencies_required": true
+}
