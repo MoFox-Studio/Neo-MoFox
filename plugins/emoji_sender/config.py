@@ -30,6 +30,11 @@ class EmojiSenderConfig(BaseConfig):
     class PluginSection(SectionBase):
         """插件行为配置。"""
 
+        enabled: bool = Field(
+            default=True,
+            description="是否启用插件",
+        )
+
         inject_system_prompt: bool = Field(
             default=True,
             description="是否将表情包使用提示同步到 default_chatter 的 actor system reminder",
