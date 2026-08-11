@@ -60,7 +60,6 @@ class NeoChatterPlugin(BasePlugin):
     """
 
     plugin_name = "neo_default_chatter"
-    plugin_version = "0.1.0"
     plugin_author = "MoFox Team"
     plugin_description = "可复用的会话逻辑中台，事件驱动预处理 + 原生多模态"
     configs = [NeoChatterConfig]

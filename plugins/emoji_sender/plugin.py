@@ -69,7 +69,6 @@ class EmojiSenderPlugin(BasePlugin):
 
     plugin_name: str = "emoji_sender"
     plugin_description: str = "从 media cache 收藏表情包并按 tag+向量检索发送"
-    plugin_version: str = "1.0.0"
 
     configs: list[type] = [EmojiSenderConfig]
     dependent_components: list[str] = []

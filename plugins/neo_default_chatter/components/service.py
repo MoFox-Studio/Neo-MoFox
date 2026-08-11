@@ -28,7 +28,6 @@ class NeoChatterService(BaseService):
 
     name = "chat_core"
     description = "Neo-Default-Chatter 会话工厂，复用主会话逻辑构建自定义聊天器"
-    version = "0.1.0"
 
     def create_session(
         self,
