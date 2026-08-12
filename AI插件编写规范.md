@@ -42,10 +42,11 @@ default_chatter:chatter:default_chatter
 
 - 必须继承 `BasePlugin`。
 - 必须使用 `@register_plugin` 装饰器。
-- 必须定义以下类属性：
-  - `plugin_name: str`
-  - `plugin_description: str`
-  - `plugin_version: str`
+- 必须定义类属性 `plugin_name: str`。
+- 版本号、描述、作者等元数据**只在 `manifest.json` 中声明**，插件类上不重复定义。
+  运行时 `plugin_version` 由框架从 manifest 注入（见 `PluginManager._inject_manifest_metadata`）；
+  插件类若再显式声明 `plugin_version` / `plugin_description` / `plugin_author`，
+  会被视为历史遗留冗余并触发 `DeprecationWarning`（不影响加载运行）。
 - 如果插件有配置类，必须在 `configs: list[type]` 中声明。
 - `get_components()` 必须返回组件类列表，返回值是 `list[type]`，不是实例列表。
 
@@ -58,8 +59,6 @@ from src.app.plugin_system.base import BasePlugin, register_plugin
 @register_plugin
 class MyPlugin(BasePlugin):
     plugin_name = "my_plugin"
-    plugin_description = "示例插件"
-    plugin_version = "1.0.0"
 
     configs: list[type] = []
     dependent_components: list[str] = []
@@ -820,8 +819,6 @@ class DemoPlugin(BasePlugin):
     """最小 demo 插件。"""
 
     plugin_name = "demo_plugin"
-    plugin_description = "最小 demo 插件"
-    plugin_version = "1.0.0"
 
     configs: list[type] = [DemoConfig]
     dependent_components: list[str] = []
@@ -851,7 +848,7 @@ AI 在生成插件前，先做下面的判定。
 在输出插件代码前，逐条检查：
 
 1. 是否使用了公开入口 `src.app.plugin_system.base/api/types`。
-2. 插件类是否有 `@register_plugin`，以及完整的 `plugin_name`、`plugin_description`、`plugin_version`。
+2. 插件类是否有 `@register_plugin`，以及 `plugin_name`。版本/描述/作者是否只在 `manifest.json` 声明，插件类上没有冗余的 `plugin_version` / `plugin_description` / `plugin_author`。
 3. `get_components()` 是否返回类而不是实例。
 4. 配置类是否放在 `configs` 中，而不是放进 `get_components()`。
 5. 每个组件是否定义了统一属性 `name`（不要继续使用 `tool_name` / `action_name` 等旧属性名），并与 manifest 中的 `component_name` 一致。

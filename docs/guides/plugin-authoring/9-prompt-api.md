@@ -107,8 +107,6 @@ class EchoDemoPlugin(BasePlugin):
     """最小回显插件。"""
 
     plugin_name = "echo_demo"
-    plugin_description = "一个用于演示插件加载与命令执行的最小插件"
-    plugin_version = "1.0.0"
 
     configs: list[type] = [EchoDemoConfig]
 

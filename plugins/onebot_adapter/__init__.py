@@ -4,5 +4,4 @@
 实现 OneBot 11 协议的通信。
 """
 
-__version__ = "2.0.0"
 __author__ = "MoFox Team"

@@ -95,7 +95,6 @@ class EmojiSenderService(BaseService):
 
     name: str = "emoji_sender"
     description: str = "表情包收藏、检索与发送服务"
-    version: str = "1.0.0"
 
     def _selection_temperature(self) -> float:
         """获取检索候选采样温度。"""

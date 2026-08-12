@@ -162,8 +162,6 @@ class EchoDemoPlugin(BasePlugin):
     """最小回显插件。"""
 
     plugin_name = "echo_demo"
-    plugin_description = "一个用于演示插件加载与命令执行的最小插件"
-    plugin_version = "1.0.0"
 
     def get_components(self) -> list[type]:
         """返回当前插件包含的组件。"""

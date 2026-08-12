@@ -51,7 +51,6 @@ class OneBotAdapter(BaseAdapter):
     """OneBot 适配器 - 完全基于 mofox-wire 架构"""
 
     name = "onebot_adapter"
-    adapter_version = "2.0.0"
     adapter_author = "MoFox Team"
     description = "基于 MoFox-Bus 的 OneBot 11 适配器"
     platform = "qq"
@@ -353,9 +352,6 @@ class OneBotAdapterPlugin(BasePlugin):
     """OneBot 适配器插件"""
 
     plugin_name: str = "onebot_adapter"
-    plugin_version: str = "2.0.0"
-    plugin_author: str = "MoFox Team"
-    plugin_description: str = "OneBot 11 适配器（基于 Neo-MoFox 重写）"
     configs: list[type] = [OneBotAdapterConfig]
 
 

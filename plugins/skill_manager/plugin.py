@@ -68,8 +68,6 @@ class SkillManagerPlugin(BasePlugin):
     """Skill 管理器插件。"""
 
     plugin_name: str = "skill_manager"
-    plugin_description: str = "技能管理器"
-    plugin_version: str = "1.0.0"
 
     configs: list[type] = [SkillManagerConfig]
 

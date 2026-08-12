@@ -627,7 +627,6 @@ class BookuKnowledgeService(BaseService):
 
     name: str = "booku_knowledge"
     description: str = "知识库服务，支持文档分块入库与语义检索"
-    version: str = "1.0.0"
     dependencies: list[str] = []
     _memory_service: BookuMemoryService | None = None
 

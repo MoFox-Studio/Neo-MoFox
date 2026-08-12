@@ -22,8 +22,6 @@ class PermPlugin(BasePlugin):
     """
 
     plugin_name: str = "perm_plugin"
-    plugin_description: str = "系统权限管理插件，提供聊天内 /perm 命令"
-    plugin_version: str = "1.0.0"
 
     configs: list[type] = []
     dependent_components: list[str] = []
