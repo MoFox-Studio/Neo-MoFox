@@ -63,7 +63,27 @@ class MessageHandler:
 
         config = cast(OneBotAdapterConfig, self.adapter.plugin.config)
         return max(1.0, float(config.features.video_download_timeout))
-    
+
+    def _get_forward_image_threshold(self) -> int:
+        """获取转发消息图片 base64 解析阈值。
+
+        转发消息内的图片总数达到该值时，不再解析为 base64，
+        而是统一替换为占位符；0 表示始终使用占位符。
+        """
+        default_threshold = 5
+        if not self.adapter.plugin or not self.adapter.plugin.config:
+            return default_threshold
+        config = cast(OneBotAdapterConfig, self.adapter.plugin.config)
+        return max(0, int(config.features.forward_image_threshold))
+
+    def _get_forward_max_depth(self) -> int:
+        """获取转发消息最大递归解析层数。"""
+        default_depth = 3
+        if not self.adapter.plugin or not self.adapter.plugin.config:
+            return default_depth
+        config = cast(OneBotAdapterConfig, self.adapter.plugin.config)
+        return max(1, int(config.features.forward_max_depth))
+
     def _init_video_downloader(self) -> None:
         """根据配置初始化视频下载器"""
         # 通过 adapter.plugin 访问配置
@@ -213,7 +233,7 @@ class MessageHandler:
                 if not messages:
                     logger.warning("转发消息内容为空或获取失败")
                     return None
-                return await self.handle_forward_message(messages)
+                return await self.handle_forward_message(messages, raw_message)
             case RealMessageType.json:
                 return await self._handle_json_message(segment)
             case RealMessageType.file:
@@ -460,28 +480,46 @@ class MessageHandler:
         return {"type": "text", "data": f"[扔了一个骰子，点数是{res}]"}
 
 
-    async def handle_forward_message(self, message_list: list) -> Seg | None:
+    async def handle_forward_message(
+        self, message_list: list, raw_message: dict | None = None
+    ) -> Seg | None:
         """
-        递归处理转发消息，并按照动态方式确定图片处理方式
+        递归处理转发消息，并按配置动态确定图片处理方式。
+
+        当转发消息内的图片总数小于 forward_image_threshold 时，
+        将图片解析为 base64；达到或超过该阈值时，统一替换为占位符。
+
         Parameters:
             message_list: list: 转发消息列表
+            raw_message: dict | None: 最外层原始消息，用于引用消息处理
         """
-        handled_message, image_count = await self._handle_forward_message(message_list, 0)
+        handled_message, image_count = await self._handle_forward_message(message_list, 0, raw_message)
         if not handled_message:
             return None
 
-        if 0 < image_count < 5:
-            logger.debug("图片数量小于5，开始解析图片为base64")
+        image_threshold = self._get_forward_image_threshold()
+        if 0 < image_count < image_threshold:
+            logger.debug(
+                f"图片数量({image_count})小于阈值({image_threshold})，开始解析图片为base64"
+            )
             processed_message = await self._recursive_parse_image_seg(handled_message, True)
         elif image_count > 0:
-            logger.debug("图片数量大于等于5，开始解析图片为占位符")
+            logger.debug(
+                f"图片数量({image_count})大于等于阈值({image_threshold})，开始解析图片为占位符"
+            )
             processed_message = await self._recursive_parse_image_seg(handled_message, False)
         else:
             logger.debug("没有图片，直接返回")
             processed_message = handled_message
 
         forward_hint = {"type": "text", "data": "这是一条转发消息：\n"}
-        return {"type": "seglist", "data": [forward_hint, processed_message]}
+        # 尽量扁平化：核心转换器对 seglist 有嵌套深度上限，
+        # 这里将内容列表展开到同一层，降低越界截断风险。
+        if processed_message.get("type") == "seglist":
+            processed_items = processed_message.get("data", [])
+        else:
+            processed_items = [processed_message]
+        return {"type": "seglist", "data": [forward_hint, *processed_items]}
 
     async def _recursive_parse_image_seg(self, seg_data: Seg, to_image: bool) -> Seg:
         # sourcery skip: merge-else-if-into-elif
@@ -519,13 +557,17 @@ class MessageHandler:
         logger.debug(f"不处理类型: {seg_data.get('type')}")
         return seg_data
 
-    async def _handle_forward_message(self, message_list: list, layer: int) -> tuple[Seg | None, int]:
-        # sourcery skip: low-code-quality
+    async def _handle_forward_message(
+        self, message_list: list, layer: int, raw_message: dict | None = None
+    ) -> tuple[Seg | None, int]:
         """
-        递归处理实际转发消息
+        递归处理转发消息
+
         Parameters:
             message_list: list: 转发消息列表，首层对应messages字段，后面对应content字段
             layer: int: 当前层级
+            raw_message: dict | None: 最外层原始消息，用于引用消息处理
+
         Returns:
             seg_data: Seg: 处理后的消息段
             image_count: int: 图片数量
@@ -534,72 +576,201 @@ class MessageHandler:
         image_count = 0
         if message_list is None:
             return None, 0
+
+        # 构建 message_seq / message_id → 消息 映射，供转发内 reply 段按 id 定位被引用消息。
+        # 转发记录里的 reply.data.id 通常是 message_seq 而非 message_id，
+        # get_msg 用该值查不到任何消息，被引用内容其实就在转发记录内。
+        seq_map: dict[str, dict] = {}
         for sub_message in message_list:
+            if not isinstance(sub_message, dict):
+                continue
+            for key in ("message_seq", "message_id"):
+                seq_val = sub_message.get(key)
+                if seq_val is not None:
+                    seq_map[str(seq_val)] = sub_message
+
+        for sub_message in message_list:
+            if not isinstance(sub_message, dict):
+                continue
             sender_info: dict = sub_message.get("sender", {})
             user_nickname: str = sender_info.get("nickname", "QQ用户")
             user_nickname_str = f"【{user_nickname}】:"
             break_seg: Seg = {"type": "text", "data": "\n"}
-            message_of_sub_message_list: list[dict[str, Any]] = sub_message.get("message")
+            message_of_sub_message_list: Any = sub_message.get("message")
+            if isinstance(message_of_sub_message_list, dict):
+                message_of_sub_message_list = [message_of_sub_message_list]
             if not message_of_sub_message_list:
                 logger.warning("转发消息内容为空")
                 continue
-            message_of_sub_message = message_of_sub_message_list[0]
-            message_type = message_of_sub_message.get("type")
-            if message_type == RealMessageType.forward:
-                if layer >= 3:
-                    full_seg_data: Seg = {
-                        "type": "text",
-                        "data": ("--" * layer) + f"【{user_nickname}】:【转发消息】\n",
-                    }
-                else:
-                    sub_message_data = message_of_sub_message.get("data")
-                    if not sub_message_data:
-                        continue
-                    contents = sub_message_data.get("content")
-                    seg_data, count = await self._handle_forward_message(contents, layer + 1)
-                    if seg_data is None:
-                        continue
-                    image_count += count
-                    head_tip: Seg = {
-                        "type": "text",
-                        "data": ("--" * layer) + f"【{user_nickname}】: 合并转发消息内容：\n",
-                    }
-                    full_seg_data = {"type": "seglist", "data": [head_tip, seg_data]}
-                seg_list.append(full_seg_data)
-            elif message_type == RealMessageType.text:
-                sub_message_data = message_of_sub_message.get("data")
-                if not sub_message_data:
+
+            nickname_prefix = ("--" * layer) + user_nickname_str if layer > 0 else user_nickname_str
+            sub_seg_list: list[Seg] = []
+
+            for message_of_sub_message in message_of_sub_message_list:
+                if not isinstance(message_of_sub_message, dict):
                     continue
-                text_message = sub_message_data.get("text")
-                seg_data = {"type": "text", "data": text_message}
-                nickname_prefix = ("--" * layer) + user_nickname_str if layer > 0 else user_nickname_str
-                data_list: list[Seg] = [
-                    {"type": "text", "data": nickname_prefix},
-                    seg_data,
-                    break_seg,
-                ]
-                seg_list.append({"type": "seglist", "data": data_list})
-            elif message_type == RealMessageType.image:
-                image_count += 1
-                image_data = message_of_sub_message.get("data", {})
-                image_url = image_data.get("url")
-                if not image_url:
-                    logger.warning("转发消息图片缺少URL")
-                    continue
-                sub_type = image_data.get("sub_type")
-                if sub_type == 0:
-                    seg_data = {"type": "image", "data": image_url}
-                else:
-                    seg_data = {"type": "emoji", "data": image_url}
-                nickname_prefix = ("--" * layer) + user_nickname_str if layer > 0 else user_nickname_str
-                data_list = [
-                    {"type": "text", "data": nickname_prefix},
-                    seg_data,
-                    break_seg,
-                ]
-                full_seg_data = {"type": "seglist", "data": data_list}
-                seg_list.append(full_seg_data)
+                seg_result, count = await self._handle_forward_single_segment(
+                    message_of_sub_message, raw_message, layer, seq_map
+                )
+                image_count += count
+                if seg_result:
+                    sub_seg_list.append(seg_result)
+
+            if not sub_seg_list:
+                continue
+
+            # 尽量扁平化：核心转换器对 seglist 有嵌套深度上限，
+            # 除必须独立成块的引用/合并转发外，其余内容直接展开到当前层。
+            nickname_part: Seg = {"type": "text", "data": nickname_prefix}
+            seg_list.extend([nickname_part, *sub_seg_list, break_seg])
         return {"type": "seglist", "data": seg_list}, image_count
+
+    async def _handle_forward_single_segment(
+        self, segment: dict, raw_message: dict | None, layer: int, seq_map: dict[str, dict] | None = None
+    ) -> tuple[Seg | None, int]:
+        """
+        处理转发消息内的单条消息段。
+
+        与顶层消息处理不同，此处图片段仅保留 URL（交由外层统一决定
+        是否解析为 base64），并支持对引用（reply）消息的递归解析以及
+        嵌套转发（forward）的递归解析。
+
+        Parameters:
+            segment: dict: 转发内容中的一条消息段
+            raw_message: dict | None: 最外层原始消息，用于引用消息处理
+            layer: int: 当前层级
+            seq_map: dict[str, dict] | None: message_seq/message_id → 消息 映射，
+                供 reply 段定位被引用消息（转发记录内回复段 id 指向 message_seq）
+        Returns:
+            seg_data: Seg | None: 处理后的消息段
+            image_count: int: 该消息段包含的图片数量
+        """
+        seg_type = segment.get("type")
+
+        if seg_type == RealMessageType.text:
+            seg_data = segment.get("data")
+            if isinstance(seg_data, str):
+                return {"type": "text", "data": seg_data}, 0
+            seg_data = seg_data or {}
+            text_message = seg_data.get("text")
+            if not text_message:
+                return None, 0
+            return {"type": "text", "data": text_message}, 0
+
+        if seg_type == RealMessageType.image:
+            image_data = segment.get("data", {})
+            image_url = image_data.get("url")
+            if not image_url:
+                logger.warning("转发消息图片缺少URL")
+                return None, 0
+            sub_type = image_data.get("sub_type")
+            seg_data = {"type": "image", "data": image_url} if sub_type == 0 else {"type": "emoji", "data": image_url}
+            return seg_data, 1
+
+        if seg_type == RealMessageType.forward:
+            max_depth = self._get_forward_max_depth()
+            if layer >= max_depth:
+                return {"type": "text", "data": "【转发消息】\n"}, 0
+
+            sub_message_data = segment.get("data")
+            if not sub_message_data:
+                return None, 0
+            contents = await get_forward_message(segment, adapter=self.adapter)
+            if not contents:
+                logger.warning("嵌套转发消息内容为空")
+                return None, 0
+
+            seg_data, count = await self._handle_forward_message(contents, layer + 1, raw_message)
+            if seg_data is None:
+                return None, count
+            head_tip: Seg = {"type": "text", "data": "合并转发消息内容：\n"}
+            if seg_data.get("type") == "seglist":
+                inner_items = seg_data.get("data", [])
+            else:
+                inner_items = [seg_data]
+            return {"type": "seglist", "data": [head_tip, *inner_items]}, count
+
+        if seg_type == RealMessageType.reply:
+            # 转发内容中的引用消息：优先按 reply.data.id（对应被引用消息的
+            # message_seq/message_id）在当前转发记录内定位并解析出原文内容，
+            # 无法定位时回退使用 reply 段自带的内嵌 text/qq 预览。
+            # 全程不产出 reply 段，避免整个转发内容被误判为引用消息。
+            reply_data = segment.get("data", {})
+            reply_id = str(reply_data.get("id", ""))
+            referenced: dict | None = None
+            if seq_map and reply_id:
+                referenced = seq_map.get(reply_id)
+
+            reply_segments: list[Seg] = []
+            sender_id = reply_data.get("qq")
+            sender_nickname = str(sender_id) if sender_id else "未知用户"
+
+            if referenced:
+                # 命中转发记录内的被引用消息：递归解析其消息段作为可读预览
+                ref_sender = referenced.get("sender", {})
+                ref_sender_id = ref_sender.get("user_id")
+                ref_nickname = ref_sender.get("nickname") or "未知用户"
+                if ref_sender_id:
+                    sender_id = ref_sender_id
+                    sender_nickname = ref_nickname
+
+                ref_message_list: Any = referenced.get("message")
+                if isinstance(ref_message_list, dict):
+                    ref_message_list = [ref_message_list]
+                for ref_seg in ref_message_list or []:
+                    if not isinstance(ref_seg, dict):
+                        continue
+                    ref_result, _count = await self._handle_forward_single_segment(
+                        ref_seg, raw_message, layer, seq_map
+                    )
+                    if ref_result:
+                        reply_segments.append(ref_result)
+
+            prefix_text = f"[回复<{sender_nickname}({sender_id})>：" if sender_id else f"[回复<{sender_nickname}>："
+            brief_segments = [
+                {"type": seg.get("type", "text"), "data": seg.get("data", "")} for seg in reply_segments
+            ] or [{"type": "text", "data": "[无法获取被引用的消息]"}]
+
+            return {
+                "type": "seglist",
+                "data": [
+                    {"type": "text", "data": prefix_text},
+                    *brief_segments,
+                    {"type": "text", "data": "]，说："},
+                ],
+            }, 0
+
+        if seg_type == RealMessageType.face:
+            seg_data = segment.get("data", {})
+            face_raw_id = str(seg_data.get("id", ""))
+            face_content = QQ_FACE.get(face_raw_id)
+            if face_content:
+                return {"type": "text", "data": face_content}, 0
+            return None, 0
+
+        if seg_type == RealMessageType.at:
+            seg_data = segment.get("data", {})
+            qq_id = seg_data.get("qq")
+            if qq_id == "all":
+                return {"type": "text", "data": "@全体成员 "}, 0
+            return {"type": "text", "data": f"@{qq_id} "}, 0
+
+        if seg_type == RealMessageType.record:
+            return {"type": "text", "data": "[语音消息]\n"}, 0
+        if seg_type == RealMessageType.video:
+            return {"type": "text", "data": "[视频消息]\n"}, 0
+
+        if seg_type in (RealMessageType.rps, RealMessageType.dice, RealMessageType.json, RealMessageType.file):
+            type_label = {
+                RealMessageType.rps: "[猜拳表情]",
+                RealMessageType.dice: "[骰子]",
+                RealMessageType.json: "[JSON卡片]",
+                RealMessageType.file: "[文件]",
+            }[seg_type]
+            return {"type": "text", "data": type_label + "\n"}, 0
+
+        logger.warning(f"转发消息中不支持的消息段类型: {seg_type}")
+        return None, 0
 
     async def _handle_file_message(self, segment: dict) -> Seg | None:
         """处理文件消息"""
