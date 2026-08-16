@@ -426,6 +426,18 @@ class SendHandler:
 
     async def handle_emoji_message(self, encoded_emoji: str) -> dict:
         """处理表情消息"""
+        if encoded_emoji.startswith(("base64://", "http://", "https://", "file://")):
+            return {
+                "type": "image",
+                "data": {
+                    "file": encoded_emoji,
+                    "subtype": 1,
+                    "summary": "[动画表情]",
+                },
+            }
+        # 剥离 MoFox 内部 base64| 前缀
+        if encoded_emoji.startswith("base64|"):
+            encoded_emoji = encoded_emoji[7:]
         encoded_image = encoded_emoji
         image_format = await get_image_format(encoded_emoji)
         if image_format != "gif":

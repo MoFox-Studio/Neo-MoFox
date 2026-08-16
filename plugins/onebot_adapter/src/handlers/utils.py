@@ -29,6 +29,18 @@ def sanitize_text(text: str | None) -> str | None:
         return None
     return text.translate(_INVALID_CHARS)
 
+
+def clean_base64(data: str) -> str:
+    """提取纯净的 base64 数据，移除 ``data:`` / ``base64|`` / ``base64://`` 前缀与空白字符。"""
+    if data.startswith("data:"):
+        if "base64," in data:
+            data = data.split("base64,", 1)[1]
+    elif data.startswith("base64|"):
+        data = data[7:]
+    elif data.startswith("base64://"):
+        data = data[len("base64://") :]
+    return data.replace("\n", "").replace("\r", "").replace(" ", "")
+
 # 简单的缓存实现，通过 kernel.storage 实现磁盘持久化存储
 _CACHE_LOADED = False
 _CACHE: dict[str, dict[str, dict[str, Any]]] = {
@@ -298,9 +310,12 @@ async def convert_image_to_gif(image_base64: str) -> str:
     """
     logger.debug("转换图片为GIF格式")
     try:
+        cleaned = clean_base64(image_base64)
+        if not cleaned:
+            return image_base64
         image_bytes = await asyncio.to_thread(
             base64_decode_to_bytes,
-            image_base64,
+            cleaned,
         )
         image = Image.open(io.BytesIO(image_bytes))
         output_buffer = io.BytesIO()
@@ -346,9 +361,16 @@ async def get_image_format(raw_data: str) -> str:
     Returns:
         format: str: 图片的格式类型，如 'jpeg', 'png', 'gif'等
     """
-    image_bytes = await asyncio.to_thread(base64_decode_to_bytes, raw_data)
-    img_format = Image.open(io.BytesIO(image_bytes)).format
-    return (img_format or "unknown").lower()
+    clean = clean_base64(raw_data)
+    if not clean:
+        return "unknown"
+    try:
+        image_bytes = await asyncio.to_thread(base64_decode_to_bytes, clean)
+        img_format = Image.open(io.BytesIO(image_bytes)).format
+        return (img_format or "unknown").lower()
+    except Exception as e:
+        logger.debug(f"获取图片格式失败: {e!s}")
+        return "unknown"
 
 
 async def get_stranger_info(
