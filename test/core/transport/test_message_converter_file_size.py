@@ -46,6 +46,27 @@ def test_format_file_size_invalid() -> None:
     assert _format_file_size(None) == ""
     assert _format_file_size("") == ""
     assert _format_file_size("  ") == ""
+    assert _format_file_size("abc") == ""
+    assert _format_file_size(object()) == ""
+
+
+def test_format_file_size_negative() -> None:
+    """负数无法表示真实大小，返回空串。"""
+    assert _format_file_size(-1) == ""
+    assert _format_file_size("-1024") == ""
+
+
+def test_format_file_size_thousands_separator() -> None:
+    """千分位逗号字符串应被解析为字节数。"""
+    assert _format_file_size("1,024") == "1.0KB"
+    assert _format_file_size("83,385,540") == "79.5MB"
+
+
+def test_format_file_size_preset_text_case_insensitive() -> None:
+    """已是可读格式的字符串（含小写/二进制单位）原样返回。"""
+    assert _format_file_size("1.7MB") == "1.7MB"
+    assert _format_file_size("512kb") == "512kb"
+    assert _format_file_size("1.0GiB") == "1.0GiB"
 
 
 def test_handle_file_with_size() -> None:

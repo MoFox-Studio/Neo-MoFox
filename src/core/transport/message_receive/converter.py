@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -78,12 +79,17 @@ def _merge_message_extra_with_format_info(
     return extra_data
 
 
+# 预格式化大小文本（如 OneBot 回声中 "1.7MB"），直接透传
+_READABLE_SIZE_RE = re.compile(r"^\d+(?:\.\d+)?\s*[KMGTP]?i?B$", re.IGNORECASE)
+
+
 def _format_file_size(size: Any) -> str:
     """将字节数格式化为可读大小文本。
 
-    支持数值与数字字符串；无法解析（如 ``None``、空串或 OneBot 回声中
-    形如 ``"1.7MB"`` 的预格式化字符串）时原样返回，避免 LLM 文本中出现
-    无意义的 ``None``。单位以 1024 进制换算（B/KB/MB/GB/TB）。
+    支持数值、数字字符串（含千分位逗号）；无法解析（``None``、空串、
+    负数或非数字）时统一返回空字符串，避免 LLM 文本中出现无意义内容。
+    已是可读格式的字符串（如 ``"1.7MB"``）原样返回。单位以 1024 进制
+    换算（B/KB/MB/GB/TB）。
 
     Args:
         size: 文件大小（字节数或字符串）。
@@ -91,23 +97,28 @@ def _format_file_size(size: Any) -> str:
     Returns:
         可读大小文本；无法解析时返回空字符串。
     """
-    if size is None or size == "":
+    if size is None:
         return ""
     if isinstance(size, str):
         stripped = size.strip()
         if not stripped:
             return ""
         # 已是可读格式（如 "1.7MB"），直接原样使用
-        if not stripped.replace(".", "", 1).isdigit():
+        if _READABLE_SIZE_RE.match(stripped):
             return stripped
-        size = int(stripped)
+        # 兼容千分位逗号（如 "1,024"）
+        normalized = stripped.replace(",", "")
+        try:
+            size = int(normalized)
+        except ValueError:
+            return ""
     try:
         size = int(size)
     except (TypeError, ValueError):
-        return str(size)
+        return ""
 
     if size < 0:
-        return str(size)
+        return ""
     units = ("B", "KB", "MB", "GB", "TB")
     value = float(size)
     for unit in units:
