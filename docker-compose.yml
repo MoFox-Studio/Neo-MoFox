@@ -6,7 +6,6 @@ services:
     # build: .
     container_name: mofox-bot
     restart: unless-stopped
-    entrypoint: ["sh", "-c", "if [ ! -d 'plugins/webui_backend' ]; then git clone -b webui-dist https://github.com/MoFox-Studio/MoFox-Core-Webui.git plugins/webui_backend; fi; exec uv run main.py"]
     volumes:
       # 将配置、数据和日志文件夹物理映射到宿主机
       - ./config:/app/config
