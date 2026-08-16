@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -76,6 +77,57 @@ def _merge_message_extra_with_format_info(
         extra_data["format_info"] = format_info
 
     return extra_data
+
+
+# 预格式化大小文本（如 "1.7MB"），直接透传
+_READABLE_SIZE_RE = re.compile(r"^\d+(?:\.\d+)?\s*[KMGTP]?i?B$", re.IGNORECASE)
+
+
+def _format_file_size(size: Any) -> str:
+    """将字节数格式化为可读大小文本。
+
+    支持数值、数字字符串（含千分位逗号）；无法解析（``None``、空串、
+    负数或非数字）时统一返回空字符串，避免 LLM 文本中出现无意义内容。
+    已是可读格式的字符串（如 ``"1.7MB"``）原样返回。单位以 1024 进制
+    换算（B/KB/MB/GB/TB）。
+
+    Args:
+        size: 文件大小（字节数或字符串）。
+
+    Returns:
+        可读大小文本；无法解析时返回空字符串。
+    """
+    if size is None:
+        return ""
+    if isinstance(size, str):
+        stripped = size.strip()
+        if not stripped:
+            return ""
+        # 已是可读格式（如 "1.7MB"），直接原样使用
+        if _READABLE_SIZE_RE.match(stripped):
+            return stripped
+        # 兼容千分位逗号（如 "1,024"）
+        normalized = stripped.replace(",", "")
+        try:
+            size = int(normalized)
+        except ValueError:
+            return ""
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        return ""
+
+    if size < 0:
+        return ""
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{size}B"
 
 
 # ──────────────────────────────────────────────
@@ -585,16 +637,21 @@ class MessageConverter:
             parsed = safe_json_loads(data)
 
         if isinstance(parsed, dict):
+            file_size = parsed.get("size") or parsed.get("file_size")
             result.media.append({
                 "type": "file",
                 "data": {
                     "name": parsed.get("name") or parsed.get("file", ""),
-                    "size": parsed.get("size") or parsed.get("file_size"),
+                    "size": file_size,
                     "id": parsed.get("id") or parsed.get("file_id"),
                 },
             })
             file_name = parsed.get("name") or parsed.get("file", "文件")
-            result.text_parts.append(f"[文件:{file_name}]")
+            size_text = _format_file_size(file_size)
+            # 文本占位符附带可读大小，使 LLM 在 processed_plain_text 中能感知文件大小
+            result.text_parts.append(
+                f"[文件:{file_name}({size_text})]" if size_text else f"[文件:{file_name}]"
+            )
         else:
             # 无法解析结构，保留原始信息
             result.media.append({"type": "file", "data": parsed})
