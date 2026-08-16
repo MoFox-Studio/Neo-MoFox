@@ -98,9 +98,6 @@ class VLMEngine:
 
             description = response.message.strip() if response.message else ""
 
-            if len(description) > 100:
-                description = description[:97] + "..."
-
             return description if description else None
 
         except Exception as e:
