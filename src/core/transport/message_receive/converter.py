@@ -78,6 +78,47 @@ def _merge_message_extra_with_format_info(
     return extra_data
 
 
+def _format_file_size(size: Any) -> str:
+    """将字节数格式化为可读大小文本。
+
+    支持数值与数字字符串；无法解析（如 ``None``、空串或 OneBot 回声中
+    形如 ``"1.7MB"`` 的预格式化字符串）时原样返回，避免 LLM 文本中出现
+    无意义的 ``None``。单位以 1024 进制换算（B/KB/MB/GB/TB）。
+
+    Args:
+        size: 文件大小（字节数或字符串）。
+
+    Returns:
+        可读大小文本；无法解析时返回空字符串。
+    """
+    if size is None or size == "":
+        return ""
+    if isinstance(size, str):
+        stripped = size.strip()
+        if not stripped:
+            return ""
+        # 已是可读格式（如 "1.7MB"），直接原样使用
+        if not stripped.replace(".", "", 1).isdigit():
+            return stripped
+        size = int(stripped)
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        return str(size)
+
+    if size < 0:
+        return str(size)
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{size}B"
+
+
 # ──────────────────────────────────────────────
 #  段解析返回结构
 # ──────────────────────────────────────────────
@@ -585,16 +626,21 @@ class MessageConverter:
             parsed = safe_json_loads(data)
 
         if isinstance(parsed, dict):
+            file_size = parsed.get("size") or parsed.get("file_size")
             result.media.append({
                 "type": "file",
                 "data": {
                     "name": parsed.get("name") or parsed.get("file", ""),
-                    "size": parsed.get("size") or parsed.get("file_size"),
+                    "size": file_size,
                     "id": parsed.get("id") or parsed.get("file_id"),
                 },
             })
             file_name = parsed.get("name") or parsed.get("file", "文件")
-            result.text_parts.append(f"[文件:{file_name}]")
+            size_text = _format_file_size(file_size)
+            # 文本占位符附带可读大小，使 LLM 在 processed_plain_text 中能感知文件大小
+            result.text_parts.append(
+                f"[文件:{file_name}({size_text})]" if size_text else f"[文件:{file_name}]"
+            )
         else:
             # 无法解析结构，保留原始信息
             result.media.append({"type": "file", "data": parsed})
