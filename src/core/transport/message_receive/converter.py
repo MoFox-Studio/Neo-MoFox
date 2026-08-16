@@ -79,7 +79,7 @@ def _merge_message_extra_with_format_info(
     return extra_data
 
 
-# 预格式化大小文本（如 OneBot 回声中 "1.7MB"），直接透传
+# 预格式化大小文本（如 "1.7MB"），直接透传
 _READABLE_SIZE_RE = re.compile(r"^\d+(?:\.\d+)?\s*[KMGTP]?i?B$", re.IGNORECASE)
 
 
