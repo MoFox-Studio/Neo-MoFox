@@ -46,8 +46,8 @@ def _patch_api_version(monkeypatch: pytest.MonkeyPatch, api_name: str, version: 
 # =============================================================================
 
 
-def test_plugin_api_versions_contains_all_20_modules() -> None:
-    """PLUGIN_API_VERSIONS 应包含全部 20 个 *_api 模块，且初始版本均为 1.0.0。"""
+def test_plugin_api_versions_contains_all_modules() -> None:
+    """PLUGIN_API_VERSIONS 应包含全部 *_api 模块，且版本为合法语义化版本号。"""
     expected = {
         "action_api",
         "adapter_api",
@@ -62,6 +62,7 @@ def test_plugin_api_versions_contains_all_20_modules() -> None:
         "media_api",
         "message_api",
         "permission_api",
+        "person_api",
         "plugin_api",
         "prompt_api",
         "router_api",
@@ -69,11 +70,13 @@ def test_plugin_api_versions_contains_all_20_modules() -> None:
         "service_api",
         "storage_api",
         "stream_api",
+        "tool_api",
     }
     assert set(PLUGIN_API_VERSIONS) == expected
-    assert len(PLUGIN_API_VERSIONS) == 20
     for name, ver in PLUGIN_API_VERSIONS.items():
-        assert ver == "1.0.0", f"{name} 初始版本应为 1.0.0，实际为 {ver}"
+        parts = ver.split(".")
+        assert len(parts) == 3, f"{name} 版本应为三段式语义化版本，实际为 {ver}"
+        assert all(p.isdigit() for p in parts), f"{name} 版本含非数字段: {ver}"
 
 
 # =============================================================================

@@ -1,8 +1,8 @@
 """Action 管理器。
 
-本模块提供 Action 管理器，负责 Action 组件的注册、发现、激活判定和执行。
-Action 是"主动的响应"，通过 LLM Tool Calling 调用。
-管理器维护 Action 组件的全局集合，并根据聊天上下文过滤可用的 Action。
+本模块提供 Action 管理器，负责 Action 组件的注册、发现、作用域筛选、
+动态激活判定、schema 与执行。Action 是"主动的响应"，通过 LLM Tool Calling 调用。
+管理器维护 Action 组件的全局集合，并按传入的组件类集合进行筛选。
 """
 
 from __future__ import annotations
@@ -14,16 +14,23 @@ from src.kernel.llm import LLMUsable
 from src.kernel.concurrency import get_task_manager
 
 from src.core.components.registry import get_global_registry
-from src.core.components.types import ChatType, ComponentType
+from src.core.components.types import ChatType, ComponentType, EventType
 from src.core.components.utils import should_strip_auto_reason_argument
 from src.core.managers.stream_manager import get_stream_manager
 
+from src.core.managers.utils import (
+    build_usable_static_context,
+    filter_by_associated_types,
+    publish_before_filter_event,
+    static_filter_usables,
+)
+
 if TYPE_CHECKING:
     from src.core.components.base.action import BaseAction
+    from src.core.components.base.chatter import BaseChatter
     from src.core.components.base.plugin import BasePlugin
     from src.core.models.message import Message
     from src.core.models.stream import ChatStream, StreamContext
-
 
 logger = get_logger("action_manager")
 
@@ -31,33 +38,33 @@ logger = get_logger("action_manager")
 class ActionManager:
     """Action 管理器。
 
-    负责管理所有 Action 组件，提供查询、过滤和执行接口。
-    根据 ChatType、Chatter 名称等条件过滤可用的 Action。
+    负责管理所有 Action 组件，提供查询、筛选、激活与执行接口。
+    筛选前发布 ``BEFORE_ACTION_FILTER`` 事件，允许外部事件处理器改写组件类集合。
+    筛选逻辑从"按聊天流获取"改为"按传入组件类筛选"，并支持聊天器名称参数。
 
     Attributes:
         _schema_cache: Action schema 缓存
 
     Examples:
         >>> manager = ActionManager()
-        >>> actions = manager.get_actions_for_chat(
-        ...     chat_type=ChatType.PRIVATE,
-        ...     chatter_name="my_chatter"
+        >>> actions = await manager.get_actions_for_chat(
+        ...     usables=[MyAction],
+        ...     chat_type="private",
+        ...     chatter_name="my_chatter",
         ... )
-        >>> schema = manager.get_action_schema("my_plugin:action:send_message")
     """
 
     def __init__(self) -> None:
         """初始化 Action 管理器。"""
         self._schema_cache: dict[str, dict[str, Any]] = {}
 
+    # ── 查询 ──
+
     def get_all_actions(self) -> dict[str, type["BaseAction"]]:
         """获取所有已注册的 Action 组件。
 
         Returns:
             dict[str, type[BaseAction]]: 将签名映射到 Action 类的字典
-
-        Examples:
-            >>> actions = manager.get_all_actions()
         """
         registry = get_global_registry()
         return registry.get_by_type(ComponentType.ACTION)
@@ -70,63 +77,9 @@ class ActionManager:
 
         Returns:
             dict[str, type[BaseAction]]: 将签名映射到 Action 类的字典
-
-        Examples:
-            >>> actions = manager.get_actions_for_plugin("my_plugin")
         """
         registry = get_global_registry()
         return registry.get_by_plugin_and_type(plugin_name, ComponentType.ACTION)
-
-    def get_actions_for_chat(
-        self,
-        chat_type: ChatType = ChatType.ALL,
-        chatter_name: str = "",
-        platform: str = "",
-    ) -> list[type[LLMUsable]]:
-        """获取适用于特定聊天上下文的 Action 组件列表。
-
-        根据 ChatType、Chatter 名称和平台过滤 Action。
-
-        Args:
-            chat_type: 聊天类型（私聊/群聊/全部）
-            chatter_name: Chatter 名称（空字符串表示不限制）
-            platform: 平台名称（空字符串表示不限制）
-
-        Returns:
-            list[type[LLMUsable]]: 可用的 Action 类列表
-
-        Examples:
-            >>> actions = manager.get_actions_for_chat(
-            ...     chat_type=ChatType.PRIVATE,
-            ...     chatter_name="my_chatter"
-            ... )
-        """
-        from src.core.components.usable_filter import (
-            UsableFilterContext,
-            evaluate_usable_filter,
-        )
-
-        all_actions = self.get_all_actions()
-        ctx = UsableFilterContext(
-            stream_id="",
-            chat_type=chat_type.value if isinstance(chat_type, ChatType) else str(chat_type),
-            platform=platform,
-            chatter_name=chatter_name,
-        )
-
-        filtered_actions = []
-        for signature, action_cls in all_actions.items():
-            is_eligible, _ = evaluate_usable_filter(action_cls, ctx)
-            if is_eligible:
-                filtered_actions.append(action_cls)
-
-        logger.debug(
-            f"为聊天上下文筛选 Action: chat_type={ctx.chat_type}, "
-            f"chatter={chatter_name}, platform={platform}, "
-            f"结果: {len(filtered_actions)}/{len(all_actions)}"
-        )
-
-        return filtered_actions
 
     def get_action_class(self, signature: str) -> type["BaseAction"] | None:
         """通过签名获取 Action 类。
@@ -136,12 +89,155 @@ class ActionManager:
 
         Returns:
             type[BaseAction] | None: Action 类，如果未找到则返回 None
-
-        Examples:
-            >>> action_cls = manager.get_action_class("my_plugin:action:send_message")
         """
         registry = get_global_registry()
         return registry.get(signature)
+
+    # ── 筛选与激活 ──
+
+    async def get_actions_for_chat(
+        self,
+        usables: list[type["LLMUsable"]] | None = None,
+        *,
+        chat_type: "ChatType | str" = "all",
+        chatter_name: str = "",
+        platform: str = "",
+        stream_id: str = "",
+        chat_stream: "ChatStream | None" = None,
+        stream_context: "StreamContext | None" = None,
+        chatter: "BaseChatter | None" = None,
+    ) -> list[type["LLMUsable"]]:
+        """获取适用于特定聊天上下文的 Action 组件类列表。
+
+        若传入 ``usables`` 则直接对给定集合筛选（默认筛选不传 stream_id、
+        不获取流，仅按静态维度）；否则从注册表拉取全部 Action。
+
+        Args:
+            usables: 待筛选的组件类列表；不传则取全量注册 Action
+            chat_type: 聊天类型（private / group / all）
+            chatter_name: Chatter 名称
+            platform: 平台名称
+            stream_id: 聊天流 ID（空表示不按流筛选）
+            chat_stream: 候选聊天流实例（提供后由其派生完整上下文）
+            stream_context: 聊天流上下文（提供后按内容类型过滤）
+
+        Returns:
+            list[type[LLMUsable]]: 筛选后的 Action 组件类列表
+        """
+        if isinstance(chat_type, ChatType):
+            chat_type = chat_type.value
+
+        if usables is None:
+            usables = list(self.get_all_actions().values())
+
+        # 筛选前事件钩子：外部处理器可改写组件集合
+        usables = await publish_before_filter_event(
+            EventType.BEFORE_ACTION_FILTER,
+            component_kind="action",
+            usables=usables,
+            stream_id=stream_id or (getattr(chat_stream, "stream_id", "") or ""),
+            chatter_name=chatter_name,
+            stream_context=stream_context,
+        )
+
+        ctx = build_usable_static_context(
+            usables=usables,
+            chat_type=chat_type,
+            chatter_name=chatter_name,
+            platform=platform,
+            stream_id=stream_id,
+            chat_stream=chat_stream,
+            chatter=chatter,
+        )
+
+        filtered, removals = static_filter_usables(usables, ctx)
+
+        if stream_context is not None:
+            removals.extend(filter_by_associated_types(filtered, stream_context))
+
+        removal_names = {name for name, _ in removals}
+        available = [
+            cls
+            for cls in filtered
+            if (cls.get_signature() or cls.__name__) not in removal_names  # type: ignore[attr-defined]
+        ]
+
+        if removals:
+            summary = " | ".join(f"{n}({r})" for n, r in removals)
+            logger.debug(f"移除 Action 组件: {summary}")
+
+        return available
+
+    async def activate_actions_for_chat(
+        self,
+        actions: list[type["LLMUsable"]],
+        *,
+        chat_stream: "ChatStream",
+        plugin: "BasePlugin | None" = None,
+        message_content: str = "",
+    ) -> list[type["LLMUsable"]]:
+        """对 Action 组件类执行动态激活判定（go_activate）。
+
+        Args:
+            actions: 待判定的 Action 组件类列表
+            chat_stream: 当前聊天流实例
+            plugin: 所属插件实例（缺省时按组件签名解析）
+            message_content: 当前消息内容，供激活判定使用
+
+        Returns:
+            list[type[LLMUsable]]: 激活通过的组件类列表
+        """
+        from src.core.managers import get_plugin_manager
+
+        tasks: list[Any] = []
+        signatures: list[str] = []
+        kept: list[type["LLMUsable"]] = []
+
+        for action_cls in actions:
+            signature = action_cls.get_signature() or action_cls.__name__  # type: ignore[attr-defined]
+            # 优先按组件签名解析所属插件；无法解析时回退到传入的 plugin
+            action_plugin = None
+            parts = signature.split(":") if signature else []
+            plugin_name = parts[0] if len(parts) >= 3 else ""
+            if plugin_name:
+                action_plugin = get_plugin_manager().get_plugin(plugin_name)
+            if action_plugin is None:
+                action_plugin = plugin
+            if action_plugin is None:
+                logger.warning(f"未找到 Action 所属插件实例: {signature}，跳过激活判定")
+                continue
+            try:
+                instance = action_cls(chat_stream=chat_stream, plugin=action_plugin)  # type: ignore[call-arg]
+                instance._last_message = message_content  # type: ignore[attr-defined]
+                go_activate = getattr(instance, "go_activate", None)
+                if not callable(go_activate):
+                    kept.append(action_cls)
+                    continue
+                tasks.append(go_activate())
+                signatures.append(signature)
+            except Exception as e:
+                logger.error(f"创建 Action 实例 {signature} 失败: {e}")
+                continue
+
+        if tasks:
+            results = await get_task_manager().gather(*tasks, return_exceptions=True)
+            for signature, result in zip(signatures, results, strict=False):
+                if isinstance(result, Exception) or not result:
+                    continue
+                action_cls = next(
+                    (
+                        c
+                        for c in actions
+                        if (c.get_signature() or c.__name__) == signature  # type: ignore[attr-defined]
+                    ),
+                    None,
+                )
+                if action_cls is not None:
+                    kept.append(action_cls)
+
+        return kept
+
+    # ── Schema ──
 
     def get_action_schema(self, signature: str) -> dict[str, Any] | None:
         """获取 Action 的 Tool Schema。
@@ -153,17 +249,6 @@ class ActionManager:
 
         Returns:
             dict[str, Any] | None: OpenAI Tool Calling 格式的 schema
-
-        Examples:
-            >>> schema = manager.get_action_schema("my_plugin:action:send_message")
-            >>> {
-            ...     "type": "function",
-            ...     "function": {
-            ...         "name": "send_message",
-            ...         "description": "发送消息",
-            ...         "parameters": {...}
-            ...     }
-            ... }
         """
         if signature in self._schema_cache:
             return self._schema_cache[signature]
@@ -176,29 +261,30 @@ class ActionManager:
         self._schema_cache[signature] = schema
         return schema
 
-    def get_action_schemas(
+    async def get_action_schemas(
         self,
-        chat_type: ChatType = ChatType.ALL,
+        chat_type: "ChatType | str" = "all",
         chatter_name: str = "",
         platform: str = "",
+        stream_id: str = "",
     ) -> list[dict[str, Any]]:
         """获取适用于特定聊天上下文的所有 Action Schema。
 
         Args:
-            chat_type: 聊天类型
+            chat_type: 聊天类型（private / group / all）
             chatter_name: Chatter 名称
             platform: 平台名称
+            stream_id: 聊天流 ID
 
         Returns:
             list[dict[str, Any]]: Action schema 列表
-
-        Examples:
-            >>> schemas = manager.get_action_schemas(
-            ...     chat_type=ChatType.PRIVATE,
-            ...     chatter_name="my_chatter"
-            ... )
         """
-        actions = self.get_actions_for_chat(chat_type, chatter_name, platform)
+        actions = await self.get_actions_for_chat(
+            chat_type=chat_type,
+            chatter_name=chatter_name,
+            platform=platform,
+            stream_id=stream_id,
+        )
         schemas = []
 
         for action_cls in actions:
@@ -209,6 +295,19 @@ class ActionManager:
                 schemas.append(schema)
 
         return schemas
+
+    def clear_schema_cache(self, signature: str | None = None) -> None:
+        """清除 schema 缓存。
+
+        Args:
+            signature: 要清除的 Action 签名，None 表示清除全部
+        """
+        if signature:
+            self._schema_cache.pop(signature, None)
+        else:
+            self._schema_cache.clear()
+
+    # ── 执行 ──
 
     async def execute_action(
         self,
@@ -234,14 +333,6 @@ class ActionManager:
         Raises:
             ValueError: 如果 Action 类未找到
             RuntimeError: 如果 Action 执行失败
-
-        Examples:
-            >>> success, result = await manager.execute_action(
-            ...     "my_plugin:action:send_message",
-            ...     plugin,
-            ...     message,
-            ...     content="你好"
-            ... )
         """
         action_cls = self.get_action_class(signature)
         if not action_cls:
@@ -277,19 +368,17 @@ class ActionManager:
 
         # 触发动作调用执行前事件
         try:
-            from src.core.components.types import EventType
+            from src.core.components.types import EventType as _EventType
             from src.kernel.event import get_event_bus
 
             event_bus = get_event_bus()
-            if event_bus.get_subscribers(EventType.BEFORE_ACTION_CALL):
+            if event_bus.get_subscribers(_EventType.BEFORE_ACTION_CALL):
                 _, modified_params = await event_bus.publish(
-                    EventType.BEFORE_ACTION_CALL,
+                    _EventType.BEFORE_ACTION_CALL,
                     {
                         "signature": signature,
-                        "action_name": action_instance.action_name,
-                        "action_description": getattr(
-                            action_instance, "action_description", ""
-                        ),
+                        "action_name": action_instance.name,
+                        "action_description": action_instance.description,
                         "args": dict(kwargs),
                         "message": message,
                     },
@@ -319,19 +408,17 @@ class ActionManager:
 
             # 触发动作调用执行后事件
             try:
-                from src.core.components.types import EventType
+                from src.core.components.types import EventType as _EventType
                 from src.kernel.event import get_event_bus
 
                 event_bus = get_event_bus()
-                if event_bus.get_subscribers(EventType.AFTER_ACTION_CALL):
+                if event_bus.get_subscribers(_EventType.AFTER_ACTION_CALL):
                     _, modified_params = await event_bus.publish(
-                        EventType.AFTER_ACTION_CALL,
+                        _EventType.AFTER_ACTION_CALL,
                         {
                             "signature": signature,
                             "action_name": action_instance.name,
-                            "action_description": getattr(
-                                action_instance, "description", ""
-                            ),
+                            "action_description": action_instance.description,
                             "args": dict(kwargs),
                             "result": result[1],
                             "success": result[0],
@@ -362,13 +449,13 @@ class ActionManager:
 
             # 触发动作调用失败事件
             try:
-                from src.core.components.types import EventType
+                from src.core.components.types import EventType as _EventType
                 from src.kernel.event import get_event_bus
 
                 event_bus = get_event_bus()
-                if event_bus.get_subscribers(EventType.ON_ACTION_CALL_FAILED):
+                if event_bus.get_subscribers(_EventType.ON_ACTION_CALL_FAILED):
                     await event_bus.publish(
-                        EventType.ON_ACTION_CALL_FAILED,
+                        _EventType.ON_ACTION_CALL_FAILED,
                         {
                             "signature": signature,
                             "action_name": action_instance.name,
@@ -389,225 +476,7 @@ class ActionManager:
 
             raise RuntimeError(f"Action 执行失败: {e}") from e
 
-    def clear_schema_cache(self, signature: str | None = None) -> None:
-        """清除 schema 缓存。
-
-        Args:
-            signature: 要清除的 Action 签名，None 表示清除全部
-
-        Examples:
-            >>> # 清除特定 Action 的缓存
-            >>> manager.clear_schema_cache("my_plugin:action:send_message")
-            >>> # 清除全部缓存
-            >>> manager.clear_schema_cache()
-        """
-        if signature:
-            self._schema_cache.pop(signature, None)
-        else:
-            self._schema_cache.clear()
-
-    async def modify_actions(
-        self,
-        stream_id: str,
-        message_content: str = "",
-    ) -> list[str]:
-        """修改动作列表，根据上下文过滤和激活动作。
-
-        这是主方法，协调多个阶段的动作过滤和激活判定：
-        1. 检查动作的关联类型（associated_types）
-        2. 调用 go_activate 方法进行激活判定
-
-        Args:
-            stream_id: 聊天流 ID
-            message_content: 当前消息内容，用于激活判定
-
-        Returns:
-            list[str]: 最终可用的动作签名列表
-
-        Examples:
-            >>> available_actions = await manager.modify_actions(
-            ...     stream_id=stream.stream_id,
-            ...     message_content="你好"
-            ... )
-        """
-        logger.debug(f"[{stream_id}] 开始动作修改流程")
-
-        from src.core.managers.stream_manager import get_stream_manager
-
-        chat_stream = await get_stream_manager().get_or_create_stream(
-            stream_id=stream_id
-        )
-        # 获取所有动作类
-        all_actions = self.get_all_actions()
-        removals: list[tuple[str, str]] = []
-
-        # 第二阶段：检查关联类型
-        type_mismatched = self._check_action_associated_types(
-            all_actions, chat_stream.context
-        )
-        removals.extend(type_mismatched)
-
-        # 第三阶段：激活判定
-        deactivated = await self._get_deactivated_actions_by_type(
-            all_actions, chat_stream, message_content
-        )
-        removals.extend(deactivated)
-
-        # 构建最终可用动作列表
-        available_actions = []
-        for signature in all_actions.keys():
-            if not any(r[0] == signature for r in removals):
-                available_actions.append(signature)
-
-        # 日志记录
-        if removals:
-            removals_summary = " | ".join(
-                [f"{name}({reason})" for name, reason in removals]
-            )
-            logger.info(f"[{stream_id}] 移除动作: {removals_summary}")
-
-        available_text = "、".join(available_actions) if available_actions else "无"
-        logger.info(f"[{chat_stream.stream_id}] 可用动作: {available_text}")
-
-        return available_actions
-
-    def _check_action_associated_types(
-        self,
-        all_actions: dict[str, type["BaseAction"]],
-        chat_context: "StreamContext",
-    ) -> list[tuple[str, str]]:
-        """检查动作的关联类型。
-
-        Args:
-            all_actions: 所有动作类字典
-            chat_context: 聊天流上下文
-
-        Returns:
-            list[tuple[str, str]]: 需要移除的 (动作签名, 原因) 列表
-
-        Examples:
-            >>> removals = manager._check_action_associated_types(
-            ...     actions, context
-            ... )
-        """
-        type_mismatched: list[tuple[str, str]] = []
-
-        for signature, action_cls in all_actions.items():
-            required_types = action_cls.validate_associated_types()
-            if not chat_context.check_types(required_types):
-                types_str = ", ".join(required_types)
-                reason = f"适配器不支持（需要: {types_str}）"
-                type_mismatched.append((signature, reason))
-                logger.debug(f"[移除动作] {signature}：{reason}")
-
-        return type_mismatched
-
-    async def _get_deactivated_actions_by_type(
-        self,
-        actions_dict: dict[str, type["BaseAction"]],
-        chat_stream: "ChatStream",
-        message_content: str = "",
-    ) -> list[tuple[str, str]]:
-        """根据激活类型判定返回需要停用的动作列表。
-
-        并行调用每个 Action 的 go_activate 方法进行激活判定。
-
-        Args:
-            actions_dict: 动作字典
-            chat_stream: 聊天流实例
-            message_content: 消息内容
-
-        Returns:
-            list[tuple[str, str]]: 需要停用的 (动作签名, 原因) 列表
-
-        Examples:
-            >>> deactivated = await manager._get_deactivated_actions_by_type(
-            ...     actions, stream, "你好"
-            ... )
-        """
-        from src.core.managers import get_plugin_manager
-
-        deactivated_actions: list[tuple[str, str]] = []
-        plugin_manager = get_plugin_manager()
-
-        # 创建并行任务列表
-        tasks = []
-        signatures = []
-
-        for signature, action_cls in actions_dict.items():
-            # 从签名中提取 plugin_name（格式：plugin_name:component_type:component_name）
-            parts = signature.split(":")
-            if len(parts) < 3:
-                logger.warning(f"无效的 Action 签名格式: {signature}，跳过")
-                continue
-
-            plugin_name = parts[0]
-
-            # 获取真实的 plugin 实例
-            plugin = plugin_manager.get_plugin(plugin_name)
-            if not plugin:
-                logger.warning(
-                    f"未找到 Plugin 实例: {plugin_name}，跳过 Action: {signature}"
-                )
-                deactivated_actions.append(
-                    (signature, f"未找到 Plugin 实例: {plugin_name}")
-                )
-                continue
-
-            # 创建 Action 实例
-            try:
-                action_instance = action_cls(chat_stream=chat_stream, plugin=plugin)
-                # 设置消息内容供 go_activate 使用
-                action_instance._last_message = message_content
-
-                # 创建 go_activate 任务
-                task = action_instance.go_activate()
-                tasks.append(task)
-                signatures.append(signature)
-
-            except Exception as e:
-                logger.error(f"创建 Action 实例 {signature} 失败: {e}")
-                deactivated_actions.append((signature, f"创建实例失败: {e}"))
-
-        # 并行执行所有激活判断
-        if tasks:
-            logger.debug(
-                f"[{chat_stream.stream_id}] 并行执行激活判断，任务数: {len(tasks)}"
-            )
-            try:
-                results = await get_task_manager().gather(
-                    *tasks, return_exceptions=True
-                )
-
-                # 处理结果
-                for signature, result in zip(signatures, results, strict=False):
-                    if isinstance(result, Exception):
-                        logger.error(
-                            f"[{chat_stream.stream_id}] 激活判断 {signature} 时出错: {result}"
-                        )
-                        deactivated_actions.append(
-                            (signature, f"激活判断出错: {result}")
-                        )
-                    elif not result:
-                        # go_activate 返回 False，不激活
-                        deactivated_actions.append(
-                            (signature, "go_activate 返回 False")
-                        )
-                        logger.debug(
-                            f"[{chat_stream.stream_id}] 未激活动作: {signature}"
-                        )
-                    else:
-                        # go_activate 返回 True，激活
-                        logger.debug(f"[{chat_stream.stream_id}] 激活动作: {signature}")
-
-            except Exception as e:
-                logger.error(f"[{chat_stream.stream_id}] 并行激活判断失败: {e}")
-                # 如果并行执行失败，将所有动作标记为不激活
-                deactivated_actions.extend(
-                    (sig, f"并行判断失败: {e}") for sig in signatures
-                )
-
-        return deactivated_actions
+    # ── 内部 ──
 
     def _build_signature(self, action_cls: type["BaseAction"]) -> str:
         """构建 Action 组件签名。
@@ -647,10 +516,6 @@ def get_action_manager() -> ActionManager:
 
     Returns:
         ActionManager: 全局 Action 管理器单例
-
-    Examples:
-        >>> manager = get_action_manager()
-        >>> actions = manager.get_actions_for_chat(ChatType.PRIVATE)
     """
     global _global_action_manager
     if _global_action_manager is None:

@@ -59,18 +59,18 @@ async def main() -> None:
     schema = action_api.get_action_schema(first_signature)
     print(f"Action schema: {schema}")
 
-    actions_for_chat = action_api.get_actions_for_chat(chat_type=ChatType.PRIVATE)
+    actions_for_chat = await action_api.get_actions_for_chat(
+        chat_type=ChatType.PRIVATE
+    )
     print(f"私聊可用 Action 数量: {len(actions_for_chat)}")
 
-    schemas_for_chat = action_api.get_action_schemas(chat_type=ChatType.PRIVATE)
+    schemas_for_chat = await action_api.get_action_schemas(
+        chat_type=ChatType.PRIVATE
+    )
     print(f"私聊 Action schema 数量: {len(schemas_for_chat)}")
 
     stream_id = "demo_action_stream"
-    available_actions = await action_api.modify_actions(
-        stream_id=stream_id,
-        message_content="hello",
-    )
-    print(f"根据上下文可用 Action 数量: {len(available_actions)}")
+    print(f"基于给定组件类集合筛选 Action 数量: {len(actions_for_chat)}")
 
     plugin_name = first_signature.split(":")[0]
     plugin = get_plugin_manager().get_plugin(plugin_name)

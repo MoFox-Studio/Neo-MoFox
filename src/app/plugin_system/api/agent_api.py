@@ -1,26 +1,40 @@
 """
-Agent API模块
-专门负责Agent组件的查询、过滤和执行操作。
+Agent API 模块
+专门负责 Agent 组件的查询、筛选、激活、schema 与执行操作，是
+``AgentManager`` 的薄封装。
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from src.core.components.types import ChatType, ComponentType
-from src.core.components.registry import get_global_registry
-from src.core.components.utils import should_strip_auto_reason_argument
+from src.core.components.types import ChatType
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 if TYPE_CHECKING:
     from src.core.components.base.agent import BaseAgent
     from src.core.components.base.plugin import BasePlugin
+    from src.core.managers.agent_manager import AgentManager
+    from src.core.models.stream import ChatStream
     from src.kernel.llm import LLMUsable
+
+
+def _get_agent_manager() -> "AgentManager":
+    """延迟获取 AgentManager，避免循环依赖。
+
+    Returns:
+        AgentManager: Agent 组件管理器实例
+    """
+    from src.core.managers.agent_manager import get_agent_manager
+
+    return get_agent_manager()
 
 
 def _normalize_chat_type(chat_type: ChatType | str) -> ChatType:
     """规范化 chat_type 输入为 ChatType。
+
+    无法识别的字符串回退为 ChatType.ALL。
 
     Args:
         chat_type: 聊天类型
@@ -31,7 +45,10 @@ def _normalize_chat_type(chat_type: ChatType | str) -> ChatType:
     if isinstance(chat_type, ChatType):
         return chat_type
     if isinstance(chat_type, str):
-        return ChatType(chat_type)
+        try:
+            return ChatType(chat_type)
+        except ValueError:
+            return ChatType.ALL
     raise TypeError("chat_type 必须是 ChatType 或 str")
 
 
@@ -70,8 +87,7 @@ def get_all_agents() -> dict[str, type["BaseAgent"]]:
     Returns:
         Agent 签名到类的映射
     """
-    registry = get_global_registry()
-    return registry.get_by_type(ComponentType.AGENT)
+    return _get_agent_manager().get_all_agents()
 
 
 def get_agents_for_plugin(plugin_name: str) -> dict[str, type["BaseAgent"]]:
@@ -84,49 +100,72 @@ def get_agents_for_plugin(plugin_name: str) -> dict[str, type["BaseAgent"]]:
         Agent 签名到类的映射
     """
     _validate_non_empty(plugin_name, "plugin_name")
-    registry = get_global_registry()
-    return registry.get_by_plugin_and_type(plugin_name, ComponentType.AGENT)
+    return _get_agent_manager().get_agents_for_plugin(plugin_name)
 
 
-def get_agents_for_chat(
+async def get_agents_for_chat(
+    usables: list[type["LLMUsable"]] | None = None,
+    *,
     chat_type: ChatType | str = ChatType.ALL,
     chatter_name: str = "",
     platform: str = "",
+    stream_id: str = "",
+    chat_stream: "ChatStream | None" = None,
+    stream_context: Any = None,
+    chatter: Any = None,
 ) -> list[type["LLMUsable"]]:
-    """获取适用于特定聊天上下文的 Agent 组件列表。
+    """获取适用于特定聊天上下文的 Agent 组件类列表。
+
+    若传入 ``usables`` 则直接对给定集合筛选（默认不传 stream_id）；
+    否则从注册表拉取全部 Agent。
 
     Args:
+        usables: 待筛选的组件类列表；不传则取全量注册 Agent
         chat_type: 聊天类型
         chatter_name: Chatter 名称
         platform: 平台名称
+        stream_id: 聊天流 ID
+        chat_stream: 候选聊天流实例
+        stream_context: 聊天流上下文
 
     Returns:
-        Agent 组件列表
+        Agent 组件类列表
     """
     _validate_optional(chatter_name, "chatter_name")
     _validate_optional(platform, "platform")
-    
-    from src.core.components.usable_filter import (
-        UsableFilterContext,
-        evaluate_usable_filter,
-    )
-
-    norm_chat_type = _normalize_chat_type(chat_type)
-    all_agents = get_all_agents()
-    ctx = UsableFilterContext(
-        stream_id="",
-        chat_type=norm_chat_type.value,
-        platform=platform,
+    return await _get_agent_manager().get_agents_for_chat(
+        usables,
+        chat_type=_normalize_chat_type(chat_type).value,
         chatter_name=chatter_name,
+        platform=platform,
+        stream_id=stream_id,
+        chat_stream=chat_stream,
+        stream_context=stream_context,
+        chatter=chatter,
     )
 
-    filtered_agents = []
-    for signature, agent_cls in all_agents.items():
-        is_eligible, _ = evaluate_usable_filter(agent_cls, ctx)
-        if is_eligible:
-            filtered_agents.append(agent_cls)
 
-    return filtered_agents
+async def activate_agents_for_chat(
+    agents: list[type["LLMUsable"]],
+    *,
+    chat_stream: "ChatStream",
+    plugin: "BasePlugin | None" = None,
+) -> list[type["LLMUsable"]]:
+    """对 Agent 组件类执行动态激活判定（go_activate）。
+
+    Args:
+        agents: 待判定的 Agent 组件类列表
+        chat_stream: 当前聊天流实例
+        plugin: 所属插件实例（缺省时按组件签名解析）
+
+    Returns:
+        激活通过的组件类列表
+    """
+    return await _get_agent_manager().activate_agents_for_chat(
+        agents,
+        chat_stream=chat_stream,
+        plugin=plugin,
+    )
 
 
 def get_agent_class(signature: str) -> type["BaseAgent"] | None:
@@ -139,8 +178,7 @@ def get_agent_class(signature: str) -> type["BaseAgent"] | None:
         Agent 类，未找到则返回 None
     """
     _validate_non_empty(signature, "signature")
-    registry = get_global_registry()
-    return registry.get(signature)
+    return _get_agent_manager().get_agent_class(signature)
 
 
 def get_agent_schema(signature: str) -> dict[str, Any] | None:
@@ -153,39 +191,68 @@ def get_agent_schema(signature: str) -> dict[str, Any] | None:
         Tool Schema，未找到则返回 None
     """
     _validate_non_empty(signature, "signature")
-    agent_cls = get_agent_class(signature)
-    if not agent_cls:
-        return None
-    return agent_cls.to_schema()
+    return _get_agent_manager().get_agent_schema(signature)
 
 
-def get_agent_schemas(
+async def get_agent_schemas(
+    usables: list[type["LLMUsable"]] | None = None,
+    *,
     chat_type: ChatType | str = ChatType.ALL,
     chatter_name: str = "",
     platform: str = "",
+    stream_id: str = "",
 ) -> list[dict[str, Any]]:
     """获取适用于特定聊天上下文的所有 Agent Schema。
 
     Args:
+        usables: 待筛选的组件类列表
         chat_type: 聊天类型
         chatter_name: Chatter 名称
         platform: 平台名称
+        stream_id: 聊天流 ID
 
     Returns:
         Tool Schema 列表
     """
-    _validate_optional(chatter_name, "chatter_name")
-    _validate_optional(platform, "platform")
-    
-    agents = get_agents_for_chat(chat_type, chatter_name, platform)
+    agents = await get_agents_for_chat(
+        usables,
+        chat_type=chat_type,
+        chatter_name=chatter_name,
+        platform=platform,
+        stream_id=stream_id,
+    )
     schemas = []
-
     for agent_cls in agents:
-        schema = agent_cls.to_schema()
+        schema = agent_cls.to_schema()  # type: ignore[attr-defined]
         if schema:
             schemas.append(schema)
-
     return schemas
+
+
+def get_agent_usables(signature: str) -> list[type["LLMUsable"]]:
+    """获取 Agent 的专属 usables 列表。
+
+    Args:
+        signature: Agent 组件签名
+
+    Returns:
+        Agent 专属的 usables 类列表
+    """
+    _validate_non_empty(signature, "signature")
+    return _get_agent_manager().get_agent_usables(signature)
+
+
+def get_agent_usable_schemas(signature: str) -> list[dict[str, Any]]:
+    """获取 Agent 专属 usables 的 Schema 列表。
+
+    Args:
+        signature: Agent 组件签名
+
+    Returns:
+        usables 的 Tool Schema 列表
+    """
+    _validate_non_empty(signature, "signature")
+    return _get_agent_manager().get_agent_usable_schemas(signature)
 
 
 async def execute_agent(
@@ -205,68 +272,16 @@ async def execute_agent(
     Returns:
         执行是否成功与结果描述
     """
-    from src.kernel.logger import get_logger
-    
-    logger = get_logger("agent_api")
-    
     _validate_non_empty(signature, "signature")
     if plugin is None:
         raise ValueError("plugin 不能为空")
     _validate_non_empty(stream_id, "stream_id")
-    
-    agent_cls = get_agent_class(signature)
-    if not agent_cls:
-        raise ValueError(f"Agent 类未找到: {signature}")
-    
-    # 创建 Agent 实例
-    agent_instance = agent_cls(stream_id=stream_id, plugin=plugin)
-    
-    # 仅剥离系统自动注入的 reason；组件原生声明 reason 时必须保留。
-    if should_strip_auto_reason_argument(agent_instance.execute, kwargs):
-        kwargs.pop("reason", None)
-    
-    # 执行 Agent
-    try:
-        result = await agent_instance._wrap_execute(**kwargs).wait_done()
-        return result
-    except Exception as e:
-        logger.error(
-            f"执行 Agent 失败 ({signature}): {e}",
-            exc_info=True,
-        )
-        raise RuntimeError(f"Agent 执行失败: {e}") from e
-
-
-def get_agent_usables(signature: str) -> list[type["LLMUsable"]]:
-    """获取 Agent 的专属 usables 列表。
-
-    Args:
-        signature: Agent 组件签名
-
-    Returns:
-        Agent 专属的 usables 类列表
-    """
-    _validate_non_empty(signature, "signature")
-    agent_cls = get_agent_class(signature)
-    if not agent_cls:
-        return []
-    return agent_cls.get_local_usables()
-
-
-def get_agent_usable_schemas(signature: str) -> list[dict[str, Any]]:
-    """获取 Agent 专属 usables 的 Schema 列表。
-
-    Args:
-        signature: Agent 组件签名
-
-    Returns:
-        usables 的 Tool Schema 列表
-    """
-    _validate_non_empty(signature, "signature")
-    agent_cls = get_agent_class(signature)
-    if not agent_cls:
-        return []
-    return agent_cls.get_local_usable_schemas()
+    return await _get_agent_manager().execute_agent(
+        signature=signature,
+        plugin=plugin,
+        stream_id=stream_id,
+        **kwargs,
+    )
 
 
 async def execute_agent_usable(
@@ -288,36 +303,29 @@ async def execute_agent_usable(
     Returns:
         执行是否成功与结果
     """
-    from src.kernel.logger import get_logger
-    
-    logger = get_logger("agent_api")
-    
     _validate_non_empty(signature, "signature")
     if plugin is None:
         raise ValueError("plugin 不能为空")
     _validate_non_empty(stream_id, "stream_id")
     _validate_non_empty(usable_name, "usable_name")
-    
-    agent_cls = get_agent_class(signature)
-    if not agent_cls:
-        raise ValueError(f"Agent 类未找到: {signature}")
-    
-    # 创建 Agent 实例
-    agent_instance = agent_cls(stream_id=stream_id, plugin=plugin)
-    
-    # 执行专属 usable
-    try:
-        result = await agent_instance.execute_local_usable(
-            usable_name=usable_name,
-            **kwargs
-        )
-        return result
-    except Exception as e:
-        logger.error(
-            f"执行 Agent usable 失败 ({signature}.{usable_name}): {e}",
-            exc_info=True,
-        )
-        raise RuntimeError(f"Agent usable 执行失败: {e}") from e
+    return await _get_agent_manager().execute_agent_usable(
+        signature=signature,
+        plugin=plugin,
+        stream_id=stream_id,
+        usable_name=usable_name,
+        **kwargs,
+    )
+
+
+def clear_schema_cache(signature: str | None = None) -> None:
+    """清除 schema 缓存。
+
+    Args:
+        signature: Agent 组件签名，可选
+    """
+    if signature is not None:
+        _validate_non_empty(signature, "signature")
+    _get_agent_manager().clear_schema_cache(signature)
 
 
 __all__ = [
@@ -325,11 +333,13 @@ __all__ = [
     "get_all_agents",
     "get_agents_for_plugin",
     "get_agents_for_chat",
+    "activate_agents_for_chat",
     "get_agent_class",
     "get_agent_schema",
     "get_agent_schemas",
-    "execute_agent",
     "get_agent_usables",
     "get_agent_usable_schemas",
+    "execute_agent",
     "execute_agent_usable",
+    "clear_schema_cache",
 ]

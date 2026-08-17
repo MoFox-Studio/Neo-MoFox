@@ -144,7 +144,8 @@ class TestActionManagerGetActionsForPlugin:
 class TestActionManagerGetActionsForChat:
     """测试根据聊天上下文过滤 Action 功能。"""
     
-    def test_get_actions_for_chat_all_type(self) -> None:
+    @pytest.mark.asyncio
+    async def test_get_actions_for_chat_all_type(self) -> None:
         """测试获取 ALL 类型的 Action。"""
         manager = ActionManager()
         
@@ -158,7 +159,7 @@ class TestActionManagerGetActionsForChat:
             mock_registry.get_by_type.return_value = actions
             mock_get_registry.return_value = mock_registry
             
-            result = manager.get_actions_for_chat(
+            result = await manager.get_actions_for_chat(
                 chat_type=ChatType.GROUP,
                 chatter_name="",
                 platform=""
@@ -167,7 +168,8 @@ class TestActionManagerGetActionsForChat:
             # ALL 类型应该匹配所有聊天类型
             assert len(result) > 0
     
-    def test_get_actions_for_chat_specific_type(self) -> None:
+    @pytest.mark.asyncio
+    async def test_get_actions_for_chat_specific_type(self) -> None:
         """测试获取特定聊天类型的 Action。"""
         manager = ActionManager()
         
@@ -181,13 +183,13 @@ class TestActionManagerGetActionsForChat:
             mock_registry.get_by_type.return_value = actions
             mock_get_registry.return_value = mock_registry
             
-            result_group = manager.get_actions_for_chat(
+            result_group = await manager.get_actions_for_chat(
                 chat_type=ChatType.GROUP,
                 chatter_name="",
                 platform=""
             )
             
-            result_private = manager.get_actions_for_chat(
+            result_private = await manager.get_actions_for_chat(
                 chat_type=ChatType.PRIVATE,
                 chatter_name="",
                 platform=""
@@ -197,7 +199,8 @@ class TestActionManagerGetActionsForChat:
             assert len(result_group) > 0
             assert len(result_private) == 0
     
-    def test_get_actions_for_chat_empty(self) -> None:
+    @pytest.mark.asyncio
+    async def test_get_actions_for_chat_empty(self) -> None:
         """测试无匹配 Action 时返回空列表。"""
         manager = ActionManager()
         
@@ -206,7 +209,7 @@ class TestActionManagerGetActionsForChat:
             mock_registry.get_by_type.return_value = {}
             mock_get_registry.return_value = mock_registry
             
-            result = manager.get_actions_for_chat(
+            result = await manager.get_actions_for_chat(
                 chat_type=ChatType.GROUP,
                 chatter_name="",
                 platform=""
@@ -288,7 +291,8 @@ class TestActionManagerGetActionSchema:
 class TestActionManagerGetActionSchemas:
     """测试批量获取 Action schemas 功能。"""
     
-    def test_get_action_schemas_multiple(self) -> None:
+    @pytest.mark.asyncio
+    async def test_get_action_schemas_multiple(self) -> None:
         """测试获取多个 Action 的 schemas。"""
         manager = ActionManager()
         
@@ -301,7 +305,7 @@ class TestActionManagerGetActionSchemas:
                 {"name": "schema2"},
             ]
             
-            result = manager.get_action_schemas(
+            result = await manager.get_action_schemas(
                 chat_type=ChatType.GROUP,
                 chatter_name="",
                 platform=""
@@ -309,14 +313,15 @@ class TestActionManagerGetActionSchemas:
             
             assert len(result) == 2
     
-    def test_get_action_schemas_empty(self) -> None:
+    @pytest.mark.asyncio
+    async def test_get_action_schemas_empty(self) -> None:
         """测试无 Action 时返回空列表。"""
         manager = ActionManager()
         
         with patch.object(manager, 'get_actions_for_chat') as mock_get_actions:
             mock_get_actions.return_value = []
             
-            result = manager.get_action_schemas(
+            result = await manager.get_action_schemas(
                 chat_type=ChatType.GROUP,
                 chatter_name="",
                 platform=""

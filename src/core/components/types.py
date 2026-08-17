@@ -87,6 +87,11 @@ class EventType(str, Enum):
     AFTER_COMMAND_EXECUTE = "after_command_execute"
     ON_COMMAND_EXECUTE_FAILED = "on_command_execute_failed"
 
+    # 组件筛选生命周期事件（筛选发生前发布，处理器可改写组件类集合）
+    BEFORE_ACTION_FILTER = "before_action_filter"
+    BEFORE_TOOL_FILTER = "before_tool_filter"
+    BEFORE_AGENT_FILTER = "before_agent_filter"
+
     # 媒体识别事件（落盘入库后触发，处理器可回写 description）
     ON_MEDIA_RECOGNIZE = "on_media_recognize"
 

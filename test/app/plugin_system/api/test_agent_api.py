@@ -11,6 +11,7 @@ from src.app.plugin_system.api import agent_api
 from src.app.plugin_system.types import ChatType
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
+from src.core.managers import agent_manager as agent_manager_mod
 
 
 class MockPrivateTool(BaseTool):
@@ -51,7 +52,9 @@ def test_get_all_agents_returns_dict(monkeypatch: pytest.MonkeyPatch) -> None:
         def get_by_type(self, component_type):
             return {"demo:agent:demo": MockAgent}
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     result = agent_api.get_all_agents()
 
@@ -72,14 +75,17 @@ def test_get_agents_for_plugin_delegates(monkeypatch: pytest.MonkeyPatch) -> Non
         def get_by_plugin_and_type(self, plugin_name: str, component_type):
             return {f"{plugin_name}:agent:demo": MockAgent}
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     result = agent_api.get_agents_for_plugin("demo_plugin")
 
     assert "demo_plugin:agent:demo" in result
 
 
-def test_get_agents_for_chat_filters_by_chat_type(
+@pytest.mark.asyncio
+async def test_get_agents_for_chat_filters_by_chat_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """get_agents_for_chat 应根据 chat_type 过滤。"""
@@ -107,15 +113,18 @@ def test_get_agents_for_chat_filters_by_chat_type(
                 "plugin:agent:private": PrivateAgent,
             }
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
-    result = agent_api.get_agents_for_chat(chat_type=ChatType.PRIVATE)
+    result = await agent_api.get_agents_for_chat(chat_type=ChatType.PRIVATE)
 
     assert len(result) == 1
     assert result[0] is PrivateAgent
 
 
-def test_get_agents_for_chat_filters_by_chatter_allow(
+@pytest.mark.asyncio
+async def test_get_agents_for_chat_filters_by_chatter_allow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """get_agents_for_chat 应根据 chatter_allow 过滤。"""
@@ -145,15 +154,18 @@ def test_get_agents_for_chat_filters_by_chatter_allow(
                 "plugin:agent:not_allowed": NotAllowedAgent,
             }
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
-    result = agent_api.get_agents_for_chat(chatter_name="my_chatter")
+    result = await agent_api.get_agents_for_chat(chatter_name="my_chatter")
 
     assert len(result) == 1
     assert result[0] is AllowedAgent
 
 
-def test_get_agents_for_chat_filters_by_platform(
+@pytest.mark.asyncio
+async def test_get_agents_for_chat_filters_by_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """get_agents_for_chat 应根据 platform 过滤。"""
@@ -183,9 +195,11 @@ def test_get_agents_for_chat_filters_by_platform(
                 "plugin:agent:other": OtherAgent,
             }
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
-    result = agent_api.get_agents_for_chat(platform="test_platform")
+    result = await agent_api.get_agents_for_chat(platform="test_platform")
 
     assert len(result) == 1
     assert result[0] is PlatformAgent
@@ -206,7 +220,9 @@ def test_get_agent_class_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
                 return MockAgent
             return None
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     result = agent_api.get_agent_class("demo:agent:demo")
 
@@ -228,7 +244,9 @@ def test_get_agent_schema_returns_schema(monkeypatch: pytest.MonkeyPatch) -> Non
                 return MockAgent
             return None
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     result = agent_api.get_agent_schema("demo:agent:demo")
 
@@ -237,7 +255,10 @@ def test_get_agent_schema_returns_schema(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result["function"]["name"] == "agent-mock_agent"
 
 
-def test_get_agent_schemas_returns_list(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_get_agent_schemas_returns_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """get_agent_schemas 应返回 schema 列表。"""
 
     class _FakeRegistry:
@@ -246,9 +267,11 @@ def test_get_agent_schemas_returns_list(monkeypatch: pytest.MonkeyPatch) -> None
                 "plugin:agent:mock": MockAgent,
             }
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
-    result = agent_api.get_agent_schemas(chat_type=ChatType.PRIVATE)
+    result = await agent_api.get_agent_schemas(chat_type=ChatType.PRIVATE)
 
     assert isinstance(result, list)
     assert len(result) == 1
@@ -287,18 +310,16 @@ async def test_execute_agent_raises_if_not_found() -> None:
         def get(self, signature: str):
             return None
 
-    import src.app.plugin_system.api.agent_api as module
-
-    original_func = module.get_global_registry
+    original_func = agent_manager_mod.get_global_registry
 
     try:
-        module.get_global_registry = lambda: _FakeRegistry()
+        agent_manager_mod.get_global_registry = lambda: _FakeRegistry()
 
         with pytest.raises(ValueError, match="Agent 类未找到"):
             await agent_api.execute_agent("demo:agent:demo", mock_plugin, "stream_123")
 
     finally:
-        module.get_global_registry = original_func
+        agent_manager_mod.get_global_registry = original_func
 
 
 @pytest.mark.asyncio
@@ -321,7 +342,9 @@ async def test_execute_agent_calls_execute(monkeypatch: pytest.MonkeyPatch) -> N
         def get(self, signature: str):
             return TestAgent
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     success, result = await agent_api.execute_agent(
         "demo:agent:test",
@@ -353,7 +376,9 @@ async def test_execute_agent_keeps_declared_reason(
         def get(self, signature: str):
             return ReasonAgent
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     success, result = await agent_api.execute_agent(
         "demo:agent:reason",
@@ -380,7 +405,9 @@ def test_get_agent_usables_returns_list(monkeypatch: pytest.MonkeyPatch) -> None
         def get(self, signature: str):
             return MockAgent
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     result = agent_api.get_agent_usables("demo:agent:demo")
 
@@ -404,7 +431,9 @@ def test_get_agent_usable_schemas_returns_list(
         def get(self, signature: str):
             return MockAgent
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     result = agent_api.get_agent_usable_schemas("demo:agent:demo")
 
@@ -475,7 +504,9 @@ async def test_execute_agent_usable_calls_execute_local_usable(
         def get(self, signature: str):
             return TestAgent
 
-    monkeypatch.setattr(agent_api, "get_global_registry", lambda: _FakeRegistry())
+    monkeypatch.setattr(
+        agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
+    )
 
     success, result = await agent_api.execute_agent_usable(
         "demo:agent:test",

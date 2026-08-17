@@ -1,7 +1,7 @@
 """
-Action API 模块
-专门负责 Action 组件的查询、筛选、激活、schema 与执行操作，是
-``ActionManager`` 的薄封装。
+Tool API 模块
+专门负责 Tool 组件的查询、筛选、激活、schema 与执行操作，是
+``ToolComponentManager`` 的薄封装。
 """
 
 from __future__ import annotations
@@ -10,26 +10,26 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.0.0"
 
 if TYPE_CHECKING:
-    from src.core.components.base.action import BaseAction
     from src.core.components.base.plugin import BasePlugin
-    from src.core.managers.action_manager import ActionManager
+    from src.core.components.base.tool import BaseTool
+    from src.core.managers.tool_manager.manager import ToolComponentManager
     from src.core.models.message import Message
     from src.core.models.stream import ChatStream
     from src.kernel.llm import LLMUsable
 
 
-def _get_action_manager() -> "ActionManager":
-    """延迟获取 ActionManager，避免循环依赖。
+def _get_tool_manager() -> "ToolComponentManager":
+    """延迟获取 ToolComponentManager，避免循环依赖。
 
     Returns:
-        Action 管理器实例
+        ToolComponentManager: 工具组件管理器实例
     """
-    from src.core.managers.action_manager import get_action_manager
+    from src.core.managers.tool_manager.manager import get_tool_component_manager
 
-    return get_action_manager()
+    return get_tool_component_manager()
 
 
 def _normalize_chat_type(chat_type: ChatType | str) -> ChatType:
@@ -82,29 +82,29 @@ def _validate_optional(value: str, name: str) -> None:
     _validate_non_empty(value, name)
 
 
-def get_all_actions() -> dict[str, type["BaseAction"]]:
-    """获取所有已注册的 Action 组件。
+def get_all_tools() -> dict[str, type["BaseTool"]]:
+    """获取所有已注册的 Tool 组件。
 
     Returns:
-        Action 签名到类的映射
+        Tool 签名到类的映射
     """
-    return _get_action_manager().get_all_actions()
+    return _get_tool_manager().get_all_tools()
 
 
-def get_actions_for_plugin(plugin_name: str) -> dict[str, type["BaseAction"]]:
-    """获取指定插件的所有 Action 组件。
+def get_tools_for_plugin(plugin_name: str) -> dict[str, type["BaseTool"]]:
+    """获取指定插件的所有 Tool 组件。
 
     Args:
         plugin_name: 插件名称
 
     Returns:
-        Action 签名到类的映射
+        Tool 签名到类的映射
     """
     _validate_non_empty(plugin_name, "plugin_name")
-    return _get_action_manager().get_actions_for_plugin(plugin_name)
+    return _get_tool_manager().get_tools_for_plugin(plugin_name)
 
 
-async def get_actions_for_chat(
+async def get_tools_for_chat(
     usables: list[type["LLMUsable"]] | None = None,
     *,
     chat_type: ChatType | str = ChatType.ALL,
@@ -115,13 +115,13 @@ async def get_actions_for_chat(
     stream_context: Any = None,
     chatter: Any = None,
 ) -> list[type["LLMUsable"]]:
-    """获取适用于特定聊天上下文的 Action 组件类列表。
+    """获取适用于特定聊天上下文的 Tool 组件类列表。
 
     若传入 ``usables`` 则直接对给定集合筛选（默认不传 stream_id）；
-    否则从注册表拉取全部 Action。
+    否则从注册表拉取全部 Tool。
 
     Args:
-        usables: 待筛选的组件类列表；不传则取全量注册 Action
+        usables: 待筛选的组件类列表；不传则取全量注册 Tool
         chat_type: 聊天类型
         chatter_name: Chatter 名称
         platform: 平台名称
@@ -130,11 +130,11 @@ async def get_actions_for_chat(
         stream_context: 聊天流上下文
 
     Returns:
-        Action 组件类列表
+        Tool 组件类列表
     """
     _validate_optional(chatter_name, "chatter_name")
     _validate_optional(platform, "platform")
-    return await _get_action_manager().get_actions_for_chat(
+    return await _get_tool_manager().get_tools_for_chat(
         usables,
         chat_type=_normalize_chat_type(chat_type).value,
         chatter_name=chatter_name,
@@ -146,59 +146,59 @@ async def get_actions_for_chat(
     )
 
 
-async def activate_actions_for_chat(
-    actions: list[type["LLMUsable"]],
+async def activate_tools_for_chat(
+    tools: list[type["LLMUsable"]],
     *,
     chat_stream: "ChatStream",
     plugin: "BasePlugin | None" = None,
-    message_content: str = "",
+    message: "Message | None" = None,
 ) -> list[type["LLMUsable"]]:
-    """对 Action 组件类执行动态激活判定（go_activate）。
+    """对 Tool 组件类执行动态激活判定（go_activate）。
 
     Args:
-        actions: 待判定的 Action 组件类列表
+        tools: 待判定的 Tool 组件类列表
         chat_stream: 当前聊天流实例
         plugin: 所属插件实例（缺省时按组件签名解析）
-        message_content: 当前消息内容，供激活判定使用
+        message: 触发消息
 
     Returns:
         激活通过的组件类列表
     """
-    return await _get_action_manager().activate_actions_for_chat(
-        actions,
+    return await _get_tool_manager().activate_tools_for_chat(
+        tools,
         chat_stream=chat_stream,
         plugin=plugin,
-        message_content=message_content,
+        message=message,
     )
 
 
-def get_action_class(signature: str) -> type["BaseAction"] | None:
-    """通过签名获取 Action 类。
+def get_tool_class(signature: str) -> type["BaseTool"] | None:
+    """通过签名获取 Tool 类。
 
     Args:
-        signature: Action 组件签名
+        signature: Tool 组件签名
 
     Returns:
-        Action 类，未找到则返回 None
+        Tool 类，未找到则返回 None
     """
     _validate_non_empty(signature, "signature")
-    return _get_action_manager().get_action_class(signature)
+    return _get_tool_manager().get_tool_class(signature)
 
 
-def get_action_schema(signature: str) -> dict[str, Any] | None:
-    """获取 Action 的 Tool Schema。
+def get_tool_schema(signature: str) -> dict[str, Any] | None:
+    """获取 Tool 的 Tool Schema。
 
     Args:
-        signature: Action 组件签名
+        signature: Tool 组件签名
 
     Returns:
         Tool Schema，未找到则返回 None
     """
     _validate_non_empty(signature, "signature")
-    return _get_action_manager().get_action_schema(signature)
+    return _get_tool_manager().get_tool_schema(signature)
 
 
-async def get_action_schemas(
+async def get_tool_schemas(
     usables: list[type["LLMUsable"]] | None = None,
     *,
     chat_type: ChatType | str = ChatType.ALL,
@@ -206,7 +206,7 @@ async def get_action_schemas(
     platform: str = "",
     stream_id: str = "",
 ) -> list[dict[str, Any]]:
-    """获取适用于特定聊天上下文的所有 Action Schema。
+    """获取适用于特定聊天上下文的所有 Tool Schema。
 
     Args:
         usables: 待筛选的组件类列表
@@ -218,7 +218,7 @@ async def get_action_schemas(
     Returns:
         Tool Schema 列表
     """
-    actions = await get_actions_for_chat(
+    tools = await get_tools_for_chat(
         usables,
         chat_type=chat_type,
         chatter_name=chatter_name,
@@ -226,36 +226,38 @@ async def get_action_schemas(
         stream_id=stream_id,
     )
     schemas = []
-    for action_cls in actions:
-        schema = action_cls.to_schema()  # type: ignore[attr-defined]
+    for tool_cls in tools:
+        schema = tool_cls.to_schema()  # type: ignore[attr-defined]
         if schema:
             schemas.append(schema)
     return schemas
 
 
-async def execute_action(
+async def execute_tool(
     signature: str,
     plugin: "BasePlugin",
     message: "Message",
     **kwargs: Any,
-) -> tuple[bool, str]:
-    """执行 Action。创建 Action 实例并调用其 execute 方法。
+) -> tuple[bool, Any]:
+    """执行 Tool，委托给 ToolUse 并记录历史。
 
     Args:
-        signature: Action 组件签名
+        signature: Tool 组件签名
         plugin: 插件实例
-        message: 消息对象
-        **kwargs: 传递给 Action 的参数
+        message: 触发的消息
+        **kwargs: 传递给 Tool 的参数
 
     Returns:
-        执行是否成功与结果描述
+        执行是否成功与结果
     """
     _validate_non_empty(signature, "signature")
     if plugin is None:
         raise ValueError("plugin 不能为空")
     if message is None:
         raise ValueError("message 不能为空")
-    return await _get_action_manager().execute_action(
+    from src.core.managers.tool_manager.tool_use import get_tool_use
+
+    return await get_tool_use().execute_tool(
         signature=signature,
         plugin=plugin,
         message=message,
@@ -267,25 +269,22 @@ def clear_schema_cache(signature: str | None = None) -> None:
     """清除 schema 缓存。
 
     Args:
-        signature: Action 组件签名，可选
-
-    Returns:
-        None
+        signature: Tool 组件签名，可选
     """
     if signature is not None:
         _validate_non_empty(signature, "signature")
-    _get_action_manager().clear_schema_cache(signature)
+    _get_tool_manager().clear_schema_cache(signature)
 
 
 __all__ = [
     "API_VERSION",
-    "get_all_actions",
-    "get_actions_for_plugin",
-    "get_actions_for_chat",
-    "activate_actions_for_chat",
-    "get_action_class",
-    "get_action_schema",
-    "get_action_schemas",
-    "execute_action",
+    "get_all_tools",
+    "get_tools_for_plugin",
+    "get_tools_for_chat",
+    "activate_tools_for_chat",
+    "get_tool_class",
+    "get_tool_schema",
+    "get_tool_schemas",
+    "execute_tool",
     "clear_schema_cache",
 ]

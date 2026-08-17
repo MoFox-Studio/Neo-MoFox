@@ -270,11 +270,17 @@ class TestBaseChatter:
         mock_stream.context = MagicMock()
         mock_stream.context.current_message = None
 
+        def _resolve_plugin(name: str) -> MagicMock | None:
+            """按插件名返回对应 plugin mock。"""
+            if name == "plugin_b":
+                return owner_plugin
+            return MagicMock(plugin_name=name)
+
         with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm, patch(
-            "src.core.components.base.chatter.get_plugin_manager"
+            "src.core.managers.get_plugin_manager"
         ) as mock_pm:
             mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
-            mock_pm.return_value.get_plugin.return_value = owner_plugin
+            mock_pm.return_value.get_plugin.side_effect = _resolve_plugin
 
             result = await chatter.modify_llm_usables([CrossPluginTool])
 
@@ -314,8 +320,15 @@ class TestBaseChatter:
         mock_stream.stream_id = "stream_123"
         mock_stream.context = MagicMock()
 
-        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm:
+        def _resolve_plugin(name: str) -> MagicMock:
+            """按插件名返回对应 plugin mock。"""
+            return MagicMock(plugin_name=name)
+
+        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm, patch(
+            "src.core.managers.get_plugin_manager"
+        ) as mock_pm:
             mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
+            mock_pm.return_value.get_plugin.side_effect = _resolve_plugin
 
             result = await chatter.modify_llm_usables([AllowedTool, RejectedTool, OpenTool])
 
