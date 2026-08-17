@@ -261,6 +261,10 @@ class BaseChatter(BaseComponent):
                         )
                 elif issubclass(usable_cls, BaseTool):
                     instance = usable_cls(plugin=component_plugin)
+                    instance._bind_runtime_context(
+                        stream_id=self.stream_id,
+                        message=chat_context.current_message,
+                    )
                 elif issubclass(usable_cls, BaseAgent):
                     instance = usable_cls(
                         stream_id=self.stream_id, plugin=component_plugin
