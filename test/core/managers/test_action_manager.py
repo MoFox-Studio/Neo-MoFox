@@ -293,7 +293,9 @@ class TestActionManagerGetActionSchemas:
         manager = ActionManager()
         
         
-        with patch.object(manager, 'get_action_schema') as mock_get_schema:
+        with patch.object(manager, 'get_actions_for_chat', return_value=[TestAction, TestAction]), patch.object(
+            manager, 'get_action_schema'
+        ) as mock_get_schema:
             mock_get_schema.side_effect = [
                 {"name": "schema1"},
                 {"name": "schema2"},

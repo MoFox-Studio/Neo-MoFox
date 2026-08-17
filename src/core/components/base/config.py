@@ -5,7 +5,6 @@
 自动默认路径生成和默认配置文件生成。
 """
 
-from abc import ABC
 from pathlib import Path
 from typing import ClassVar, Self
 

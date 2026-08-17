@@ -106,29 +106,25 @@ def get_agents_for_chat(
     _validate_optional(chatter_name, "chatter_name")
     _validate_optional(platform, "platform")
     
-    chat_type = _normalize_chat_type(chat_type)
+    from src.core.components.usable_filter import (
+        UsableFilterContext,
+        evaluate_usable_filter,
+    )
+
+    norm_chat_type = _normalize_chat_type(chat_type)
     all_agents = get_all_agents()
+    ctx = UsableFilterContext(
+        stream_id="",
+        chat_type=norm_chat_type.value,
+        platform=platform,
+        chatter_name=chatter_name,
+    )
+
     filtered_agents = []
-
     for signature, agent_cls in all_agents.items():
-        # 检查 chat_type 兼容性
-        if (
-            agent_cls.chat_type != ChatType.ALL
-            and agent_cls.chat_type != chat_type
-        ):
-            continue
-
-        # 检查 chatter_allow
-        if chatter_name and agent_cls.chatter_allow:
-            if chatter_name not in agent_cls.chatter_allow:
-                continue
-
-        # 检查平台关联
-        if platform and agent_cls.associated_platforms:
-            if platform not in agent_cls.associated_platforms:
-                continue
-
-        filtered_agents.append(agent_cls)
+        is_eligible, _ = evaluate_usable_filter(agent_cls, ctx)
+        if is_eligible:
+            filtered_agents.append(agent_cls)
 
     return filtered_agents
 

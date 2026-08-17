@@ -87,9 +87,22 @@ class BaseAgent(BaseComponent, LLMUsable):
     description: str = ""
 
     chatter_allow: list[str] = []
-    chat_type: ChatType = ChatType.ALL
+    chatter_deny: list[str] = []
+    chat_type: ChatType | list[ChatType] = ChatType.ALL
 
     associated_platforms: list[str] = []
+    platform_allow: list[str] = []
+    platform_deny: list[str] = []
+
+    stream_allow: list[str] = []
+    stream_deny: list[str] = []
+
+    group_allow: list[str | int] = []
+    group_deny: list[str | int] = []
+
+    user_allow: list[str | int] = []
+    user_deny: list[str | int] = []
+
     associated_types: list[str] = []
 
     dependencies: list[str] = []

@@ -20,6 +20,11 @@ from .base import (
 from .loader import PluginLoader, register_plugin, get_plugin_loader, PluginManifest
 from .registry import ComponentRegistry, get_global_registry
 from .state_manager import StateManager, get_global_state_manager
+from .usable_filter import (
+    UsableFilterContext,
+    build_filter_context_from_stream,
+    evaluate_usable_filter,
+)
 from .types import (
     ChatType,
     ComponentState,
@@ -52,12 +57,14 @@ __all__ = [
     "get_global_registry",
     "get_global_state_manager",
     "StateManager",
+    "UsableFilterContext",
+    "build_filter_context_from_stream",
+    "evaluate_usable_filter",
     "ChatType",
     "ComponentState",
     "ComponentType",
     "EventType",
     "MediaEngine",
     "PermissionLevel",
-    "RecognitionMode",
     "PluginManifest",
 ]

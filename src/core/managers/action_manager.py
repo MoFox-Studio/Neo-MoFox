@@ -101,31 +101,27 @@ class ActionManager:
             ...     chatter_name="my_chatter"
             ... )
         """
+        from src.core.components.usable_filter import (
+            UsableFilterContext,
+            evaluate_usable_filter,
+        )
+
         all_actions = self.get_all_actions()
+        ctx = UsableFilterContext(
+            stream_id="",
+            chat_type=chat_type.value if isinstance(chat_type, ChatType) else str(chat_type),
+            platform=platform,
+            chatter_name=chatter_name,
+        )
+
         filtered_actions = []
-
         for signature, action_cls in all_actions.items():
-            # 检查 chat_type 兼容性
-            if (
-                action_cls.chat_type != ChatType.ALL
-                and action_cls.chat_type != chat_type
-            ):
-                continue
-
-            # 检查 chatter_allow
-            if chatter_name and action_cls.chatter_allow:
-                if chatter_name not in action_cls.chatter_allow:
-                    continue
-
-            # 检查平台关联
-            if platform and action_cls.associated_platforms:
-                if platform not in action_cls.associated_platforms:
-                    continue
-
-            filtered_actions.append(action_cls)
+            is_eligible, _ = evaluate_usable_filter(action_cls, ctx)
+            if is_eligible:
+                filtered_actions.append(action_cls)
 
         logger.debug(
-            f"为聊天上下文筛选 Action: chat_type={chat_type.value}, "
+            f"为聊天上下文筛选 Action: chat_type={ctx.chat_type}, "
             f"chatter={chatter_name}, platform={platform}, "
             f"结果: {len(filtered_actions)}/{len(all_actions)}"
         )

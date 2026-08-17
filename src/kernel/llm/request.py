@@ -50,6 +50,11 @@ class LLMRequest:
         elif not isinstance(self.meta_data, dict):
             self.meta_data = dict(self.meta_data)
 
+    @property
+    def stream_id(self) -> str:
+        """从 meta_data 中获取 stream_id。"""
+        return str(self.meta_data.get("stream_id", "") or "")
+
     def add_payload(self, payload: LLMPayload, position=None) -> Self:
         """按当前 context manager 规则追加或插入 payload。"""
         if self.context_manager is not None:

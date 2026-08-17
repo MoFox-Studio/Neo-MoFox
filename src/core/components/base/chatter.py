@@ -24,6 +24,20 @@ from src.core.utils.context_compression import default_chat_context_compression_
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger, COLOR
 
+
+def get_stream_manager() -> Any:
+    """获取 StreamManager 单例（延迟导入避免模块循环依赖）。"""
+    from src.core.managers import get_stream_manager as _get_sm
+
+    return _get_sm()
+
+
+def get_plugin_manager() -> Any:
+    """获取 PluginManager 单例（延迟导入避免模块循环依赖）。"""
+    from src.core.managers import get_plugin_manager as _get_pm
+
+    return _get_pm()
+
 if TYPE_CHECKING:
     from src.core.components.base.action import BaseAction
     from src.core.components.base.agent import BaseAgent
@@ -180,17 +194,21 @@ class BaseChatter(BaseComponent):
     ) -> list[type[LLMUsable]]:
         """修改 LLMUsable 组件列表。
 
-        调用其go_activate方法进行激活判定，并核对associate_type，返回最终可用的组件列表。
+        采用两阶段过滤流水线：
+        1. Phase 1（Fast-Path 静态过滤）：基于 UsableFilterEngine 评估各维度作用域，无需实例化。
+        2. Phase 2（Slow-Path 动态激活）：仅对存活组件实例化并异步执行 go_activate 判定。
 
         Args:
             llm_usables: 原始 LLMUsable 组件列表
 
         Returns:
-            list[type[LLMUsable]]: 修改后的组件列表
+            list[type[LLMUsable]]: 修改后的可用组件类列表
         """
+        from src.core.components.usable_filter import (
+            build_filter_context_from_stream,
+            evaluate_usable_filter,
+        )
 
-        from src.core.managers import get_stream_manager
-        
         logger = get_logger("chatter", display="聊天器", color=COLOR.MAGENTA)
         chat_stream = await get_stream_manager().get_or_create_stream(
             stream_id=self.stream_id
@@ -200,36 +218,26 @@ class BaseChatter(BaseComponent):
         removals: list[tuple[str, str]] = []
         filtered: list[type[LLMUsable]] = []
 
+        # 构造当前流的通用过滤快照
+        filter_ctx = build_filter_context_from_stream(chat_stream, self)
+
+        # ── Phase 1: Fast-Path 纯静态元数据过滤 ──
         for usable_cls in llm_usables:
             usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
             signature = usable_cls.get_signature() or usable_cls.__name__
 
-            chatter_allow = getattr(usable_cls, "chatter_allow", [])
-            if chatter_allow:
-                chatter_signature = self.get_signature()
-                allowed = self.name in chatter_allow
-                if chatter_signature and not allowed:
-                    allowed = chatter_signature in chatter_allow
-
-                if not allowed:
-                    allow_str = ", ".join(chatter_allow)
-                    reason = f"chatter 不匹配（允许: {allow_str}）"
-                    removals.append((signature, reason))
-                    logger.debug(f"[移除组件] {signature}：{reason}")
-                    continue
-
-            if issubclass(usable_cls, BaseAction):
-                required_types = usable_cls.validate_associated_types()
-                if not chat_context.check_types(required_types):
-                    types_str = ", ".join(required_types)
-                    reason = f"适配器不支持（需要: {types_str}）"
-                    removals.append((signature, reason))
-                    logger.debug(f"[移除组件] {signature}：{reason}")
-                    continue
+            is_eligible, reject_reason = evaluate_usable_filter(
+                usable_cls, filter_ctx
+            )
+            if not is_eligible:
+                reason = reject_reason or "静态作用域不匹配"
+                removals.append((signature, reason))
+                logger.debug(f"[移除组件] {signature}：{reason}")
+                continue
 
             filtered.append(usable_cls)
 
-        # 并行执行 go_activate（如果组件提供）
+        # ── Phase 2: Slow-Path 动态实例化与 go_activate 判定 ──
         tasks = []
         signatures = []
         for usable_cls in filtered:
@@ -240,7 +248,9 @@ class BaseChatter(BaseComponent):
                 component_plugin = self._resolve_component_plugin(signature)
                 instance: BaseAction | BaseAgent | BaseTool
                 if issubclass(usable_cls, BaseAction):
-                    instance = usable_cls(chat_stream=chat_stream, plugin=component_plugin)
+                    instance = usable_cls(
+                        chat_stream=chat_stream, plugin=component_plugin
+                    )
 
                     current_msg = chat_context.current_message
                     if current_msg:
@@ -252,7 +262,9 @@ class BaseChatter(BaseComponent):
                 elif issubclass(usable_cls, BaseTool):
                     instance = usable_cls(plugin=component_plugin)
                 elif issubclass(usable_cls, BaseAgent):
-                    instance = usable_cls(stream_id=self.stream_id, plugin=component_plugin)
+                    instance = usable_cls(
+                        stream_id=self.stream_id, plugin=component_plugin
+                    )
                 else:
                     continue
 
@@ -304,7 +316,7 @@ class BaseChatter(BaseComponent):
         available = [
             usable_cls
             for usable_cls in filtered
-            if (usable_cls.get_signature() or usable_cls.__name__) not in removal_names # type: ignore
+            if (usable_cls.get_signature() or usable_cls.__name__) not in removal_names  # type: ignore
         ]
 
         logger.info(
@@ -323,12 +335,21 @@ class BaseChatter(BaseComponent):
             from src.core.components.types import parse_signature
 
             plugin_name = parse_signature(signature)["plugin_name"]
+            target_plugin = plugin_api.get_plugin(plugin_name)
+            if target_plugin:
+                return target_plugin
         except Exception:
-            return self.plugin
+            pass
 
-        target_plugin = plugin_api.get_plugin(plugin_name)
-        if target_plugin:
-            return target_plugin
+        try:
+            from src.core.components.types import parse_signature
+
+            plugin_name = parse_signature(signature)["plugin_name"]
+            target_plugin = get_plugin_manager().get_plugin(plugin_name)
+            if target_plugin:
+                return target_plugin
+        except Exception:
+            pass
 
         return self.plugin
 
