@@ -68,12 +68,6 @@ class BaseTool(BaseComponent, LLMUsable):
     stream_allow: list[str] = []
     stream_deny: list[str] = []
 
-    group_allow: list[str | int] = []
-    group_deny: list[str | int] = []
-
-    user_allow: list[str | int] = []
-    user_deny: list[str | int] = []
-
     associated_types: list[str] = []
 
     # 组件级依赖（精确到组件签名）

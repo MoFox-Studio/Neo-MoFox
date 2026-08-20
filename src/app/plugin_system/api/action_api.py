@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 if TYPE_CHECKING:
     from src.core.components.base.action import BaseAction

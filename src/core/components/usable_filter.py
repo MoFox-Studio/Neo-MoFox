@@ -2,8 +2,11 @@
 
 本模块提供 UsableFilterContext 上下文快照与 evaluate_usable_filter 纯函数，
 用于在不实例化组件的前提下，根据运行时上下文对 Action / Tool / Agent 进行
-多维度（Chatter、ChatType、Platform、Stream、Group、User、Content Types）
-的静态过滤，消除无谓的对象创建与协程调度开销。
+部署/设计期静态维度（Chatter、ChatType、Platform、Stream、Content Types）
+的过滤，消除无谓的对象创建与协程调度开销。
+
+Group / User 等运行时实体名单不在此引擎内判定——它们由插件经配置 +
+事件处理器（BEFORE_*_FILTER）或组件 ``go_activate`` 在运行时自行处理。
 """
 
 from __future__ import annotations
@@ -102,8 +105,10 @@ def evaluate_usable_filter(
 ) -> tuple[bool, str | None]:
     """评估单个 LLMUsable 组件是否在指定上下文中可用（Fast-Path 静态过滤）。
 
-    按顺序依次校验 Chatter、ChatType、Platform、Stream、Group、User、Content Types
-    7 个维度。黑名单优先于白名单；任意维度不匹配即返回 False 及具体原因。
+    仅处理部署/设计期静态维度：Chatter、ChatType、Platform、Stream、Content Types
+    共 5 个。Group / User 等运行时实体名单不在此评估——它们由插件经配置 +
+    事件处理器（BEFORE_*_FILTER）或组件 ``go_activate`` 在运行时自行判定。
+    黑名单优先于白名单；任意维度不匹配即返回 False 及具体原因。
 
     Args:
         usable_cls: 要评估的 Tool / Action / Agent 组件类
@@ -190,29 +195,7 @@ def evaluate_usable_filter(
     if stream_allow and ctx.stream_id not in stream_allow:
         return False, f"聊天流不匹配 (允许: {', '.join(stream_allow)})"
 
-    # ── 5. Group 维度 (仅群聊/群实体存在时生效) ──
-    if str(ctx.chat_type).lower() == "group" and ctx.group_id:
-        group_deny = _normalize_str_list(getattr(usable_cls, "group_deny", []))
-        if group_deny and ctx.group_id in group_deny:
-            return False, f"群组在黑名单中 (拒绝: {', '.join(group_deny)})"
-
-        group_allow = _normalize_str_list(
-            getattr(usable_cls, "group_allow", [])
-        )
-        if group_allow and ctx.group_id not in group_allow:
-            return False, f"群组不匹配 (允许: {', '.join(group_allow)})"
-
-    # ── 6. User 维度 ──
-    if ctx.user_id:
-        user_deny = _normalize_str_list(getattr(usable_cls, "user_deny", []))
-        if user_deny and ctx.user_id in user_deny:
-            return False, f"用户在黑名单中 (拒绝: {', '.join(user_deny)})"
-
-        user_allow = _normalize_str_list(getattr(usable_cls, "user_allow", []))
-        if user_allow and ctx.user_id not in user_allow:
-            return False, f"用户不匹配 (允许: {', '.join(user_allow)})"
-
-    # ── 7. Content Types 维度 ──
+    # ── 5. Content Types 维度 ──
     raw_req_types: Any
     val_method = getattr(usable_cls, "validate_associated_types", None)
     if callable(val_method):

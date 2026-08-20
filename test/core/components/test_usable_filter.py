@@ -56,22 +56,6 @@ class DummyToolWithStreamScope:
     stream_deny = ["stream_blocked"]
 
 
-class DummyToolWithGroupScope:
-    """指定群组作用域的工具类。"""
-
-    name = "dummy_group_scope"
-    group_allow = [123456, "888888"]
-    group_deny = [999999]
-
-
-class DummyToolWithUserScope:
-    """指定用户作用域的工具类。"""
-
-    name = "dummy_user_scope"
-    user_allow = [10001, "20002"]
-    user_deny = [30003]
-
-
 class DummyActionWithFormats:
     """指定内容格式作用域的动作类。"""
 
@@ -213,61 +197,27 @@ def test_evaluate_usable_filter_stream() -> None:
     assert "聊天流不匹配" in str(reason3)
 
 
-def test_evaluate_usable_filter_group() -> None:
-    """群组 ID 黑白名单在群聊与非群聊上下文中的行为。"""
-    # 非群聊上下文不校验群组规则
-    ctx_private = UsableFilterContext(
-        stream_id="s1", chat_type="private", platform="qq", group_id="999999"
-    )
-    is_ok0, _ = evaluate_usable_filter(DummyToolWithGroupScope, ctx_private)
-    assert is_ok0 is True
+def test_evaluate_usable_filter_does_not_evaluate_entity_lists() -> None:
+    """Group / User 实体名单不应由引擎评估（运行时交给事件钩子/go_activate）。"""
 
-    ctx_group_deny = UsableFilterContext(
-        stream_id="s1", chat_type="group", platform="qq", group_id="999999"
-    )
-    is_ok1, reason1 = evaluate_usable_filter(
-        DummyToolWithGroupScope, ctx_group_deny
-    )
-    assert is_ok1 is False
-    assert "群组在黑名单中" in str(reason1)
+    class PlainGroupTool:
+        name = "plain_group_tool"
 
-    ctx_group_allow = UsableFilterContext(
-        stream_id="s1", chat_type="group", platform="qq", group_id="123456"
+    # 任意群上下文都不做名单过滤
+    ctx_group = UsableFilterContext(
+        stream_id="s1", chat_type="group", platform="qq", group_id="any_group"
     )
-    is_ok2, _ = evaluate_usable_filter(DummyToolWithGroupScope, ctx_group_allow)
+    is_ok, reason = evaluate_usable_filter(PlainGroupTool, ctx_group)
+    assert is_ok is True
+    assert reason is None
+
+    # 任意用户上下文都不做名单过滤
+    ctx_user = UsableFilterContext(
+        stream_id="s1", chat_type="private", platform="qq", user_id="any_user"
+    )
+    is_ok2, reason2 = evaluate_usable_filter(PlainGroupTool, ctx_user)
     assert is_ok2 is True
-
-    ctx_group_unauth = UsableFilterContext(
-        stream_id="s1", chat_type="group", platform="qq", group_id="777777"
-    )
-    is_ok3, reason3 = evaluate_usable_filter(
-        DummyToolWithGroupScope, ctx_group_unauth
-    )
-    assert is_ok3 is False
-    assert "群组不匹配" in str(reason3)
-
-
-def test_evaluate_usable_filter_user() -> None:
-    """用户 ID 黑白名单校验。"""
-    ctx_deny = UsableFilterContext(
-        stream_id="s1", chat_type="private", platform="qq", user_id="30003"
-    )
-    is_ok1, reason1 = evaluate_usable_filter(DummyToolWithUserScope, ctx_deny)
-    assert is_ok1 is False
-    assert "用户在黑名单中" in str(reason1)
-
-    ctx_allow = UsableFilterContext(
-        stream_id="s1", chat_type="private", platform="qq", user_id="10001"
-    )
-    is_ok2, _ = evaluate_usable_filter(DummyToolWithUserScope, ctx_allow)
-    assert is_ok2 is True
-
-    ctx_unauth = UsableFilterContext(
-        stream_id="s1", chat_type="private", platform="qq", user_id="40004"
-    )
-    is_ok3, reason3 = evaluate_usable_filter(DummyToolWithUserScope, ctx_unauth)
-    assert is_ok3 is False
-    assert "用户不匹配" in str(reason3)
+    assert reason2 is None
 
 
 def test_evaluate_usable_filter_content_types() -> None:
@@ -351,10 +301,6 @@ class DummyToolSingleValues:
     platform_deny = "discord"
     stream_allow = "s1"
     stream_deny = "s_blocked"
-    group_allow = 123456
-    group_deny = 999999
-    user_allow = 10001
-    user_deny = 30003
     chat_type = "group"
 
 
