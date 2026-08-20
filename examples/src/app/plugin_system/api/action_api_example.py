@@ -60,7 +60,8 @@ async def main() -> None:
     print(f"Action schema: {schema}")
 
     actions_for_chat = await action_api.filter_actions_for_chat(
-        chat_type=ChatType.PRIVATE
+        list(actions.values()),
+        chat_type=ChatType.PRIVATE,
     )
     print(f"私聊可用 Action 数量: {len(actions_for_chat)}")
 

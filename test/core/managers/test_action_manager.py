@@ -150,23 +150,16 @@ class TestActionManagerFilterActionsForChat:
         manager = ActionManager()
         
         TestAction.supported_chat_types = [ChatType.ALL]
-        actions = {
-            "test_plugin:action:test": TestAction,
-        }
         
-        with patch('src.core.managers.action_manager.get_global_registry') as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.get_by_type.return_value = actions
-            mock_get_registry.return_value = mock_registry
-            
-            result = await manager.filter_actions_for_chat(
-                chat_type=ChatType.GROUP,
-                chatter_name="",
-                platform=""
-            )
-            
-            # ALL 类型应该匹配所有聊天类型
-            assert len(result) > 0
+        result = await manager.filter_actions_for_chat(
+            [TestAction],
+            chat_type=ChatType.GROUP,
+            chatter_name="",
+            platform="",
+        )
+        
+        # ALL 类型应该匹配所有聊天类型
+        assert len(result) > 0
     
     @pytest.mark.asyncio
     async def test_filter_actions_for_chat_specific_type(self) -> None:
@@ -174,48 +167,38 @@ class TestActionManagerFilterActionsForChat:
         manager = ActionManager()
         
         TestAction.supported_chat_types = [ChatType.GROUP]
-        actions = {
-            "test_plugin:action:test": TestAction,
-        }
         
-        with patch('src.core.managers.action_manager.get_global_registry') as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.get_by_type.return_value = actions
-            mock_get_registry.return_value = mock_registry
-            
-            result_group = await manager.filter_actions_for_chat(
-                chat_type=ChatType.GROUP,
-                chatter_name="",
-                platform=""
-            )
-            
-            result_private = await manager.filter_actions_for_chat(
-                chat_type=ChatType.PRIVATE,
-                chatter_name="",
-                platform=""
-            )
-            
-            # 应该只匹配 GROUP 类型
-            assert len(result_group) > 0
-            assert len(result_private) == 0
+        result_group = await manager.filter_actions_for_chat(
+            [TestAction],
+            chat_type=ChatType.GROUP,
+            chatter_name="",
+            platform="",
+        )
+        
+        result_private = await manager.filter_actions_for_chat(
+            [TestAction],
+            chat_type=ChatType.PRIVATE,
+            chatter_name="",
+            platform="",
+        )
+        
+        # 应该只匹配 GROUP 类型
+        assert len(result_group) > 0
+        assert len(result_private) == 0
     
     @pytest.mark.asyncio
     async def test_filter_actions_for_chat_empty(self) -> None:
-        """测试无匹配 Action 时返回空列表。"""
+        """测试空列表直接返回空列表。"""
         manager = ActionManager()
         
-        with patch('src.core.managers.action_manager.get_global_registry') as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.get_by_type.return_value = {}
-            mock_get_registry.return_value = mock_registry
-            
-            result = await manager.filter_actions_for_chat(
-                chat_type=ChatType.GROUP,
-                chatter_name="",
-                platform=""
-            )
-            
-            assert result == []
+        result = await manager.filter_actions_for_chat(
+            [],
+            chat_type=ChatType.GROUP,
+            chatter_name="",
+            platform="",
+        )
+        
+        assert result == []
 
 
 class TestActionManagerGetActionClass:

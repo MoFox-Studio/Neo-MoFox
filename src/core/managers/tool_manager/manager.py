@@ -89,7 +89,7 @@ class ToolComponentManager:
 
     async def filter_tools_for_chat(
         self,
-        usables: list[type["LLMUsable"]] | None = None,
+        usables: list[type["LLMUsable"]],
         *,
         chat_type: "ChatType | str" = "all",
         chatter_name: str = "",
@@ -101,12 +101,12 @@ class ToolComponentManager:
     ) -> list[type["LLMUsable"]]:
         """筛选适用于特定聊天上下文的 Tool 组件类列表。
 
-        Tool 组件仅做部署期静态维度过滤（含筛选前事件钩子），不涉及动态激活
-        （``BaseTool`` 无 ``go_activate``）。传入 ``usables`` 则直接筛给定集合；
-        否则从注册表拉取全部 Tool（获取另由 ``get_all_tools`` 负责）。
+        只负责筛选：Tool 组件仅做部署期静态维度过滤（含筛选前事件钩子），
+        不涉及动态激活（``BaseTool`` 无 ``go_activate``）。拉取全量由
+        ``get_all_tools`` 单独承担，调用方需自行获取后传入。
 
         Args:
-            usables: 待筛选的组件类列表；不传则取全量注册 Tool
+            usables: 待筛选的组件类列表（必填，由调用方传入）
             chat_type: 聊天类型（private / group / all）
             chatter_name: Chatter 名称
             platform: 平台标识
@@ -120,9 +120,6 @@ class ToolComponentManager:
         """
         if isinstance(chat_type, ChatType):
             chat_type = chat_type.value
-
-        if usables is None:
-            usables = list(self.get_all_tools().values())
 
         # 筛选前事件钩子：外部处理器可改写组件集合
         usables = await publish_before_filter_event(

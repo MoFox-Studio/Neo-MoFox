@@ -97,7 +97,7 @@ class ActionManager:
 
     async def filter_actions_for_chat(
         self,
-        usables: list[type["LLMUsable"]] | None = None,
+        usables: list[type["LLMUsable"]],
         *,
         chat_type: "ChatType | str" = "all",
         chatter_name: str = "",
@@ -111,12 +111,12 @@ class ActionManager:
     ) -> list[type["LLMUsable"]]:
         """筛选适用于特定聊天上下文的 Action 组件类列表。
 
-        一个函数完成完整筛选流程：静态维度过滤（部署期）+ 筛选前事件钩子 +
-        动态 go_activate 激活。传入 ``usables`` 则直接筛给定集合；否则从注册表
-        拉取全部 Action（获取另由 ``get_all_actions`` 负责）。
+        只负责筛选：对传入的 ``usables`` 完成静态维度过滤（部署期）+
+        筛选前事件钩子 + 动态 go_activate 激活。拉取全量由 ``get_all_actions``
+        单独承担，调用方需自行获取后传入。
 
         Args:
-            usables: 待筛选的组件类列表；不传则取全量注册 Action
+            usables: 待筛选的组件类列表（必填，由调用方传入）
             chat_type: 聊天类型（private / group / all）
             chatter_name: Chatter 名称
             platform: 平台名称
@@ -132,9 +132,6 @@ class ActionManager:
         """
         if isinstance(chat_type, ChatType):
             chat_type = chat_type.value
-
-        if usables is None:
-            usables = list(self.get_all_actions().values())
 
         # 筛选前事件钩子：外部处理器可改写组件集合
         usables = await publish_before_filter_event(
@@ -268,6 +265,7 @@ class ActionManager:
             list[dict[str, Any]]: Action schema 列表
         """
         actions = await self.filter_actions_for_chat(
+            list(self.get_all_actions().values()),
             chat_type=chat_type,
             chatter_name=chatter_name,
             platform=platform,

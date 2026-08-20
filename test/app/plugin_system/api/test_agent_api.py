@@ -117,7 +117,10 @@ async def test_filter_agents_for_chat_filters_by_chat_type(
         agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
     )
 
-    result = await agent_api.filter_agents_for_chat(chat_type=ChatType.PRIVATE)
+    usables = list(agent_api.get_all_agents().values())
+    result = await agent_api.filter_agents_for_chat(  # type: ignore[arg-type]
+        usables, chat_type=ChatType.PRIVATE
+    )
 
     assert len(result) == 1
     assert result[0] is PrivateAgent
@@ -158,7 +161,10 @@ async def test_filter_agents_for_chat_filters_by_chatter_allow(
         agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
     )
 
-    result = await agent_api.filter_agents_for_chat(chatter_name="my_chatter")
+    usables = list(agent_api.get_all_agents().values())
+    result = await agent_api.filter_agents_for_chat(  # type: ignore[arg-type]
+        usables, chatter_name="my_chatter"
+    )
 
     assert len(result) == 1
     assert result[0] is AllowedAgent
@@ -199,7 +205,10 @@ async def test_filter_agents_for_chat_filters_by_platform(
         agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
     )
 
-    result = await agent_api.filter_agents_for_chat(platform="test_platform")
+    usables = list(agent_api.get_all_agents().values())
+    result = await agent_api.filter_agents_for_chat(  # type: ignore[arg-type]
+        usables, platform="test_platform"
+    )
 
     assert len(result) == 1
     assert result[0] is PlatformAgent

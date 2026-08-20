@@ -105,7 +105,7 @@ def get_actions_for_plugin(plugin_name: str) -> dict[str, type["BaseAction"]]:
 
 
 async def filter_actions_for_chat(
-    usables: list[type["LLMUsable"]] | None = None,
+    usables: list[type["LLMUsable"]],
     *,
     chat_type: ChatType | str = ChatType.ALL,
     chatter_name: str = "",
@@ -119,12 +119,12 @@ async def filter_actions_for_chat(
 ) -> list[type["LLMUsable"]]:
     """筛选适用于特定聊天上下文的 Action 组件类列表。
 
-    一个函数完成完整筛选流程（静态过滤 + 筛选前事件钩子 + 动态 go_activate
-    激活）。传入 ``usables`` 则直接筛给定集合；否则从注册表拉取全部 Action
-    （拉取另由 ``get_all_actions`` 负责）。
+    只负责筛选：对传入的 ``usables`` 完成静态过滤 + 筛选前事件钩子 + 动态
+    go_activate 激活。拉取全量由 ``get_all_actions`` 单独承担，调用方需先
+    获取再传入。
 
     Args:
-        usables: 待筛选的组件类列表；不传则取全量注册 Action
+        usables: 待筛选的组件类列表（必填，由调用方传入）
         chat_type: 聊天类型
         chatter_name: Chatter 名称
         platform: 平台名称
@@ -200,6 +200,8 @@ async def get_action_schemas(
     Returns:
         Tool Schema 列表
     """
+    if usables is None:
+        usables = list(get_all_actions().values())
     actions = await filter_actions_for_chat(
         usables,
         chat_type=chat_type,
