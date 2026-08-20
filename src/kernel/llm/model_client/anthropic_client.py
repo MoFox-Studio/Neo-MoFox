@@ -498,6 +498,7 @@ class AnthropicChatClient:
         list[dict[str, Any]] | None,
         AsyncIterator[StreamEvent] | None,
         str | list[ReasoningText] | None,
+        dict[str, Any] | None,
     ]:
         """发起一次 Anthropic 消息请求。"""
         del tools

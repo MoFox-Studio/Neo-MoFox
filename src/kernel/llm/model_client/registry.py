@@ -9,6 +9,7 @@ from ..exceptions import LLMConfigurationError
 from .base import ASRModelClient, ChatModelClient, EmbeddingModelClient, RerankModelClient
 from .anthropic_client import AnthropicChatClient
 from .openai_client import OpenAIChatClient
+from .responses_client import OpenAIResponsesClient
 from ..types import ModelEntry
 
 @dataclass(slots=True)
@@ -20,6 +21,7 @@ class ModelClientRegistry:
 
     openai: ChatModelClient | None = None
     anthropic: ChatModelClient | None = None
+    responses: ChatModelClient | None = None
     gemini: ChatModelClient | None = None
     bedrock: ChatModelClient | None = None
 
@@ -28,6 +30,8 @@ class ModelClientRegistry:
             self.openai = OpenAIChatClient()
         if self.anthropic is None:
             self.anthropic = AnthropicChatClient()
+        if self.responses is None:
+            self.responses = OpenAIResponsesClient()
 
     def get_client_for_model(self, model: ModelEntry) -> ChatModelClient:
         """根据单个模型配置决定使用哪个 provider。
@@ -41,6 +45,8 @@ class ModelClientRegistry:
                 return self.openai
             if client_type == "anthropic" and self.anthropic is not None:
                 return self.anthropic
+            if client_type in {"openai_response", "responses", "openai.responses"} and self.responses is not None:
+                return self.responses
             if client_type in {"gemini", "aiohttp_gemini"} and self.gemini is not None:
                 return self.gemini
             if client_type == "bedrock" and self.bedrock is not None:
