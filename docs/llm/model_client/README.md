@@ -2,7 +2,7 @@
 
 ## 概述
 
-`model_client/` 子模块实现了与各个 LLM 提供商的交互。它定义了统一的客户端接口（Chat、Embedding、Rerank），并提供了 OpenAI 和 Anthropic 的具体实现。框架设计允许轻松扩展支持其他提供商。
+`model_client/` 子模块实现了与各个 LLM 提供商的交互。它定义了统一的客户端接口（Chat、Embedding、Rerank），并提供了 OpenAI（Chat Completions 与 Responses API）、Anthropic 和 Gemini 的具体实现。框架设计允许轻松扩展支持其他提供商。
 
 ## 模块结构
 
@@ -11,6 +11,7 @@ model_client/
 ├── base.py              # 客户端接口协议（ChatModelClient / EmbeddingModelClient / RerankModelClient）
 ├── openai_client.py     # OpenAI 实现
 ├── anthropic_client.py  # Anthropic 实现
+├── responses_client.py  # OpenAI Responses API 客户端（内置 web_search 等服务端工具）
 ├── registry.py          # 客户端注册表（ModelClientRegistry）
 ├── shared.py            # 共享工具
 └── __init__.py          # 公开 API
@@ -96,6 +97,7 @@ class RerankModelClient(Protocol):
 |--------|------|------|
 | `OpenAIChatClient` | Chat / Embedding / Rerank | 完整实现三种协议 |
 | `AnthropicChatClient` | Chat | 支持 reasoning blocks 和扩展思考 |
+| `OpenAIResponsesClient` | Chat | Responses API，支持内置 `web_search` 等服务端工具 |
 
 **返回值：**
 - `message`: 非流式时的完整响应文本；流式时为 None
@@ -413,4 +415,5 @@ request = LLMRequest(model_set=models)  # 会轮流尝试
 - [Request 模块](../request.md)
 - [Response 模块](../response.md)
 - [Policy 模块](../policy/README.md)
+- [OpenAIResponsesClient 与内置 web_search](./responses_client.md)
 
