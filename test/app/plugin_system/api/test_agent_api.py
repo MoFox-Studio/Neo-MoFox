@@ -85,10 +85,10 @@ def test_get_agents_for_plugin_delegates(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_get_agents_for_chat_filters_by_chat_type(
+async def test_filter_agents_for_chat_filters_by_chat_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """get_agents_for_chat 应根据 chat_type 过滤。"""
+    """filter_agents_for_chat 应根据 chat_type 过滤。"""
 
     class GroupAgent(BaseAgent):
         agent_name = "group_agent"
@@ -117,17 +117,17 @@ async def test_get_agents_for_chat_filters_by_chat_type(
         agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
     )
 
-    result = await agent_api.get_agents_for_chat(chat_type=ChatType.PRIVATE)
+    result = await agent_api.filter_agents_for_chat(chat_type=ChatType.PRIVATE)
 
     assert len(result) == 1
     assert result[0] is PrivateAgent
 
 
 @pytest.mark.asyncio
-async def test_get_agents_for_chat_filters_by_chatter_allow(
+async def test_filter_agents_for_chat_filters_by_chatter_allow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """get_agents_for_chat 应根据 chatter_allow 过滤。"""
+    """filter_agents_for_chat 应根据 chatter_allow 过滤。"""
 
     class AllowedAgent(BaseAgent):
         agent_name = "allowed_agent"
@@ -158,17 +158,17 @@ async def test_get_agents_for_chat_filters_by_chatter_allow(
         agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
     )
 
-    result = await agent_api.get_agents_for_chat(chatter_name="my_chatter")
+    result = await agent_api.filter_agents_for_chat(chatter_name="my_chatter")
 
     assert len(result) == 1
     assert result[0] is AllowedAgent
 
 
 @pytest.mark.asyncio
-async def test_get_agents_for_chat_filters_by_platform(
+async def test_filter_agents_for_chat_filters_by_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """get_agents_for_chat 应根据 platform 过滤。"""
+    """filter_agents_for_chat 应根据 platform 过滤。"""
 
     class PlatformAgent(BaseAgent):
         agent_name = "platform_agent"
@@ -199,7 +199,7 @@ async def test_get_agents_for_chat_filters_by_platform(
         agent_manager_mod, "get_global_registry", lambda: _FakeRegistry()
     )
 
-    result = await agent_api.get_agents_for_chat(platform="test_platform")
+    result = await agent_api.filter_agents_for_chat(platform="test_platform")
 
     assert len(result) == 1
     assert result[0] is PlatformAgent

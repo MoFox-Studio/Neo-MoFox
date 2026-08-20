@@ -103,7 +103,7 @@ def get_agents_for_plugin(plugin_name: str) -> dict[str, type["BaseAgent"]]:
     return _get_agent_manager().get_agents_for_plugin(plugin_name)
 
 
-async def get_agents_for_chat(
+async def filter_agents_for_chat(
     usables: list[type["LLMUsable"]] | None = None,
     *,
     chat_type: ChatType | str = ChatType.ALL,
@@ -113,11 +113,13 @@ async def get_agents_for_chat(
     chat_stream: "ChatStream | None" = None,
     stream_context: Any = None,
     chatter: Any = None,
+    plugin: "BasePlugin | None" = None,
 ) -> list[type["LLMUsable"]]:
-    """获取适用于特定聊天上下文的 Agent 组件类列表。
+    """筛选适用于特定聊天上下文的 Agent 组件类列表。
 
-    若传入 ``usables`` 则直接对给定集合筛选（默认不传 stream_id）；
-    否则从注册表拉取全部 Agent。
+    一个函数完成完整筛选流程（静态过滤 + 筛选前事件钩子 + 动态 go_activate
+    激活）。传入 ``usables`` 则直接筛给定集合；否则从注册表拉取全部 Agent
+    （拉取另由 ``get_all_agents`` 负责）。
 
     Args:
         usables: 待筛选的组件类列表；不传则取全量注册 Agent
@@ -125,15 +127,17 @@ async def get_agents_for_chat(
         chatter_name: Chatter 名称
         platform: 平台名称
         stream_id: 聊天流 ID
-        chat_stream: 候选聊天流实例
+        chat_stream: 候选聊天流实例（提供后由其派生完整上下文并触发激活）
         stream_context: 聊天流上下文
+        chatter: 当前驱动执行的 Chatter 实例
+        plugin: 归属插件实例（go_activate 签名解析失败时的兜底）
 
     Returns:
         Agent 组件类列表
     """
     _validate_optional(chatter_name, "chatter_name")
     _validate_optional(platform, "platform")
-    return await _get_agent_manager().get_agents_for_chat(
+    return await _get_agent_manager().filter_agents_for_chat(
         usables,
         chat_type=_normalize_chat_type(chat_type).value,
         chatter_name=chatter_name,
@@ -142,28 +146,6 @@ async def get_agents_for_chat(
         chat_stream=chat_stream,
         stream_context=stream_context,
         chatter=chatter,
-    )
-
-
-async def activate_agents_for_chat(
-    agents: list[type["LLMUsable"]],
-    *,
-    chat_stream: "ChatStream",
-    plugin: "BasePlugin | None" = None,
-) -> list[type["LLMUsable"]]:
-    """对 Agent 组件类执行动态激活判定（go_activate）。
-
-    Args:
-        agents: 待判定的 Agent 组件类列表
-        chat_stream: 当前聊天流实例
-        plugin: 所属插件实例（缺省时按组件签名解析）
-
-    Returns:
-        激活通过的组件类列表
-    """
-    return await _get_agent_manager().activate_agents_for_chat(
-        agents,
-        chat_stream=chat_stream,
         plugin=plugin,
     )
 
@@ -214,7 +196,7 @@ async def get_agent_schemas(
     Returns:
         Tool Schema 列表
     """
-    agents = await get_agents_for_chat(
+    agents = await filter_agents_for_chat(
         usables,
         chat_type=chat_type,
         chatter_name=chatter_name,
@@ -332,8 +314,7 @@ __all__ = [
     "API_VERSION",
     "get_all_agents",
     "get_agents_for_plugin",
-    "get_agents_for_chat",
-    "activate_agents_for_chat",
+    "filter_agents_for_chat",
     "get_agent_class",
     "get_agent_schema",
     "get_agent_schemas",

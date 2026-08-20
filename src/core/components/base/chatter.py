@@ -193,9 +193,9 @@ class BaseChatter(BaseComponent):
     ) -> list[type[LLMUsable]]:
         """修改 LLMUsable 组件列表。
 
-        将筛选与激活全部委托给各组件管理器经 API 封装的流程：
-        1. 静态筛选（Fast-Path）：按组件类型调用各 API 的 get_*_for_chat。
-        2. 动态激活（Slow-Path）：对存活组件调用各 API 的 activate_*_for_chat。
+        将各类组件的筛选与激活全部委托给对应管理器经 API 封装的单个
+        ``filter_*_for_chat`` 流程：Action/Agent 完成静态过滤与动态
+        go_activate 激活，Tool 仅做静态过滤（``BaseTool`` 无 ``go_activate``）。
 
         Args:
             llm_usables: 原始 LLMUsable 组件列表
@@ -214,6 +214,14 @@ class BaseChatter(BaseComponent):
 
         filter_ctx = build_filter_context_from_stream(chat_stream, self)
 
+        message_content = (
+            chat_context.current_message.processed_plain_text
+            if chat_context.current_message and chat_context.current_message.processed_plain_text
+            else str(chat_context.current_message.content or "")
+            if chat_context.current_message
+            else ""
+        )
+
         # 按组件类型分组待筛选列表
         action_usables: list[type[LLMUsable]] = []
         tool_usables: list[type[LLMUsable]] = []
@@ -228,10 +236,10 @@ class BaseChatter(BaseComponent):
             elif issubclass(usable_cls, BaseAgent):
                 agent_usables.append(usable_cls)
 
-        # Phase 1：静态筛选（全走 API）
+        # 筛选 + 激活（全走 API）
         from src.app.plugin_system.api import action_api, agent_api, tool_api
 
-        kept_actions = await action_api.get_actions_for_chat(
+        kept_actions = await action_api.filter_actions_for_chat(
             action_usables,
             chat_type=filter_ctx.chat_type,
             chatter_name=filter_ctx.chatter_name,
@@ -240,8 +248,10 @@ class BaseChatter(BaseComponent):
             chat_stream=chat_stream,
             stream_context=chat_context,
             chatter=self,
+            plugin=self.plugin,
+            message_content=message_content,
         )
-        kept_tools = await tool_api.get_tools_for_chat(
+        kept_tools = await tool_api.filter_tools_for_chat(
             tool_usables,
             chat_type=filter_ctx.chat_type,
             chatter_name=filter_ctx.chatter_name,
@@ -251,7 +261,7 @@ class BaseChatter(BaseComponent):
             stream_context=chat_context,
             chatter=self,
         )
-        kept_agents = await agent_api.get_agents_for_chat(
+        kept_agents = await agent_api.filter_agents_for_chat(
             agent_usables,
             chat_type=filter_ctx.chat_type,
             chatter_name=filter_ctx.chatter_name,
@@ -260,30 +270,6 @@ class BaseChatter(BaseComponent):
             chat_stream=chat_stream,
             stream_context=chat_context,
             chatter=self,
-        )
-
-        # Phase 2：动态激活（全走 API，plugin 作为签名解析失败的兜底）
-        kept_actions = await action_api.activate_actions_for_chat(
-            kept_actions,
-            chat_stream=chat_stream,
-            plugin=self.plugin,
-            message_content=(
-                chat_context.current_message.processed_plain_text
-                if chat_context.current_message and chat_context.current_message.processed_plain_text
-                else str(chat_context.current_message.content or "")
-                if chat_context.current_message
-                else ""
-            ),
-        )
-        kept_tools = await tool_api.activate_tools_for_chat(
-            kept_tools,
-            chat_stream=chat_stream,
-            plugin=self.plugin,
-            message=chat_context.current_message,
-        )
-        kept_agents = await agent_api.activate_agents_for_chat(
-            kept_agents,
-            chat_stream=chat_stream,
             plugin=self.plugin,
         )
 

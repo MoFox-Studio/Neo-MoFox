@@ -47,7 +47,7 @@ class ActionManager:
 
     Examples:
         >>> manager = ActionManager()
-        >>> actions = await manager.get_actions_for_chat(
+        >>> actions = await manager.filter_actions_for_chat(
         ...     usables=[MyAction],
         ...     chat_type="private",
         ...     chatter_name="my_chatter",
@@ -93,9 +93,9 @@ class ActionManager:
         registry = get_global_registry()
         return registry.get(signature)
 
-    # ── 筛选与激活 ──
+    # ── 筛选 ──
 
-    async def get_actions_for_chat(
+    async def filter_actions_for_chat(
         self,
         usables: list[type["LLMUsable"]] | None = None,
         *,
@@ -106,11 +106,14 @@ class ActionManager:
         chat_stream: "ChatStream | None" = None,
         stream_context: "StreamContext | None" = None,
         chatter: "BaseChatter | None" = None,
+        plugin: "BasePlugin | None" = None,
+        message_content: str = "",
     ) -> list[type["LLMUsable"]]:
-        """获取适用于特定聊天上下文的 Action 组件类列表。
+        """筛选适用于特定聊天上下文的 Action 组件类列表。
 
-        若传入 ``usables`` 则直接对给定集合筛选（默认筛选不传 stream_id、
-        不获取流，仅按静态维度）；否则从注册表拉取全部 Action。
+        一个函数完成完整筛选流程：静态维度过滤（部署期）+ 筛选前事件钩子 +
+        动态 go_activate 激活。传入 ``usables`` 则直接筛给定集合；否则从注册表
+        拉取全部 Action（获取另由 ``get_all_actions`` 负责）。
 
         Args:
             usables: 待筛选的组件类列表；不传则取全量注册 Action
@@ -120,9 +123,12 @@ class ActionManager:
             stream_id: 聊天流 ID（空表示不按流筛选）
             chat_stream: 候选聊天流实例（提供后由其派生完整上下文）
             stream_context: 聊天流上下文（提供后按内容类型过滤）
+            chatter: 当前驱动执行的 Chatter 实例
+            plugin: 归属插件实例（go_activate 签名解析失败时的兜底）
+            message_content: 当前消息内容，供 go_activate 使用
 
         Returns:
-            list[type[LLMUsable]]: 筛选后的 Action 组件类列表
+            list[type[LLMUsable]]: 筛选并激活通过的 Action 组件类列表
         """
         if isinstance(chat_type, ChatType):
             chat_type = chat_type.value
@@ -155,45 +161,27 @@ class ActionManager:
         if stream_context is not None:
             removals.extend(filter_by_associated_types(filtered, stream_context))
 
-        removal_names = {name for name, _ in removals}
-        available = [
-            cls
-            for cls in filtered
-            if (cls.get_signature() or cls.__name__) not in removal_names  # type: ignore[attr-defined]
-        ]
-
+        # 恢复筛选结果日志
+        logger.debug(
+            f"为聊天上下文筛选 Action: chat_type={chat_type}, "
+            f"chatter={chatter_name}, platform={platform}, "
+            f"结果: {len(filtered)}/{len(usables)}"
+        )
         if removals:
             summary = " | ".join(f"{n}({r})" for n, r in removals)
             logger.debug(f"移除 Action 组件: {summary}")
 
-        return available
-
-    async def activate_actions_for_chat(
-        self,
-        actions: list[type["LLMUsable"]],
-        *,
-        chat_stream: "ChatStream",
-        plugin: "BasePlugin | None" = None,
-        message_content: str = "",
-    ) -> list[type["LLMUsable"]]:
-        """对 Action 组件类执行动态激活判定（go_activate）。
-
-        Args:
-            actions: 待判定的 Action 组件类列表
-            chat_stream: 当前聊天流实例
-            plugin: 所属插件实例（缺省时按组件签名解析）
-            message_content: 当前消息内容，供激活判定使用
-
-        Returns:
-            list[type[LLMUsable]]: 激活通过的组件类列表
-        """
+        # 动态激活判定（go_activate）；未提供流上下文时仅做静态筛选
         from src.core.managers import get_plugin_manager
+
+        if chat_stream is None:
+            return filtered
 
         tasks: list[Any] = []
         signatures: list[str] = []
-        kept: list[type["LLMUsable"]] = []
+        available: list[type["LLMUsable"]] = []
 
-        for action_cls in actions:
+        for action_cls in filtered:
             signature = action_cls.get_signature() or action_cls.__name__  # type: ignore[attr-defined]
             # 优先按组件签名解析所属插件；无法解析时回退到传入的 plugin
             action_plugin = None
@@ -211,7 +199,7 @@ class ActionManager:
                 instance._last_message = message_content  # type: ignore[attr-defined]
                 go_activate = getattr(instance, "go_activate", None)
                 if not callable(go_activate):
-                    kept.append(action_cls)
+                    available.append(action_cls)
                     continue
                 tasks.append(go_activate())
                 signatures.append(signature)
@@ -227,15 +215,15 @@ class ActionManager:
                 action_cls = next(
                     (
                         c
-                        for c in actions
+                        for c in filtered
                         if (c.get_signature() or c.__name__) == signature  # type: ignore[attr-defined]
                     ),
                     None,
                 )
                 if action_cls is not None:
-                    kept.append(action_cls)
+                    available.append(action_cls)
 
-        return kept
+        return available
 
     # ── Schema ──
 
@@ -279,7 +267,7 @@ class ActionManager:
         Returns:
             list[dict[str, Any]]: Action schema 列表
         """
-        actions = await self.get_actions_for_chat(
+        actions = await self.filter_actions_for_chat(
             chat_type=chat_type,
             chatter_name=chatter_name,
             platform=platform,

@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.registry import get_global_registry
 from src.core.components.types import ChatType, ComponentType, EventType
-from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
 
 from src.core.managers.utils import (
@@ -24,9 +23,7 @@ from src.core.managers.utils import (
 
 if TYPE_CHECKING:
     from src.core.components.base.chatter import BaseChatter
-    from src.core.components.base.plugin import BasePlugin
     from src.core.components.base.tool import BaseTool
-    from src.core.models.message import Message
     from src.core.models.stream import ChatStream, StreamContext
     from src.kernel.llm import LLMUsable
 
@@ -41,7 +38,7 @@ class ToolComponentManager:
 
     Examples:
         >>> manager = ToolComponentManager()
-        >>> tools = await manager.get_tools_for_chat(
+        >>> tools = await manager.filter_tools_for_chat(
         ...     usables=[CalculatorTool, TranslatorTool],
         ...     chat_type="private",
         ...     chatter_name="my_chatter",
@@ -88,9 +85,9 @@ class ToolComponentManager:
         registry = get_global_registry()
         return registry.get(signature)
 
-    # ── 筛选与激活 ──
+    # ── 筛选 ──
 
-    async def get_tools_for_chat(
+    async def filter_tools_for_chat(
         self,
         usables: list[type["LLMUsable"]] | None = None,
         *,
@@ -102,10 +99,11 @@ class ToolComponentManager:
         stream_context: "StreamContext | None" = None,
         chatter: "BaseChatter | None" = None,
     ) -> list[type["LLMUsable"]]:
-        """获取适用于指定聊天上下文的 Tool 组件类列表。
+        """筛选适用于特定聊天上下文的 Tool 组件类列表。
 
-        若传入 ``usables`` 则直接对给定集合筛选（默认筛选不传 stream_id、
-        不获取流，仅按静态维度）；否则从注册表拉取全部 Tool。
+        Tool 组件仅做部署期静态维度过滤（含筛选前事件钩子），不涉及动态激活
+        （``BaseTool`` 无 ``go_activate``）。传入 ``usables`` 则直接筛给定集合；
+        否则从注册表拉取全部 Tool（获取另由 ``get_all_tools`` 负责）。
 
         Args:
             usables: 待筛选的组件类列表；不传则取全量注册 Tool
@@ -115,6 +113,7 @@ class ToolComponentManager:
             stream_id: 聊天流 ID（空表示不按流筛选）
             chat_stream: 候选聊天流实例（提供后由其派生完整上下文）
             stream_context: 聊天流上下文（提供后按内容类型过滤）
+            chatter: 当前驱动执行的 Chatter 实例
 
         Returns:
             list[type[LLMUsable]]: 筛选后的 Tool 组件类列表
@@ -150,82 +149,17 @@ class ToolComponentManager:
         if stream_context is not None:
             removals.extend(filter_by_associated_types(filtered, stream_context))
 
-        removal_names = {name for name, _ in removals}
-        available = [
-            cls for cls in filtered if (cls.get_signature() or cls.__name__) not in removal_names  # type: ignore[attr-defined]
-        ]
-
+        # 恢复筛选结果日志
+        logger.debug(
+            f"为聊天上下文筛选 Tool: chat_type={chat_type}, "
+            f"chatter={chatter_name}, platform={platform}, "
+            f"结果: {len(filtered)}/{len(usables)}"
+        )
         if removals:
             summary = " | ".join(f"{n}({r})" for n, r in removals)
             logger.debug(f"移除 Tool 组件: {summary}")
 
-        return available
-
-    async def activate_tools_for_chat(
-        self,
-        tools: list[type["LLMUsable"]],
-        *,
-        chat_stream: "ChatStream",
-        plugin: "BasePlugin | None" = None,
-        message: "Message | None" = None,
-    ) -> list[type["LLMUsable"]]:
-        """对 Tool 组件类执行动态激活判定（go_activate）。
-
-        Args:
-            tools: 待判定的 Tool 组件类列表
-            chat_stream: 当前聊天流实例
-            plugin: 所属插件实例（缺省时按组件签名解析）
-            message: 触发消息（用于绑定运行时上下文）
-
-        Returns:
-            list[type[LLMUsable]]: 激活通过的组件类列表
-        """
-        tasks = []
-        signatures = []
-        kept = []
-
-        for tool_cls in tools:
-            signature = tool_cls.get_signature() or tool_cls.__name__  # type: ignore[attr-defined]
-            # 优先按组件签名解析所属插件；无法解析时回退到传入的 plugin
-            tool_plugin = self._resolve_tool_plugin(signature)
-            if tool_plugin is None:
-                tool_plugin = plugin
-            if tool_plugin is None:
-                logger.warning(f"未找到 Tool 所属插件实例: {signature}，跳过激活判定")
-                continue
-            try:
-                instance = tool_cls(plugin=tool_plugin)  # type: ignore[call-arg]
-                instance._bind_runtime_context(  # type: ignore[attr-defined]
-                    stream_id=chat_stream.stream_id,
-                    message=message,
-                )
-                go_activate = getattr(instance, "go_activate", None)
-                if not callable(go_activate):
-                    kept.append(tool_cls)
-                    continue
-                tasks.append(go_activate())
-                signatures.append(signature)
-            except Exception as e:
-                logger.error(f"创建 Tool 实例 {signature} 失败: {e}")
-                continue
-
-        if tasks:
-            results = await get_task_manager().gather(*tasks, return_exceptions=True)
-            for signature, result in zip(signatures, results, strict=False):
-                if isinstance(result, Exception) or not result:
-                    continue
-                tool_cls = next(
-                    (
-                        c
-                        for c in tools
-                        if (c.get_signature() or c.__name__) == signature  # type: ignore[attr-defined]
-                    ),
-                    None,
-                )
-                if tool_cls is not None:
-                    kept.append(tool_cls)
-
-        return kept
+        return filtered
 
     # ── Schema ──
 
@@ -259,28 +193,7 @@ class ToolComponentManager:
         else:
             self._schema_cache.clear()
 
-    # ── 内部 ──
-
-    def _resolve_tool_plugin(self, signature: str) -> "BasePlugin | None":
-        """根据组件签名解析其所属插件实例。
-
-        Args:
-            signature: Tool 组件签名
-
-        Returns:
-            BasePlugin | None: 解析到的插件实例；无法解析时返回 None
-        """
-        try:
-            from src.core.managers import get_plugin_manager
-            from src.core.components.types import parse_signature
-
-            plugin_name = parse_signature(signature)["plugin_name"]
-            return get_plugin_manager().get_plugin(plugin_name)
-        except Exception:
-            return None
-
-
-# 全局工具组件管理器实例
+    # 全局工具组件管理器实例
 _global_tool_component_manager: ToolComponentManager | None = None
 
 

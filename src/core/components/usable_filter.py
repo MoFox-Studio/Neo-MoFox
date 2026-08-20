@@ -229,7 +229,11 @@ def build_filter_context_from_stream(
         UsableFilterContext: 构造好的过滤上下文快照
     """
     stream_id = str(chat_stream.stream_id or "").strip()
-    chat_type = str(chat_stream.chat_type or "private").strip().lower()
+    raw_chat_type = chat_stream.chat_type or "private"
+    if isinstance(raw_chat_type, ChatType):
+        chat_type = raw_chat_type.value.strip().lower()
+    else:
+        chat_type = str(raw_chat_type).strip().lower()
     platform = str(chat_stream.platform or "").strip()
 
     group_id: str | None = None
