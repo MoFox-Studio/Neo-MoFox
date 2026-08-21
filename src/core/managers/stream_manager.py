@@ -303,10 +303,20 @@ class StreamManager:
                 group_id=group_id,
             )
 
+        # 读快速路径：流已存在时直接返回，不抢流级锁。
+        # 高压下大量协程（每条消息）并发获取同一已存在流，若一律串行抢锁会
+        # 使读路径在锁上排队（曾导致 inject_usables 被挤到 30 秒超时）。
+        # 仅当未命中缓存时才进入写路径，锁内二次检查防止并发重复创建。
+        existed = self._streams.get(stream_id)
+        if existed is not None:
+            await self._ensure_stream_bot_identity(existed)
+            logger.debug(f"获取已存在的流实例: {stream_id}")
+            return existed
+
         # 并发保护：同一个 stream_id 的创建/加载必须串行化
         lock = self._get_stream_lock(stream_id)
         async with lock:
-            # 检查，避免等待锁期间已被其他协程创建
+            # 二次检查，避免等待锁期间已被其他协程创建
             existed = self._streams.get(stream_id)
             if existed is not None:
                 await self._ensure_stream_bot_identity(existed)
