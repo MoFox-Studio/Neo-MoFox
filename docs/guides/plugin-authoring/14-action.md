@@ -165,7 +165,7 @@ Action 还有一个很实用的点，是很多插件作者一开始会低估的�
 
 > **它可以在进入模型可用能力列表之前，先做激活判定。**
 
-基类提供了 `go_activate()`，而 `ActionManager.modify_actions()` 会在运行前根据上下文做过滤。
+基类提供了 `go_activate()`，而 `action_api.filter_actions()`（底层为 `ActionManager.filter_actions()`）会在运行前根据上下文对传入的组件类列表做过滤。
 
 这意味着你不一定要让每个 Action 永远暴露给模型。
 

@@ -1,6 +1,6 @@
 """
-Action API模块
-作为 Action 管理器的薄封装，专门负责 Action 组件的查询、筛选和执行操作。
+Tool API模块
+作为 Tool 管理器的薄封装，专门负责 Tool 组件的查询与筛选操作。
 """
 
 from __future__ import annotations
@@ -9,25 +9,25 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
-API_VERSION = "2.0.0"
+API_VERSION = "1.0.0"
 
 if TYPE_CHECKING:
-    from src.core.components.base.action import BaseAction
     from src.core.components.base.plugin import BasePlugin
-    from src.core.managers.action_manager import ActionManager
+    from src.core.components.base.tool import BaseTool
+    from src.core.managers.tool_manager import ToolManager
     from src.core.models.message import Message
     from src.kernel.llm import LLMUsable
 
 
-def _get_action_manager() -> "ActionManager":
-    """延迟获取 ActionManager，避免循环依赖。
+def _get_tool_manager() -> "ToolManager":
+    """延迟获取 ToolManager，避免循环依赖。
 
     Returns:
-        Action 管理器实例
+        Tool 管理器实例
     """
-    from src.core.managers.action_manager import get_action_manager
+    from src.core.managers.tool_manager import get_tool_manager
 
-    return get_action_manager()
+    return get_tool_manager()
 
 
 def _normalize_chat_type(chat_type: ChatType | str) -> ChatType:
@@ -75,29 +75,29 @@ def _validate_optional(value: str, name: str) -> None:
     _validate_non_empty(value, name)
 
 
-def get_all_actions() -> dict[str, type["BaseAction"]]:
-    """获取所有已注册的 Action 组件。
+def get_all_tools() -> dict[str, type["BaseTool"]]:
+    """获取所有已注册的 Tool 组件。
 
     Returns:
-        Action 签名到类的映射
+        Tool 签名到类的映射
     """
-    return _get_action_manager().get_all_actions()
+    return _get_tool_manager().get_all_tools()
 
 
-def get_actions_for_plugin(plugin_name: str) -> dict[str, type["BaseAction"]]:
-    """获取指定插件的所有 Action 组件。
+def get_tools_for_plugin(plugin_name: str) -> dict[str, type["BaseTool"]]:
+    """获取指定插件的所有 Tool 组件。
 
     Args:
         plugin_name: 插件名称
 
     Returns:
-        Action 签名到类的映射
+        Tool 签名到类的映射
     """
     _validate_non_empty(plugin_name, "plugin_name")
-    return _get_action_manager().get_actions_for_plugin(plugin_name)
+    return _get_tool_manager().get_tools_for_plugin(plugin_name)
 
 
-async def filter_actions(
+async def filter_tools(
     component_classes: list[type["LLMUsable"]],
     *,
     stream_id: str = "",
@@ -106,13 +106,13 @@ async def filter_actions(
     chat_type: ChatType | str = ChatType.ALL,
     platform: str = "",
 ) -> list[type["LLMUsable"]]:
-    """筛选传入的 Action 组件类列表。
+    """筛选传入的 Tool 组件类列表。
 
     仅从 ``component_classes`` 中筛选，不从聊天流或全局注册表获取组件；
-    需要从全局注册表获取时请先调用 :func:`get_all_actions`。
+    需要从全局注册表获取时请先调用 :func:`get_all_tools`。
 
     Args:
-        component_classes: 待筛选的 Action 组件类列表
+        component_classes: 待筛选的 Tool 组件类列表
         stream_id: 聊天流 ID
         chatter_name: 聊天器名称
         chatter_signature: 聊天器签名
@@ -120,12 +120,12 @@ async def filter_actions(
         platform: 平台名称
 
     Returns:
-        Action 组件类列表
+        Tool 组件类列表
     """
     _validate_optional(chatter_name, "chatter_name")
     _validate_optional(chatter_signature, "chatter_signature")
     _validate_optional(platform, "platform")
-    return await _get_action_manager().filter_actions(
+    return await _get_tool_manager().filter_tools(
         component_classes,
         stream_id=stream_id,
         chatter_name=chatter_name,
@@ -135,69 +135,71 @@ async def filter_actions(
     )
 
 
-def get_action_class(signature: str) -> type["BaseAction"] | None:
-    """通过签名获取 Action 类。
+def get_tool_class(signature: str) -> type["BaseTool"] | None:
+    """通过签名获取 Tool 类。
 
     Args:
-        signature: Action 组件签名
+        signature: Tool 组件签名
 
     Returns:
-        Action 类，未找到则返回 None
+        Tool 类，未找到则返回 None
     """
     _validate_non_empty(signature, "signature")
-    return _get_action_manager().get_action_class(signature)
+    return _get_tool_manager().get_tool_class(signature)
 
 
-def get_action_schema(signature: str) -> dict[str, Any] | None:
-    """获取 Action 的 Tool Schema。
+def get_tool_schema(signature: str) -> dict[str, Any] | None:
+    """获取 Tool 的 Tool Schema。
 
     Args:
-        signature: Action 组件签名
+        signature: Tool 组件签名
 
     Returns:
         Tool Schema，未找到则返回 None
     """
     _validate_non_empty(signature, "signature")
-    return _get_action_manager().get_action_schema(signature)
+    return _get_tool_manager().get_tool_schema(signature)
 
 
-def get_action_schemas(
+def get_tool_schemas(
     component_classes: list[type["LLMUsable"]],
 ) -> list[dict[str, Any]]:
-    """获取组件类列表对应的 Action Schema 列表。
+    """获取组件类列表对应的 Tool Schema 列表。
 
     Args:
-        component_classes: 已筛选的 Action 组件类列表
+        component_classes: 已筛选的 Tool 组件类列表
 
     Returns:
-        Tool Schema 列表
+        Tool schema 列表
     """
-    return _get_action_manager().get_action_schemas(component_classes)
+    return _get_tool_manager().get_tool_schemas(component_classes)
 
 
-async def execute_action(
+async def execute_tool(
     signature: str,
     plugin: "BasePlugin",
     message: "Message",
     **kwargs: Any,
-) -> tuple[bool, str]:
-    """执行 Action。创建 Action 实例并调用其 execute 方法。
+) -> tuple[bool, Any]:
+    """执行 Tool，委托给 ToolUse 管理器。
 
     Args:
-        signature: Action 组件签名
+        signature: Tool 组件签名
         plugin: 插件实例
-        message: 消息对象
-        **kwargs: 传递给 Action 的参数
+        message: 触发的消息
+        **kwargs: 传递给 Tool 的参数
 
     Returns:
-        执行是否成功与结果描述
+        (是否成功, 返回结果)
     """
     _validate_non_empty(signature, "signature")
     if plugin is None:
         raise ValueError("plugin 不能为空")
     if message is None:
         raise ValueError("message 不能为空")
-    return await _get_action_manager().execute_action(
+    from src.core.managers.tool_manager import get_tool_use
+
+    return await get_tool_use().execute_tool(
         signature=signature,
         plugin=plugin,
         message=message,
@@ -209,24 +211,24 @@ def clear_schema_cache(signature: str | None = None) -> None:
     """清除 schema 缓存。
 
     Args:
-        signature: Action 组件签名，可选
+        signature: Tool 组件签名，可选
 
     Returns:
         None
     """
     if signature is not None:
         _validate_non_empty(signature, "signature")
-    _get_action_manager().clear_schema_cache(signature)
+    _get_tool_manager().clear_schema_cache(signature)
 
 
 __all__ = [
     "API_VERSION",
-    "get_all_actions",
-    "get_actions_for_plugin",
-    "filter_actions",
-    "get_action_class",
-    "get_action_schema",
-    "get_action_schemas",
-    "execute_action",
+    "get_all_tools",
+    "get_tools_for_plugin",
+    "filter_tools",
+    "get_tool_class",
+    "get_tool_schema",
+    "get_tool_schemas",
+    "execute_tool",
     "clear_schema_cache",
 ]

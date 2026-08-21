@@ -12,6 +12,7 @@
 
 - [plugin_manager](./plugin_manager.md): 单插件导入、组件注册、卸载与生命周期钩子。
 - [action_manager](./action_manager.md): Action 组件筛选、schema 和执行入口。
+- [agent_manager](./agent_manager.md): Agent 组件查询、筛选、schema 与执行入口。
 - [adapter_manager](./adapter_manager.md): Adapter 启停、健康检查、命令下发。
 - [chatter_manager](./chatter_manager.md): Chatter 组件选择与活跃实例管理。
 - [command_manager](./command_manager.md): 命令前缀识别、匹配与执行。
@@ -22,7 +23,7 @@
 - [router_manager](./router_manager.md): Router 挂载到 HTTPServer 与卸载管理。
 - [service_manager](./service_manager.md): Service 查询、实例化和方法调用。
 - [stream_manager](./stream_manager.md): ChatStream 单例管理、消息持久化与 TTL 清理。
-- [tool_manager](./tool_manager.md): ToolUse、MCPManager 与工具历史缓存。
+- [tool_manager](./tool_manager.md): ToolUse、MCPManager、ToolManager 与工具历史缓存。
 
 ## 导出入口
 

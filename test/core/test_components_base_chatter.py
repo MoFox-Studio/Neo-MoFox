@@ -270,8 +270,8 @@ class TestBaseChatter:
         mock_stream.context = MagicMock()
         mock_stream.context.current_message = None
 
-        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm, patch(
-            "src.core.components.base.chatter.get_plugin_manager"
+        with patch("src.core.managers.get_stream_manager") as mock_sm, patch(
+            "src.core.managers.get_plugin_manager"
         ) as mock_pm:
             mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
             mock_pm.return_value.get_plugin.return_value = owner_plugin
@@ -314,7 +314,7 @@ class TestBaseChatter:
         mock_stream.stream_id = "stream_123"
         mock_stream.context = MagicMock()
 
-        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm:
+        with patch("src.core.managers.get_stream_manager") as mock_sm:
             mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
 
             result = await chatter.modify_llm_usables([AllowedTool, RejectedTool, OpenTool])
@@ -349,8 +349,9 @@ class TestBaseChatter:
         mock_stream.stream_id = "stream_123"
         mock_stream.context = MagicMock()
         mock_stream.context.current_message = current_message
+        mock_stream.context.check_types.return_value = False
 
-        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm:
+        with patch("src.core.managers.get_stream_manager") as mock_sm:
             mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
 
             result = await chatter.modify_llm_usables([EmojiAction])

@@ -32,9 +32,9 @@ class TestAction(BaseAction):
     supported_chat_types = [ChatType.ALL]
     associated_types = ["text"]
     
-    async def execute(self, **kwargs: Any) -> dict[str, Any]:
+    async def execute(self, **kwargs: Any) -> tuple[bool, Any]:
         """执行 Action。"""
-        return {"success": True, "result": "Executed"}
+        return True, "Executed"
     
     @classmethod
     def get_llm_schema(cls) -> dict[str, Any]:
@@ -141,78 +141,161 @@ class TestActionManagerGetActionsForPlugin:
             assert result == {}
 
 
-class TestActionManagerGetActionsForChat:
-    """测试根据聊天上下文过滤 Action 功能。"""
-    
-    def test_get_actions_for_chat_all_type(self) -> None:
-        """测试获取 ALL 类型的 Action。"""
+class TestActionManagerFilterComponents:
+    """测试 Action 组件筛选功能。"""
+
+    @pytest.mark.asyncio
+    async def test_filter_actions_empty_returns_empty(self) -> None:
+        """传入空列表时直接返回空列表，不访问注册表/聊天流。"""
         manager = ActionManager()
-        
-        TestAction.supported_chat_types = [ChatType.ALL]
-        actions = {
-            "test_plugin:action:test": TestAction,
-        }
-        
-        with patch('src.core.managers.action_manager.get_global_registry') as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.get_by_type.return_value = actions
-            mock_get_registry.return_value = mock_registry
-            
-            result = manager.get_actions_for_chat(
-                chat_type=ChatType.GROUP,
-                chatter_name="",
-                platform=""
-            )
-            
-            # ALL 类型应该匹配所有聊天类型
-            assert len(result) > 0
-    
-    def test_get_actions_for_chat_specific_type(self) -> None:
-        """测试获取特定聊天类型的 Action。"""
+
+        with patch(
+            "src.core.managers.utils.filtering.filter_component_classes",
+            new=AsyncMock(return_value=[]),
+        ), patch("src.core.managers.get_stream_manager") as mock_sm:
+            result = await manager.filter_actions([])
+
+        assert result == []
+        mock_sm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_filter_actions_delegates_to_common_filter(self) -> None:
+        """filter_actions 应委托给统一入口并传入对应筛选事件。"""
+        from src.core.components.types import EventType
+
         manager = ActionManager()
-        
-        TestAction.supported_chat_types = [ChatType.GROUP]
-        actions = {
-            "test_plugin:action:test": TestAction,
-        }
-        
-        with patch('src.core.managers.action_manager.get_global_registry') as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.get_by_type.return_value = actions
-            mock_get_registry.return_value = mock_registry
-            
-            result_group = manager.get_actions_for_chat(
+        component_classes: list[Any] = [TestAction]
+        expected = [TestAction]
+
+        with patch(
+            "src.core.managers.utils.filtering.filter_component_classes",
+            new=AsyncMock(return_value=expected),
+        ) as mock_filter, patch.object(
+            manager, "_apply_action_activation", new=AsyncMock(return_value=expected),
+        ) as mock_activate, patch(
+            "src.core.managers.get_stream_manager"
+        ) as mock_sm:
+            mock_stream = MagicMock()
+            mock_stream.context = MagicMock()
+            mock_stream.context.check_types.return_value = True
+            mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
+
+            result = await manager.filter_actions(
+                component_classes,
+                stream_id="stream_123",
+                chatter_name="my_chatter",
                 chat_type=ChatType.GROUP,
-                chatter_name="",
-                platform=""
+                platform="test_platform",
             )
-            
-            result_private = manager.get_actions_for_chat(
-                chat_type=ChatType.PRIVATE,
-                chatter_name="",
-                platform=""
-            )
-            
-            # 应该只匹配 GROUP 类型
-            assert len(result_group) > 0
-            assert len(result_private) == 0
-    
-    def test_get_actions_for_chat_empty(self) -> None:
-        """测试无匹配 Action 时返回空列表。"""
+
+        assert result == expected
+        mock_filter.assert_awaited_once_with(
+            component_classes,
+            event_type=EventType.BEFORE_ACTION_FILTER,
+            stream_id="stream_123",
+            chatter_name="my_chatter",
+            chatter_signature="",
+            chat_type=ChatType.GROUP,
+            platform="test_platform",
+        )
+        mock_activate.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_filter_actions_publishes_event_before_filtering(self) -> None:
+        """筛选前应发布 BEFORE_ACTION_FILTER 事件，事件可替换组件类。"""
+        from src.core.components.types import EventType
+        from src.kernel.event import EventDecision, get_event_bus
+
         manager = ActionManager()
-        
-        with patch('src.core.managers.action_manager.get_global_registry') as mock_get_registry:
-            mock_registry = MagicMock()
-            mock_registry.get_by_type.return_value = {}
-            mock_get_registry.return_value = mock_registry
-            
-            result = manager.get_actions_for_chat(
-                chat_type=ChatType.GROUP,
-                chatter_name="",
-                platform=""
+        replacement = [TestAction]
+
+        event_bus = get_event_bus()
+
+        async def _handler(event_name: str, params: dict) -> tuple[EventDecision, dict]:
+            params["component_classes"] = replacement
+            return EventDecision.SUCCESS, params
+
+        unsubscribe = event_bus.subscribe(EventType.BEFORE_ACTION_FILTER, _handler)
+        try:
+            with patch.object(
+                manager,
+                "_apply_action_activation",
+                new=AsyncMock(return_value=replacement),
+            ) as mock_activate, patch(
+                "src.core.managers.get_stream_manager"
+            ) as mock_sm:
+                mock_stream = MagicMock()
+                mock_stream.context = MagicMock()
+                mock_stream.context.check_types.return_value = True
+                mock_sm.return_value.get_or_create_stream = AsyncMock(
+                    return_value=mock_stream
+                )
+
+                result = await manager.filter_actions(
+                    [TestAction], stream_id="stream_123"
+                )
+
+            assert result == replacement
+            assert mock_activate.await_args is not None
+            assert mock_activate.await_args.args[0] == replacement
+        finally:
+            unsubscribe()
+
+    @pytest.mark.asyncio
+    async def test_apply_action_activation_removes_deactivated_action(self) -> None:
+        """go_activate 返回 False 的 Action 应被剔除。"""
+
+        class _DeactivatedAction(BaseAction):
+            name = "deactivated_action"
+            description = "deactivated"
+            associated_types = ["text"]
+            _signature_ = "plugin:action:deactivated_action"
+
+            async def execute(self) -> tuple[bool, str]:
+                return True, "ok"
+
+            async def go_activate(self) -> bool:
+                return False
+
+        manager = ActionManager()
+
+        mock_stream = MagicMock()
+        mock_stream.stream_id = "stream_123"
+        mock_stream.context = MagicMock()
+        mock_stream.context.current_message = None
+        mock_stream.context.check_types.return_value = True
+
+        plugin = MagicMock()
+        plugin.plugin_name = "plugin"
+
+        with patch("src.core.managers.get_stream_manager") as mock_sm, patch(
+            "src.core.managers.get_plugin_manager"
+        ) as mock_pm:
+            mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
+            mock_pm.return_value.get_plugin.return_value = plugin
+
+            result = await manager._apply_action_activation(
+                [_DeactivatedAction], stream_id="stream_123"
             )
-            
-            assert result == []
+
+        assert _DeactivatedAction not in result
+
+    @pytest.mark.asyncio
+    async def test_filter_actions_does_not_fetch_from_stream_without_stream_id(
+        self,
+    ) -> None:
+        """未提供 stream_id 时不获取聊天流。"""
+        manager = ActionManager()
+
+        with patch(
+            "src.core.managers.utils.filtering.filter_component_classes",
+            new=AsyncMock(return_value=[TestAction]),
+        ) as mock_filter, patch("src.core.managers.get_stream_manager") as mock_sm:
+            result = await manager.filter_actions([TestAction])
+
+        assert result == [TestAction]
+        mock_filter.assert_awaited_once()
+        mock_sm.assert_not_called()
 
 
 class TestActionManagerGetActionClass:
@@ -292,35 +375,23 @@ class TestActionManagerGetActionSchemas:
         """测试获取多个 Action 的 schemas。"""
         manager = ActionManager()
         
+        class _FakeAction:
+            @classmethod
+            def to_schema(cls) -> dict[str, Any]:
+                return {"name": cls.__name__}
         
-        with patch.object(manager, 'get_action_schema') as mock_get_schema:
-            mock_get_schema.side_effect = [
-                {"name": "schema1"},
-                {"name": "schema2"},
-            ]
-            
-            result = manager.get_action_schemas(
-                chat_type=ChatType.GROUP,
-                chatter_name="",
-                platform=""
-            )
-            
-            assert len(result) == 2
+        result = manager.get_action_schemas([_FakeAction, _FakeAction])
+        
+        assert len(result) == 2
+        assert result[0]["name"] == "_FakeAction"
     
     def test_get_action_schemas_empty(self) -> None:
-        """测试无 Action 时返回空列表。"""
+        """测试传入空列表时返回空列表。"""
         manager = ActionManager()
         
-        with patch.object(manager, 'get_actions_for_chat') as mock_get_actions:
-            mock_get_actions.return_value = []
-            
-            result = manager.get_action_schemas(
-                chat_type=ChatType.GROUP,
-                chatter_name="",
-                platform=""
-            )
-            
-            assert result == []
+        result = manager.get_action_schemas([])
+        
+        assert result == []
 
 
 class TestActionManagerExecuteAction:

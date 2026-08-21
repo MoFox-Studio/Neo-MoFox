@@ -26,6 +26,7 @@ from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api import service_api
 from src.app.plugin_system.api import storage_api
 from src.app.plugin_system.api import stream_api
+from src.app.plugin_system.api import tool_api
 
 #: 各 ``*_api`` 模块的 API 版本号聚合表。
 #:
@@ -56,6 +57,7 @@ PLUGIN_API_VERSIONS: dict[str, str] = {
     "service_api": service_api.API_VERSION,
     "storage_api": storage_api.API_VERSION,
     "stream_api": stream_api.API_VERSION,
+    "tool_api": tool_api.API_VERSION,
 }
 
 __all__ = [
@@ -80,5 +82,6 @@ __all__ = [
     "service_api",
     "storage_api",
     "stream_api",
+    "tool_api",
     "PLUGIN_API_VERSIONS",
 ]

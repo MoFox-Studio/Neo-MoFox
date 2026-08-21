@@ -21,7 +21,6 @@ from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
 from src.core.utils.context_compression import default_chat_context_compression_handler
-from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger, COLOR
 
 if TYPE_CHECKING:
@@ -180,7 +179,9 @@ class BaseChatter(BaseComponent):
     ) -> list[type[LLMUsable]]:
         """修改 LLMUsable 组件列表。
 
-        调用其go_activate方法进行激活判定，并核对associate_type，返回最终可用的组件列表。
+        将传入的组件类按 Action/Agent/Tool 分流，委托给各 ``*_api`` 封装
+        的筛选逻辑做上下文过滤（chatter_allow、关联类型、激活判定等）。
+        仅对传入列表筛选，不从聊天流或全局注册表获取组件。
 
         Args:
             llm_usables: 原始 LLMUsable 组件列表
@@ -188,130 +189,71 @@ class BaseChatter(BaseComponent):
         Returns:
             list[type[LLMUsable]]: 修改后的组件列表
         """
+        from src.app.plugin_system.api import action_api, agent_api, tool_api
 
-        from src.core.managers import get_stream_manager
-        
         logger = get_logger("chatter", display="聊天器", color=COLOR.MAGENTA)
-        chat_stream = await get_stream_manager().get_or_create_stream(
-            stream_id=self.stream_id
+
+        action_classes = cast(
+            list[type["LLMUsable"]],
+            [
+                cls for cls in llm_usables
+                if isinstance(cls, type) and issubclass(cls, BaseAction)
+            ],
         )
-        chat_context = chat_stream.context
+        agent_classes = cast(
+            list[type["LLMUsable"]],
+            [
+                cls for cls in llm_usables
+                if isinstance(cls, type) and issubclass(cls, BaseAgent)
+            ],
+        )
+        tool_classes = cast(
+            list[type["LLMUsable"]],
+            [
+                cls for cls in llm_usables
+                if isinstance(cls, type) and issubclass(cls, BaseTool)
+            ],
+        )
 
-        removals: list[tuple[str, str]] = []
-        filtered: list[type[LLMUsable]] = []
+        known_classes = set(action_classes) | set(agent_classes) | set(tool_classes)
+        others = [cls for cls in llm_usables if cls not in known_classes]
 
-        for usable_cls in llm_usables:
-            usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
-            signature = usable_cls.get_signature() or usable_cls.__name__
+        chatter_signature = self.get_signature() or ""
 
-            chatter_allow = getattr(usable_cls, "chatter_allow", [])
-            if chatter_allow:
-                chatter_signature = self.get_signature()
-                allowed = self.name in chatter_allow
-                if chatter_signature and not allowed:
-                    allowed = chatter_signature in chatter_allow
-
-                if not allowed:
-                    allow_str = ", ".join(chatter_allow)
-                    reason = f"chatter 不匹配（允许: {allow_str}）"
-                    removals.append((signature, reason))
-                    logger.debug(f"[移除组件] {signature}：{reason}")
-                    continue
-
-            if issubclass(usable_cls, BaseAction):
-                required_types = usable_cls.validate_associated_types()
-                if not chat_context.check_types(required_types):
-                    types_str = ", ".join(required_types)
-                    reason = f"适配器不支持（需要: {types_str}）"
-                    removals.append((signature, reason))
-                    logger.debug(f"[移除组件] {signature}：{reason}")
-                    continue
-
-            filtered.append(usable_cls)
-
-        # 并行执行 go_activate（如果组件提供）
-        tasks = []
-        signatures = []
-        for usable_cls in filtered:
-            usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
-            signature = usable_cls.get_signature() or usable_cls.__name__
-
-            try:
-                component_plugin = self._resolve_component_plugin(signature)
-                instance: BaseAction | BaseAgent | BaseTool
-                if issubclass(usable_cls, BaseAction):
-                    instance = usable_cls(chat_stream=chat_stream, plugin=component_plugin)
-
-                    current_msg = chat_context.current_message
-                    if current_msg:
-                        instance._last_message = (
-                            current_msg.processed_plain_text
-                            if current_msg.processed_plain_text
-                            else str(current_msg.content or "")
-                        )
-                elif issubclass(usable_cls, BaseTool):
-                    instance = usable_cls(plugin=component_plugin)
-                elif issubclass(usable_cls, BaseAgent):
-                    instance = usable_cls(stream_id=self.stream_id, plugin=component_plugin)
-                else:
-                    continue
-
-                go_activate = getattr(instance, "go_activate", None)
-                if not callable(go_activate):
-                    continue
-
-                tasks.append(go_activate())
-                signatures.append(signature)
-
-            except Exception as e:
-                logger.error(f"创建 LLMUsable 实例 {signature} 失败: {e}")
-                removals.append((signature, f"创建实例失败: {e}"))
-
-        if tasks:
-            logger.debug(
-                f"[{chat_stream.stream_id}] 并行执行激活判断，任务数: {len(tasks)}"
-            )
-            try:
-                results = await get_task_manager().gather(
-                    *tasks, return_exceptions=True
-                )
-
-                for signature, result in zip(signatures, results, strict=False):
-                    if isinstance(result, Exception):
-                        logger.error(
-                            f"[{chat_stream.stream_id}] 激活判断 {signature} 时出错: {result}"
-                        )
-                        removals.append((signature, f"激活判断出错: {result}"))
-                    elif not result:
-                        removals.append((signature, "go_activate 返回 False"))
-                        logger.debug(
-                            f"[{chat_stream.stream_id}] 未激活组件: {signature}"
-                        )
-                    else:
-                        logger.debug(f"[{chat_stream.stream_id}] 激活组件: {signature}")
-
-            except Exception as e:
-                logger.error(f"[{chat_stream.stream_id}] 并行激活判断失败: {e}")
-                removals.extend((sig, f"并行判断失败: {e}") for sig in signatures)
-
-        if removals:
-            removals_summary = " | ".join(
-                [f"{name}({reason})" for name, reason in removals]
-            )
-            logger.info(f"[{chat_stream.stream_id}] 移除组件: {removals_summary}")
-
-        removal_names = {name for name, _ in removals}
-        available = [
-            usable_cls
-            for usable_cls in filtered
-            if (usable_cls.get_signature() or usable_cls.__name__) not in removal_names # type: ignore
-        ]
+        filtered_actions = await action_api.filter_actions(
+            action_classes,
+            stream_id=self.stream_id,
+            chatter_name=self.name,
+            chatter_signature=chatter_signature,
+        )
+        filtered_agents = await agent_api.filter_agents(
+            agent_classes,
+            stream_id=self.stream_id,
+            chatter_name=self.name,
+            chatter_signature=chatter_signature,
+        )
+        filtered_tools = await tool_api.filter_tools(
+            tool_classes,
+            stream_id=self.stream_id,
+            chatter_name=self.name,
+            chatter_signature=chatter_signature,
+        )
 
         logger.info(
-            f"[{chat_stream.stream_id}] 可用组件: {len(available)}/{len(llm_usables)}"
+            f"[{self.stream_id}] 可用组件: "
+            f"{len(filtered_actions) + len(filtered_agents) + len(filtered_tools)}"
+            f"/{len(llm_usables)}"
         )
 
-        return available
+        return cast(
+            list[type["LLMUsable"]],
+            (
+                list(filtered_actions)
+                + list(filtered_agents)
+                + list(filtered_tools)
+                + others
+            ),
+        )
 
     def _resolve_component_plugin(self, signature: str | None) -> "BasePlugin":
         """根据组件签名解析其所属插件实例。"""
