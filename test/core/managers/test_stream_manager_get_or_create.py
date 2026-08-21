@@ -488,3 +488,66 @@ def test_serialize_content_for_db_keeps_non_binary_media_data() -> None:
 
     assert "file-001" in serialized
     assert "99999" in serialized
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_stream_fast_path_ignores_locked_write_path() -> None:
+    """已存在流应走无锁快速路径：即使写路径锁被长期占用也不阻塞读。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    stream_id = "stream-fast-path-001"
+    cached_stream = SimpleNamespace(
+        stream_id=stream_id,
+        platform="qq",
+        bot_id="bot-1",
+        bot_nickname="Bot",
+        context=SimpleNamespace(),
+    )
+    manager._streams[stream_id] = cached_stream  # type: ignore[assignment]
+    manager._streams_crud.get_by = AsyncMock(return_value=None)
+    manager._create_new_stream = AsyncMock()  # type: ignore[method-assign]
+
+    # 预先占用写路径锁（模拟高压下正在进行的创建/加载）
+    lock = manager._get_stream_lock(stream_id)
+    await lock.acquire()
+    try:
+        # 快速路径不应等待锁，直接返回缓存实例
+        result = await asyncio.wait_for(
+            manager.get_or_create_stream(stream_id=stream_id, platform="qq"),
+            timeout=1.0,
+        )
+    finally:
+        lock.release()
+
+    assert result is cached_stream
+    assert manager._streams_crud.get_by.await_count == 0
+    assert manager._create_new_stream.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_stream_concurrent_create_still_once(monkeypatch) -> None:
+    """流不存在时并发创建：double-check 仍应保证只创建一次。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    stream_id = "stream-double-check-001"
+    fake_stream = SimpleNamespace(
+        stream_id=stream_id,
+        platform="qq",
+        bot_id="",
+        bot_nickname="",
+        context=SimpleNamespace(),
+    )
+    manager._streams_crud.get_by = AsyncMock(return_value=None)
+    manager._create_new_stream = AsyncMock(return_value=fake_stream)  # type: ignore[method-assign]
+
+    first, second = await asyncio.gather(
+        manager.get_or_create_stream(stream_id=stream_id, platform="qq"),
+        manager.get_or_create_stream(stream_id=stream_id, platform="qq"),
+    )
+
+    assert first is fake_stream
+    assert second is fake_stream
+    assert manager._create_new_stream.await_count == 1
+    assert manager._streams_crud.get_by.await_count == 1
