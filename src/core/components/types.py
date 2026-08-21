@@ -77,6 +77,12 @@ class EventType(str, Enum):
     AFTER_TOOL_CALL = "after_tool_call"
     ON_TOOL_CALL_FAILED = "on_tool_call_failed"
 
+    # 组件筛选事件（在各管理器执行筛选前发布，
+    # 事件处理器可通过修改 component_classes 控制最终组件类型）
+    BEFORE_ACTION_FILTER = "before_action_filter"
+    BEFORE_AGENT_FILTER = "before_agent_filter"
+    BEFORE_TOOL_FILTER = "before_tool_filter"
+
     # 动作调用生命周期事件
     BEFORE_ACTION_CALL = "before_action_call"
     AFTER_ACTION_CALL = "after_action_call"
