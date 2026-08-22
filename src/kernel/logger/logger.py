@@ -452,8 +452,13 @@ class Logger:
             if border_style is None:
                 border_style = self.color
 
+            try:
+                renderable = Text.from_markup(message) if "[" in message else message
+            except Exception:
+                renderable = Text(message)
+
             panel = Panel(
-                message,
+                renderable,
                 title=title or self.display,
                 border_style=border_style,
             )
