@@ -10,7 +10,6 @@ from typing import ClassVar
 
 from src.core.components.base.config import BaseConfig, Field, SectionBase, config_section
 
-
 class EmojiSenderConfig(BaseConfig):
     """emoji_sender 插件配置。"""
 
@@ -38,6 +37,15 @@ class EmojiSenderConfig(BaseConfig):
         inject_system_prompt: bool = Field(
             default=True,
             description="是否将表情包使用提示同步到 default_chatter 的 actor system reminder",
+        )
+
+        interaction_mode: str = Field(
+            default="direct",
+            description=(
+                "表情包发送模式：direct=一步直达（插件自动挑选后直接发送）；"
+                "picker=两段式（先查询候选列表，由 AI 亲自挑选后按 id 发送）。"
+                "修改后需重载插件生效。"
+            ),
         )
 
     @config_section("prompt")
@@ -93,6 +101,29 @@ class EmojiSenderConfig(BaseConfig):
             description="检索结果采样温度（<=0 时固定选择最相似项，越大越随机）",
         )
 
+    @config_section("picker")
+    class PickerSection(SectionBase):
+        """两段式挑选模式（interaction_mode="picker"）相关配置。"""
+
+        page_size: int = Field(
+            default=6,
+            description="候选列表每页数量",
+        )
+
+    @config_section("dedup")
+    class DedupSection(SectionBase):
+        """使用历史去重配置。"""
+
+        enabled: bool = Field(
+            default=True,
+            description="是否过滤每个聊天流最近已发送过的表情包（无可用候选时自动回退全量）",
+        )
+
+        window: int = Field(
+            default=6,
+            description="每个聊天流记住的最近已发送表情包数量（即最近 N 张内的不会重复发送）",
+        )
+
     @config_section("storage")
     class StorageSection(SectionBase):
         """文件存储相关配置。"""
@@ -112,4 +143,6 @@ class EmojiSenderConfig(BaseConfig):
     prompt: PromptSection = Field(default_factory=PromptSection)
     ingest: IngestSection = Field(default_factory=IngestSection)
     vector: VectorSection = Field(default_factory=VectorSection)
+    picker: PickerSection = Field(default_factory=PickerSection)
+    dedup: DedupSection = Field(default_factory=DedupSection)
     storage: StorageSection = Field(default_factory=StorageSection)

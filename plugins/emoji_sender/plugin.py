@@ -2,6 +2,10 @@
 
 加载后会注册一个 scheduler 周期任务：定时执行一次入库（对齐→抽取→VLM 决策→收藏入库）。
 注意：scheduler 在 Bot.run() 阶段才 start()，因此这里使用 task_manager 后台协程等待 scheduler 就绪后再注册。
+
+发送模式由 config.plugin.interaction_mode 决定：
+- "direct"：注册 SendEmojiMemeAction（一步直达，插件自动挑选后直接发送）
+- "picker"：注册 SearchEmojiMemesTool + SendEmojiMemeByIdAction（先查询候选，AI 亲自挑选后按 id 发送）
 """
 
 from __future__ import annotations
@@ -13,12 +17,16 @@ from src.core.components import BasePlugin, register_plugin
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
 
-from .action import SendEmojiMemeAction
+from .action import SendEmojiMemeAction, SendEmojiMemeByIdAction
 from .config import EmojiSenderConfig
 from .service import EmojiSenderService
+from .tool import SearchEmojiMemesTool
 
 
 logger = get_logger("emoji_sender")
+
+MODE_DIRECT = "direct"
+MODE_PICKER = "picker"
 
 _TARGET_REMINDER_BUCKET = "actor"
 _TARGET_REMINDER_NAME = "关于表情包的使用"
@@ -31,6 +39,31 @@ _EMOJI_USAGE_REMINDER = (
     "简单发个表情包是个很常见的做法。因此，虽然使用表情包看起来很简单，但是也值得你认真思考，请你在接下来的对话中时刻牢记这个能力，"
     "把表情包用活、用的恰到好处。"
 )
+_EMOJI_USAGE_REMINDER_PICKER = (
+    "表情包的使用在你的日常互动中扮演着非常重要的角色。它直接影响到你向他人所展示出的形象。"
+    "如果你经常只发文字，不发表情包，则通常被认为是严肃、专业的象征，而经常使用表情包则更可能被认为是可爱、活力的象征，"
+    "所以请你认真对待表情包的使用。\n"
+    "同时，表情包使用的时机也是一门学问。当别人和你谈正事等严肃的场合时，随意使用表情包可能被认为嘻嘻哈哈惹人厌的家伙，"
+    "而在日常聊天中使用更多表情包的而不是认真的回复则可能更贴合轻松诙谐的气氛；当你懒得专门打字回应，或者只是冒个泡刷个存在感时，"
+    "简单发个表情包是个很常见的做法。\n"
+    "你发送表情包的方式是两步：先调用 search_emoji_memes 按目标描述（可附带情感标签）检索表情包库，"
+    "查看返回的候选列表（列表中每项含 id、标签、描述与距离，距离越小与你想要的越贴切），"
+    "从中挑选最契合当前语境与你的形象的一张，再用它的 id 调用 send_emoji_meme_by_id 发送；"
+    "如果对候选不满意，可以换更具体的描述重新查询，或翻页查看更多候选。"
+    "请把表情包用活、用的恰到好处。"
+)
+
+
+def _get_interaction_mode(plugin: Any) -> str:
+    """读取当前发送模式，非法值按 direct 处理并告警。"""
+    config = plugin.config
+    if not isinstance(config, EmojiSenderConfig):
+        return MODE_DIRECT
+    mode = str(config.plugin.interaction_mode).strip().lower()
+    if mode not in (MODE_DIRECT, MODE_PICKER):
+        logger.warning(f"未知 interaction_mode: {mode!r}，按 direct 处理")
+        return MODE_DIRECT
+    return mode
 
 
 def build_emoji_sender_actor_reminder(plugin: Any) -> str:
@@ -39,6 +72,8 @@ def build_emoji_sender_actor_reminder(plugin: Any) -> str:
     config = getattr(plugin, "config", None)
     if isinstance(config, EmojiSenderConfig) and not config.plugin.inject_system_prompt:
         return ""
+    if _get_interaction_mode(plugin) == MODE_PICKER:
+        return _EMOJI_USAGE_REMINDER_PICKER
     return _EMOJI_USAGE_REMINDER
 
 
@@ -78,10 +113,12 @@ class EmojiSenderPlugin(BasePlugin):
         self._register_task_id: str | None = None
 
     def get_components(self) -> list[type]:
-        """返回本插件提供的组件类。"""
+        """返回本插件提供的组件类（按 interaction_mode 分模式注册）。"""
         config = self.config
         if isinstance(config, EmojiSenderConfig) and not config.plugin.enabled:
             return []
+        if _get_interaction_mode(self) == MODE_PICKER:
+            return [EmojiSenderService, SearchEmojiMemesTool, SendEmojiMemeByIdAction]
         return [EmojiSenderService, SendEmojiMemeAction]
 
     async def on_plugin_loaded(self) -> None:
@@ -91,14 +128,23 @@ class EmojiSenderPlugin(BasePlugin):
             return
         sync_emoji_sender_actor_reminder(self)
 
-        # 将自定义场景说明追加到 action 的描述，使 Chatter 侧感知使用时机
+        # 将自定义场景说明追加到当前模式对应 LLM 组件的描述，使 Chatter 侧感知使用时机
         if isinstance(self.config, EmojiSenderConfig):
             custom = self.config.prompt.custom_instructions.strip()
             if custom:
-                SendEmojiMemeAction.description = (
-                    SendEmojiMemeAction.description.rstrip() + "\n\n自定义指令：\n" + custom
-                )
-                logger.debug("已将自定义场景说明追加到 send_emoji_meme 描述")
+                if _get_interaction_mode(self) == MODE_PICKER:
+                    SearchEmojiMemesTool.description = (
+                        SearchEmojiMemesTool.description.rstrip() + "\n\n自定义指令：\n" + custom
+                    )
+                    SendEmojiMemeByIdAction.description = (
+                        SendEmojiMemeByIdAction.description.rstrip() + "\n\n自定义指令：\n" + custom
+                    )
+                    logger.debug("已将自定义场景说明追加到 picker 模式组件描述")
+                else:
+                    SendEmojiMemeAction.description = (
+                        SendEmojiMemeAction.description.rstrip() + "\n\n自定义指令：\n" + custom
+                    )
+                    logger.debug("已将自定义场景说明追加到 send_emoji_meme 描述")
 
         tm = get_task_manager()
         task = tm.create_task(
