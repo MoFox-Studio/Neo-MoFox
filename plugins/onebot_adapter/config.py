@@ -61,10 +61,10 @@ class OneBotAdapterConfig(BaseConfig):
             hint="reverse: 逆向WebSocket; direct: 正向WebSocket"
         )
         host: str = Field(
-            default="localhost",
+            default="127.0.0.1",
             description="OneBot WebSocket 服务地址",
             label="服务地址",
-            placeholder="localhost",
+            placeholder="127.0.0.1",
             tag="network"
         )
         port: int = Field(
