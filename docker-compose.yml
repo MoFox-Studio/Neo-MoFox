@@ -33,6 +33,7 @@ services:
       - snowluma-local:/app/.local/share
 
   # ===== Neo-MoFox - AI 聊天机器人框架 (dev 分支) =====
+  # 在 SnowLuma WebUI 中将反向 WebSocket 地址设为 ws://mofox-bot:8095
   mofox:
     image: ikun11451/neo-mofox-dev:latest
     container_name: mofox-bot
@@ -48,10 +49,6 @@ services:
     environment:
       TZ: Asia/Shanghai
       MOFOX_ACCEPT_STARTUP_AGREEMENTS: "1"
-      # Compose 网络内通过服务名直连 SnowLuma 的 OneBot WebSocket。
-      MOFOX_ONEBOT_MODE: direct
-      MOFOX_ONEBOT_HOST: snowluma
-      MOFOX_ONEBOT_PORT: "3001"
     ports:
       - "8000:8000" # MoFox WebUI
     stdin_open: true
