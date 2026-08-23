@@ -1,8 +1,8 @@
 """emoji_sender Action：发送表情包。
 
-该 Action 面向 LLM Tool Calling：
-- 输入：目标表情包描述文本 + 情感 tag（可多个）
-- 行为：按 tag 过滤候选后向量检索 topN，选择距离满足阈值的最佳表情包发送
+提供两个 Action：
+- SendEmojiMemeAction（direct 模式）：输入目标描述 + 情感 tag，一步完成检索与发送
+- SendEmojiMemeByIdAction（picker 模式）：按 search_emoji_memes 返回的 id 精确发送指定表情包
 """
 
 from __future__ import annotations
@@ -72,5 +72,51 @@ class SendEmojiMemeAction(BaseAction):
             return
 
         # 失败：尽量带上原因
+        yield False, reason
+        return
+
+
+class SendEmojiMemeByIdAction(BaseAction):
+    """按 id 精确发送表情包动作。"""
+
+    name: str = "send_emoji_meme_by_id"
+    description: str = (
+        "按 id 发送一张表情包库中的指定表情包。"
+        "id 必须来自 search_emoji_memes 返回的候选列表；"
+        "此动作可以单独使用也可以和发送文字一起使用，更符合日常聊天习惯。"
+    )
+    primary_action: bool = False
+    associated_types = ["emoji"]
+
+    async def execute(
+        self,
+        meme_id: Annotated[str, "要发送的表情包 id（来自 search_emoji_memes 返回的候选列表）"],
+    ) -> AsyncGenerator[tuple[bool, str] | None, None]:
+        """执行按 id 发送表情包动作。"""
+        service = get_service("emoji_sender:service:emoji_sender")
+        if service is None:
+            yield False, "emoji_sender service 未加载"
+            return
+
+        service = cast(EmojiSenderService, service)
+
+        yield None
+        ok, result, reason = await service.send_by_id(
+            short_id=meme_id,
+            stream_id=self.chat_stream.stream_id,
+            platform=self.chat_stream.platform,
+        )
+
+        if ok:
+            if not result:
+                yield True, "已发送表情包"
+                return
+
+            tag = str(result.get("tag") or "").strip()
+            desc = str(result.get("description") or "").strip()
+            detail = f"已发送表情包\n- 标签: {tag}\n- 描述: {desc}" if desc else f"已发送表情包\n- 标签: {tag}"
+            yield True, detail
+            return
+
         yield False, reason
         return
