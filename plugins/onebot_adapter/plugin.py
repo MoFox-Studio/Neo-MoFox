@@ -11,6 +11,7 @@ OneBot 适配器（基于 MoFox-Bus 完全重写版）
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from typing import Any, cast
 
@@ -30,6 +31,41 @@ from .src.handlers.to_core.notice_handler import NoticeHandler
 from .src.handlers.to_napcat.send_handler import SendHandler
 
 logger = get_logger("onebot_adapter")
+
+
+def _resolve_onebot_connection(
+    config: OneBotAdapterConfig | None,
+) -> tuple[str, str, int, str]:
+    """解析 OneBot 连接配置，并允许容器部署通过环境变量覆盖。"""
+
+    if config is None:
+        mode = "reverse"
+        host = "127.0.0.1"
+        port = 8095
+        access_token = ""
+    else:
+        mode = config.onebot_server.mode
+        host = config.onebot_server.host
+        port = config.onebot_server.port
+        access_token = config.onebot_server.access_token
+
+    mode = os.environ.get("MOFOX_ONEBOT_MODE", mode)
+    host = os.environ.get("MOFOX_ONEBOT_HOST", host)
+    access_token = os.environ.get("MOFOX_ONEBOT_ACCESS_TOKEN", access_token)
+
+    raw_port = os.environ.get("MOFOX_ONEBOT_PORT")
+    if raw_port is not None:
+        try:
+            port = int(raw_port)
+        except ValueError as exc:
+            raise ValueError("MOFOX_ONEBOT_PORT 必须是整数") from exc
+
+    if mode not in {"direct", "reverse"}:
+        raise ValueError("MOFOX_ONEBOT_MODE 必须是 direct 或 reverse")
+    if not 1 <= port <= 65535:
+        raise ValueError("MOFOX_ONEBOT_PORT 必须在 1 到 65535 之间")
+
+    return mode, host, port, access_token
 
 
 def _validate_bot_identity(config: OneBotAdapterConfig) -> None:
@@ -59,23 +95,13 @@ class OneBotAdapter(BaseAdapter):
 
     def __init__(self, core_sink: CoreSink, plugin: OneBotAdapterPlugin | None = None, **kwargs):
         """初始化 OneBot 适配器"""
-        # 从插件配置读取 WebSocket URL
-        if plugin and plugin.config:
-            config = cast(OneBotAdapterConfig, plugin.config)
-            host = config.onebot_server.host
-            port = config.onebot_server.port
-            access_token = config.onebot_server.access_token
-            mode_str = config.onebot_server.mode
-            ws_mode = "client" if mode_str == "direct" else "server"
-
-            ws_url = f"ws://{host}:{port}"
-            headers = {}
-            if access_token:
-                headers["Authorization"] = f"Bearer {access_token}"
-        else:
-            ws_url = "ws://127.0.0.1:8095"
-            headers = {}
-            ws_mode = "server"
+        config = cast(OneBotAdapterConfig, plugin.config) if plugin and plugin.config else None
+        mode_str, host, port, access_token = _resolve_onebot_connection(config)
+        ws_mode = "client" if mode_str == "direct" else "server"
+        ws_url = f"ws://{host}:{port}"
+        headers = {}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
 
         # 配置 WebSocket 传输
         transport = WebSocketAdapterOptions(

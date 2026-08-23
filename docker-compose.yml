@@ -10,7 +10,9 @@ services:
     security_opt:
       - seccomp=unconfined
     environment:
-      VNC_PASSWD: vncpasswd
+      # 不提供默认密码，避免把公开凭据带入生产环境。
+      # 启动前请设置 SNOWLUMA_VNC_PASSWORD（建议使用随机强密码）。
+      VNC_PASSWD: ${SNOWLUMA_VNC_PASSWORD:?Set SNOWLUMA_VNC_PASSWORD to a strong password}
       SNOWLUMA_UID: "1000"
       SNOWLUMA_GID: "1000"
       SNOWLUMA_WEBUI_HOST: "0.0.0.0"
@@ -21,7 +23,6 @@ services:
       SNOWLUMA_QQ_FLAGS: >-
         --disable-gpu --disable-software-rasterizer --disable-gpu-compositing
     ports:
-      - "5900:5900" # VNC
       - "6081:6081" # noVNC
       - "5099:5099" # SnowLuma WebUI
       - "3000:3000" # OneBot HTTP
@@ -47,6 +48,10 @@ services:
     environment:
       TZ: Asia/Shanghai
       MOFOX_ACCEPT_STARTUP_AGREEMENTS: "1"
+      # Compose 网络内通过服务名直连 SnowLuma 的 OneBot WebSocket。
+      MOFOX_ONEBOT_MODE: direct
+      MOFOX_ONEBOT_HOST: snowluma
+      MOFOX_ONEBOT_PORT: "3001"
     ports:
       - "8000:8000" # MoFox WebUI
     stdin_open: true

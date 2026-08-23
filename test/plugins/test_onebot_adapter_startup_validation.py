@@ -11,7 +11,12 @@ import src.kernel.storage as kernel_storage
 from src.kernel.concurrency import get_task_manager
 
 from plugins.onebot_adapter.config import OneBotAdapterConfig
-from plugins.onebot_adapter.plugin import OneBotAdapter, OneBotAdapterPlugin, _validate_bot_identity
+from plugins.onebot_adapter.plugin import (
+    OneBotAdapter,
+    OneBotAdapterPlugin,
+    _resolve_onebot_connection,
+    _validate_bot_identity,
+)
 from plugins.onebot_adapter.src.handlers import utils as onebot_utils
 
 
@@ -48,6 +53,21 @@ class _HangingWebSocket:
 
 class TestOneBotAdapterStartupValidation:
     """测试 Napcat 适配器启动校验。"""
+
+    def test_environment_overrides_onebot_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """容器环境变量应覆盖插件文件中的 OneBot 地址。"""
+        monkeypatch.setenv("MOFOX_ONEBOT_MODE", "direct")
+        monkeypatch.setenv("MOFOX_ONEBOT_HOST", "snowluma")
+        monkeypatch.setenv("MOFOX_ONEBOT_PORT", "3001")
+
+        assert _resolve_onebot_connection(None) == ("direct", "snowluma", 3001, "")
+
+    def test_environment_rejects_invalid_onebot_port(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """非法的环境变量端口应在启动时给出明确错误。"""
+        monkeypatch.setenv("MOFOX_ONEBOT_PORT", "not-a-port")
+
+        with pytest.raises(ValueError, match="MOFOX_ONEBOT_PORT 必须是整数"):
+            _resolve_onebot_connection(None)
 
     def test_validate_bot_identity_accepts_valid_values(self) -> None:
         """有效配置应通过校验。"""
