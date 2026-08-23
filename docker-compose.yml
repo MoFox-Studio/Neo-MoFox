@@ -10,7 +10,9 @@ services:
     security_opt:
       - seccomp=unconfined
     environment:
-      VNC_PASSWD: vncpasswd
+      # 不提供默认密码，避免把公开凭据带入生产环境。
+      # 启动前请设置 SNOWLUMA_VNC_PASSWORD（建议使用随机强密码）。
+      VNC_PASSWD: ${SNOWLUMA_VNC_PASSWORD:?Set SNOWLUMA_VNC_PASSWORD to a strong password}
       SNOWLUMA_UID: "1000"
       SNOWLUMA_GID: "1000"
       SNOWLUMA_WEBUI_HOST: "0.0.0.0"
@@ -21,7 +23,6 @@ services:
       SNOWLUMA_QQ_FLAGS: >-
         --disable-gpu --disable-software-rasterizer --disable-gpu-compositing
     ports:
-      - "5900:5900" # VNC
       - "6081:6081" # noVNC
       - "5099:5099" # SnowLuma WebUI
       - "3000:3000" # OneBot HTTP
@@ -32,6 +33,7 @@ services:
       - snowluma-local:/app/.local/share
 
   # ===== Neo-MoFox - AI 聊天机器人框架 (dev 分支) =====
+  # 在 SnowLuma WebUI 中将反向 WebSocket 地址设为 ws://mofox-bot:8095
   mofox:
     image: ikun11451/neo-mofox-dev:latest
     container_name: mofox-bot
