@@ -4,6 +4,11 @@ import os
 import re
 from pathlib import Path
 
+from src.app.plugin_system.api.permission_api import (
+    generate_person_id,
+    get_user_permission_level,
+)
+from src.app.plugin_system.types import Message, PermissionLevel
 from src.core.components import BasePlugin, register_plugin
 from src.core.prompt import SystemReminderInsertType
 from src.kernel.logger import get_logger
@@ -16,6 +21,14 @@ from .tools import SkillGetReferenceTool, SkillGetScriptTool, SkillGetTool
 
 logger = get_logger("skill_manager")
 _FRONT_MATTER_FIELD_RE = re.compile(r"^(name|description)\s*:\s*(.+)$", re.IGNORECASE)
+
+SCRIPT_EXECUTION_DISABLED_MESSAGE = (
+    "skill 脚本执行已被禁用；如确需开启，"
+    "请在 skill_manager 配置中把 [security].allow_script_execution 设为 true"
+)
+SCRIPT_EXECUTION_UNIDENTIFIED_MESSAGE = "无法确认调用者身份，已拒绝执行 skill 脚本"
+SCRIPT_EXECUTION_LEVEL_INVALID_MESSAGE = "脚本执行权限级别配置无效，已拒绝执行 skill 脚本"
+SCRIPT_EXECUTION_LOOKUP_FAILED_MESSAGE = "权限校验失败，已拒绝执行 skill 脚本"
 
 
 def _is_path_inside(base_dir: Path, target_path: Path) -> bool:
@@ -90,13 +103,116 @@ class SkillManagerPlugin(BasePlugin):
         ):
             logger.info("skill_manager 已在配置中禁用")
             return []
-        return [
+
+        components: list[type] = [
             SkillManagerLoadHandler,
             SkillManagerCommand,
             SkillGetTool,
             SkillGetReferenceTool,
-            SkillGetScriptTool,
         ]
+        if self.allow_script_execution:
+            components.append(SkillGetScriptTool)
+        else:
+            logger.info(
+                "skill_manager 未开启脚本执行，get_script 工具不会注册；"
+                "如需开启请将 [security].allow_script_execution 设为 true"
+            )
+        return components
+
+    @property
+    def _security(self) -> SkillManagerConfig.SecuritySection:
+        """返回生效的 ``[security]`` 配置段。
+
+        配置缺失时回退到一个全默认实例：该段所有默认值都取最严的一档，因此回退等价于
+        fail-closed，不会因为配置没加载而放开脚本执行。
+
+        Returns:
+            SkillManagerConfig.SecuritySection: 生效的安全配置段。
+        """
+
+        if isinstance(self.config, SkillManagerConfig):
+            return self.config.security
+        return SkillManagerConfig.SecuritySection()
+
+    @property
+    def allow_script_execution(self) -> bool:
+        """是否允许通过 get_script 执行 skill 脚本。"""
+
+        return self._security.allow_script_execution
+
+    @property
+    def powershell_bypass_execution_policy(self) -> bool:
+        """执行 .ps1 脚本时是否附加 ``-ExecutionPolicy Bypass``。"""
+
+        return self._security.powershell_bypass_execution_policy
+
+    @property
+    def script_execution_permission_level(self) -> PermissionLevel:
+        """执行 skill 脚本所需的调用者最低权限级别。
+
+        Returns:
+            PermissionLevel: 配置中声明的最低权限级别。
+
+        Raises:
+            ValueError: 配置中的级别字符串不是合法的权限级别名。
+        """
+
+        return PermissionLevel.from_string(
+            self._security.script_execution_permission_level
+        )
+
+    async def authorize_script_execution(
+        self,
+        message: Message | None,
+    ) -> tuple[bool, str | None]:
+        """判定一次 get_script 调用是否获得授权。
+
+        工具调用层本身没有权限模型（``src/core/managers/tool_manager/`` 内不存在任何
+        鉴权代码），因此这里按 ``/skill`` 管理命令的同一套权限体系补上调用者级别的门：
+        总开关只决定「这台部署是否提供脚本执行」，具体「谁可以执行」由权限级别决定，
+        避免开关一开就对所有聊天用户放开。
+
+        任何无法完成判定的情况（无触发消息、身份字段为空、级别配置非法、权限查询失败）
+        都按拒绝处理。
+
+        Args:
+            message: 触发本次工具调用的消息；为 None 表示无法归因到具体用户。
+
+        Returns:
+            tuple[bool, str | None]: (是否放行, 拒绝原因)；放行时第二项为 None。
+        """
+
+        if not self.allow_script_execution:
+            return False, SCRIPT_EXECUTION_DISABLED_MESSAGE
+
+        platform = str(getattr(message, "platform", "") or "").strip()
+        sender_id = str(getattr(message, "sender_id", "") or "").strip()
+        if not platform or not sender_id:
+            logger.warning("skill 脚本执行请求无法归因到具体用户，已拒绝")
+            return False, SCRIPT_EXECUTION_UNIDENTIFIED_MESSAGE
+
+        try:
+            required_level = self.script_execution_permission_level
+        except ValueError as error:
+            logger.error(f"skill_manager 脚本执行权限级别配置非法，已拒绝: {error}")
+            return False, SCRIPT_EXECUTION_LEVEL_INVALID_MESSAGE
+
+        try:
+            person_id = generate_person_id(platform, sender_id)
+            actual_level = await get_user_permission_level(person_id)
+        except Exception as error:
+            logger.error(f"查询 skill 脚本执行权限失败，已拒绝: {error}")
+            return False, SCRIPT_EXECUTION_LOOKUP_FAILED_MESSAGE
+
+        if actual_level < required_level:
+            logger.warning(
+                f"权限拒绝: 执行 skill 脚本需要 {required_level.to_string()}，"
+                f"调用者为 {actual_level.to_string()}"
+            )
+            return False, (
+                f"权限不足：执行 skill 脚本需要 {required_level.to_string()} 级别权限"
+            )
+        return True, None
 
     async def on_plugin_unloaded(self) -> None:
         """插件卸载时清理 system reminder。"""
