@@ -45,8 +45,6 @@ def _build_plugin(
     *,
     allow_script_execution: bool = True,
     powershell_bypass_execution_policy: bool = False,
-    powershell_no_profile: bool = True,
-    powershell_non_interactive: bool = True,
     script_execution_permission_level: str = "owner",
 ) -> SkillManagerPlugin:
     """创建测试用插件实例。"""
@@ -56,8 +54,6 @@ def _build_plugin(
     config.security.powershell_bypass_execution_policy = (
         powershell_bypass_execution_policy
     )
-    config.security.powershell_no_profile = powershell_no_profile
-    config.security.powershell_non_interactive = powershell_non_interactive
     config.security.script_execution_permission_level = (
         script_execution_permission_level
     )
@@ -98,8 +94,6 @@ def _prepare_script(
     content: str,
     allow_script_execution: bool = True,
     powershell_bypass_execution_policy: bool = False,
-    powershell_no_profile: bool = True,
-    powershell_non_interactive: bool = True,
     script_execution_permission_level: str = "owner",
     bind_message: bool = True,
 ) -> tuple[SkillGetScriptTool, Path]:
@@ -108,8 +102,6 @@ def _prepare_script(
     plugin = _build_plugin(
         allow_script_execution=allow_script_execution,
         powershell_bypass_execution_policy=powershell_bypass_execution_policy,
-        powershell_no_profile=powershell_no_profile,
-        powershell_non_interactive=powershell_non_interactive,
         script_execution_permission_level=script_execution_permission_level,
     )
     skill_root = tmp_path / "demo"
@@ -160,17 +152,12 @@ def test_script_tool_is_registered_when_execution_enabled() -> None:
 
 
 def test_security_defaults_are_fail_closed() -> None:
-    """默认配置下脚本执行关闭、策略绕过关闭、权限门为 OWNER。
-
-    另外两个 PowerShell 加固开关默认开启：它们默认取「更安全」的一档，运维可显式关闭。
-    """
+    """默认配置下脚本执行关闭、策略绕过关闭、权限门为 OWNER。"""
 
     security = resolve_security_section(SkillManagerConfig())
 
     assert security.allow_script_execution is False
     assert security.powershell_bypass_execution_policy is False
-    assert security.powershell_no_profile is True
-    assert security.powershell_non_interactive is True
     assert (
         PermissionLevel.from_string(security.script_execution_permission_level)
         is PermissionLevel.OWNER
@@ -811,55 +798,6 @@ async def test_get_script_executes_powershell_without_policy_bypass(tmp_path: Pa
         "3",
     )
     assert "Bypass" not in await_args.args
-
-
-@pytest.mark.parametrize(
-    ("no_profile", "non_interactive", "expected_flags"),
-    [
-        (True, True, ["-NoProfile", "-NonInteractive"]),
-        (False, True, ["-NonInteractive"]),
-        (True, False, ["-NoProfile"]),
-        (False, False, []),
-    ],
-)
-@pytest.mark.asyncio
-async def test_get_script_powershell_hardening_flags_follow_config(
-    tmp_path: Path,
-    no_profile: bool,
-    non_interactive: bool,
-    expected_flags: list[str],
-) -> None:
-    """-NoProfile / -NonInteractive 应完全由配置决定，而不是硬编码。"""
-
-    tool, script_path = _prepare_script(
-        tmp_path,
-        file_name="search.ps1",
-        content='Write-Output "ok"\n',
-        powershell_no_profile=no_profile,
-        powershell_non_interactive=non_interactive,
-    )
-
-    with (
-        patch(
-            "plugins.skill_manager.tools.shutil.which",
-            side_effect=lambda name: "powershell.exe" if name == "powershell" else None,
-        ),
-        patch(
-            "plugins.skill_manager.tools.asyncio.create_subprocess_exec",
-            new=AsyncMock(return_value=_fake_process(stdout=b"ok\n")),
-        ) as create_mock,
-    ):
-        success, _ = await tool.execute("demo", "scripts/search.ps1")
-
-    assert success is True
-    await_args = create_mock.await_args
-    assert await_args is not None
-    assert await_args.args == (
-        "powershell.exe",
-        *expected_flags,
-        "-File",
-        str(script_path),
-    )
 
 
 @pytest.mark.parametrize("script_name", ["echo.py", "run.sh"])

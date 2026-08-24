@@ -168,12 +168,18 @@ class SkillGetScriptTool(BaseTool):
         if not security.allow_script_execution:
             return False, SCRIPT_EXECUTION_DISABLED_MESSAGE
 
-        # 这两个字段确实会为空，不是防御性冗余：BaseTool.trigger_message 默认 None
-        # （src/core/components/base/tool.py:76），ToolUse.execute_tool 与 Agent usable
-        # 两条路径都不调用 _bind_runtime_context；而各 chatter 在流里没有现成消息时会造
-        # 合成触发消息，且都没填 sender_id —— 见 neo_default_chatter 的
-        # defaults/pick_trigger_message.py、default_chatter 的 session.py 与
-        # sub_agent_collaboration.py。定时唤醒与 sub_agent 协作走的正是这些分支。
+        # 这两个字段确实会为空，不是防御性冗余，两类来源：
+        # 1) trigger_message 本身为 None —— BaseTool.trigger_message 默认 None
+        #    （src/core/components/base/tool.py:76）。Agent usable 路径经
+        #    create_llm_usable_execution 会调 _bind_runtime_context
+        #    （src/core/utils/llm_tool_call.py:146），但传入的 message 允许为 None
+        #    （execute_local_usable 的 message 默认 None，agent_api.execute_agent_usable
+        #    根本没有 message 参数）；ToolUse.execute_tool 则压根不绑定运行时上下文。
+        # 2) 消息存在但字段为空 —— Message 无字段校验，platform/sender_id 默认空串；
+        #    各 chatter 在流里没有现成消息时会造合成触发消息，且都没填 sender_id，见
+        #    neo_default_chatter 的 defaults/pick_trigger_message.py、default_chatter 的
+        #    session.py 与 sub_agent_collaboration.py。定时唤醒与 sub_agent 协作走的
+        #    正是这些分支。
         message: Message | None = self.trigger_message
         platform = str(getattr(message, "platform", "") or "").strip()
         sender_id = str(getattr(message, "sender_id", "") or "").strip()
@@ -328,7 +334,8 @@ async def _execute_script_in_subprocess(
             # 不给脚本继承 bot 的 stdin：bot 主循环是交互式控制台命令循环
             # （src/app/runtime/console_input.py 的 prompt_toolkit 会话），若脚本读
             # stdin 就会和控制台抢同一个 fd，把运维正在输入的命令吃掉。DEVNULL 让
-            # 读取立即得到 EOF，这也是把 -NonInteractive 做成可关配置项的前提。
+            # 读取立即得到 EOF。这对 .py/.sh 尤其必要 —— 它们没有 PowerShell
+            # -NonInteractive 那样的解释器级开关。
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -456,16 +463,13 @@ def _build_powershell_command(
 ) -> tuple[list[str] | None, str | None]:
     """构建 .ps1 的 PowerShell 执行命令。
 
-    三个加固开关全部由配置决定，代码不替运维定夺，只把默认值定在更安全的一档：
+    ``-ExecutionPolicy Bypass`` 由配置 ``powershell_bypass_execution_policy`` 决定，默认
+    不附加：执行策略是 Windows 上阻止未签名脚本运行的纵深防御，由代码单方面绕过等于替运维
+    取消了这道防线；确需在受限策略的机器上跑未签名 skill 脚本时再打开。
 
-    - ``-ExecutionPolicy Bypass``（``powershell_bypass_execution_policy``，默认关）：
-      执行策略是 Windows 上阻止未签名脚本运行的纵深防御，由代码单方面绕过等于替运维
-      取消了这道防线；确需在受限策略的机器上跑未签名 skill 脚本时再打开。
-    - ``-NoProfile``（``powershell_no_profile``，默认开）：跳过用户 profile 脚本，即
-      与 skill 无关的额外代码；若运维依赖 profile 里预置的模块或函数，可以关掉。
-    - ``-NonInteractive``（``powershell_non_interactive``，默认开）：脚本请求交互输入
-      时直接失败，而不是挂到执行超时；关掉后脚本仍拿不到 bot 的控制台输入，因为子进程
-      的 stdin 被接到 DEVNULL，只会立即读到 EOF。
+    ``-NoProfile`` 与 ``-NonInteractive`` 固定附加，不做成配置项：前者跳过用户 profile
+    脚本（与 skill 无关的额外代码），后者让脚本请求交互输入时直接失败而不是挂到执行超时。
+    两者都不改变脚本本身能做的事，只是去掉与「执行这个 skill 脚本」无关的变量。
 
     残留风险（有意接受，不在此处消除）：``-File`` 模式把参数当字面字符串交给脚本的
     ``param()`` 绑定器，所以不存在把参数重新解析成 PowerShell 代码的注入面，但以 ``-``
@@ -477,7 +481,7 @@ def _build_powershell_command(
     Args:
         script_path: 脚本绝对路径。
         normalized_args: 归一化后的脚本参数。
-        security: 生效的安全配置段，决定上述三个开关。
+        security: 生效的安全配置段，决定是否绕过执行策略。
 
     Returns:
         tuple[list[str] | None, str | None]: (命令列表, 错误信息)；
@@ -488,11 +492,7 @@ def _build_powershell_command(
     if powershell is None:
         return None, "未找到可用的 PowerShell 解释器"
 
-    command = [powershell]
-    if security.powershell_no_profile:
-        command.append("-NoProfile")
-    if security.powershell_non_interactive:
-        command.append("-NonInteractive")
+    command = [powershell, "-NoProfile", "-NonInteractive"]
     if security.powershell_bypass_execution_policy:
         command.extend(["-ExecutionPolicy", "Bypass"])
     command.extend(["-File", str(script_path), *normalized_args])

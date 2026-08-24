@@ -69,21 +69,6 @@ class SkillManagerConfig(BaseConfig):
                 "开启会绕过 PowerShell 执行策略与脚本签名校验（高风险，默认关闭）"
             ),
         )
-        powershell_no_profile: bool = Field(
-            default=True,
-            description=(
-                "执行 .ps1 脚本时是否附加 -NoProfile；"
-                "开启表示跳过用户 profile 脚本（与 skill 无关的额外代码），"
-                "关闭则沿用运维为该账户配置的 profile"
-            ),
-        )
-        powershell_non_interactive: bool = Field(
-            default=True,
-            description=(
-                "执行 .ps1 脚本时是否附加 -NonInteractive；"
-                "开启表示脚本请求交互输入时直接失败，关闭则让脚本挂到执行超时"
-            ),
-        )
 
     security: SecuritySection = Field(default_factory=SecuritySection)
 
