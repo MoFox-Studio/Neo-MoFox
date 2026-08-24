@@ -2,11 +2,12 @@
 
 SkillManager 是 Neo-MoFox 的技能索引与按需加载插件。
 
-它会在插件加载完成后扫描本地 skill 目录，建立技能清单，并提供 3 个工具给 LLM 按需调用：
+它会在插件加载完成后扫描本地 skill 目录，建立技能清单，并提供工具给 LLM 按需调用：
 
 - get_skill：读取并注入 SKILL.md
 - get_reference：读取 skill 内 markdown 引用文件
-- get_script：执行 skill 内脚本（支持 .py/.ps1/.bat/.cmd/.sh，支持参数，返回脚本输出）
+- get_script：在子进程中执行 skill 内脚本（支持 .py/.ps1/.bat/.cmd/.sh，支持参数，返回脚本输出）
+  —— **默认关闭**，需在配置中显式开启
 
 ## 目录结构
 
@@ -17,7 +18,11 @@ plugins/skill_manager/
 ├── manifest.json
 ├── models.py
 ├── plugin.py
+├── README.md
 ├── tools.py
+├── commands/
+│   ├── __init__.py
+│   └── skill_command.py
 └── handlers/
     ├── __init__.py
     └── skillmanager.py
@@ -77,7 +82,9 @@ plugins/skill_manager/
 
 ### 3) get_script
 
-直接执行 skill 根目录内脚本，支持可选参数透传。
+在独立子进程中执行 skill 根目录内脚本，支持可选参数透传。
+
+> **该工具默认不注册，且开启后仍受权限门约束。** 需要在配置中把 `[security].allow_script_execution` 设为 `true` 才会出现在 LLM 的工具列表里；调用者还必须达到 `[security].script_execution_permission_level`（默认 `owner`）。详见「安全与边界」。
 
 参数：
 
@@ -89,18 +96,23 @@ plugins/skill_manager/
 
 执行行为：
 
-- `.py` 通过 `runpy.run_path(..., run_name="__main__")` 内嵌执行。
-- `.ps1` 通过 `pwsh` 或 `powershell` 执行。
-- `.bat/.cmd` 通过 `cmd.exe /c` 执行。
+- 所有脚本一律以**独立子进程**执行，统一受 15 秒超时保护。
+- `.py` 通过当前解释器（`sys.executable`）执行。
+- `.ps1` 通过 `pwsh` 或 `powershell` 执行，固定附带 `-NoProfile -NonInteractive`；
+  `-ExecutionPolicy Bypass` 由配置决定，默认不附加。
+- `.bat/.cmd` 通过 `%COMSPEC%`（即 `cmd.exe`）`/c` 执行。
 - `.sh` 通过 `bash` 或 `sh` 执行。
 - 执行时会透传 `script_args`，并自动将工作目录设置为脚本所在目录。
-- 自动捕获脚本的 `stdout/stderr`（包含 print 与标准流日志输出）并拼接到返回内容。
-- `SystemExit(0)` / `SystemExit(None)` 视为成功（例如 argparse `--help`）。
+- 子进程的 `stdin` 接到 `DEVNULL`，脚本读取输入会立即得到 EOF；bot 主循环本身是交互式
+  控制台命令循环，若让脚本继承 `stdin` 会和控制台抢同一个 fd。
+- 自动捕获脚本的 `stdout/stderr`（包含 print 与标准流日志输出）并拼接到返回内容；
+  子进程内的 Python 被强制以 UTF-8 输出，避免 Windows 本地代码页导致中文乱码。
+- 退出码 `0` 视为成功（例如 argparse `--help`），非零视为失败并回显输出。
 
 返回：
 
 - 成功：`(True, "脚本已执行: xxx.py\n\n[stdout]/[stderr]...")`
-- 失败：`(False, "执行脚本失败...\n\n[stdout]/[stderr]...")`
+- 失败：`(False, "脚本执行退出码: 1\n\n[stdout]/[stderr]...")`
 
 ## 配置项
 
@@ -113,6 +125,15 @@ plugins/skill_manager/
 - `inject_actor_reminder: bool = true`
 - `inject_sub_actor_reminder: bool = true`
 
+`[security]`：
+
+- `allow_script_execution: bool = false` —— 是否允许通过 `get_script` 执行脚本。
+  关闭时 `get_script` 组件根本不会注册。
+- `script_execution_permission_level: str = "owner"` —— 执行脚本所需的**调用者**最低权限
+  级别，可选 `guest` / `user` / `operator` / `owner`。与 `/skill` 命令用同一套权限体系。
+- `powershell_bypass_execution_policy: bool = false` —— 执行 `.ps1` 时是否附加
+  `-ExecutionPolicy Bypass`。关闭时沿用机器/用户的 PowerShell 执行策略。
+
 示意：
 
 ```toml
@@ -121,7 +142,19 @@ enabled = true
 paths = ["skill"]
 inject_actor_reminder = true
 inject_sub_actor_reminder = true
+
+[security]
+allow_script_execution = false
+script_execution_permission_level = "owner"
+powershell_bypass_execution_policy = false
 ```
+
+### manifest `include` 与实际注册集合
+
+`manifest.json` 的 `include` 列出的是本插件**声明的全部组件面**（5 个），而实际注册集合由配置
+决定：`manager.enabled = false` 时一个都不注册，`security.allow_script_execution = false` 时不
+注册 `get_script`。`include` 只被 `loader.py` 解析成组件级依赖声明，不参与强制校验，因此这种
+「清单是超集」的关系是有意为之，不是漏维护。
 
 ## 常见调用建议
 
@@ -131,12 +164,64 @@ inject_sub_actor_reminder = true
 
 ## 安全与边界
 
-- 所有引用路径都会做目录边界校验，禁止越界访问。
-- `get_reference` 仅允许 `.md`。
-- `get_script` 仅允许 `.py`。
-- 本插件不负责脚本沙箱隔离，脚本执行权限等同当前进程。
+`get_script` 以 bot 进程权限执行代码，而工具调用层**没有权限模型**（`tool_manager/` 下不存在
+任何鉴权代码）：任何聊天用户都可以通过提示注入影响 LLM 选择的工具参数。因此这里的默认姿态是
+「默认关闭、显式开启、开启后仍要看调用者是谁」。
+
+- **脚本执行总开关默认关闭。** `[security].allow_script_execution = false` 时插件不注册
+  `get_script`，LLM 的工具列表里看不到它。
+- **开启后仍有调用者权限门。** 每次调用都会用触发消息的 `platform` + `sender_id` 解析
+  `person_id`，查出权限级别并与 `script_execution_permission_level`（默认 `owner`）比对。
+  这一层是为了避免「开关一开就对所有聊天用户放开」，让它与 `/skill` 命令的 `OWNER` 门对齐。
+  以下情况一律拒绝（fail-closed）：无触发消息、身份字段为空、级别配置写错、权限查询抛错。
+
+  判定逻辑住在 `SkillGetScriptTool._authorize`（`tools.py`），插件类只负责按总开关决定要不要
+  注册这个组件。配置读取统一走 `config.resolve_security_section()`，配置缺失时回退到全默认
+  实例 —— 该段默认值全取最严一档，所以回退等价于 fail-closed。
+
+  关于「身份字段为空」这条，有两类真实来源，不是防御性冗余：
+
+  1. `trigger_message` 本身为 None —— `BaseTool.trigger_message` 默认 None。Agent usable
+     路径经 `create_llm_usable_execution` 会调 `_bind_runtime_context`，但传入的 message
+     允许为 None（`execute_local_usable` 的 message 默认 None，`agent_api.execute_agent_usable`
+     根本没有 message 参数）；`ToolUse.execute_tool` 则压根不绑定运行时上下文。
+  2. 消息存在但字段为空 —— `Message` 无字段校验，`platform`/`sender_id` 都默认空串；各
+     chatter 在流里没有现成消息时会构造合成触发消息，且都没填 `sender_id`（见
+     `neo_default_chatter/components/event_handlers/defaults/pick_trigger_message.py`、
+     `default_chatter/session.py`、`default_chatter/sub_agent_collaboration.py`）。定时唤醒
+     与 sub_agent 协作走的正是这些分支。
+- **所有脚本都在子进程中运行。** `.py` 不再用 `runpy` 在 bot 进程内执行，因此脚本拿不到
+  bot 进程内的对象：已加载的配置实例、内存中的数据库会话、以及 monkeypatch 全局状态
+  （含权限判定函数）的能力都消失了。代价是脚本**不能再 `import src.*`**：需要框架能力的
+  逻辑应写成插件组件，而不是 skill 脚本。
+
+  这是**进程内存隔离，不是沙箱**：子进程仍以与 bot 相同的 OS 身份运行，拥有同样的文件系统
+  与网络权限，可以直接读 `config/`（含 `config/model.toml` 里的模型配置）、`data/`、以及
+  继承到的环境变量。想真正约束这些，需要 OS 层手段（独立低权限账号、容器、AppArmor 等），
+  本插件不提供。
+- **`.bat/.cmd` 参数走字符白名单。** Windows 上 `subprocess.list2cmdline` 不转义 cmd.exe
+  元字符，参数里的 `&` 会逃逸成独立命令。因此这类脚本的参数只接受
+  `字母、数字与 . _ : / \ @ = -`，出现空白或 `& | < > ^ ( ) " % !` 一律拒绝执行。
+  需要传含空格的值时请拆成多个列表元素，或改用 `.ps1` / `.py`。
+- **所有类型的参数都不接受控制字符**（含换行、回车、NUL）。
+- **不再默认绕过 PowerShell 执行策略。** 执行策略是 Windows 上阻止未签名脚本运行的纵深
+  防御，默认不再附加 `-ExecutionPolicy Bypass`；在受限策略的机器上运行未签名 skill 脚本
+  需要运维显式打开 `[security].powershell_bypass_execution_policy`。
+- **所有引用路径都会做目录边界校验**，禁止越界访问；`get_reference` 仅允许 `.md`，
+  `get_script` 仅允许 `.py/.ps1/.bat/.cmd/.sh`。
+- **脚本执行有 15 秒超时**，超时后进程会被 kill，并尽量回收已产生的输出。
+
+### 已知的、有意接受的残留风险
+
+- **调用者可以触达脚本声明的完整参数面。** `.ps1` 走 `-File`，参数作为字面字符串交给脚本的
+  `param()` 绑定器（不会被重新解析成 PowerShell 代码），但以 `-` 开头的参数确实会绑定到
+  命名参数上。`.py` 的 argparse、`.sh` 的 getopts 同理。这是「给脚本传参」这个功能的固有
+  语义，砍掉才能消除；实际约束靠的是上面的调用者权限门与下面的可信前提。
+- **脚本文件本身属于可信输入。** 本插件没有任何写盘、下载、解压逻辑，skill 目录内容完全由
+  运维决定，脚本路径也因此不做元字符校验。请把「往 skill 目录放一个脚本」当作
+  「授予该脚本 bot 进程权限」来对待。
 
 ## 版本
 
-- Plugin: `1.0.0`
+- Plugin: `1.1.0`
 - Manifest: `plugins/skill_manager/manifest.json`
