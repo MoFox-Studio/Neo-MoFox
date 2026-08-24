@@ -98,10 +98,13 @@ plugins/skill_manager/
 
 - 所有脚本一律以**独立子进程**执行，统一受 15 秒超时保护。
 - `.py` 通过当前解释器（`sys.executable`）执行。
-- `.ps1` 通过 `pwsh` 或 `powershell` 执行，附带 `-NoProfile -NonInteractive`。
+- `.ps1` 通过 `pwsh` 或 `powershell` 执行；`-NoProfile` / `-NonInteractive` /
+  `-ExecutionPolicy Bypass` 三个开关全部由配置决定，见「配置项」。
 - `.bat/.cmd` 通过 `%COMSPEC%`（即 `cmd.exe`）`/c` 执行。
 - `.sh` 通过 `bash` 或 `sh` 执行。
 - 执行时会透传 `script_args`，并自动将工作目录设置为脚本所在目录。
+- 子进程的 `stdin` 接到 `DEVNULL`，脚本读取输入会立即得到 EOF；bot 主循环本身是交互式
+  控制台命令循环，若让脚本继承 `stdin` 会和控制台抢同一个 fd。
 - 自动捕获脚本的 `stdout/stderr`（包含 print 与标准流日志输出）并拼接到返回内容；
   子进程内的 Python 被强制以 UTF-8 输出，避免 Windows 本地代码页导致中文乱码。
 - 退出码 `0` 视为成功（例如 argparse `--help`），非零视为失败并回显输出。
@@ -130,6 +133,14 @@ plugins/skill_manager/
   级别，可选 `guest` / `user` / `operator` / `owner`。与 `/skill` 命令用同一套权限体系。
 - `powershell_bypass_execution_policy: bool = false` —— 执行 `.ps1` 时是否附加
   `-ExecutionPolicy Bypass`。关闭时沿用机器/用户的 PowerShell 执行策略。
+- `powershell_no_profile: bool = true` —— 执行 `.ps1` 时是否附加 `-NoProfile`。默认跳过
+  用户 profile 脚本（与 skill 无关的额外代码）；若运维依赖 profile 里预置的模块或函数，
+  可以关掉。
+- `powershell_non_interactive: bool = true` —— 执行 `.ps1` 时是否附加 `-NonInteractive`。
+  默认让脚本请求交互输入时直接失败，而不是挂到执行超时；关掉后脚本仍读不到 bot 的控制台
+  输入，因为子进程 `stdin` 接的是 `DEVNULL`。
+
+后三个开关的默认值取的是更安全的一档，但都可由运维改写 —— 代码不替部署方定夺。
 
 示意：
 
@@ -144,6 +155,8 @@ inject_sub_actor_reminder = true
 allow_script_execution = false
 script_execution_permission_level = "owner"
 powershell_bypass_execution_policy = false
+powershell_no_profile = true
+powershell_non_interactive = true
 ```
 
 ### manifest `include` 与实际注册集合
@@ -171,6 +184,16 @@ powershell_bypass_execution_policy = false
   `person_id`，查出权限级别并与 `script_execution_permission_level`（默认 `owner`）比对。
   这一层是为了避免「开关一开就对所有聊天用户放开」，让它与 `/skill` 命令的 `OWNER` 门对齐。
   以下情况一律拒绝（fail-closed）：无触发消息、身份字段为空、级别配置写错、权限查询抛错。
+
+  判定逻辑住在 `SkillGetScriptTool._authorize`（`tools.py`），插件类只负责按总开关决定要不要
+  注册这个组件。配置读取统一走 `config.resolve_security_section()`，配置缺失时回退到全默认
+  实例 —— 该段默认值全取最严一档，所以回退等价于 fail-closed。
+
+  关于「身份字段为空」这条：`Message` 是无校验的普通类，`platform` 与 `sender_id` 都默认空串；
+  各 chatter 在流里没有现成消息时会构造合成触发消息，且都没填 `sender_id`（见
+  `neo_default_chatter/components/event_handlers/defaults/pick_trigger_message.py`、
+  `default_chatter/session.py`、`default_chatter/sub_agent_collaboration.py`）。定时唤醒与
+  sub_agent 协作走的正是这些分支，所以这个判断是有实际触发路径的，不是防御性冗余。
 - **所有脚本都在子进程中运行。** `.py` 不再用 `runpy` 在 bot 进程内执行，因此脚本拿不到
   bot 进程内的对象：已加载的配置实例、内存中的数据库会话、以及 monkeypatch 全局状态
   （含权限判定函数）的能力都消失了。代价是脚本**不能再 `import src.*`**：需要框架能力的

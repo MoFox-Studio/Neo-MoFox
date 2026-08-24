@@ -12,16 +12,16 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from plugins.skill_manager.config import SkillManagerConfig
+from plugins.skill_manager.config import SkillManagerConfig, resolve_security_section
 from plugins.skill_manager.models import SkillEntry
-from plugins.skill_manager.plugin import (
+from plugins.skill_manager.plugin import SkillManagerPlugin
+from plugins.skill_manager.tools import (
     SCRIPT_EXECUTION_DISABLED_MESSAGE,
     SCRIPT_EXECUTION_LEVEL_INVALID_MESSAGE,
     SCRIPT_EXECUTION_LOOKUP_FAILED_MESSAGE,
     SCRIPT_EXECUTION_UNIDENTIFIED_MESSAGE,
-    SkillManagerPlugin,
+    SkillGetScriptTool,
 )
-from plugins.skill_manager.tools import SkillGetScriptTool
 from src.app.plugin_system.types import PermissionLevel
 
 
@@ -35,8 +35,8 @@ def stub_permission_lookup() -> Iterator[AsyncMock]:
 
     level_mock = AsyncMock(return_value=PermissionLevel.OWNER)
     with (
-        patch("plugins.skill_manager.plugin.generate_person_id", return_value="person"),
-        patch("plugins.skill_manager.plugin.get_user_permission_level", new=level_mock),
+        patch("plugins.skill_manager.tools.generate_person_id", return_value="person"),
+        patch("plugins.skill_manager.tools.get_user_permission_level", new=level_mock),
     ):
         yield level_mock
 
@@ -45,6 +45,8 @@ def _build_plugin(
     *,
     allow_script_execution: bool = True,
     powershell_bypass_execution_policy: bool = False,
+    powershell_no_profile: bool = True,
+    powershell_non_interactive: bool = True,
     script_execution_permission_level: str = "owner",
 ) -> SkillManagerPlugin:
     """创建测试用插件实例。"""
@@ -54,6 +56,8 @@ def _build_plugin(
     config.security.powershell_bypass_execution_policy = (
         powershell_bypass_execution_policy
     )
+    config.security.powershell_no_profile = powershell_no_profile
+    config.security.powershell_non_interactive = powershell_non_interactive
     config.security.script_execution_permission_level = (
         script_execution_permission_level
     )
@@ -94,6 +98,8 @@ def _prepare_script(
     content: str,
     allow_script_execution: bool = True,
     powershell_bypass_execution_policy: bool = False,
+    powershell_no_profile: bool = True,
+    powershell_non_interactive: bool = True,
     script_execution_permission_level: str = "owner",
     bind_message: bool = True,
 ) -> tuple[SkillGetScriptTool, Path]:
@@ -102,6 +108,8 @@ def _prepare_script(
     plugin = _build_plugin(
         allow_script_execution=allow_script_execution,
         powershell_bypass_execution_policy=powershell_bypass_execution_policy,
+        powershell_no_profile=powershell_no_profile,
+        powershell_non_interactive=powershell_non_interactive,
         script_execution_permission_level=script_execution_permission_level,
     )
     skill_root = tmp_path / "demo"
@@ -152,23 +160,43 @@ def test_script_tool_is_registered_when_execution_enabled() -> None:
 
 
 def test_security_defaults_are_fail_closed() -> None:
-    """默认配置下脚本执行关闭、策略绕过关闭、权限门为 OWNER。"""
+    """默认配置下脚本执行关闭、策略绕过关闭、权限门为 OWNER。
 
-    plugin = SkillManagerPlugin(config=SkillManagerConfig())
+    另外两个 PowerShell 加固开关默认开启：它们默认取「更安全」的一档，运维可显式关闭。
+    """
 
-    assert plugin.allow_script_execution is False
-    assert plugin.powershell_bypass_execution_policy is False
-    assert plugin.script_execution_permission_level is PermissionLevel.OWNER
+    security = resolve_security_section(SkillManagerConfig())
+
+    assert security.allow_script_execution is False
+    assert security.powershell_bypass_execution_policy is False
+    assert security.powershell_no_profile is True
+    assert security.powershell_non_interactive is True
+    assert (
+        PermissionLevel.from_string(security.script_execution_permission_level)
+        is PermissionLevel.OWNER
+    )
 
 
-def test_security_defaults_apply_without_typed_config() -> None:
-    """配置缺失时应回退到同一套 fail-closed 默认值。"""
+@pytest.mark.parametrize("config", [None, object(), "not-a-config"])
+def test_security_defaults_apply_without_typed_config(config: object) -> None:
+    """配置缺失或类型不符时应回退到同一套 fail-closed 默认值。"""
+
+    security = resolve_security_section(config)
+
+    assert security.allow_script_execution is False
+    assert security.powershell_bypass_execution_policy is False
+    assert (
+        PermissionLevel.from_string(security.script_execution_permission_level)
+        is PermissionLevel.OWNER
+    )
+
+
+def test_script_tool_is_not_registered_without_typed_config() -> None:
+    """配置缺失时 get_script 同样不应注册。"""
 
     plugin = SkillManagerPlugin(config=None)
 
-    assert plugin.allow_script_execution is False
-    assert plugin.powershell_bypass_execution_policy is False
-    assert plugin.script_execution_permission_level is PermissionLevel.OWNER
+    assert SkillGetScriptTool not in plugin.get_components()
 
 
 @pytest.mark.asyncio
@@ -266,6 +294,54 @@ async def test_get_script_refuses_unidentifiable_caller(tmp_path: Path) -> None:
         success, result = await tool.execute("demo", "scripts/echo.py")
 
     assert success is False
+    assert result == SCRIPT_EXECUTION_UNIDENTIFIED_MESSAGE
+    assert create_mock.await_count == 0
+
+
+@pytest.mark.parametrize(
+    ("platform", "sender_id", "origin"),
+    [
+        ("qq", "", "各 chatter 的合成触发消息都不填 sender_id"),
+        ("", "user_1", "ChatStream.platform 允许为空串"),
+        ("", "", "两个字段同时缺失"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_get_script_refuses_message_with_blank_identity(
+    tmp_path: Path,
+    platform: str,
+    sender_id: str,
+    origin: str,
+) -> None:
+    """触发消息存在但身份字段为空时也必须拒绝。
+
+    这不是防御性冗余：``Message`` 是无校验的普通类，``platform`` 与 ``sender_id`` 都默认
+    空串；而 neo_default_chatter 的 defaults/pick_trigger_message.py、default_chatter 的
+    session.py 与 sub_agent_collaboration.py 在流里没有现成消息时都会构造合成触发消息，
+    三处都没填 ``sender_id``。定时唤醒与 sub_agent 协作走的正是这些分支。
+    """
+
+    tool, _ = _prepare_script(
+        tmp_path,
+        file_name="echo.py",
+        content="print('should not run')\n",
+        bind_message=False,
+    )
+    tool._bind_runtime_context(
+        stream_id="stream",
+        message=cast(
+            Any,
+            SimpleNamespace(platform=platform, sender_id=sender_id, stream_id="stream"),
+        ),
+    )
+
+    with patch(
+        "plugins.skill_manager.tools.asyncio.create_subprocess_exec",
+        new=AsyncMock(),
+    ) as create_mock:
+        success, result = await tool.execute("demo", "scripts/echo.py")
+
+    assert success is False, f"{origin} 时不应放行"
     assert result == SCRIPT_EXECUTION_UNIDENTIFIED_MESSAGE
     assert create_mock.await_count == 0
 
@@ -735,6 +811,92 @@ async def test_get_script_executes_powershell_without_policy_bypass(tmp_path: Pa
         "3",
     )
     assert "Bypass" not in await_args.args
+
+
+@pytest.mark.parametrize(
+    ("no_profile", "non_interactive", "expected_flags"),
+    [
+        (True, True, ["-NoProfile", "-NonInteractive"]),
+        (False, True, ["-NonInteractive"]),
+        (True, False, ["-NoProfile"]),
+        (False, False, []),
+    ],
+)
+@pytest.mark.asyncio
+async def test_get_script_powershell_hardening_flags_follow_config(
+    tmp_path: Path,
+    no_profile: bool,
+    non_interactive: bool,
+    expected_flags: list[str],
+) -> None:
+    """-NoProfile / -NonInteractive 应完全由配置决定，而不是硬编码。"""
+
+    tool, script_path = _prepare_script(
+        tmp_path,
+        file_name="search.ps1",
+        content='Write-Output "ok"\n',
+        powershell_no_profile=no_profile,
+        powershell_non_interactive=non_interactive,
+    )
+
+    with (
+        patch(
+            "plugins.skill_manager.tools.shutil.which",
+            side_effect=lambda name: "powershell.exe" if name == "powershell" else None,
+        ),
+        patch(
+            "plugins.skill_manager.tools.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=_fake_process(stdout=b"ok\n")),
+        ) as create_mock,
+    ):
+        success, _ = await tool.execute("demo", "scripts/search.ps1")
+
+    assert success is True
+    await_args = create_mock.await_args
+    assert await_args is not None
+    assert await_args.args == (
+        "powershell.exe",
+        *expected_flags,
+        "-File",
+        str(script_path),
+    )
+
+
+@pytest.mark.parametrize("script_name", ["echo.py", "run.sh"])
+@pytest.mark.asyncio
+async def test_get_script_detaches_subprocess_stdin(
+    tmp_path: Path,
+    script_name: str,
+) -> None:
+    """脚本子进程不得继承 bot 的 stdin。
+
+    bot 主循环是交互式控制台命令循环（``src/app/runtime/console_input.py`` 的
+    prompt_toolkit 会话）。若子进程继承 stdin，读取输入的脚本会和控制台抢同一个 fd，
+    把运维正在输入的命令吃掉；接到 DEVNULL 后读取立即得到 EOF。
+    """
+
+    tool, _ = _prepare_script(
+        tmp_path,
+        file_name=script_name,
+        content="echo ok\n",
+    )
+
+    with (
+        patch(
+            "plugins.skill_manager.tools.shutil.which",
+            side_effect=lambda name: "bash" if name == "bash" else None,
+        ),
+        patch(
+            "plugins.skill_manager.tools.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=_fake_process(stdout=b"ok\n")),
+        ) as create_mock,
+    ):
+        success, _ = await tool.execute("demo", f"scripts/{script_name}")
+
+    assert success is True
+    await_args = create_mock.await_args
+    assert await_args is not None
+    assert await_args.kwargs["stdin"] is asyncio.subprocess.DEVNULL
 
 
 @pytest.mark.asyncio

@@ -12,14 +12,29 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, cast
 
+from src.app.plugin_system.api.permission_api import (
+    generate_person_id,
+    get_user_permission_level,
+)
+from src.app.plugin_system.types import Message, PermissionLevel
 from src.core.components import BaseTool
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
+
+from .config import SkillManagerConfig, resolve_security_section
 
 logger = get_logger("skill_manager.tool")
 SUPPORTED_SCRIPT_SUFFIXES: tuple[str, ...] = (".py", ".ps1", ".bat", ".cmd", ".sh")
 SCRIPT_TIMEOUT_SECONDS = 15.0
 SCRIPT_KILL_GRACE_SECONDS = 3.0
+
+SCRIPT_EXECUTION_DISABLED_MESSAGE = (
+    "skill 脚本执行已被禁用；如确需开启，"
+    "请在 skill_manager 配置中把 [security].allow_script_execution 设为 true"
+)
+SCRIPT_EXECUTION_UNIDENTIFIED_MESSAGE = "无法确认调用者身份，已拒绝执行 skill 脚本"
+SCRIPT_EXECUTION_LEVEL_INVALID_MESSAGE = "脚本执行权限级别配置无效，已拒绝执行 skill 脚本"
+SCRIPT_EXECUTION_LOOKUP_FAILED_MESSAGE = "权限校验失败，已拒绝执行 skill 脚本"
 
 # .bat/.cmd 交给 cmd.exe 解释执行，而 Windows 上 subprocess 只能把参数列表交给
 # ``subprocess.list2cmdline`` 拼成单条命令行；该函数只处理空白、反斜杠与引号，
@@ -107,7 +122,7 @@ class SkillGetScriptTool(BaseTool):
 
     该工具以 bot 进程权限执行脚本，而工具调用层本身没有权限模型，因此有两道门：
     插件只在配置开启 ``[security].allow_script_execution`` 时才注册它，且每次调用都会
-    重新走一遍 ``authorize_script_execution``（覆盖配置热更新与调用者权限级别）。
+    重新走一遍 ``_authorize``（覆盖配置热更新与调用者权限级别）。
     """
 
     name: str = "get_script"
@@ -117,6 +132,79 @@ class SkillGetScriptTool(BaseTool):
         "可选通过 script_args 传入命令行参数；"
         f"其中 .bat/.cmd 的参数只接受{_CMD_SAFE_ARGUMENT_HINT} 这些字符。"
     )
+
+    def _security(self) -> SkillManagerConfig.SecuritySection:
+        """取出所属插件生效的 ``[security]`` 配置段。
+
+        Returns:
+            SkillManagerConfig.SecuritySection: 生效的安全配置段；配置缺失时为全默认
+            实例，而该段默认值全取最严一档，因此等价于 fail-closed。
+        """
+
+        return resolve_security_section(getattr(self.plugin, "config", None))
+
+    async def _authorize(
+        self,
+        security: SkillManagerConfig.SecuritySection,
+    ) -> tuple[bool, str | None]:
+        """判定本次调用是否获得执行授权。
+
+        工具调用层本身没有权限模型（``src/core/managers/tool_manager/`` 内不存在任何
+        鉴权代码，只有 Command 有框架级的 ``permission_level`` 强制），因此这里按
+        ``/skill`` 管理命令的同一套权限体系补上调用者级别的门：总开关只决定「这台部署
+        是否提供脚本执行」，具体「谁可以执行」由权限级别决定，避免开关一开就对所有聊天
+        用户放开。
+
+        任何无法完成判定的情况（无触发消息、身份字段为空、级别配置非法、权限查询失败）
+        都按拒绝处理。
+
+        Args:
+            security: 生效的安全配置段。
+
+        Returns:
+            tuple[bool, str | None]: (是否放行, 拒绝原因)；放行时第二项为 None。
+        """
+
+        if not security.allow_script_execution:
+            return False, SCRIPT_EXECUTION_DISABLED_MESSAGE
+
+        # 这两个字段确实会为空，不是防御性冗余：BaseTool.trigger_message 默认 None
+        # （src/core/components/base/tool.py:76），ToolUse.execute_tool 与 Agent usable
+        # 两条路径都不调用 _bind_runtime_context；而各 chatter 在流里没有现成消息时会造
+        # 合成触发消息，且都没填 sender_id —— 见 neo_default_chatter 的
+        # defaults/pick_trigger_message.py、default_chatter 的 session.py 与
+        # sub_agent_collaboration.py。定时唤醒与 sub_agent 协作走的正是这些分支。
+        message: Message | None = self.trigger_message
+        platform = str(getattr(message, "platform", "") or "").strip()
+        sender_id = str(getattr(message, "sender_id", "") or "").strip()
+        if not platform or not sender_id:
+            logger.warning("skill 脚本执行请求无法归因到具体用户，已拒绝")
+            return False, SCRIPT_EXECUTION_UNIDENTIFIED_MESSAGE
+
+        try:
+            required_level = PermissionLevel.from_string(
+                security.script_execution_permission_level
+            )
+        except ValueError as error:
+            logger.error(f"skill_manager 脚本执行权限级别配置非法，已拒绝: {error}")
+            return False, SCRIPT_EXECUTION_LEVEL_INVALID_MESSAGE
+
+        try:
+            person_id = generate_person_id(platform, sender_id)
+            actual_level = await get_user_permission_level(person_id)
+        except Exception as error:
+            logger.error(f"查询 skill 脚本执行权限失败，已拒绝: {error}")
+            return False, SCRIPT_EXECUTION_LOOKUP_FAILED_MESSAGE
+
+        if actual_level < required_level:
+            logger.warning(
+                f"权限拒绝: 执行 skill 脚本需要 {required_level.to_string()}，"
+                f"调用者为 {actual_level.to_string()}"
+            )
+            return False, (
+                f"权限不足：执行 skill 脚本需要 {required_level.to_string()} 级别权限"
+            )
+        return True, None
 
     async def execute(
         self,
@@ -132,10 +220,8 @@ class SkillGetScriptTool(BaseTool):
     ) -> tuple[bool, str | dict]:
         """返回脚本执行结果。"""
 
-        plugin = cast(Any, self.plugin)
-        authorized, refusal = await plugin.authorize_script_execution(
-            self.trigger_message
-        )
+        security = self._security()
+        authorized, refusal = await self._authorize(security)
         if not authorized:
             return False, refusal or "已拒绝执行 skill 脚本"
 
@@ -143,6 +229,7 @@ class SkillGetScriptTool(BaseTool):
         if not resolved_name:
             return False, "name 不能为空"
 
+        plugin = cast(Any, self.plugin)
         if resolved_name not in plugin.injected_skills:
             return False, f"skill '{resolved_name}' 尚未注入，请先调用 get_skill"
 
@@ -165,9 +252,7 @@ class SkillGetScriptTool(BaseTool):
         return await _execute_script_in_subprocess(
             script_path,
             normalized_args,
-            powershell_bypass_execution_policy=bool(
-                plugin.powershell_bypass_execution_policy
-            ),
+            security=security,
         )
 
 
@@ -211,7 +296,7 @@ async def _execute_script_in_subprocess(
     script_path: Path,
     normalized_args: list[str],
     *,
-    powershell_bypass_execution_policy: bool,
+    security: SkillManagerConfig.SecuritySection,
 ) -> tuple[bool, str | dict]:
     """在独立子进程中执行 skill 脚本并回收输出。
 
@@ -221,7 +306,7 @@ async def _execute_script_in_subprocess(
     Args:
         script_path: 已通过目录边界校验的脚本绝对路径。
         normalized_args: 归一化后的脚本参数。
-        powershell_bypass_execution_policy: 是否允许 .ps1 绕过 PowerShell 执行策略。
+        security: 生效的安全配置段，决定各解释器的加固开关。
 
     Returns:
         tuple[bool, str | dict]: (是否成功, 执行结果或错误信息)。
@@ -230,7 +315,7 @@ async def _execute_script_in_subprocess(
     command, error = _build_script_command(
         script_path,
         normalized_args,
-        powershell_bypass_execution_policy=powershell_bypass_execution_policy,
+        security=security,
     )
     if command is None:
         return False, error or f"不支持的脚本类型: {script_path.suffix}"
@@ -240,6 +325,11 @@ async def _execute_script_in_subprocess(
             *command,
             cwd=str(script_path.parent),
             env=_build_subprocess_env(),
+            # 不给脚本继承 bot 的 stdin：bot 主循环是交互式控制台命令循环
+            # （src/app/runtime/console_input.py 的 prompt_toolkit 会话），若脚本读
+            # stdin 就会和控制台抢同一个 fd，把运维正在输入的命令吃掉。DEVNULL 让
+            # 读取立即得到 EOF，这也是把 -NonInteractive 做成可关配置项的前提。
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -325,14 +415,14 @@ def _build_script_command(
     script_path: Path,
     normalized_args: list[str],
     *,
-    powershell_bypass_execution_policy: bool,
+    security: SkillManagerConfig.SecuritySection,
 ) -> tuple[list[str] | None, str | None]:
     """按后缀构建脚本的子进程执行命令。
 
     Args:
         script_path: 脚本绝对路径。
         normalized_args: 归一化后的脚本参数。
-        powershell_bypass_execution_policy: 是否允许 .ps1 绕过 PowerShell 执行策略。
+        security: 生效的安全配置段，决定各解释器的加固开关。
 
     Returns:
         tuple[list[str] | None, str | None]: (命令列表, 错误信息)；
@@ -346,7 +436,7 @@ def _build_script_command(
         return _build_powershell_command(
             script_path,
             normalized_args,
-            bypass_execution_policy=powershell_bypass_execution_policy,
+            security=security,
         )
     if suffix in {".bat", ".cmd"}:
         return _build_windows_batch_command(script_path, normalized_args)
@@ -362,28 +452,32 @@ def _build_powershell_command(
     script_path: Path,
     normalized_args: list[str],
     *,
-    bypass_execution_policy: bool,
+    security: SkillManagerConfig.SecuritySection,
 ) -> tuple[list[str] | None, str | None]:
     """构建 .ps1 的 PowerShell 执行命令。
 
-    默认不再附加 ``-ExecutionPolicy Bypass``：执行策略是 Windows 上阻止未签名脚本
-    运行的纵深防御，由代码单方面绕过等于替运维取消了这道防线。确需在受限策略的
-    机器上运行未签名 skill 脚本时，运维可显式打开配置开关。
+    三个加固开关全部由配置决定，代码不替运维定夺，只把默认值定在更安全的一档：
 
-    ``-NoProfile`` 避免加载用户 profile 脚本（额外的、与 skill 无关的代码），
-    ``-NonInteractive`` 让脚本在需要交互输入时直接失败而不是挂到超时。
+    - ``-ExecutionPolicy Bypass``（``powershell_bypass_execution_policy``，默认关）：
+      执行策略是 Windows 上阻止未签名脚本运行的纵深防御，由代码单方面绕过等于替运维
+      取消了这道防线；确需在受限策略的机器上跑未签名 skill 脚本时再打开。
+    - ``-NoProfile``（``powershell_no_profile``，默认开）：跳过用户 profile 脚本，即
+      与 skill 无关的额外代码；若运维依赖 profile 里预置的模块或函数，可以关掉。
+    - ``-NonInteractive``（``powershell_non_interactive``，默认开）：脚本请求交互输入
+      时直接失败，而不是挂到执行超时；关掉后脚本仍拿不到 bot 的控制台输入，因为子进程
+      的 stdin 被接到 DEVNULL，只会立即读到 EOF。
 
     残留风险（有意接受，不在此处消除）：``-File`` 模式把参数当字面字符串交给脚本的
     ``param()`` 绑定器，所以不存在把参数重新解析成 PowerShell 代码的注入面，但以 ``-``
     开头的参数确实会绑定到脚本声明的命名参数上 —— 也就是说调用者可以触达脚本的完整
     参数面。这对 ``.py`` 的 argparse、``.sh`` 的 getopts 同样成立，属于「给脚本传参」
     这个功能的固有语义，无法在不砍掉传参能力的前提下消除；实际约束靠的是
-    ``authorize_script_execution`` 的调用者权限门与「skill 目录内容可信」这一前提。
+    ``SkillGetScriptTool._authorize`` 的调用者权限门与「skill 目录内容可信」这一前提。
 
     Args:
         script_path: 脚本绝对路径。
         normalized_args: 归一化后的脚本参数。
-        bypass_execution_policy: 是否附加 ``-ExecutionPolicy Bypass``。
+        security: 生效的安全配置段，决定上述三个开关。
 
     Returns:
         tuple[list[str] | None, str | None]: (命令列表, 错误信息)；
@@ -394,8 +488,12 @@ def _build_powershell_command(
     if powershell is None:
         return None, "未找到可用的 PowerShell 解释器"
 
-    command = [powershell, "-NoProfile", "-NonInteractive"]
-    if bypass_execution_policy:
+    command = [powershell]
+    if security.powershell_no_profile:
+        command.append("-NoProfile")
+    if security.powershell_non_interactive:
+        command.append("-NonInteractive")
+    if security.powershell_bypass_execution_policy:
         command.extend(["-ExecutionPolicy", "Bypass"])
     command.extend(["-File", str(script_path), *normalized_args])
     return command, None

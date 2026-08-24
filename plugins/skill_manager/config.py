@@ -69,5 +69,38 @@ class SkillManagerConfig(BaseConfig):
                 "开启会绕过 PowerShell 执行策略与脚本签名校验（高风险，默认关闭）"
             ),
         )
+        powershell_no_profile: bool = Field(
+            default=True,
+            description=(
+                "执行 .ps1 脚本时是否附加 -NoProfile；"
+                "开启表示跳过用户 profile 脚本（与 skill 无关的额外代码），"
+                "关闭则沿用运维为该账户配置的 profile"
+            ),
+        )
+        powershell_non_interactive: bool = Field(
+            default=True,
+            description=(
+                "执行 .ps1 脚本时是否附加 -NonInteractive；"
+                "开启表示脚本请求交互输入时直接失败，关闭则让脚本挂到执行超时"
+            ),
+        )
 
     security: SecuritySection = Field(default_factory=SecuritySection)
+
+
+def resolve_security_section(config: object) -> SkillManagerConfig.SecuritySection:
+    """取出生效的 ``[security]`` 配置段。
+
+    配置未加载或类型不符时回退到一个全默认实例。该段所有默认值都取最严的一档，
+    因此回退等价于 fail-closed，不会因为配置缺失而放开脚本执行。
+
+    Args:
+        config: 待解析的配置对象，通常是 ``BasePlugin.config``。
+
+    Returns:
+        SkillManagerConfig.SecuritySection: 生效的安全配置段。
+    """
+
+    if isinstance(config, SkillManagerConfig):
+        return config.security
+    return SkillManagerConfig.SecuritySection()
