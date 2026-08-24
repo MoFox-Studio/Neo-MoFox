@@ -187,7 +187,13 @@ def _normalize_script_args(
     if script_args is None:
         return [], None
     if isinstance(script_args, str):
-        normalized_args = shlex.split(script_args)
+        # shlex.split 对引号不配对的输入抛 ValueError；参数由 LLM 生成，属可预期的
+        # 非法输入而非程序错误，必须转成拒绝结果，否则异常会穿透 execute() 的
+        # (bool, str) 返回契约。
+        try:
+            normalized_args = shlex.split(script_args)
+        except ValueError as error:
+            return None, f"script_args 引号不配对，无法解析: {error}"
     elif isinstance(script_args, list):
         if not all(isinstance(item, str) for item in script_args):
             return None, "script_args 列表元素必须为字符串"
@@ -420,11 +426,39 @@ def _build_windows_batch_command(
                 f".bat/.cmd 参数只允许{_CMD_SAFE_ARGUMENT_HINT}，已拒绝执行: {argument!r}"
             )
 
-    # 用绝对路径定位解释器，避免 CreateProcess 的搜索顺序命中工作目录下的同名文件。
-    command_interpreter = os.environ.get("COMSPEC") or shutil.which("cmd.exe")
-    if not command_interpreter:
+    # 必须用绝对路径定位解释器，否则 CreateProcess 会按搜索顺序解析，可能命中工作
+    # 目录（= skill 目录）下的同名文件。COMSPEC 属运维可信输入，但取值不保证是绝对
+    # 路径，因此只在校验通过后采用，否则回退到 PATH 查找。
+    command_interpreter = _resolve_command_interpreter()
+    if command_interpreter is None:
         return None, "未找到可用的 cmd.exe 解释器"
     return [command_interpreter, "/c", str(script_path), *normalized_args], None
+
+
+def _resolve_command_interpreter() -> str | None:
+    """定位 cmd.exe 的绝对路径。
+
+    优先采用 ``%COMSPEC%``，但只在它是「绝对路径且指向一个已存在的文件」时才接受；
+    取值为相对路径或指向不存在的文件时回退到 ``shutil.which``，避免把一个会触发
+    路径搜索的解释器名交给 ``CreateProcess``。
+
+    Returns:
+        str | None: 解释器绝对路径；两种途径都定位不到时返回 None。
+    """
+
+    candidate = (os.environ.get("COMSPEC") or "").strip().strip('"')
+    if candidate:
+        candidate_path = Path(candidate)
+        if candidate_path.is_absolute() and candidate_path.is_file():
+            return str(candidate_path)
+        logger.warning(
+            f"COMSPEC 不是指向现有文件的绝对路径，已忽略并回退到 PATH 查找: {candidate!r}"
+        )
+
+    fallback = shutil.which("cmd.exe")
+    if fallback is None:
+        return None
+    return str(Path(fallback).resolve())
 
 
 def _build_subprocess_env() -> dict[str, str]:

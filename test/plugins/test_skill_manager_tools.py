@@ -24,8 +24,6 @@ from plugins.skill_manager.plugin import (
 from plugins.skill_manager.tools import SkillGetScriptTool
 from src.app.plugin_system.types import PermissionLevel
 
-_FAKE_COMSPEC = r"C:\Windows\system32\cmd.exe"
-
 
 @pytest.fixture(autouse=True)
 def stub_permission_lookup() -> Iterator[AsyncMock]:
@@ -496,9 +494,13 @@ async def test_get_script_accepts_safe_batch_arguments(tmp_path: Path) -> None:
         file_name="run.bat",
         content="@echo off\r\necho %1\r\n",
     )
+    # 解释器校验要求 COMSPEC 是指向现有文件的绝对路径，这里造一个真实文件，
+    # 避免测试依赖宿主机上真的存在 C:\Windows\system32\cmd.exe。
+    fake_interpreter = tmp_path / "cmd.exe"
+    fake_interpreter.write_bytes(b"")
 
     with (
-        patch.dict(os.environ, {"COMSPEC": _FAKE_COMSPEC}),
+        patch.dict(os.environ, {"COMSPEC": str(fake_interpreter)}),
         patch(
             "plugins.skill_manager.tools.asyncio.create_subprocess_exec",
             new=AsyncMock(return_value=_fake_process(stdout=b"batch ok\r\n")),
@@ -515,11 +517,61 @@ async def test_get_script_accepts_safe_batch_arguments(tmp_path: Path) -> None:
     await_args = create_mock.await_args
     assert await_args is not None
     assert await_args.args == (
-        _FAKE_COMSPEC,
+        str(fake_interpreter),
         "/c",
         str(script_path),
         "--count=60",
         "C:/tmp/data.json",
+    )
+
+
+@pytest.mark.parametrize(
+    ("comspec", "case"),
+    [
+        ("cmd.exe", "相对路径"),
+        (r"C:\definitely\missing\cmd.exe", "绝对路径但文件不存在"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_get_script_ignores_untrustworthy_comspec(
+    tmp_path: Path,
+    comspec: str,
+    case: str,
+) -> None:
+    """COMSPEC 取值不可用时应回退到 PATH 查找，而不是把它交给 CreateProcess。
+
+    相对路径会让 CreateProcess 走搜索顺序，可能命中工作目录（即 skill 目录）下的
+    同名文件；指向不存在文件的绝对路径则会直接让执行失败。两种都必须被忽略。
+    """
+
+    tool, script_path = _prepare_script(
+        tmp_path,
+        file_name="run.bat",
+        content="@echo off\r\n",
+    )
+    resolved_interpreter = tmp_path / "resolved-cmd.exe"
+    resolved_interpreter.write_bytes(b"")
+
+    with (
+        patch.dict(os.environ, {"COMSPEC": comspec}),
+        patch(
+            "plugins.skill_manager.tools.shutil.which",
+            return_value=str(resolved_interpreter),
+        ),
+        patch(
+            "plugins.skill_manager.tools.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=_fake_process(stdout=b"ok\r\n")),
+        ) as create_mock,
+    ):
+        success, _ = await tool.execute("demo", "scripts/run.bat")
+
+    assert success is True, f"{case} 时应回退成功"
+    await_args = create_mock.await_args
+    assert await_args is not None
+    assert await_args.args == (
+        str(resolved_interpreter.resolve()),
+        "/c",
+        str(script_path),
     )
 
 
@@ -572,6 +624,42 @@ async def test_get_script_rejects_control_characters_for_every_script_type(
 
     assert success is False
     assert "控制字符" in cast(str, result)
+    assert create_mock.await_count == 0
+
+
+@pytest.mark.parametrize(
+    "malformed_args",
+    ['--path "unterminated', "--name 'unterminated", 'a "b" "c'],
+)
+@pytest.mark.asyncio
+async def test_get_script_rejects_unbalanced_quotes_in_string_args(
+    tmp_path: Path,
+    malformed_args: str,
+) -> None:
+    """引号不配对的字符串参数应返回拒绝结果，而不是让 ValueError 穿透。
+
+    ``script_args`` 由 LLM 生成，引号不配对属可预期的非法输入。``shlex.split``
+    对这类输入抛 ValueError，若不捕获就会突破 execute() 的 (bool, str) 返回契约。
+    """
+
+    tool, _ = _prepare_script(
+        tmp_path,
+        file_name="echo.py",
+        content="print('ok')\n",
+    )
+
+    with patch(
+        "plugins.skill_manager.tools.asyncio.create_subprocess_exec",
+        new=AsyncMock(),
+    ) as create_mock:
+        success, result = await tool.execute(
+            "demo",
+            "scripts/echo.py",
+            malformed_args,
+        )
+
+    assert success is False
+    assert "引号不配对" in cast(str, result)
     assert create_mock.await_count == 0
 
 
