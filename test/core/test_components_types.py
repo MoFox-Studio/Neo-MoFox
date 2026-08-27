@@ -54,6 +54,7 @@ class TestEventType:
         assert EventType.BEFORE_MESSAGE_RECEIVED.value == "before_message_received"
         assert EventType.ON_MESSAGE_RECEIVED.value == "on_message_received"
         assert EventType.ON_MESSAGE_SENT.value == "on_message_sent"
+        assert EventType.BEFORE_CHATTER_DISPATCH.value == "before_chatter_dispatch"
         assert EventType.ON_CHATTER_STEP.value == "on_chatter_step"
         assert EventType.AFTER_CHATTER_STEP.value == "after_chatter_step"
         assert EventType.ON_ALL_PLUGIN_LOADED.value == "on_all_plugin_loaded"

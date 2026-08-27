@@ -239,12 +239,15 @@ weight = 0
 - `EventType.ON_MESSAGE_SENT`
 - `EventType.ON_ALL_PLUGIN_LOADED`
 - `EventType.ON_RECEIVED_OTHER_MESSAGE`
+- `EventType.BEFORE_CHATTER_DISPATCH`
 
 这类事件的价值在于：
 
 > **插件可以在框架已经定义好的关键时刻插进去。**
 
 比如 notice 收集、消息拦截、插件加载后补初始化，都是这一类。
+
+其中 `BEFORE_CHATTER_DISPATCH` 值得单独一提：它在每个会话 Tick 的最前端发布，把 `continue` 置为 `False` 可以让本轮分发整体跳过——等待状态、恢复事件、消息缓冲与生成器全部原样保留，不会消耗任何流状态。适合做专注度门控、优先级压制这类“本轮先别说话”的判断；如果阻断逻辑需要消费消息或状态，应该用 `ON_CHATTER_STEP` 而不是它。
 
 ### 自定义事件
 

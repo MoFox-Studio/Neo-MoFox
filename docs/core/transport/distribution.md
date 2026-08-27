@@ -42,11 +42,20 @@ initialize_distribution 会订阅两个关键事件：
 ## run_chat_stream 核心逻辑
 
 1. 消费 conversation_loop 产出的 tick。
-2. 执行 wait_state_check 和 message_buffer_check。
-3. 获取或创建 chatter 生成器。
-4. 发布 ON_CHATTER_STEP 事件（支持 continue=False 中断本 tick）。
-5. 执行 anext(chatter_gene) 并处理 Success/Failure/Wait/Stop。
-6. 异常时回收生成器并更新失败统计。
+2. 发布 BEFORE_CHATTER_DISPATCH 事件（分发前置门控，支持 continue=False 无副作用跳过本 tick）。
+3. 执行 wait_state_check 和 message_buffer_check。
+4. 获取或创建 chatter 生成器。
+5. 发布 ON_CHATTER_STEP 事件（支持 continue=False 中断本 tick）。
+6. 执行 anext(chatter_gene) 并处理 Success/Failure/Wait/Stop。
+7. 异常时回收生成器并更新失败统计。
+
+## BEFORE_CHATTER_DISPATCH 门控语义
+
+- 触发时机：每个 tick 的最前端，先于 wait_state_check、message_buffer_check 与生成器获取/创建。
+- 事件参数：`stream_id`、`context`、`tick`、`continue`（默认 True）、`reason`（阻断原因文案）。
+- 阻断语义：处理器将 `continue` 置为 False 时，本 tick 整体跳过；等待状态、resume 事件、消息缓冲计数、生成器与 `triggering_user_id` 均保持原状，不产生任何状态消费。
+- 处理租约：`is_chatter_processing` 从本事件发布开始置为 True，覆盖分发决策到 chatter 单步结束的完整区间，`finally` 中统一释放；接收侧可依据该标记避免在同一流上并发干预。
+- 与 ON_CHATTER_STEP 的区别：ON_CHATTER_STEP 位于链路末端，阻断时等待状态与 resume 事件已被消费，并触发 `_discard_blocked_messages` 丢弃积压消息；BEFORE_CHATTER_DISPATCH 用于需要无损阻断的场景。
 
 ## 性能与稳定性要点
 

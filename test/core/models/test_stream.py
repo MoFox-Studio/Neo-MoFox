@@ -26,6 +26,7 @@ class TestStreamContext:
         assert context.unread_messages == []
         assert context.history_messages == []
         assert context.is_active is True
+        # 字段默认值定义了 dispatch/processing lease 的空闲状态。
         assert context.is_chatter_processing is False
         assert context.current_message is None
         assert context.triggering_user_id is None

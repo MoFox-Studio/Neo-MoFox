@@ -264,183 +264,204 @@ async def run_chat_stream(
                     )
                     break
 
-                # 1. 检查并处理等待状态
-                wait_state = manager._wait_state_check(stream_id, context)
-                if not wait_state:
-                    # 处于等待中且未满足条件，跳过本次 Tick
-                    continue
-
-                resume_event = _take_wait_resume_event(manager, stream_id)
-
-                # 2. 消息缓冲机制检查
-                # 若距上次收到消息未超过缓冲窗口，则跳过本次 Tick（等待用户连续消息合并），
-                # 但当连续跳过次数已达上限时强制继续，防止高压群聊导致 Bot 始终无法响应。
-                if resume_event is None and not manager._message_buffer_check(stream_id, context):
-                    continue
-
-                # 3. 获取或创建 chatter_gene
-                chatter_gene = manager._chatter_genes.get(stream_id)
-                chatter_gene_just_created = False
-                
-                if not chatter_gene:
-                    # 如果没有生成器，只有在有未处理消息或外部恢复事件时才尝试创建
-                    if not context.unread_messages and resume_event is None:
-                        continue
-
-                    # 查找或绑定 Chatter
-                    chat_stream = None
-                    chatter = chatter_manager.get_chatter_by_stream(stream_id)
-                    if not chatter:
-                        from src.core.managers import get_stream_manager
-
-                        sm = get_stream_manager()
-                        chat_stream = await sm.get_or_create_stream(stream_id)
-                        if not chat_stream:
-                            continue
-
-                        chatter = chatter_manager.get_or_create_chatter_for_stream(
-                            stream_id, chat_stream.chat_type, chat_stream.platform
-                        )
-
-                    if chatter:
-                        if chat_stream is not None:
-                            chatter.apply_stream_runtime_options(chat_stream)
-                        logger.debug(f"[驱动器] stream={stream_id[:8]}, 创建新会话生成器")
-                        
-                        # 设置触发用户 ID (从最后一条未读消息)
-                        if context.unread_messages:
-                            context.triggering_user_id = context.unread_messages[-1].sender_id
-                            
-                        chatter_gene = chatter.execute()
-                        if asyncio.iscoroutine(chatter_gene):
-                            chatter_gene = await _await_stream_step(
-                                chatter_gene,
-                                stream_id=stream_id,
-                                stage="创建 Chatter 生成器",
-                            )
-                        manager._chatter_genes[stream_id] = chatter_gene
-                        chatter_gene_just_created = True
-                
-                if not chatter_gene:
-                    continue
-
-                # 3. 执行单步 Tick
+                # 该租约覆盖 pre-dispatch 决策、状态消费和 Chatter step 的所有出口。
                 try:
-                    # 并发保护：标记正在处理
                     context.is_chatter_processing = True
 
-                    step_event_result = await event_manager.publish_event(
-                        EventType.ON_CHATTER_STEP,
+                    dispatch_event_result = await event_manager.publish_event(
+                        EventType.BEFORE_CHATTER_DISPATCH,
                         {
                             "stream_id": stream_id,
                             "context": context,
                             "tick": tick,
-                            "chatter_gene": chatter_gene,
                             "continue": True,
+                            "reason": "",
                         },
                     )
-                    step_event_params = step_event_result.get("params", {})
-                    if step_event_params.get("continue") is False:
-                        discarded_count = _discard_blocked_messages(context)
+                    dispatch_event_params = dispatch_event_result.get("params", {})
+                    if dispatch_event_params.get("continue") is False:
+                        reason = dispatch_event_params.get("reason", "")
                         logger.debug(
                             f"[驱动器] stream={stream_id[:8]}, "
-                            f"on_chatter_step continue=False，跳过本 Tick，"
-                            f"丢弃积压消息={discarded_count}"
+                            f"before_chatter_dispatch continue=False，跳过本 Tick，"
+                            f"reason={reason}"
                         )
                         continue
-                    
-                    # 新建的异步生成器首次只能 anext()/asend(None)，
-                    # 避免 Wait 恢复事件在首次步进时触发协议错误。
-                    if chatter_gene_just_created and resume_event is not None:
-                        primed_result = await _await_stream_step(
-                            anext(chatter_gene),
-                            stream_id=stream_id,
-                            stage="预激 Chatter 生成器",
+
+                    # 1. 检查并处理等待状态
+                    wait_state = manager._wait_state_check(stream_id, context)
+                    if not wait_state:
+                        # 处于等待中且未满足条件，跳过本次 Tick
+                        continue
+
+                    resume_event = _take_wait_resume_event(manager, stream_id)
+
+                    # 2. 消息缓冲机制检查
+                    # 若距上次收到消息未超过缓冲窗口，则跳过本次 Tick（等待用户连续消息合并），
+                    # 但当连续跳过次数已达上限时强制继续，防止高压群聊导致 Bot 始终无法响应。
+                    if resume_event is None and not manager._message_buffer_check(stream_id, context):
+                        continue
+
+                    # 3. 获取或创建 chatter_gene
+                    chatter_gene = manager._chatter_genes.get(stream_id)
+                    chatter_gene_just_created = False
+
+                    if not chatter_gene:
+                        # 如果没有生成器，只有在有未处理消息或外部恢复事件时才尝试创建
+                        if not context.unread_messages and resume_event is None:
+                            continue
+
+                        # 查找或绑定 Chatter
+                        chat_stream = None
+                        chatter = chatter_manager.get_chatter_by_stream(stream_id)
+                        if not chatter:
+                            from src.core.managers import get_stream_manager
+
+                            sm = get_stream_manager()
+                            chat_stream = await sm.get_or_create_stream(stream_id)
+                            if not chat_stream:
+                                continue
+
+                            chatter = chatter_manager.get_or_create_chatter_for_stream(
+                                stream_id, chat_stream.chat_type, chat_stream.platform
+                            )
+
+                        if chatter:
+                            if chat_stream is not None:
+                                chatter.apply_stream_runtime_options(chat_stream)
+                            logger.debug(f"[驱动器] stream={stream_id[:8]}, 创建新会话生成器")
+
+                            # 设置触发用户 ID (从最后一条未读消息)
+                            if context.unread_messages:
+                                context.triggering_user_id = context.unread_messages[-1].sender_id
+
+                            chatter_gene = chatter.execute()
+                            if asyncio.iscoroutine(chatter_gene):
+                                chatter_gene = await _await_stream_step(
+                                    chatter_gene,
+                                    stream_id=stream_id,
+                                    stage="创建 Chatter 生成器",
+                                )
+                            manager._chatter_genes[stream_id] = chatter_gene
+                            chatter_gene_just_created = True
+
+                    if not chatter_gene:
+                        continue
+
+                    # 3. 执行单步 Tick
+                    try:
+                        step_event_result = await event_manager.publish_event(
+                            EventType.ON_CHATTER_STEP,
+                            {
+                                "stream_id": stream_id,
+                                "context": context,
+                                "tick": tick,
+                                "chatter_gene": chatter_gene,
+                                "continue": True,
+                            },
                         )
-                        if not isinstance(primed_result, Wait):
-                            result = primed_result
+                        step_event_params = step_event_result.get("params", {})
+                        if step_event_params.get("continue") is False:
+                            discarded_count = _discard_blocked_messages(context)
+                            logger.debug(
+                                f"[驱动器] stream={stream_id[:8]}, "
+                                f"on_chatter_step continue=False，跳过本 Tick，"
+                                f"丢弃积压消息={discarded_count}"
+                            )
+                            continue
+
+                        # 新建的异步生成器首次只能 anext()/asend(None)，
+                        # 避免 Wait 恢复事件在首次步进时触发协议错误。
+                        if chatter_gene_just_created and resume_event is not None:
+                            primed_result = await _await_stream_step(
+                                anext(chatter_gene),
+                                stream_id=stream_id,
+                                stage="预激 Chatter 生成器",
+                            )
+                            if not isinstance(primed_result, Wait):
+                                result = primed_result
+                            else:
+                                result = await _await_stream_step(
+                                    chatter_gene.asend(resume_event),
+                                    stream_id=stream_id,
+                                    stage="执行 Chatter 单步",
+                                )
                         else:
+                            step_awaitable = (
+                                chatter_gene.asend(resume_event)
+                                if resume_event is not None
+                                else anext(chatter_gene)
+                            )
                             result = await _await_stream_step(
-                                chatter_gene.asend(resume_event),
+                                step_awaitable,
                                 stream_id=stream_id,
                                 stage="执行 Chatter 单步",
                             )
-                    else:
-                        step_awaitable = (
-                            chatter_gene.asend(resume_event)
-                            if resume_event is not None
-                            else anext(chatter_gene)
-                        )
-                        result = await _await_stream_step(
-                            step_awaitable,
+
+                        refreshed_context = await manager._get_stream_context(stream_id)
+                        if not refreshed_context:
+                            break
+
+                        if not _is_task_current(refreshed_context):
+                            logger.debug(
+                                f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, Chatter 步进完成后发现已被新任务接管，丢弃旧结果并退出"
+                            )
+                            break
+
+                        context = refreshed_context
+
+                        # 4. 根据执行结果处理状态
+                        if isinstance(result, Success):
+                            # 执行成功，等待下一 Tick 继续
+                            pass
+                        elif isinstance(result, Failure):
+                            # 执行失败，输出警告并等待下一 Tick
+                            logger.warning(f"[驱动器] stream={stream_id[:8]}, Chatter 返回 Failure: {result.error}")
+                        elif isinstance(result, Wait):
+                            # 记录等待状态（直接保存上次 yield 对象）
+                            manager._wait_states[stream_id] = (
+                                result,
+                                time.time(),
+                                len(context.unread_messages),
+                            )
+                            logger.debug(f"[驱动器] stream={stream_id[:8]}, 进入 Wait 状态 (time={result.time})")
+                        elif isinstance(result, Stop):
+                            # 记录等待状态并销毁生成器。
+                            # Stop 语义：经过冷却后，仅当出现“新的未读消息”才重启对话。
+                            manager._wait_states[stream_id] = (
+                                result,
+                                time.time(),
+                                len(context.unread_messages),
+                            )
+                            logger.debug(
+                                f"[驱动器] stream={stream_id[:8]}, 进入 Stop 状态 "
+                                f"(time={result.time}, "
+                                f"direct_wake={result.direct_message_wake_enabled}, "
+                                f"probability={result.direct_message_wake_probability:.2f})，销毁生成器"
+                            )
+                            manager._chatter_genes.pop(stream_id, None)
+
+                        get_chatter = getattr(chatter_manager, "get_chatter_by_stream", None)
+                        chatter = get_chatter(stream_id) if callable(get_chatter) else None
+                        await _publish_after_chatter_step_notification(
                             stream_id=stream_id,
-                            stage="执行 Chatter 单步",
+                            context=context,
+                            tick=tick,
+                            chatter_name=str(getattr(chatter, "chatter_name", "") or ""),
+                            result=result,
+                            event_manager=event_manager,
                         )
 
-                    refreshed_context = await manager._get_stream_context(stream_id)
-                    if not refreshed_context:
-                        break
+                        manager._stats["total_process_cycles"] += 1
 
-                    if not _is_task_current(refreshed_context):
-                        logger.debug(
-                            f"[驱动器] stream={stream_id[:8]}, 任务ID={task_id}, Chatter 步进完成后发现已被新任务接管，丢弃旧结果并退出"
-                        )
-                        break
-
-                    context = refreshed_context
-                    
-                    # 4. 根据执行结果处理状态
-                    if isinstance(result, Success):
-                        # 执行成功，等待下一 Tick 继续
-                        pass
-                    elif isinstance(result, Failure):
-                        # 执行失败，输出警告并等待下一 Tick
-                        logger.warning(f"[驱动器] stream={stream_id[:8]}, Chatter 返回 Failure: {result.error}")
-                    elif isinstance(result, Wait):
-                        # 记录等待状态（直接保存上次 yield 对象）
-                        manager._wait_states[stream_id] = (
-                            result,
-                            time.time(),
-                            len(context.unread_messages),
-                        )
-                        logger.debug(f"[驱动器] stream={stream_id[:8]}, 进入 Wait 状态 (time={result.time})")
-                    elif isinstance(result, Stop):
-                        # 记录等待状态并销毁生成器。
-                        # Stop 语义：经过冷却后，仅当出现“新的未读消息”才重启对话。
-                        manager._wait_states[stream_id] = (
-                            result,
-                            time.time(),
-                            len(context.unread_messages),
-                        )
-                        logger.debug(
-                            f"[驱动器] stream={stream_id[:8]}, 进入 Stop 状态 "
-                            f"(time={result.time}, "
-                            f"direct_wake={result.direct_message_wake_enabled}, "
-                            f"probability={result.direct_message_wake_probability:.2f})，销毁生成器"
-                        )
+                    except StopAsyncIteration:
+                        # 生成器结束，销毁记录以便下次重新创建
+                        logger.debug(f"[驱动器] stream={stream_id[:8]}, 会话生成器已结束 (return)")
                         manager._chatter_genes.pop(stream_id, None)
-
-                    get_chatter = getattr(chatter_manager, "get_chatter_by_stream", None)
-                    chatter = get_chatter(stream_id) if callable(get_chatter) else None
-                    await _publish_after_chatter_step_notification(
-                        stream_id=stream_id,
-                        context=context,
-                        tick=tick,
-                        chatter_name=str(getattr(chatter, "chatter_name", "") or ""),
-                        result=result,
-                        event_manager=event_manager,
-                    )
-                        
-                    manager._stats["total_process_cycles"] += 1
-
-                except StopAsyncIteration:
-                    # 生成器结束，销毁记录以便下次重新创建
-                    logger.debug(f"[驱动器] stream={stream_id[:8]}, 会话生成器已结束 (return)")
-                    manager._chatter_genes.pop(stream_id, None)
-                except Exception as e:
-                    logger.error(f"[驱动器] stream={stream_id[:8]}, 执行 Chatter 出错: {e}")
-                    manager._chatter_genes.pop(stream_id, None)
-                    manager._stats["total_failures"] += 1
+                    except Exception as e:
+                        logger.error(f"[驱动器] stream={stream_id[:8]}, 执行 Chatter 出错: {e}")
+                        manager._chatter_genes.pop(stream_id, None)
+                        manager._stats["total_failures"] += 1
                 finally:
                     context.is_chatter_processing = False
 

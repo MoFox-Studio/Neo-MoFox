@@ -54,6 +54,7 @@ class EventType(str, Enum):
     ON_MESSAGE_RECEIVED = "on_message_received"
     ON_MESSAGE_SENT = "on_message_sent"
     AFTER_MESSAGE_SENT = "after_message_sent"
+    BEFORE_CHATTER_DISPATCH = "before_chatter_dispatch"
     ON_CHATTER_STEP = "on_chatter_step"
     AFTER_CHATTER_STEP = "after_chatter_step"
     ON_INTERNAL_CONTEXT_REQUESTED = "on_internal_context_requested"

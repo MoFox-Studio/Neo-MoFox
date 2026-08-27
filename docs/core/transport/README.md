@@ -35,7 +35,7 @@
 3. MessageReceiver 使用 MessageConverter 解析为 Message。
 4. MessageReceiver 发布 ON_MESSAGE_RECEIVED 事件。
 5. distribution/distributor 订阅该事件，写入 StreamManager 并启动流驱动器。
-6. StreamLoopManager 驱动 run_chat_stream，推进 chatter 执行。
+6. StreamLoopManager 驱动 run_chat_stream：先发布 BEFORE_CHATTER_DISPATCH 门控，再推进 chatter 执行。
 
 ### 出站链路（Core -> Adapter）
 
@@ -51,7 +51,8 @@
 - ON_MESSAGE_RECEIVED: 入站消息进入 core 分发主链路。
 - ON_RECEIVED_OTHER_MESSAGE: 非标准 envelope 的二次处理入口。
 - ON_ALL_PLUGIN_LOADED: 启动 StreamLoopManager。
-- ON_CHATTER_STEP: 每个 tick 前的对话步进钩子。
+- BEFORE_CHATTER_DISPATCH: 每个 tick 最前端的分发门控，continue=False 时无副作用跳过本 tick，详见 distribution.md。
+- ON_CHATTER_STEP: 每 tick 内、chatter 单步执行前的对话步进钩子。
 - ON_MESSAGE_SENT: 出站消息下发前的拦截与补充入口。
 
 ## 运行时协作关系

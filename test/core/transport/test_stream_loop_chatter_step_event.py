@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import time
 from types import SimpleNamespace
 from typing import cast
@@ -10,6 +11,7 @@ import pytest
 
 from src.core.components.types import Success, Wait, WaitResumeEvent
 from src.core.components.types import EventType
+from src.core.models.stream import StreamContext
 from src.core.transport.distribution.loop import run_chat_stream
 from src.core.transport.distribution.stream_loop_manager import StreamLoopManager
 
@@ -18,6 +20,14 @@ async def _two_ticks(*_args, **_kwargs):
     """产出两个 Tick 供 run_chat_stream 消费。"""
     yield SimpleNamespace(stream_id="stream-001", tick_count=1)
     yield SimpleNamespace(stream_id="stream-001", tick_count=2)
+
+
+async def _four_ticks(*_args, **_kwargs):
+    """产出四个 Tick，用于验证连续阻断后放行与后续普通分发。"""
+    yield SimpleNamespace(stream_id="stream-gate", tick_count=1)
+    yield SimpleNamespace(stream_id="stream-gate", tick_count=2)
+    yield SimpleNamespace(stream_id="stream-gate", tick_count=3)
+    yield SimpleNamespace(stream_id="stream-gate", tick_count=4)
 
 
 @pytest.mark.asyncio
@@ -124,10 +134,320 @@ async def test_on_chatter_step_continue_false_skips_current_tick_then_recovers(
 
     await run_chat_stream(stream_id=stream_id, manager=manager)
 
-    assert publish_event_mock.await_count == 3
+    assert publish_event_mock.await_count == 5
     assert step_call_count == 1
     assert manager._stats["total_process_cycles"] == 1
     assert manager._stats["total_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_before_chatter_dispatch_blocks_ticks_without_consuming_stream_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pre-dispatch 阻断应无损保留消息、等待状态、resume 和 generator。"""
+    stream_id = "stream-gate"
+    operations: list[str] = []
+    busy_snapshots: list[bool] = []
+    generator_present_at_gate: list[bool] = []
+    received_resumes: list[WaitResumeEvent | None] = []
+    execute_calls = 0
+
+    message = SimpleNamespace(sender_id="u1")
+    cached_message = SimpleNamespace(sender_id="u2")
+    context = StreamContext(stream_id=stream_id)
+    context.unread_messages = [message]  # type: ignore[list-item]
+    context.message_cache = deque([cached_message])  # type: ignore[list-item]
+    context.stream_loop_task = None
+
+    async def chatter_generator():
+        resume_event = yield Wait(time=None)
+        operations.append("generator")
+        received_resumes.append(resume_event)
+        yield Success(message="ok")
+
+    chatter_gene = chatter_generator()
+    first_wait = await anext(chatter_gene)
+
+    def _execute():
+        nonlocal execute_calls
+        execute_calls += 1
+        return chatter_generator()
+
+    chatter = SimpleNamespace(execute=_execute)
+    chatter_manager = SimpleNamespace(
+        get_chatter_by_stream=lambda _sid: chatter,
+        get_or_create_chatter_for_stream=lambda *_args, **_kwargs: chatter,
+    )
+
+    async def _publish_event(event_name: object, params: dict[str, object]) -> dict[str, object]:
+        if event_name == EventType.BEFORE_CHATTER_DISPATCH:
+            tick = cast(SimpleNamespace, params["tick"])
+            operations.append(f"before:{tick.tick_count}")
+            busy_snapshots.append(cast(StreamContext, params["context"]).is_chatter_processing)
+            generator_present_at_gate.append(stream_id in manager._chatter_genes)
+            allowed = tick.tick_count >= 3
+            return {
+                "decision": "SUCCESS",
+                "params": {
+                    **params,
+                    "continue": allowed,
+                    "reason": "" if allowed else "not focused",
+                },
+            }
+        if event_name == EventType.ON_CHATTER_STEP:
+            operations.append("on-step")
+        return {"decision": "SUCCESS", "params": params}
+
+    event_manager = SimpleNamespace(publish_event=AsyncMock(side_effect=_publish_event))
+
+    monkeypatch.setattr("src.core.transport.distribution.loop.conversation_loop", _four_ticks)
+    monkeypatch.setattr(
+        "src.core.transport.distribution.loop.get_core_config",
+        lambda: SimpleNamespace(bot=SimpleNamespace(stream_step_timeout=60.0)),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.get_chatter_manager",
+        lambda: chatter_manager,
+    )
+    monkeypatch.setattr(
+        "src.core.managers.get_event_manager",
+        lambda: event_manager,
+    )
+    monkeypatch.setattr(
+        "src.core.transport.distribution.loop.get_watchdog",
+        lambda: SimpleNamespace(
+            feed_dog=lambda stream_id: None,
+            unregister_stream=lambda stream_id: None,
+        ),
+    )
+
+    pending_resume = WaitResumeEvent(source="sub_agent")
+    manager = StreamLoopManager()
+    manager.is_running = True
+    manager._chatter_genes[stream_id] = chatter_gene
+    manager._wait_states[stream_id] = (first_wait, time.time(), 0)
+    manager._pending_wait_resume_events[stream_id] = pending_resume
+
+    async def _get_context(_stream_id: str):
+        if context.stream_loop_task is None:
+            context.stream_loop_task = asyncio.current_task()
+        return context
+
+    def _wait_state_check(_stream_id: str, _context: StreamContext) -> bool:
+        operations.append("wait-check")
+        return True
+
+    def _take_wait_resume_event(_stream_id: str) -> WaitResumeEvent | None:
+        operations.append("take-resume")
+        return manager._pending_wait_resume_events.pop(_stream_id, None)
+
+    def _message_buffer_check(_stream_id: str, _context: StreamContext) -> bool:
+        operations.append("buffer-check")
+        return True
+
+    manager._get_stream_context = _get_context  # type: ignore[method-assign]
+    manager._flush_cached_messages_to_unread = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    manager._wait_state_check = _wait_state_check  # type: ignore[method-assign]
+    manager.take_wait_resume_event = _take_wait_resume_event  # type: ignore[method-assign]
+    manager._message_buffer_check = _message_buffer_check  # type: ignore[method-assign]
+
+    wait_state_before = manager._wait_states[stream_id]
+    unread_before = list(context.unread_messages)
+    cache_before = deque(context.message_cache)
+
+    await run_chat_stream(stream_id=stream_id, manager=manager)
+
+    assert operations == [
+        "before:1",
+        "before:2",
+        "before:3",
+        "wait-check",
+        "take-resume",
+        "on-step",
+        "generator",
+        "before:4",
+        "wait-check",
+        "take-resume",
+        "buffer-check",
+        "on-step",
+    ]
+    assert busy_snapshots == [True, True, True, True]
+    assert generator_present_at_gate == [True, True, True, True]
+    assert received_resumes == [pending_resume]
+    assert execute_calls == 0
+    assert manager._chatter_genes == {}
+    assert manager._wait_states[stream_id] is wait_state_before
+    assert context.unread_messages == unread_before
+    assert context.message_cache == cache_before
+    assert context.is_chatter_processing is False
+
+
+@pytest.mark.asyncio
+async def test_before_chatter_dispatch_lease_recovers_on_reject_and_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """dispatch/processing lease 在 gate 阻断和前置检查异常后都必须释放。"""
+    stream_id = "stream-gate-lease"
+    busy_snapshots: list[bool] = []
+    context = StreamContext(stream_id=stream_id)
+    context.stream_loop_task = None
+
+    async def _publish_event(event_name: object, params: dict[str, object]) -> dict[str, object]:
+        if event_name == EventType.BEFORE_CHATTER_DISPATCH:
+            tick = cast(SimpleNamespace, params["tick"])
+            busy_snapshots.append(context.is_chatter_processing)
+            return {
+                "decision": "SUCCESS",
+                "params": {
+                    **params,
+                    "continue": tick.tick_count != 1,
+                    "reason": "" if tick.tick_count != 1 else "blocked",
+                },
+            }
+        return {"decision": "SUCCESS", "params": params}
+
+    event_manager = SimpleNamespace(publish_event=AsyncMock(side_effect=_publish_event))
+
+    monkeypatch.setattr("src.core.transport.distribution.loop.conversation_loop", _two_ticks)
+    monkeypatch.setattr(
+        "src.core.transport.distribution.loop.get_core_config",
+        lambda: SimpleNamespace(bot=SimpleNamespace(stream_step_timeout=60.0)),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.get_chatter_manager",
+        lambda: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.get_event_manager",
+        lambda: event_manager,
+    )
+    monkeypatch.setattr(
+        "src.core.transport.distribution.loop.get_watchdog",
+        lambda: SimpleNamespace(
+            feed_dog=lambda stream_id: None,
+            unregister_stream=lambda stream_id: None,
+        ),
+    )
+
+    async def _get_context(_stream_id: str):
+        if context.stream_loop_task is None:
+            context.stream_loop_task = asyncio.current_task()
+        return context
+
+    def _wait_state_check(_stream_id: str, _context: StreamContext) -> bool:
+        raise RuntimeError("gate passed")
+
+    manager = cast(
+        StreamLoopManager,
+        SimpleNamespace(
+            is_running=True,
+            _chatter_genes={},
+            _wait_states={},
+            _stats={"total_failures": 0, "total_process_cycles": 0},
+            _get_stream_context=_get_context,
+            _flush_cached_messages_to_unread=AsyncMock(return_value=[]),
+            _wait_state_check=_wait_state_check,
+            _message_buffer_check=lambda _stream_id, _context: True,
+        ),
+    )
+
+    await run_chat_stream(stream_id=stream_id, manager=manager)
+
+    assert busy_snapshots == [True, True]
+    assert context.is_chatter_processing is False
+    assert manager._stats["total_failures"] == 1
+
+
+@pytest.mark.asyncio
+async def test_before_chatter_dispatch_blocks_chatter_selection_and_generator_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """阻断 tick 不得查找 Chatter，也不得创建新的会话生成器。"""
+    stream_id = "stream-gate-no-generator"
+    busy_snapshots: list[bool] = []
+    selection_calls = 0
+    execute_calls = 0
+
+    async def _one_tick(*_args, **_kwargs):
+        yield SimpleNamespace(stream_id=stream_id, tick_count=1)
+
+    message = SimpleNamespace(sender_id="u1")
+    context = StreamContext(stream_id=stream_id)
+    context.unread_messages = [message]  # type: ignore[list-item]
+    context.stream_loop_task = None
+
+    def _get_chatter(_stream_id: str):
+        nonlocal selection_calls
+        selection_calls += 1
+        return None
+
+    def _create_chatter(*_args, **_kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        return None
+
+    async def _publish_event(event_name: object, params: dict[str, object]) -> dict[str, object]:
+        if event_name == EventType.BEFORE_CHATTER_DISPATCH:
+            busy_snapshots.append(context.is_chatter_processing)
+            return {
+                "decision": "SUCCESS",
+                "params": {**params, "continue": False, "reason": "not focused"},
+            }
+        return {"decision": "SUCCESS", "params": params}
+
+    event_manager = SimpleNamespace(publish_event=AsyncMock(side_effect=_publish_event))
+
+    monkeypatch.setattr("src.core.transport.distribution.loop.conversation_loop", _one_tick)
+    monkeypatch.setattr(
+        "src.core.transport.distribution.loop.get_core_config",
+        lambda: SimpleNamespace(bot=SimpleNamespace(stream_step_timeout=60.0)),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.get_chatter_manager",
+        lambda: SimpleNamespace(
+            get_chatter_by_stream=_get_chatter,
+            get_or_create_chatter_for_stream=_create_chatter,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.core.managers.get_event_manager",
+        lambda: event_manager,
+    )
+    monkeypatch.setattr(
+        "src.core.transport.distribution.loop.get_watchdog",
+        lambda: SimpleNamespace(
+            feed_dog=lambda stream_id: None,
+            unregister_stream=lambda stream_id: None,
+        ),
+    )
+
+    async def _get_context(_stream_id: str):
+        if context.stream_loop_task is None:
+            context.stream_loop_task = asyncio.current_task()
+        return context
+
+    manager = cast(
+        StreamLoopManager,
+        SimpleNamespace(
+            is_running=True,
+            _chatter_genes={},
+            _wait_states={},
+            _stats={"total_failures": 0, "total_process_cycles": 0},
+            _get_stream_context=_get_context,
+            _flush_cached_messages_to_unread=AsyncMock(return_value=[]),
+            _wait_state_check=lambda _stream_id, _context: True,
+            _message_buffer_check=lambda _stream_id, _context: True,
+        ),
+    )
+
+    await run_chat_stream(stream_id=stream_id, manager=manager)
+
+    assert busy_snapshots == [True]
+    assert selection_calls == 0
+    assert execute_calls == 0
+    assert manager._chatter_genes == {}
+    assert context.unread_messages == [message]
+    assert context.is_chatter_processing is False
 
 
 @pytest.mark.asyncio
@@ -614,12 +934,17 @@ async def test_after_chatter_step_is_published_after_result_without_affecting_ex
                     "continue": True,
                 },
             }
+        if event_name == EventType.AFTER_CHATTER_STEP:
+            return {
+                "decision": "STOP",
+                "params": {
+                    **params,
+                    "continue": False,
+                },
+            }
         return {
-            "decision": "STOP",
-            "params": {
-                **params,
-                "continue": False,
-            },
+            "decision": "SUCCESS",
+            "params": params,
         }
 
     event_manager = SimpleNamespace(publish_event=AsyncMock(side_effect=_publish_event))
@@ -666,8 +991,8 @@ async def test_after_chatter_step_is_published_after_result_without_affecting_ex
 
     await run_chat_stream(stream_id=stream_id, manager=manager)
 
-    assert len(publish_calls) == 2
-    after_event_name, after_params = publish_calls[1]
+    assert len(publish_calls) == 3
+    after_event_name, after_params = publish_calls[2]
     assert after_event_name == EventType.AFTER_CHATTER_STEP
     assert after_params["result_type"] == "wait"
     assert after_params["step_scope"] == "actor_round"

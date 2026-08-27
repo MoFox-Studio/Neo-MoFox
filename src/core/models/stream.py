@@ -29,7 +29,7 @@ class StreamContext:
         unread_messages: 未读消息列表
         history_messages: 历史消息列表
         is_active: 是否活跃
-        is_chatter_processing: Chatter 是否正在处理
+        is_chatter_processing: 当前流是否处于 Chatter 分发决策或单步处理租约中
         is_context_compressing: 是否正在执行上下文压缩
         message_cache: 消息缓存队列
         is_cache_enabled: 是否启用消息缓存
@@ -43,6 +43,7 @@ class StreamContext:
     unread_messages: list["Message"] = field(default_factory=list)
     history_messages: list["Message"] = field(default_factory=list)
     is_active: bool = True
+    # 覆盖 pre-dispatch gate 到 Chatter step 结束的完整不可并发切换区间。
     is_chatter_processing: bool = False
     is_context_compressing: bool = False
 
