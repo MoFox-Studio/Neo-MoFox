@@ -8,7 +8,7 @@ from typing import Literal
 
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
 
-CORE_VERSION = "1.3.0-alpha.0"
+CORE_VERSION = "1.3.0-alpha.1"
 
 
 DEFAULT_REPLY_STYLE = """我顺着当下的关系、气氛与情绪自然表达，保留谈话的温度。日常交流不刻意复述设定，也不机械重复同一种句式、口癖或模板化评价。

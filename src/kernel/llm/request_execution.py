@@ -374,8 +374,39 @@ async def execute_request(
                     error=classified_error,
                 )
 
+            # 分类完成后立即触发失败事件，供插件统一检测所有 LLM 错误
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.ON_LLM_REQUEST_FAILED):
+                    _, final_params = await event_bus.publish(
+                        EventType.ON_LLM_REQUEST_FAILED,
+                        {
+                            "request_name": request.request_name,
+                            "model_identifier": model_identifier,
+                            "payloads": list(trimmed_payloads),
+                            "tools": list(tools),
+                            "stream": actual_stream,
+                            "error": classified_error,
+                            "error_type": type(classified_error).__name__,
+                            "error_message": str(classified_error),
+                            "retry_count": retry_count,
+                            "latency": timer.elapsed,
+                            "meta_data": request.meta_data,
+                        },
+                    )
+                    # 回写事件订阅者修改后的错误信息
+                    final_error = final_params.get("error")
+                    if isinstance(final_error, BaseException):
+                        last_error = final_error
+            except Exception:
+                # 事件触发失败不中断异常传播，静默降级
+                pass
+
             if not retry_decision.retryable:
-                raise classified_error
+                raise last_error
 
             retry_count += 1
             next_step = session.next_after_error(classified_error)
@@ -385,39 +416,6 @@ async def execute_request(
                     f"retry_count={retry_count}, "
                     f"last_error={type(classified_error).__name__}: {classified_error}",
                 )
-
-                # 重试耗尽，触发大模型请求失败事件
-                # 事件订阅者可以修改 payloads、tools、stream、error、error_message
-                # 等字段，修改后的 error 会作为最终抛出的异常。
-                try:
-                    from src.core.components.types import EventType
-                    from src.kernel.event import get_event_bus
-
-                    event_bus = get_event_bus()
-                    if event_bus.get_subscribers(EventType.ON_LLM_REQUEST_FAILED):
-                        _, final_params = await event_bus.publish(
-                            EventType.ON_LLM_REQUEST_FAILED,
-                            {
-                                "request_name": request.request_name,
-                                "model_identifier": model_identifier,
-                                "payloads": list(trimmed_payloads),
-                                "tools": list(tools),
-                                "stream": actual_stream,
-                                "error": classified_error,
-                                "error_type": type(classified_error).__name__,
-                                "error_message": str(classified_error),
-                                "retry_count": retry_count,
-                                "latency": timer.elapsed,
-                                "meta_data": request.meta_data,
-                            },
-                        )
-                        # 回写事件订阅者修改后的错误信息
-                        final_error = final_params.get("error")
-                        if isinstance(final_error, BaseException):
-                            last_error = final_error
-                except Exception:
-                    # 事件触发失败不中断异常传播，静默降级
-                    pass
             else:
                 next_model_identifier = next_step.model.get("model_identifier")
                 next_model_name = (
