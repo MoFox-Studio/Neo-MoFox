@@ -496,8 +496,8 @@ class PluginManager:
         """以 manifest 为唯一权威来源，注入插件运行时元数据。
 
         将 ``manifest.version`` / ``manifest.description`` 写入插件实例的
-        ``plugin_version`` / ``plugin_description``。若插件类继承链（MRO 中
-        ``BasePlugin`` 之前的用户定义层级）在类级别显式声明了
+        ``plugin_version`` / ``plugin_description``。若插件继承链的用户定义层级
+        在类级别显式声明了
         ``plugin_version`` / ``plugin_description`` / ``plugin_author``，
         视为历史遗留冗余，逐项发出弃用警告提醒移除，不影响插件加载运行。
 
@@ -507,20 +507,29 @@ class PluginManager:
         """
         import warnings
 
+        from src.core.components.base.plugin import BasePlugin
+
         manifest_version = manifest.version
         plugin_instance.plugin_version = manifest_version
         plugin_instance.plugin_description = manifest.description
 
-        # 遍历 MRO 中 BasePlugin 之前的用户定义层级，覆盖中间基类声明
-        base_plugin_cls = type(plugin_instance).__mro__[-2]
-        declared_names: set[str] = set()
+        # 按属性解析顺序遍历完整 MRO，覆盖中间基类与后置 mixin 声明
+        metadata_names = (
+            "plugin_version",
+            "plugin_description",
+            "plugin_author",
+        )
+        declared_values: dict[str, object] = {}
         for cls in type(plugin_instance).__mro__:
-            if cls is base_plugin_cls:
-                break
-            declared_names.update(vars(cls))
+            if cls in (BasePlugin, object):
+                continue
+            class_vars = vars(cls)
+            for name in metadata_names:
+                if name not in declared_values and name in class_vars:
+                    declared_values[name] = class_vars[name]
 
-        if "plugin_version" in declared_names:
-            declared_version = vars(type(plugin_instance)).get("plugin_version")
+        if "plugin_version" in declared_values:
+            declared_version = declared_values["plugin_version"]
             version_hint = (
                 f" ({declared_version}) 与 manifest.version ({manifest_version}) 不一致，"
                 if declared_version is not None
@@ -534,14 +543,14 @@ class PluginManager:
                 DeprecationWarning,
                 stacklevel=3,
             )
-        if "plugin_description" in declared_names:
+        if "plugin_description" in declared_values:
             warnings.warn(
                 f"插件 '{plugin_instance.plugin_name}' 的类属性 plugin_description "
                 "已弃用；描述请只保留在 manifest.json",
                 DeprecationWarning,
                 stacklevel=3,
             )
-        if "plugin_author" in declared_names:
+        if "plugin_author" in declared_values:
             warnings.warn(
                 f"插件 '{plugin_instance.plugin_name}' 的类属性 plugin_author "
                 "已弃用；作者信息请只保留在 manifest.json",

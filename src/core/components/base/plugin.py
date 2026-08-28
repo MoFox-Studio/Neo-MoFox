@@ -59,6 +59,14 @@ class BasePlugin(ABC):
     # 依赖的其他组件
     dependencies: list[str] = []
 
+    def __getattr__(self, name: str) -> str:
+        """为尚未注入的运行时元数据提供构造期兜底。"""
+        if name in ("plugin_version", "plugin_description"):
+            return ""
+        raise AttributeError(
+            f"'{self.__class__.__name__}' object has no attribute '{name}'"
+        )
+
     def __init__(self, config: "BaseConfig | None" = None) -> None:
         """初始化插件。
 
@@ -66,12 +74,6 @@ class BasePlugin(ABC):
             config: 插件配置实例，可选
         """
         self.config = config
-        # 空字符串兜底：继承链未声明时保证构造期间可安全读取；
-        # 已声明（含旧插件类属性）时不遮蔽，加载后被 manifest 值覆盖
-        if not hasattr(self, "plugin_version"):
-            self.plugin_version = ""
-        if not hasattr(self, "plugin_description"):
-            self.plugin_description = ""
 
     @abstractmethod
     def get_components(self) -> list[type]:
