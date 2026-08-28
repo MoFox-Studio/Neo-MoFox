@@ -24,8 +24,8 @@ class BasePlugin(ABC):
 
     Note:
         版本号、描述、作者等元数据只在 manifest.json 中声明，插件类上不得重复定义。
-        运行时 ``plugin_version`` 由框架在插件实例化后从 manifest 注入
-        （见 ``PluginManager._inject_manifest_metadata``）；
+        运行时 ``plugin_version`` / ``plugin_description`` 由框架在插件实例化后
+        从 manifest 注入（见 ``PluginManager._inject_manifest_metadata``）；
         插件基类仅提供空字符串兜底，保证构造期间可安全读取。
         插件类若显式声明 ``plugin_version`` / ``plugin_description`` / ``plugin_author``，
         会被视为历史遗留冗余并触发 ``DeprecationWarning``。
@@ -52,6 +52,7 @@ class BasePlugin(ABC):
     # 插件元数据
     plugin_name: str = "unknown_plugin"
     plugin_version: str
+    plugin_description: str
 
     configs: list[type["BaseConfig"]] = []
 
@@ -65,8 +66,9 @@ class BasePlugin(ABC):
             config: 插件配置实例，可选
         """
         self.config = config
-        # 空字符串兜底：插件构造期间可安全读取，加载后被 manifest.version 覆盖
+        # 空字符串兜底：插件构造期间可安全读取，加载后被 manifest 值覆盖
         self.plugin_version = ""
+        self.plugin_description = ""
 
     @abstractmethod
     def get_components(self) -> list[type]:
