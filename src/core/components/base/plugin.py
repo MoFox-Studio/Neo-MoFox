@@ -18,11 +18,16 @@ class BasePlugin(ABC):
     插件是组件系统的核心单位，每个插件包含多个子组件。
 
     Class Attributes:
-        plugin_name: 插件名称（唯一标识符）
-        plugin_description: 插件描述
-        plugin_version: 插件版本
+        plugin_name: 插件名称（唯一标识符），必须与 manifest.json 的 name 一致
         configs: 插件配置类列表，会在插件实例化前优先加载
         dependencies: 依赖的其他组件列表，格式：["plugin_name:component_type:component_name"]
+
+    Note:
+        版本号、描述、作者等元数据只在 manifest.json 中声明，插件类上不重复定义。
+        运行时 ``plugin_version`` 由框架从 manifest 注入
+        （见 ``PluginManager._inject_manifest_metadata``）；
+        插件类若显式声明 ``plugin_version`` / ``plugin_description`` / ``plugin_author``，
+        会被视为历史遗留冗余并触发 ``DeprecationWarning``。
 
     Examples:
         >>> from src.core.components.loader import register_plugin
@@ -31,8 +36,6 @@ class BasePlugin(ABC):
         >>> @register_plugin
         ... class MyPlugin(BasePlugin):
         ...     plugin_name = "my_plugin"
-        ...     plugin_description = "我的插件"
-        ...     plugin_version = "1.0.0"
         ...
         ...     dependencies: list[str] = []
         ...
@@ -47,8 +50,6 @@ class BasePlugin(ABC):
 
     # 插件元数据
     plugin_name: str = "unknown_plugin"
-    plugin_description: str = "无描述"
-    plugin_version: str = "1.0.0"
 
     configs: list[type["BaseConfig"]] = []
 
@@ -102,4 +103,4 @@ class BasePlugin(ABC):
 
     def __repr__(self) -> str:
         """返回插件的字符串表示。"""
-        return f"<{self.__class__.__name__}(name={self.plugin_name}, version={self.plugin_version})>"
+        return f"<{self.__class__.__name__}(name={self.plugin_name})>"
