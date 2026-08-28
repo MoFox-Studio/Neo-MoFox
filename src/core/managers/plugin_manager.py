@@ -497,7 +497,7 @@ class PluginManager:
 
         将 ``manifest.version`` 写入 ``plugin_version``。若插件类在类级别显式
         声明了 ``plugin_version`` / ``plugin_description`` / ``plugin_author``，
-        发出弃用警告提醒移除，不影响插件加载运行。
+        视为历史遗留冗余，逐项发出弃用警告提醒移除，不影响插件加载运行。
 
         Args:
             plugin_instance: 已实例化的插件对象
@@ -505,19 +505,25 @@ class PluginManager:
         """
         import warnings
 
-        plugin_instance.plugin_version = manifest.version
+        manifest_version = manifest.version
+        plugin_instance.plugin_version = manifest_version
 
         declared_vars = vars(type(plugin_instance))
-        declared_version = declared_vars.get("plugin_version")
-        if declared_version is not None and declared_version != manifest.version:
+        if "plugin_version" in declared_vars:
+            declared_version = declared_vars["plugin_version"]
+            version_hint = (
+                f" ({declared_version}) 与 manifest.version ({manifest_version}) 不一致，"
+                if declared_version != manifest_version
+                else ""
+            )
             warnings.warn(
-                f"插件 '{plugin_instance.plugin_name}' 的类属性 plugin_version "
-                f"({declared_version}) 与 manifest.version ({manifest.version}) 不一致，"
+                f"插件 '{plugin_instance.plugin_name}' 的类属性 plugin_version"
+                f"{version_hint}"
                 "已弃用；版本号请只保留在 manifest.json",
                 DeprecationWarning,
                 stacklevel=3,
             )
-        if "plugin_description" in declared_vars and manifest.description:
+        if "plugin_description" in declared_vars:
             warnings.warn(
                 f"插件 '{plugin_instance.plugin_name}' 的类属性 plugin_description "
                 "已弃用；描述请只保留在 manifest.json",

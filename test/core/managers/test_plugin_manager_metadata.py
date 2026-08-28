@@ -2,7 +2,7 @@
 
 验证 ``PluginManager._inject_manifest_metadata``：
 - 以 ``manifest.version`` 为准注入 ``plugin_version``；
-- 插件类显式声明冗余元数据时触发 ``DeprecationWarning``；
+- 插件类显式声明冗余元数据时无条件触发 ``DeprecationWarning``；
 - 未声明冗余元数据时不触发警告。
 """
 
@@ -111,3 +111,65 @@ def test_warning_when_declared_version_mismatches_manifest() -> None:
     assert "9.9.9" in messages
     assert "3.0.0" in messages
     assert plugin.plugin_version == "3.0.0"
+
+
+def test_warning_when_declared_version_matches_manifest() -> None:
+    """声明版本与 manifest 一致时也应触发警告：声明即冗余。"""
+    manager = PluginManager()
+    plugin = _RedundantPlugin()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        manager._inject_manifest_metadata(plugin, _make_manifest("redundant_plugin", version="9.9.9"))
+
+    deprecations = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    messages = " | ".join(str(w.message) for w in deprecations)
+    assert "plugin_version" in messages
+    assert plugin.plugin_version == "9.9.9"
+
+
+def test_warning_when_manifest_description_empty() -> None:
+    """manifest 描述为空时，声明 plugin_description 仍应触发警告。"""
+    manager = PluginManager()
+    plugin = _RedundantPlugin()
+    manifest = PluginManifest(
+        name="redundant_plugin",
+        version="2.0.0",
+        description="",
+        author="manifest 作者",
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        manager._inject_manifest_metadata(plugin, manifest)
+
+    deprecations = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    messages = " | ".join(str(w.message) for w in deprecations)
+    assert "plugin_description" in messages
+
+
+def test_plugin_version_accessible_during_init() -> None:
+    """插件构造期间应可安全读取 plugin_version（基类空字符串兜底）。"""
+    class _InitReaderPlugin(BasePlugin):
+        """在构造期间读取 plugin_version 的插件。"""
+
+        plugin_name = "init_reader_plugin"
+
+        def __init__(self, config: object | None = None) -> None:
+            super().__init__(config)  # type: ignore[arg-type]
+            self.version_seen_in_init = self.plugin_version
+
+        def get_components(self) -> list[type]:
+            return []
+
+    plugin = _InitReaderPlugin()
+    assert plugin.version_seen_in_init == ""
+
+    manager = PluginManager()
+    manager._inject_manifest_metadata(plugin, _make_manifest("init_reader_plugin"))
+    # 注入后版本被 manifest 值覆盖
+    assert plugin.plugin_version == "2.0.0"
