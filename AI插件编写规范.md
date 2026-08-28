@@ -44,7 +44,8 @@ default_chatter:chatter:default_chatter
 - 必须使用 `@register_plugin` 装饰器。
 - 必须定义类属性 `plugin_name: str`。
 - 版本号、描述、作者等元数据**只在 `manifest.json` 中声明**，插件类上不重复定义。
-  运行时 `plugin_version` 由框架从 manifest 注入（见 `PluginManager._inject_manifest_metadata`）；
+  运行时 `plugin_version` / `plugin_description` 由框架从 manifest 注入
+  （见 `PluginManager._inject_manifest_metadata`）；
   插件类若再显式声明 `plugin_version` / `plugin_description` / `plugin_author`，
   会被视为历史遗留冗余并触发 `DeprecationWarning`（不影响加载运行）。
 - 如果插件有配置类，必须在 `configs: list[type]` 中声明。
