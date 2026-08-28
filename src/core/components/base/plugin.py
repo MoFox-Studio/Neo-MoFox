@@ -66,9 +66,12 @@ class BasePlugin(ABC):
             config: 插件配置实例，可选
         """
         self.config = config
-        # 空字符串兜底：插件构造期间可安全读取，加载后被 manifest 值覆盖
-        self.plugin_version = ""
-        self.plugin_description = ""
+        # 空字符串兜底：继承链未声明时保证构造期间可安全读取；
+        # 已声明（含旧插件类属性）时不遮蔽，加载后被 manifest 值覆盖
+        if not hasattr(self, "plugin_version"):
+            self.plugin_version = ""
+        if not hasattr(self, "plugin_description"):
+            self.plugin_description = ""
 
     @abstractmethod
     def get_components(self) -> list[type]:

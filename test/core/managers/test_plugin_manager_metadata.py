@@ -198,6 +198,35 @@ def test_plugin_description_accessible_during_init() -> None:
     assert plugin.plugin_description == "manifest 描述"
 
 
+def test_legacy_declared_metadata_not_shadowed_during_init() -> None:
+    """旧插件类级声明的元数据在构造期间不应被基类兜底遮蔽。"""
+    class _LegacyDeclaredPlugin(BasePlugin):
+        """类级声明了旧元数据的插件。"""
+
+        plugin_name = "legacy_declared_plugin"
+        plugin_version = "1.2.3"
+        plugin_description = "legacy 描述"
+
+        def __init__(self, config: object | None = None) -> None:
+            super().__init__(config)  # type: ignore[arg-type]
+            self.version_seen_in_init = self.plugin_version
+            self.description_seen_in_init = self.plugin_description
+
+        def get_components(self) -> list[type]:
+            return []
+
+    plugin = _LegacyDeclaredPlugin()
+    # 构造期间仍能读到插件自己声明的值
+    assert plugin.version_seen_in_init == "1.2.3"
+    assert plugin.description_seen_in_init == "legacy 描述"
+
+    manager = PluginManager()
+    manager._inject_manifest_metadata(plugin, _make_manifest("legacy_declared_plugin"))
+    # 注入后被 manifest 值覆盖（manifest 为最终权威来源）
+    assert plugin.plugin_version == "2.0.0"
+    assert plugin.plugin_description == "manifest 描述"
+
+
 def test_warning_on_metadata_declared_in_intermediate_base() -> None:
     """中间基类声明的冗余元数据也应触发警告（MRO 遍历检测）。"""
     class _LegacyBase(BasePlugin):
