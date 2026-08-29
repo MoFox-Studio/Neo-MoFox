@@ -2,7 +2,7 @@ import asyncio
 import io
 import time
 import weakref
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import orjson
@@ -443,6 +443,16 @@ async def get_forward_message(
     if not forward_message_data:
         logger.warning("转发消息内容为空")
         return None
+
+    # 内联 content 优先：本地/离线转发段会直接携带完整节点列表且通常没有
+    # data.id，此时按 id 调 API 拉取必然失败，直接使用内联内容即可。
+    inline_content = forward_message_data.get("content")
+    if isinstance(inline_content, dict):
+        inline_content = [inline_content]
+    if isinstance(inline_content, list) and inline_content:
+        logger.debug("转发消息携带内联 content，跳过 API 拉取")
+        return cast("list[dict[str, Any]]", inline_content)
+
     forward_message_id = forward_message_data.get("id")
 
     try:
