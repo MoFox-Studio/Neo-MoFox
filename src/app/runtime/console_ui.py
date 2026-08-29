@@ -177,7 +177,7 @@ class ConsoleUIManager:
         而不是为每个阶段单独打印一行。
 
         Args:
-            total_steps: 固定初始化步骤数（不含插件加载）
+            total_steps: 固定初始化步骤数（不含插件子进度）
 
         Yields:
             None
