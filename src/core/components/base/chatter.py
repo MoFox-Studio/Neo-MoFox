@@ -180,7 +180,8 @@ class BaseChatter(BaseComponent):
         """修改 LLMUsable 组件列表。
 
         将传入的组件类按 Action/Agent/Tool 分流，委托给各 ``*_api`` 封装
-        的筛选逻辑做上下文过滤（chatter_allow、关联类型、激活判定等）。
+        的筛选逻辑做上下文过滤（chat_type、chatter_allow、关联类型、
+        激活判定等）。
         仅对传入列表筛选，不从聊天流或全局注册表获取组件。
 
         Args:
@@ -190,6 +191,7 @@ class BaseChatter(BaseComponent):
             list[type[LLMUsable]]: 修改后的组件列表
         """
         from src.app.plugin_system.api import action_api, agent_api, tool_api
+        from src.core.managers import get_stream_manager
 
         logger = get_logger("chatter", display="聊天器", color=COLOR.MAGENTA)
 
@@ -220,23 +222,32 @@ class BaseChatter(BaseComponent):
 
         chatter_signature = self.get_signature() or ""
 
+        # 读取当前流的聊天类型，供筛选判定组件声明的 chat_type；
+        # 缺失时筛选会按 ChatType.ALL 判定，声明了具体类型的组件将被全部剔除
+        chat_stream = await get_stream_manager().get_or_create_stream(
+            stream_id=self.stream_id
+        )
+
         filtered_actions = await action_api.filter_actions(
             action_classes,
             stream_id=self.stream_id,
             chatter_name=self.name,
             chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
         )
         filtered_agents = await agent_api.filter_agents(
             agent_classes,
             stream_id=self.stream_id,
             chatter_name=self.name,
             chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
         )
         filtered_tools = await tool_api.filter_tools(
             tool_classes,
             stream_id=self.stream_id,
             chatter_name=self.name,
             chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
         )
 
         logger.info(
