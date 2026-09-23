@@ -267,6 +267,7 @@ class TestBaseChatter:
 
         mock_stream = MagicMock()
         mock_stream.stream_id = "stream_123"
+        mock_stream.chat_type = "group"
         mock_stream.context = MagicMock()
         mock_stream.context.current_message = None
 
@@ -312,6 +313,7 @@ class TestBaseChatter:
 
         mock_stream = MagicMock()
         mock_stream.stream_id = "stream_123"
+        mock_stream.chat_type = "group"
         mock_stream.context = MagicMock()
 
         with patch("src.core.managers.get_stream_manager") as mock_sm:
@@ -347,6 +349,7 @@ class TestBaseChatter:
 
         mock_stream = MagicMock()
         mock_stream.stream_id = "stream_123"
+        mock_stream.chat_type = "group"
         mock_stream.context = MagicMock()
         mock_stream.context.current_message = current_message
         mock_stream.context.check_types.return_value = False
@@ -357,6 +360,57 @@ class TestBaseChatter:
             result = await chatter.modify_llm_usables([EmojiAction])
 
         assert EmojiAction not in result
+
+    @pytest.mark.asyncio
+    async def test_modify_llm_usables_keeps_components_of_current_chat_type(self):
+        """声明了当前流聊天类型的组件不应被剔除。
+
+        chatter 未把流的 chat_type 传给筛选时，筛选默认按 ``ChatType.ALL`` 判定，
+        会把声明了 GROUP/PRIVATE 的组件全部剔除；本用例锁定该回归。
+        """
+
+        class GroupAction(BaseAction):
+            name = "group_action"
+            description = "group only"
+            chat_type = ChatType.GROUP
+            associated_types = ["text"]
+
+            async def execute(self) -> tuple[bool, str]:
+                return True, "ok"
+
+        class PrivateTool(BaseTool):
+            name = "private_tool"
+            description = "private only"
+            chat_type = ChatType.PRIVATE
+
+            async def execute(self) -> tuple[bool, str]:
+                return True, "ok"
+
+        class OpenTool(BaseTool):
+            name = "open_tool"
+            description = "no chat_type restriction"
+
+            async def execute(self) -> tuple[bool, str]:
+                return True, "ok"
+
+        chatter_plugin = MagicMock()
+        chatter = ConcreteChatter("stream_123", chatter_plugin)
+
+        mock_stream = MagicMock()
+        mock_stream.stream_id = "stream_123"
+        mock_stream.chat_type = "group"
+        mock_stream.context = MagicMock()
+        mock_stream.context.current_message = None
+        mock_stream.context.check_types.return_value = True
+
+        with patch("src.core.managers.get_stream_manager") as mock_sm:
+            mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
+
+            result = await chatter.modify_llm_usables([GroupAction, PrivateTool, OpenTool])
+
+        assert GroupAction in result
+        assert OpenTool in result
+        assert PrivateTool not in result
 
     @pytest.mark.asyncio
     async def test_exec_llm_usable_uses_owner_plugin_instance(self):
