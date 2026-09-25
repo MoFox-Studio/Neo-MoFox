@@ -134,6 +134,7 @@ class MessageSender:
             self._apply_platform_message_id(message, result.message_id)
 
             # 7. 写入历史消息
+            await self._store_sent_media(message)
             await self._persist_sent_message_to_history(message)
             await self._emit_sent_event(message, envelope, adapter_signature)
 
@@ -172,6 +173,55 @@ class MessageSender:
         """
         if isinstance(message_id, str) and message_id:
             message.message_id = message_id
+
+    async def _store_sent_media(self, message: "Message") -> None:
+        """将成功发送的二进制媒体登记入库，并在历史文本中标出可回查 ID。"""
+        if not isinstance(message.content, dict):
+            return
+        media_items = message.content.get("media")
+        if not isinstance(media_items, list):
+            return
+
+        from src.core.managers.media_manager import MediaManager, get_media_manager
+
+        manager = None
+        labels = {"image": "图片", "emoji": "表情包", "voice": "语音", "video": "视频"}
+        id_keys = {"image": "image_id", "emoji": "image_id", "voice": "voice_id", "video": "video_id"}
+        for item in media_items:
+            if not isinstance(item, dict):
+                continue
+            media_type = item.get("type")
+            if media_type not in labels:
+                continue
+            data = item.get("data")
+            media_id = item.get(id_keys[media_type])
+            if not isinstance(data, str) or not data.startswith(("base64|", "data:")):
+                item.pop(id_keys[media_type], None)
+                continue
+            expected_id = MediaManager.compute_media_hash(data)
+            if media_id != expected_id:
+                item[id_keys[media_type]] = expected_id
+            media_id = expected_id
+            try:
+                if manager is None:
+                    manager = get_media_manager()
+                stored = await manager.store_media(data, media_type)
+            except Exception as exc:
+                logger.warning(f"已发送媒体入库失败: {media_type}, error={exc}")
+                stored = False
+            if not stored:
+                item.pop(id_keys[media_type], None)
+                continue
+
+            placeholder = f"[{labels[media_type]}]"
+            identified = f"[{labels[media_type]}({media_id})]"
+            text = message.processed_plain_text or message.content.get("text") or ""
+            message.processed_plain_text = (
+                text.replace(placeholder, identified, 1)
+                if placeholder in text
+                else f"{text} {identified}".strip()
+            )
+            message.content["text"] = message.processed_plain_text
 
     async def _apply_bot_sender_info(self, message: "Message", adapter: Any) -> None:
         """在发送前将消息发送者信息设置为 Bot 信息。"""

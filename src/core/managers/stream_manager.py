@@ -43,11 +43,12 @@ _BINARY_MEDIA_TYPES: frozenset[str] = frozenset(
 def _strip_media_data(item: dict[str, Any]) -> dict[str, Any]:
     """移除二进制媒体项的 data 字段，保留其余元信息。
 
-    媒体项的媒体 ID（``image_id`` / ``voice_id`` / ``video_id``）由
-    ``MessageConverter`` 在创建媒体项时注入，此处剔除 ``data`` 后媒体 ID
-    自然保留，便于后续按哈希回查 Images/Voices/Videos 表。
+    二进制项保留媒体 ID 供回查；URL 是资源引用，保留原始地址。
     """
-    if item.get("data") is None:
+    if item.get("data") is None or (
+        isinstance(item.get("data"), str)
+        and item["data"].startswith(("http://", "https://"))
+    ):
         return item
 
     return {key: value for key, value in item.items() if key != "data"}
@@ -115,12 +116,11 @@ def _parse_db_content(content: Any) -> dict[str, Any] | None:
 
 
 async def _restore_media_data_from_db(content: Any) -> Any:
-    """按媒体 ID 从媒体表回查 base64，补齐历史消息的图片数据。
+    """按媒体 ID 从媒体表回查 base64，补齐历史消息的媒体数据。
 
     ``_serialize_content_for_db`` 入库时剔除了二进制 media 的 ``data`` 字段，
-    历史消息反序列化后 content 里的 media 项只有 ``image_id`` 等元信息、无
-    base64。此函数按 ``image_id`` 回查 Images 表读取文件并编码 base64，
-    使历史图片在 native 多模态下仍可内联。
+    历史消息反序列化后仅保留媒体 ID。此函数按图片、语音或视频 ID
+    回查文件并编码为 base64，供后续处理使用。
 
     返回与传入 ``content`` 同构的结构：dict 返回回填后的 dict，纯字符串
     原样返回，保证调用方对 content 的访问路径一致。
@@ -143,21 +143,23 @@ async def _restore_media_data_from_db(content: Any) -> Any:
     for item in media:
         if not isinstance(item, dict):
             continue
-        image_id = item.get("image_id")
+        media_id = (
+            item.get("image_id") or item.get("voice_id") or item.get("video_id")
+        )
         # 仅对缺失 data 的二进制媒体回查；已带 data（旧数据）直接保留
-        if item.get("data") is not None or not isinstance(image_id, str) or not image_id:
+        if item.get("data") is not None or not isinstance(media_id, str) or not media_id:
             restored.append(item)
             continue
         try:
             from src.core.managers.media_manager import get_media_manager
 
-            data = await get_media_manager().get_media_file(image_id)
+            data = await get_media_manager().get_media_file(media_id)
             if data:
                 restored.append({**item, "data": data})
                 continue
         except Exception as exc:
             logger.warning(
-                f"回查媒体 base64 失败: image_id={image_id[:8]}, error={exc}"
+                f"回查媒体 base64 失败: media_id={media_id[:8]}, error={exc}"
             )
         restored.append(item)
 

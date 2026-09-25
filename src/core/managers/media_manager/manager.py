@@ -131,6 +131,10 @@ class MediaManager:
     # 公共 API：媒体识别
     # ──────────────────────────────────────────
 
+    async def store_media(self, base64_data: str, media_type: str) -> bool:
+        """持久化发出的媒体文件与索引，不触发 VLM/ASR。"""
+        return await self._recognition.store_media(base64_data, media_type)
+
     async def recognize_media(
         self,
         base64_data: str,
@@ -306,7 +310,7 @@ class MediaManager:
     async def get_media_file(self, media_hash: str) -> str | None:
         """根据媒体哈希读取落盘文件的 base64 内容。
 
-        先经 ``get_media_info`` 获取媒体记录的 path，再按该路径读文件并
+        按图片、语音、视频顺序查询媒体记录的 path，再按该路径读文件并
         编码为 base64。文件不存在或读取失败时返回 None（例如已被清理）。
 
         Args:
@@ -315,7 +319,11 @@ class MediaManager:
         Returns:
             base64 编码的文件内容；文件不存在或读取失败时返回 None
         """
-        info = await self._repository.get_media_info(media_hash)
+        info = (
+            await self._repository.get_media_info(media_hash)
+            or await self._repository.get_voice_info(media_hash)
+            or await self._repository.get_video_info(media_hash)
+        )
         if not info:
             return None
         file_path = info.get("path")

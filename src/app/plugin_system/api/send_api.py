@@ -24,9 +24,8 @@ def _build_media_content(
     采用相同的数据结构 ``{"text": ..., "media": [{"type", "data", "id"}]}``，
     避免裸 base64 作为 ``Message.content`` 落库后被当作文本参与 token 计数。
 
-    媒体 ``data`` 经 ``normalize_base64`` 规范化、``id`` 用与 MediaManager 识别
-    流程相同的哈希算法计算，保证发送端媒体的 ``image_id`` / ``voice_id`` /
-    ``video_id`` 可在媒体表中回查，与接收端媒体项完全对称。
+    base64 媒体经 ``normalize_base64`` 规范化，``id`` 用 MediaManager
+    相同的哈希算法计算；URL 媒体不生成 ID，由平台自行获取资源。
 
     Args:
         media_type: 媒体段类型（``image`` / ``emoji`` / ``voice`` / ``video``）。
@@ -39,6 +38,9 @@ def _build_media_content(
     """
     from src.core.managers.media_manager import MediaManager
     from src.core.transport.message_receive.utils import normalize_base64
+
+    if media_data.startswith(("http://", "https://")):
+        return {"text": text, "media": [{"type": media_type, "data": media_data}]}
 
     normalized_data = normalize_base64(media_data)
     return {

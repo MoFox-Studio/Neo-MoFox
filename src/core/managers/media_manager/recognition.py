@@ -46,6 +46,31 @@ class MediaRecognition:
         self._vlm_engine = vlm_engine
         self._asr_engine = asr_engine
 
+    async def store_media(self, base64_data: str, media_type: str) -> bool:
+        """保存媒体文件及索引，不调用识别引擎。"""
+        if media_type not in {"image", "emoji", "voice", "video"}:
+            return False
+        media_hash = compute_hash(base64_data)
+        pending_path = await self._file_store.save_to_pending(
+            base64_data, media_hash, media_type
+        )
+        await self._file_store.move_to_category_folder(
+            pending_path, media_type, media_hash
+        )
+        target_path = self._file_store.category_folder_for(media_type) / pending_path.name
+        if not target_path.is_file():
+            return False
+        await self._repository.save_recognized_media(
+            media_hash, media_type, str(target_path), description=None, processed=False
+        )
+        if media_type == "voice":
+            info = await self._repository.get_voice_info(media_hash)
+        elif media_type == "video":
+            info = await self._repository.get_video_info(media_hash)
+        else:
+            info = await self._repository.get_media_info(media_hash)
+        return bool(info and info.get("path") == str(target_path))
+
     async def recognize_media(
         self,
         base64_data: str,

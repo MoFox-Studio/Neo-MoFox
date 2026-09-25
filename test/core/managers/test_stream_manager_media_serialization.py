@@ -51,6 +51,12 @@ def test_serialize_content_for_db_keeps_text_message() -> None:
     assert _serialize_content_for_db("你好") == "你好"
 
 
+def test_serialize_content_for_db_keeps_url_media_data() -> None:
+    """URL 是媒体引用，不是二进制数据，历史中应保留原始地址。"""
+    content = {"text": "[视频]", "media": [{"type": "video", "data": "https://example.org/clip.mp4"}]}
+    assert _parse_db_content(_serialize_content_for_db(content)) == content
+
+
 def test_content_to_plain_text_extracts_text_field() -> None:
     """含媒体 content 应提取 text 字段，不把 base64 当文本。"""
     content: dict[str, Any] = {
@@ -109,6 +115,22 @@ async def test_restore_media_data_from_db_fills_missing_base64() -> None:
     assert restored["media"][0]["data"] == "iVBORw0KGgo="
     assert restored["media"][0]["image_id"] == "img1"
     mock_manager.get_media_file.assert_awaited_once_with("img1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_type,id_key", [("voice", "voice_id"), ("video", "video_id")])
+async def test_restore_media_data_from_db_fills_voice_and_video(
+    media_type: str, id_key: str
+) -> None:
+    """语音和视频历史用各自的 ID 字段回填媒体数据。"""
+    content = {"text": "", "media": [{"type": media_type, id_key: "media1"}]}
+    mock_manager = AsyncMock()
+    mock_manager.get_media_file.return_value = "aGVsbG8="
+    with patch("src.core.managers.media_manager.get_media_manager", return_value=mock_manager):
+        restored = await _restore_media_data_from_db(_serialize_content_for_db(content))
+
+    assert restored["media"][0]["data"] == "aGVsbG8="
+    mock_manager.get_media_file.assert_awaited_once_with("media1")
 
 
 @pytest.mark.asyncio
