@@ -57,3 +57,16 @@ def test_build_media_content_keeps_existing_prefix() -> None:
         )
 
     assert content["media"][0]["data"] == "base64|iVBORw0KGgo="
+
+
+def test_build_media_content_url_has_no_cached_id() -> None:
+    """URL 媒体未下载时不产生承诺可回查的 ID。"""
+    with patch(
+        "src.core.managers.media_manager.MediaManager.compute_media_hash"
+    ) as mock_hash:
+        content = _build_media_content(
+            "video", "https://example.org/video.mp4", "[视频]", "video_id"
+        )
+
+    assert content["media"] == [{"type": "video", "data": "https://example.org/video.mp4"}]
+    mock_hash.assert_not_called()
