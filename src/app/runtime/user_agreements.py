@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 import tomllib
 from hashlib import sha256
@@ -104,6 +105,10 @@ def _prompt_for_choice(
         ),
         title=title,
     )
+
+    if input_func is input and not sys.stdin.isatty():
+        ui.display_warning("当前终端不可交互，请设置协议确认环境变量后再启动。")
+        return False
 
     while True:
         try:
