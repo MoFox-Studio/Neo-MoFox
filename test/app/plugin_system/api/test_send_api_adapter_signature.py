@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from src.app.plugin_system.api import send_api
-from src.core.models.message import MessageType
+from src.core.models.message import Message, MessageType
 
 
 @dataclass
@@ -182,6 +183,59 @@ async def test_send_image_with_adapter_signature_passes_through(
     assert ok is True
     assert captured.adapter_signature == "onebot:adapter:napcat"
     assert getattr(captured.message, "message_type") == MessageType.IMAGE
+
+
+@pytest.mark.asyncio
+async def test_send_voice_explicit_text_uses_provided_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """语音调用者提供的文字应原样进入历史，而非被占位符改写。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+    recognize = AsyncMock()
+    monkeypatch.setattr("src.app.plugin_system.api.media_api.recognize_media", recognize)
+
+    text = "  明天十点开会 [语音]  "
+    assert await send_api.send_voice(
+        "aGVsbG8=", "some_stream", processed_plain_text=text,
+        adapter_signature="onebot:adapter:napcat",
+    )
+    recognize.assert_not_awaited()
+    message = captured.message
+    assert isinstance(message, Message)
+    assert isinstance(message.content, dict)
+    assert message.processed_plain_text == text
+    assert message.content["text"] == text
+    assert message.content["media"][0]["context_mode"] == "provided"
+
+
+@pytest.mark.asyncio
+async def test_send_voice_without_text_keeps_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未指定文字时语音仍使用现有的占位符历史。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+
+    assert await send_api.send_voice(
+        "aGVsbG8=", "some_stream", adapter_signature="onebot:adapter:napcat",
+    )
+    message = captured.message
+    assert isinstance(message, Message)
+    assert isinstance(message.content, dict)
+    assert message.processed_plain_text == "[语音]"
+    assert "context_mode" not in message.content["media"][0]
+
+
+@pytest.mark.asyncio
+async def test_send_voice_rejects_blank_explicit_text() -> None:
+    """显式传入空白语音文字不能作为有效上下文。"""
+    with pytest.raises(ValueError, match="processed_plain_text"):
+        await send_api.send_voice("aGVsbG8=", "some_stream", processed_plain_text="  ")
 
 
 @pytest.mark.asyncio

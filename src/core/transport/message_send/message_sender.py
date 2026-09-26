@@ -213,6 +213,9 @@ class MessageSender:
                 item.pop(id_keys[media_type], None)
                 continue
 
+            if item.get("context_mode") == "provided":
+                continue
+
             placeholder = f"[{labels[media_type]}]"
             identified = f"[{labels[media_type]}({media_id})]"
             text = message.processed_plain_text or message.content.get("text") or ""

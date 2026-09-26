@@ -190,7 +190,7 @@ async def send_voice(
     voice_data: str,
     stream_id: str,
     platform: str | None = None,
-    processed_plain_text: str = "[语音]",
+    processed_plain_text: str | None = None,
     adapter_signature: str | None = None,
 ) -> bool:
     """发送语音消息
@@ -199,7 +199,8 @@ async def send_voice(
         voice_data: 语音数据（base64 或 URL）
         stream_id: 聊天流 ID
         platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
-        processed_plain_text: 人类可读文本（可选）
+        processed_plain_text: 可选的语音上下文文字；提供时原样保留，不调用识别服务。
+                      不提供时使用默认占位符。
         adapter_signature: 目标适配器组件签名（可选），格式为
                            ``plugin_name:adapter:adapter_name``；指定后直接通过该
                            适配器发送，不再按 platform 推断
@@ -214,14 +215,20 @@ async def send_voice(
             adapter_signature="onebot:adapter:napcat"
         )
     """
+    if processed_plain_text is not None and not processed_plain_text.strip():
+        raise ValueError("processed_plain_text 不能只包含空白字符")
+
+    text = processed_plain_text if processed_plain_text is not None else "[语音]"
+    content = _build_media_content("voice", voice_data, text, "voice_id")
+    if processed_plain_text is not None:
+        content["media"][0]["context_mode"] = "provided"
+
     return await _send_message(
-        content=_build_media_content(
-            "voice", voice_data, processed_plain_text, "voice_id"
-        ),
+        content=content,
         message_type=MessageType.VOICE,
         stream_id=stream_id,
         platform=platform,
-        processed_plain_text=processed_plain_text,
+        processed_plain_text=text,
         adapter_signature=adapter_signature,
     )
 

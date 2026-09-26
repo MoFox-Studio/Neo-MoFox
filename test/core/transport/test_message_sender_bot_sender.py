@@ -246,6 +246,45 @@ async def test_sent_image_is_cached_before_history(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
+async def test_sent_voice_keeps_explicit_text_after_caching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已缓存的语音保留调用者原文，媒体 ID 只存于媒体项。"""
+    sender = MessageSender()
+    adapter = SimpleNamespace(
+        get_bot_info=AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
+        _send_platform_message=AsyncMock(return_value=PlatformSendResult(success=True)),
+    )
+    sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
+    sender._converter = SimpleNamespace(  # type: ignore[assignment]
+        message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
+    )
+    media_manager = SimpleNamespace(store_media=AsyncMock(return_value=True))
+    monkeypatch.setattr("src.core.managers.media_manager.get_media_manager", lambda: media_manager)
+    stream_manager = SimpleNamespace(
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
+    )
+    monkeypatch.setattr("src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager)
+    text = "  明天十点开会 [语音]  "
+    message = Message(
+        message_id="voice-1",
+        content={"text": text, "media": [{
+            "type": "voice", "data": "base64|aGVsbG8=", "context_mode": "provided",
+        }]},
+        processed_plain_text=text,
+        message_type=MessageType.VOICE,
+        platform="qq", chat_type="group", stream_id="stream-1",
+    )
+
+    assert await sender.send_message(message, adapter_signature="mock:adapter:qq")
+    media_manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", "voice")
+    assert message.content["media"][0]["voice_id"]
+    assert message.processed_plain_text == text
+    assert message.content["text"] == text
+    stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+
+
+@pytest.mark.asyncio
 async def test_sent_image_store_failure_drops_unusable_id(monkeypatch: pytest.MonkeyPatch) -> None:
     """已发出但入库失败时，历史不能留下不可回查的媒体 ID。"""
     sender = MessageSender()
