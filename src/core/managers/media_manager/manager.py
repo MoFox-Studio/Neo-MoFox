@@ -132,7 +132,15 @@ class MediaManager:
     # ──────────────────────────────────────────
 
     async def store_media(self, base64_data: str, media_type: str) -> bool:
-        """持久化发出的媒体文件与索引，不触发 VLM/ASR。"""
+        """持久化发出的媒体文件与索引，不触发 VLM/ASR。
+
+        Args:
+            base64_data: 待存储的 base64 媒体数据。
+            media_type: 媒体类型，支持 image、emoji、voice、video。
+
+        Returns:
+            媒体文件和索引可回查时返回 True；类型不支持或回查校验失败时返回 False。
+        """
         return await self._recognition.store_media(base64_data, media_type)
 
     async def recognize_media(

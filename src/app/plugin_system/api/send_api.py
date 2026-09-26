@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from src.core.models.message import Message, MessageType
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 
 def _build_media_content(

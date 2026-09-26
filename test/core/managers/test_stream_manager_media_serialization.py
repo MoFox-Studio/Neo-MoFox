@@ -51,9 +51,10 @@ def test_serialize_content_for_db_keeps_text_message() -> None:
     assert _serialize_content_for_db("你好") == "你好"
 
 
-def test_serialize_content_for_db_keeps_url_media_data() -> None:
+@pytest.mark.parametrize("media_url", ["https://example.org/clip.mp4", "file:///media/clip.mp4"])
+def test_serialize_content_for_db_keeps_url_media_data(media_url: str) -> None:
     """URL 是媒体引用，不是二进制数据，历史中应保留原始地址。"""
-    content = {"text": "[视频]", "media": [{"type": "video", "data": "https://example.org/clip.mp4"}]}
+    content = {"text": "[视频]", "media": [{"type": "video", "data": media_url}]}
     assert _parse_db_content(_serialize_content_for_db(content)) == content
 
 

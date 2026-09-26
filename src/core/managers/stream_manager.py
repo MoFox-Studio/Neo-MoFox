@@ -47,7 +47,7 @@ def _strip_media_data(item: dict[str, Any]) -> dict[str, Any]:
     """
     if item.get("data") is None or (
         isinstance(item.get("data"), str)
-        and item["data"].startswith(("http://", "https://"))
+        and item["data"].startswith(("http://", "https://", "file://"))
     ):
         return item
 

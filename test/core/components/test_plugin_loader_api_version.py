@@ -132,6 +132,18 @@ def test_dict_api_version_current_versions_compatible() -> None:
     assert "兼容" in reason
 
 
+def test_send_api_minor_version_accepts_existing_plugins() -> None:
+    """send_api 1.1.0 同时接受要求 1.0.0 和 1.1.0 的插件。"""
+    loader = PluginLoader()
+    assert PLUGIN_API_VERSIONS["send_api"] == "1.1.0"
+    assert loader._check_api_version_compatibility(
+        _manifest(api_version={"send_api": "1.0.0"})
+    )[0] is True
+    assert loader._check_api_version_compatibility(
+        _manifest(api_version={"send_api": "1.1.0"})
+    )[0] is True
+
+
 def test_dict_api_version_major_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """dict 形式，单模块 major 不匹配，应被拒绝。"""
     _patch_api_version(monkeypatch, "llm_api", "2.0.0")

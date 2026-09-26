@@ -48,7 +48,17 @@ class MediaRecognition:
         self._asr_engine = asr_engine
 
     async def store_media(self, base64_data: str, media_type: str) -> bool:
-        """保存媒体文件及索引，不调用识别引擎。"""
+        """保存发出的媒体文件及索引，不调用识别引擎。
+
+        已登记且文件仍存在的媒体直接复用；仅在文件和索引均可回查时成功。
+
+        Args:
+            base64_data: 待存储的 base64 媒体数据。
+            media_type: 媒体类型，支持 image、emoji、voice、video。
+
+        Returns:
+            媒体文件和索引可回查时返回 True；类型不支持或回查校验失败时返回 False。
+        """
         if media_type not in {"image", "emoji", "voice", "video"}:
             return False
         media_hash = compute_hash(base64_data)
