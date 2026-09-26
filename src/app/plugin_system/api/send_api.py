@@ -25,11 +25,11 @@ def _build_media_content(
     避免裸 base64 作为 ``Message.content`` 落库后被当作文本参与 token 计数。
 
     base64 媒体经 ``normalize_base64`` 规范化，``id`` 用 MediaManager
-    相同的哈希算法计算；HTTP(S)/file URL 不生成 ID，由平台自行获取资源。
+    相同的哈希算法计算；URL 由 ``send_media`` 入口拒绝。
 
     Args:
         media_type: 媒体段类型（``image`` / ``emoji`` / ``voice`` / ``video``）。
-        media_data: 媒体数据（base64、HTTP(S) 或 file URL）。
+        media_data: base64 媒体数据。
         text: 消息的人类可读文本（占位符，如 ``[图片]``）。
         media_id_key: 媒体 ID 字段名（``image_id`` / ``voice_id`` / ``video_id``）。
 
@@ -38,9 +38,6 @@ def _build_media_content(
     """
     from src.core.managers.media_manager import MediaManager
     from src.core.transport.message_receive.utils import normalize_base64
-
-    if media_data.startswith(("http://", "https://", "file://")):
-        return {"text": text, "media": [{"type": media_type, "data": media_data}]}
 
     normalized_data = normalize_base64(media_data)
     return {
@@ -61,7 +58,7 @@ def _build_media_content(
 
 
 MediaType = Literal["image", "emoji", "voice", "video"]
-MediaContextMode = Literal["placeholder", "provided", "caption", "description", "native"]
+MediaContextMode = Literal["placeholder", "description", "native"]
 
 
 async def send_media(
@@ -77,22 +74,21 @@ async def send_media(
 ) -> bool:
     """发送并缓存媒体，指定此条消息后续在聊天上下文中的表达方式。
 
-    ``placeholder`` 对可缓存媒体保留媒体 ID 占位符；``provided`` 原样保留调用者提供的
-    上下文文本；``caption`` 将调用者文本写入媒体描述占位符，缓存成功后附加媒体 ID，
+    ``placeholder`` 保留媒体类型及可回查 ID；调用者提供文字时作为媒体描述，
     不调用识别服务；
     ``description`` 调用相应媒体识别 API 并附加描述；
     ``native`` 请求聊天流程将原始媒体内联到模型请求中，当前仅支持图片。
-    URL 资源不支持识别或原生内联，文件 URL 是否可发送取决于适配器。
+    资源 URL 未进入可回查的媒体缓存，不能通过此接口发送。
 
     Args:
         media_type: 图片、表情包、语音或视频类型。
         media_data: base64、HTTP(S) 或 file URL 媒体数据。
         stream_id: 聊天流 ID。
         platform: 平台名称，可从聊天流推断。
-        processed_plain_text: 供历史消息与模型阅读的文本；provided 和 caption 模式必填且非空。
+        processed_plain_text: 可选的调用者媒体描述；默认模式不触发识别。
         reply_to: 被回复的消息 ID。
         adapter_signature: 指定发送目标适配器组件签名。
-        context_mode: 历史消息的上下文表达模式；provided 和 caption 不会调用识别服务。
+        context_mode: 历史消息的上下文表达模式。
 
     Returns:
         是否发送成功。
@@ -104,33 +100,28 @@ async def send_media(
     labels = {"image": "图片", "emoji": "表情包", "voice": "语音", "video": "视频"}
     if media_type not in id_keys:
         raise ValueError(f"不支持的媒体类型: {media_type}")
-    if context_mode not in ("placeholder", "provided", "caption", "description", "native"):
+    if context_mode not in ("placeholder", "description", "native"):
         raise ValueError(f"不支持的上下文模式: {context_mode}")
     if context_mode == "native" and media_type != "image":
         raise ValueError(f"{media_type} 不支持 native 上下文模式")
-    if context_mode in ("provided", "caption") and (
-        not isinstance(processed_plain_text, str) or not processed_plain_text.strip()
-    ):
-        raise ValueError(f"{context_mode} 模式要求非空 processed_plain_text")
-
-    if context_mode == "caption":
-        text = f"[{labels[media_type]}:{processed_plain_text}]"
-    else:
-        text = processed_plain_text if processed_plain_text is not None else f"[{labels[media_type]}]"
+    if media_data.startswith(("http://", "https://", "file://")):
+        raise ValueError("URL 媒体未缓存，无法获得可回查的媒体 ID")
+    description_text = processed_plain_text.strip() if processed_plain_text else ""
+    placeholder = f"[{labels[media_type]}]"
+    described_prefix = f"[{labels[media_type]}:"
+    if description_text == placeholder:
+        description_text = ""
+    elif description_text.startswith(described_prefix) and description_text.endswith("]"):
+        description_text = description_text[len(described_prefix):-1]
+    text = f"[{labels[media_type]}:{description_text}]" if description_text else placeholder
     content = _build_media_content(media_type, media_data, text, id_keys[media_type])
-    if context_mode in ("description", "native") and id_keys[media_type] not in content["media"][0]:
-        raise ValueError(f"URL 媒体不支持 {context_mode} 上下文模式")
     if context_mode == "description":
         from src.app.plugin_system.api.media_api import recognize_media
 
         description = await recognize_media(media_data, media_type)
         if description and description.strip():
-            placeholder = f"[{labels[media_type]}]"
             described = f"[{labels[media_type]}:{description.strip()}]"
-            text = (
-                text.replace(placeholder, described, 1)
-                if placeholder in text else f"{text} {described}".strip()
-            )
+            text = described
             content["text"] = text
         else:
             context_mode = "placeholder"
@@ -231,10 +222,7 @@ async def send_image(
         processed_plain_text=processed_plain_text,
         reply_to=reply_to,
         adapter_signature=adapter_signature,
-        context_mode=(
-            "native" if include_in_context and not image_data.startswith(("http://", "https://", "file://"))
-            else "placeholder"
-        ),
+        context_mode="native" if include_in_context else "placeholder",
     )
 
 
@@ -309,22 +297,9 @@ async def send_voice(
     if processed_plain_text is not None and not processed_plain_text.strip():
         raise ValueError("processed_plain_text 不能只包含空白字符")
 
-    if processed_plain_text is not None:
-        return await send_media(
-            "voice", voice_data, stream_id, platform=platform,
-            processed_plain_text=processed_plain_text,
-            adapter_signature=adapter_signature, context_mode="caption",
-        )
-
-    text = "[语音]"
-    content = _build_media_content("voice", voice_data, text, "voice_id")
-
-    return await _send_message(
-        content=content,
-        message_type=MessageType.VOICE,
-        stream_id=stream_id,
-        platform=platform,
-        processed_plain_text=text,
+    return await send_media(
+        "voice", voice_data, stream_id, platform=platform,
+        processed_plain_text=processed_plain_text,
         adapter_signature=adapter_signature,
     )
 

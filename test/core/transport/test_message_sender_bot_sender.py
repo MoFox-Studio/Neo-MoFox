@@ -149,7 +149,7 @@ async def test_send_message_keeps_placeholder_id_when_platform_returns_none(
 async def test_send_message_returns_false_and_skips_history_when_send_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """适配器发送失败时不登记媒体，也不写入历史。"""
+    """适配器发送失败时媒体可已缓存，但不写入历史。"""
     sender = MessageSender()
 
     adapter = SimpleNamespace(
@@ -175,7 +175,7 @@ async def test_send_message_returns_false_and_skips_history_when_send_fails(
         "src.core.managers.stream_manager.get_stream_manager",
         lambda: fake_stream_manager,
     )
-    media_manager = SimpleNamespace(store_media=AsyncMock())
+    media_manager = SimpleNamespace(store_media=AsyncMock(return_value=True))
     monkeypatch.setattr(
         "src.core.managers.media_manager.get_media_manager", lambda: media_manager
     )
@@ -195,7 +195,7 @@ async def test_send_message_returns_false_and_skips_history_when_send_fails(
     ok = await sender.send_message(message, adapter_signature="onebot_adapter:adapter:onebot_adapter")
 
     assert ok is False
-    media_manager.store_media.assert_not_awaited()
+    media_manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", "image")
     fake_stream_manager.get_or_create_stream.assert_not_awaited()
     fake_stream_manager.add_sent_message_to_history.assert_not_awaited()
 
@@ -256,7 +256,7 @@ async def test_sent_image_is_cached_before_history(monkeypatch: pytest.MonkeyPat
 async def test_sent_media_description_contains_media_id_in_placeholder(
     monkeypatch: pytest.MonkeyPatch, media_type: str, id_key: str, label: str, stored: bool,
 ) -> None:
-    """已识别媒体仅在缓存成功时把媒体 ID 写入同一个描述占位符。"""
+    """已识别媒体只有缓存成功才发送并保留带 ID 的描述标记。"""
     from src.core.managers.media_manager import MediaManager
 
     media_id = MediaManager.compute_media_hash("base64|aGVsbG8=")
@@ -287,14 +287,18 @@ async def test_sent_media_description_contains_media_id_in_placeholder(
         platform="qq", chat_type="group", stream_id="stream-1",
     )
 
-    assert await sender.send_message(message, adapter_signature="mock:adapter:qq")
+    assert await sender.send_message(message, adapter_signature="mock:adapter:qq") is stored
     manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", media_type)
-    expected = f"[{label}({media_id}):识别结果]" if stored else f"[{label}:识别结果]"
-    assert isinstance(message.content, dict)
-    assert bool(message.content["media"][0].get(id_key)) is stored
-    assert message.processed_plain_text == expected
-    assert message.content["text"] == message.processed_plain_text
-    stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+    if stored:
+        expected = f"[{label}({media_id}):识别结果]"
+        assert isinstance(message.content, dict)
+        assert message.content["media"][0][id_key] == media_id
+        assert message.processed_plain_text == expected
+        assert message.content["text"] == expected
+        stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+    else:
+        adapter._send_platform_message.assert_not_awaited()
+        stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -304,10 +308,11 @@ async def test_sent_media_description_contains_media_id_in_placeholder(
      ("voice", "voice_id", "语音"), ("video", "video_id", "视频")],
 )
 @pytest.mark.parametrize("stored", [True, False])
-async def test_sent_media_caption_contains_id_only_when_cached(
-    monkeypatch: pytest.MonkeyPatch, media_type: str, id_key: str, label: str, stored: bool,
+async def test_sent_media_caller_description_contains_id_only_when_cached(
+    monkeypatch: pytest.MonkeyPatch, media_type: str, id_key: str, label: str,
+    stored: bool,
 ) -> None:
-    """四类媒体的调用者描述仅在可回查时附上 ID。"""
+    """四类媒体的调用者描述只有缓存成功才发送并附上 ID。"""
     from src.core.managers.media_manager import MediaManager
 
     media_id = MediaManager.compute_media_hash("base64|aGVsbG8=")
@@ -330,21 +335,25 @@ async def test_sent_media_caption_contains_id_only_when_cached(
     message = Message(
         message_id="media-1",
         content={"text": text, "media": [{
-            "type": media_type, "data": "base64|aGVsbG8=", "context_mode": "caption",
+            "type": media_type, "data": "base64|aGVsbG8=", "context_mode": "placeholder",
         }]},
         processed_plain_text=text,
         message_type=MessageType(media_type),
         platform="qq", chat_type="group", stream_id="stream-1",
     )
 
-    assert await sender.send_message(message, adapter_signature="mock:adapter:qq")
+    assert await sender.send_message(message, adapter_signature="mock:adapter:qq") is stored
     media_manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", media_type)
-    assert isinstance(message.content, dict)
-    assert bool(message.content["media"][0].get(id_key)) is stored
-    expected = f"[{label}({media_id}):晚安]" if stored else text
-    assert message.processed_plain_text == expected
-    assert message.content["text"] == expected
-    stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+    if stored:
+        expected = f"[{label}({media_id}):晚安]"
+        assert isinstance(message.content, dict)
+        assert message.content["media"][0][id_key] == media_id
+        assert message.processed_plain_text == expected
+        assert message.content["text"] == expected
+        stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+    else:
+        adapter._send_platform_message.assert_not_awaited()
+        stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -353,11 +362,10 @@ async def test_sent_media_caption_contains_id_only_when_cached(
     [("image", "image_id", "图片"), ("emoji", "image_id", "表情包"),
      ("voice", "voice_id", "语音"), ("video", "video_id", "视频")],
 )
-@pytest.mark.parametrize("stored", [True, False])
-async def test_provided_media_keeps_text_when_cached(
-    monkeypatch: pytest.MonkeyPatch, media_type: str, id_key: str, label: str, stored: bool,
+async def test_uncached_url_media_does_not_send(
+    monkeypatch: pytest.MonkeyPatch, media_type: str, id_key: str, label: str,
 ) -> None:
-    """无论媒体能否缓存，调用者的上下文文案均不改写。"""
+    """直接构造结构化 URL 媒体也无法绕过缓存校验。"""
     sender = MessageSender()
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
@@ -367,7 +375,7 @@ async def test_provided_media_keeps_text_when_cached(
     sender._converter = SimpleNamespace(  # type: ignore[assignment]
         message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
     )
-    manager = SimpleNamespace(store_media=AsyncMock(return_value=stored))
+    manager = SimpleNamespace(store_media=AsyncMock())
     monkeypatch.setattr("src.core.managers.media_manager.get_media_manager", lambda: manager)
     stream_manager = SimpleNamespace(
         get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
@@ -375,29 +383,26 @@ async def test_provided_media_keeps_text_when_cached(
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager,
     )
-    text = f"  [{label}] 开发者提供的原文  "
+    text = f"[{label}:开发者提供的原文]"
     message = Message(
         message_id="media-1",
         content={"text": text, "media": [{
-            "type": media_type, "data": "base64|aGVsbG8=", "context_mode": "provided",
+            "type": media_type, "data": "https://example.org/media", "context_mode": "placeholder",
         }]},
         processed_plain_text=text,
         message_type=MessageType(media_type),
         platform="qq", chat_type="group", stream_id="stream-1",
     )
 
-    assert await sender.send_message(message, adapter_signature="mock:adapter:qq")
-    manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", media_type)
-    assert isinstance(message.content, dict)
-    assert bool(message.content["media"][0].get(id_key)) is stored
-    assert message.processed_plain_text == text
-    assert message.content["text"] == text
-    stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+    assert not await sender.send_message(message, adapter_signature="mock:adapter:qq")
+    manager.store_media.assert_not_awaited()
+    adapter._send_platform_message.assert_not_awaited()
+    stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_sent_image_store_failure_drops_unusable_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """已发出但入库失败时，历史不能留下不可回查的媒体 ID。"""
+async def test_sent_image_store_failure_prevents_send(monkeypatch: pytest.MonkeyPatch) -> None:
+    """图片入库失败时不得发送或写入无媒体 ID 的历史。"""
     sender = MessageSender()
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
@@ -429,18 +434,18 @@ async def test_sent_image_store_failure_drops_unusable_id(monkeypatch: pytest.Mo
         stream_id="stream-1",
     )
 
-    assert await sender.send_message(message, adapter_signature="mock:adapter:qq")
+    assert not await sender.send_message(message, adapter_signature="mock:adapter:qq")
+    adapter._send_platform_message.assert_not_awaited()
+    stream_manager.add_sent_message_to_history.assert_not_awaited()
     assert isinstance(message.content, dict)
-    assert "image_id" not in message.content["media"][0]
-    assert message.processed_plain_text == "[图片]"
-    stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+    assert message.content["media"][0]["image_id"] == "pending"
 
 
 @pytest.mark.asyncio
-async def test_native_image_store_failure_drops_context_marker(
+async def test_native_image_store_failure_prevents_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """媒体无法回查时，原生上下文请求降级为占位符。"""
+    """原生图片无法回查时不发送也不写入历史。"""
     sender = MessageSender()
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
@@ -473,11 +478,31 @@ async def test_native_image_store_failure_drops_context_marker(
         stream_id="stream-1",
     )
 
-    assert await sender.send_message(message, adapter_signature="mock:adapter:qq")
-    assert isinstance(message.content, dict)
-    assert message.content["media"][0]["context_mode"] == "placeholder"
-    assert "include_in_context" not in message.content["media"][0]
-    stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
+    assert not await sender.send_message(message, adapter_signature="mock:adapter:qq")
+    adapter._send_platform_message.assert_not_awaited()
+    stream_manager.add_sent_message_to_history.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["base64|aGVsbG8=", {"text": "[图片]"}])
+async def test_raw_media_without_cache_is_not_sent(content: object) -> None:
+    """直接构造的媒体消息没有结构化数据时不能绕过缓存校验。"""
+    sender = MessageSender()
+    adapter = SimpleNamespace(
+        get_bot_info=AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
+        _send_platform_message=AsyncMock(return_value=PlatformSendResult(success=True)),
+    )
+    sender.set_adapter_manager(SimpleNamespace(get_adapter=lambda _sig: adapter))
+    sender._converter = SimpleNamespace(  # type: ignore[assignment]
+        message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
+    )
+    message = Message(
+        message_id="image-1", content=content, message_type=MessageType.IMAGE,
+        platform="qq", chat_type="group", stream_id="stream-1",
+    )
+
+    assert not await sender.send_message(message, adapter_signature="mock:adapter:qq")
+    adapter._send_platform_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
