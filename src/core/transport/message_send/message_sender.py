@@ -225,11 +225,17 @@ class MessageSender:
             placeholder = f"[{labels[media_type]}]"
             identified = f"[{labels[media_type]}({media_id})]"
             text = message.processed_plain_text or message.content.get("text") or ""
-            message.processed_plain_text = (
-                text.replace(placeholder, identified, 1)
-                if placeholder in text
-                else f"{text} {identified}".strip()
-            )
+            described_prefix = f"[{labels[media_type]}:"
+            if item.get("context_mode") == "description" and described_prefix in text:
+                message.processed_plain_text = text.replace(
+                    described_prefix, f"[{labels[media_type]}({media_id}):", 1,
+                )
+            else:
+                message.processed_plain_text = (
+                    text.replace(placeholder, identified, 1)
+                    if placeholder in text
+                    else f"{text} {identified}".strip()
+                )
             message.content["text"] = message.processed_plain_text
 
     async def _apply_bot_sender_info(self, message: "Message", adapter: Any) -> None:

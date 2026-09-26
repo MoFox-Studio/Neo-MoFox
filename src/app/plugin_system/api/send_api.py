@@ -120,7 +120,12 @@ async def send_media(
 
         description = await recognize_media(media_data, media_type)
         if description and description.strip():
-            text = f"{text} {description.strip()}".strip()
+            placeholder = f"[{labels[media_type]}]"
+            described = f"[{labels[media_type]}:{description.strip()}]"
+            text = (
+                text.replace(placeholder, described, 1)
+                if placeholder in text else f"{text} {described}".strip()
+            )
             content["text"] = text
         else:
             context_mode = "placeholder"
