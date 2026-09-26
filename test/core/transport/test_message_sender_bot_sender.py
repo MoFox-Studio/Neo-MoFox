@@ -1,13 +1,69 @@
 from __future__ import annotations
 
+from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from src.app.plugin_system.api import send_api
 from src.core.models.message import Message, MessageType
 from src.core.components.types import PlatformSendResult
 from src.core.transport.message_send.message_sender import MessageSender
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", [True, False])
+@pytest.mark.parametrize(
+    ("media_type", "label", "id_key"),
+    [("image", "图片", "image_id"), ("emoji", "表情包", "image_id"),
+     ("voice", "语音", "voice_id"), ("video", "视频", "video_id")],
+)
+async def test_url_media_cache_and_history_use_downloaded_bytes(
+    monkeypatch: pytest.MonkeyPatch, media_type: send_api.MediaType, label: str,
+    id_key: str, stored: bool,
+) -> None:
+    """URL 实际字节入库后才发送，历史仅使用新算出的可回查 ID。"""
+    from src.core.managers.media_manager import MediaManager
+
+    sender = MessageSender()
+    adapter = SimpleNamespace(
+        platform="qq",
+        get_bot_info=AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
+        _send_platform_message=AsyncMock(return_value=PlatformSendResult(success=True)),
+    )
+    adapter_manager = SimpleNamespace(get_adapter=lambda _sig: adapter)
+    sender.set_adapter_manager(adapter_manager)
+    sender._converter = SimpleNamespace(  # type: ignore[assignment]
+        message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
+    )
+    stream_manager = SimpleNamespace(
+        get_stream_info=AsyncMock(return_value={"chat_type": "group", "group_id": "123"}),
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
+    )
+    manager = SimpleNamespace(store_media=AsyncMock(return_value=stored))
+    monkeypatch.setattr("src.core.managers.adapter_manager.get_adapter_manager", lambda: adapter_manager)
+    monkeypatch.setattr("src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager)
+    monkeypatch.setattr("src.core.managers.media_manager.get_media_manager", lambda: manager)
+    monkeypatch.setattr("src.core.transport.message_send.get_message_sender", lambda: sender)
+    monkeypatch.setattr(send_api, "urlopen", lambda _url, timeout: BytesIO(b"hello"))
+
+    assert await send_api.send_media(
+        media_type, "https://example.org/media", "stream-1",
+        processed_plain_text=f"[{label}(old-id):晚安]",
+        adapter_signature="mock:adapter:qq",
+    ) is stored
+    manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", media_type)
+    if stored:
+        adapter._send_platform_message.assert_awaited_once()
+        stream_manager.add_sent_message_to_history.assert_awaited_once()
+        message = stream_manager.add_sent_message_to_history.call_args.args[0]
+        media_id = MediaManager.compute_media_hash("base64|aGVsbG8=")
+        assert message.processed_plain_text == f"[{label}({media_id}):晚安]"
+        assert message.content["media"][0][id_key] == media_id
+    else:
+        adapter._send_platform_message.assert_not_awaited()
+        stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio

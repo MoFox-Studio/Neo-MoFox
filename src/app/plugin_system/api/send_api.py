@@ -3,7 +3,12 @@
 为插件提供简洁的消息发送接口，基于 transport 层的 MessageSender 实现。
 """
 import asyncio
+import base64
+import re
+from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
+from urllib.request import url2pathname, urlopen
 from uuid import uuid4
 
 from src.core.models.message import Message, MessageType
@@ -25,7 +30,7 @@ def _build_media_content(
     避免裸 base64 作为 ``Message.content`` 落库后被当作文本参与 token 计数。
 
     base64 媒体经 ``normalize_base64`` 规范化，``id`` 用 MediaManager
-    相同的哈希算法计算；URL 由 ``send_media`` 入口拒绝。
+    相同的哈希算法计算；URL 由 ``send_media`` 先转换为 Base64。
 
     Args:
         media_type: 媒体段类型（``image`` / ``emoji`` / ``voice`` / ``video``）。
@@ -59,6 +64,26 @@ def _build_media_content(
 
 MediaType = Literal["image", "emoji", "voice", "video"]
 MediaContextMode = Literal["placeholder", "description", "native"]
+_MAX_URL_MEDIA_BYTES = 100 * 1024 * 1024
+
+
+def _read_media_url(media_url: str) -> str:
+    """读取 URL 媒体并转换为可缓存的 Base64；不接受超大或不可达的资源。"""
+    parsed = urlsplit(media_url)
+    try:
+        if parsed.scheme == "file":
+            if parsed.netloc not in ("", "localhost"):
+                raise ValueError("不支持远程文件 URL")
+            with Path(url2pathname(parsed.path)).open("rb") as media_file:
+                data = media_file.read(_MAX_URL_MEDIA_BYTES + 1)
+        else:
+            with urlopen(media_url, timeout=10) as response:
+                data = response.read(_MAX_URL_MEDIA_BYTES + 1)
+    except OSError as exc:
+        raise ValueError("媒体 URL 读取失败，无法发送") from exc
+    if not data or len(data) > _MAX_URL_MEDIA_BYTES:
+        raise ValueError("媒体 URL 内容为空或超出大小限制，无法发送")
+    return base64.b64encode(data).decode("ascii")
 
 
 async def send_media(
@@ -78,7 +103,7 @@ async def send_media(
     不调用识别服务；
     ``description`` 调用相应媒体识别 API 并附加描述；
     ``native`` 请求聊天流程将原始媒体内联到模型请求中，当前仅支持图片。
-    资源 URL 未进入可回查的媒体缓存，不能通过此接口发送。
+    资源 URL 先读取实际字节并转为 Base64，再经同一缓存流程发送。
 
     Args:
         media_type: 图片、表情包、语音或视频类型。
@@ -105,14 +130,15 @@ async def send_media(
     if context_mode == "native" and media_type != "image":
         raise ValueError(f"{media_type} 不支持 native 上下文模式")
     if media_data.startswith(("http://", "https://", "file://")):
-        raise ValueError("URL 媒体未缓存，无法获得可回查的媒体 ID")
+        media_data = await asyncio.to_thread(_read_media_url, media_data)
     description_text = processed_plain_text.strip() if processed_plain_text else ""
     placeholder = f"[{labels[media_type]}]"
-    described_prefix = f"[{labels[media_type]}:"
-    if description_text == placeholder:
-        description_text = ""
-    elif description_text.startswith(described_prefix) and description_text.endswith("]"):
-        description_text = description_text[len(described_prefix):-1]
+    existing_marker = re.fullmatch(
+        rf"\[{labels[media_type]}(?:\([^()\[\]]+\))?(?::(.*))?\]",
+        description_text, flags=re.DOTALL,
+    )
+    if existing_marker:
+        description_text = existing_marker.group(1) or ""
     text = f"[{labels[media_type]}:{description_text}]" if description_text else placeholder
     content = _build_media_content(media_type, media_data, text, id_keys[media_type])
     if context_mode == "description":
@@ -202,7 +228,7 @@ async def send_image(
         adapter_signature: 目标适配器组件签名（可选），格式为
                            ``plugin_name:adapter:adapter_name``；指定后直接通过该
                            适配器发送，不再按 platform 推断
-        include_in_context: 是否在后续模型上下文中内联此图片（仅适用于 base64 图片）
+        include_in_context: 是否在后续模型上下文中内联此图片
 
     Returns:
         是否发送成功

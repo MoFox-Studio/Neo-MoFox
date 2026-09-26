@@ -297,6 +297,9 @@ class SendHandler:
         elif seg_type == "voiceurl":
             voice_url = seg.get("data")
             new_payload = self.build_payload(payload, self.handle_voiceurl_message(str(voice_url)), False)
+        elif seg_type == "video":
+            video = seg.get("data")
+            new_payload = self.build_payload(payload, self.handle_video_message(str(video)), False)
         elif seg_type == "music":
             song_id = seg.get("data")
             new_payload = self.build_payload(payload, self.handle_music_message(str(song_id)), False)
@@ -456,7 +459,9 @@ class SendHandler:
         if not encoded_voice:
             logger.warning("接收到空的语音消息，跳过处理")
             return {}
-        if encoded_voice.startswith(("base64://", "http://", "https://")):
+        if encoded_voice.startswith("base64|"):
+            file_value = f"base64://{encoded_voice[7:]}"
+        elif encoded_voice.startswith(("base64://", "http://", "https://")):
             file_value = encoded_voice
         else:
             file_value = f"base64://{encoded_voice}"
@@ -478,6 +483,14 @@ class SendHandler:
             "type": "music",
             "data": {"type": "163", "id": song_id},
         }
+
+    def handle_video_message(self, video_data: str) -> dict:
+        """将缓存视频转换为 OneBot 可发送的媒体源。"""
+        if video_data.startswith("base64|"):
+            video_data = f"base64://{video_data[7:]}"
+        elif not video_data.startswith(("base64://", "http://", "https://", "file://")):
+            video_data = f"base64://{video_data}"
+        return self.handle_videourl_message(video_data)
 
     def handle_videourl_message(self, video_url: str) -> dict:
         """处理视频链接消息"""
