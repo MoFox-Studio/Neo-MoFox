@@ -396,9 +396,12 @@ async def test_send_media_rejects_unsupported_native_type() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("media_type", ["image", "emoji", "voice", "video"])
+@pytest.mark.parametrize(
+    ("media_type", "label"),
+    [("image", "图片"), ("emoji", "表情包"), ("voice", "语音"), ("video", "视频")],
+)
 async def test_send_media_description_uses_recognition(
-    monkeypatch: pytest.MonkeyPatch, media_type: send_api.MediaType,
+    monkeypatch: pytest.MonkeyPatch, media_type: send_api.MediaType, label: str,
 ) -> None:
     """描述策略对每类媒体使用对应识别入口。"""
     captured = _Captured()
@@ -416,8 +419,8 @@ async def test_send_media_description_uses_recognition(
     assert isinstance(captured.message, Message)
     assert isinstance(captured.message.content, dict)
     assert captured.message.content["media"][0]["context_mode"] == "description"
-    assert isinstance(captured.message.processed_plain_text, str)
-    assert captured.message.processed_plain_text.endswith("识别结果")
+    assert captured.message.processed_plain_text == f"[{label}:识别结果]"
+    assert captured.message.content["text"] == captured.message.processed_plain_text
 
 
 @pytest.mark.asyncio
