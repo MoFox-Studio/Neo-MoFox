@@ -61,7 +61,7 @@ def _build_media_content(
 
 
 MediaType = Literal["image", "emoji", "voice", "video"]
-MediaContextMode = Literal["placeholder", "provided", "description", "native"]
+MediaContextMode = Literal["placeholder", "provided", "caption", "description", "native"]
 
 
 async def send_media(
@@ -78,7 +78,9 @@ async def send_media(
     """发送并缓存媒体，指定此条消息后续在聊天上下文中的表达方式。
 
     ``placeholder`` 对可缓存媒体保留媒体 ID 占位符；``provided`` 原样保留调用者提供的
-    上下文文本；``description`` 调用相应媒体识别 API 并附加描述；
+    上下文文本；``caption`` 将调用者文本写入媒体描述占位符，缓存成功后附加媒体 ID，
+    不调用识别服务；
+    ``description`` 调用相应媒体识别 API 并附加描述；
     ``native`` 请求聊天流程将原始媒体内联到模型请求中，当前仅支持图片。
     URL 资源不支持识别或原生内联，文件 URL 是否可发送取决于适配器。
 
@@ -87,10 +89,10 @@ async def send_media(
         media_data: base64、HTTP(S) 或 file URL 媒体数据。
         stream_id: 聊天流 ID。
         platform: 平台名称，可从聊天流推断。
-        processed_plain_text: 供历史消息与模型阅读的文本；provided 模式必填且非空。
+        processed_plain_text: 供历史消息与模型阅读的文本；provided 和 caption 模式必填且非空。
         reply_to: 被回复的消息 ID。
         adapter_signature: 指定发送目标适配器组件签名。
-        context_mode: 历史消息的上下文表达模式；provided 不会调用识别服务。
+        context_mode: 历史消息的上下文表达模式；provided 和 caption 不会调用识别服务。
 
     Returns:
         是否发送成功。
@@ -102,16 +104,19 @@ async def send_media(
     labels = {"image": "图片", "emoji": "表情包", "voice": "语音", "video": "视频"}
     if media_type not in id_keys:
         raise ValueError(f"不支持的媒体类型: {media_type}")
-    if context_mode not in ("placeholder", "provided", "description", "native"):
+    if context_mode not in ("placeholder", "provided", "caption", "description", "native"):
         raise ValueError(f"不支持的上下文模式: {context_mode}")
     if context_mode == "native" and media_type != "image":
         raise ValueError(f"{media_type} 不支持 native 上下文模式")
-    if context_mode == "provided" and (
+    if context_mode in ("provided", "caption") and (
         not isinstance(processed_plain_text, str) or not processed_plain_text.strip()
     ):
-        raise ValueError("provided 模式要求非空 processed_plain_text")
+        raise ValueError(f"{context_mode} 模式要求非空 processed_plain_text")
 
-    text = processed_plain_text if processed_plain_text is not None else f"[{labels[media_type]}]"
+    if context_mode == "caption":
+        text = f"[{labels[media_type]}:{processed_plain_text}]"
+    else:
+        text = processed_plain_text if processed_plain_text is not None else f"[{labels[media_type]}]"
     content = _build_media_content(media_type, media_data, text, id_keys[media_type])
     if context_mode in ("description", "native") and id_keys[media_type] not in content["media"][0]:
         raise ValueError(f"URL 媒体不支持 {context_mode} 上下文模式")
@@ -284,8 +289,9 @@ async def send_voice(
         voice_data: 语音数据（base64 或 URL）
         stream_id: 聊天流 ID
         platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
-        processed_plain_text: 可选的语音上下文文字；提供时原样保留，不调用识别服务。
-                      不提供时使用默认占位符。
+        processed_plain_text: 可选的语音原文；提供时使用语音描述格式保留，
+                  缓存成功后附加媒体 ID，不调用识别服务。
+                  不提供时使用默认占位符。
         adapter_signature: 目标适配器组件签名（可选），格式为
                            ``plugin_name:adapter:adapter_name``；指定后直接通过该
                            适配器发送，不再按 platform 推断
@@ -303,10 +309,15 @@ async def send_voice(
     if processed_plain_text is not None and not processed_plain_text.strip():
         raise ValueError("processed_plain_text 不能只包含空白字符")
 
-    text = processed_plain_text if processed_plain_text is not None else "[语音]"
-    content = _build_media_content("voice", voice_data, text, "voice_id")
     if processed_plain_text is not None:
-        content["media"][0]["context_mode"] = "provided"
+        return await send_media(
+            "voice", voice_data, stream_id, platform=platform,
+            processed_plain_text=processed_plain_text,
+            adapter_signature=adapter_signature, context_mode="caption",
+        )
+
+    text = "[语音]"
+    content = _build_media_content("voice", voice_data, text, "voice_id")
 
     return await _send_message(
         content=content,

@@ -91,6 +91,30 @@ async def test_message_to_envelope_does_not_send_provided_context_as_text(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_type", "label"),
+    [("image", "图片"), ("emoji", "表情包"), ("voice", "语音"), ("video", "视频")],
+)
+async def test_media_caption_does_not_become_platform_text(
+    monkeypatch: pytest.MonkeyPatch, media_type: str, label: str,
+) -> None:
+    """调用者描述只进入聊天历史，平台仍只接收对应媒体段。"""
+    _patch_stream_manager(monkeypatch)
+    text = f"[{label}:晚安]"
+    message = _make_media_message(
+        {"text": text, "media": [{
+            "type": media_type, "data": "base64|aGVsbG8=", "context_mode": "caption",
+        }]},
+        MessageType(media_type),
+    )
+    message.processed_plain_text = text
+
+    envelope = await MessageConverter().message_to_envelope(message)
+
+    assert envelope.get("message_segment") == [{"type": media_type, "data": "base64|aGVsbG8="}]
+
+
+@pytest.mark.asyncio
 async def test_message_to_envelope_supports_multiple_media_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

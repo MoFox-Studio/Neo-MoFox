@@ -226,7 +226,7 @@ class MessageSender:
             identified = f"[{labels[media_type]}({media_id})]"
             text = message.processed_plain_text or message.content.get("text") or ""
             described_prefix = f"[{labels[media_type]}:"
-            if item.get("context_mode") == "description" and described_prefix in text:
+            if item.get("context_mode") in ("description", "caption") and described_prefix in text:
                 message.processed_plain_text = text.replace(
                     described_prefix, f"[{labels[media_type]}({media_id}):", 1,
                 )

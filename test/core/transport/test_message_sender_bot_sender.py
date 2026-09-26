@@ -298,10 +298,19 @@ async def test_sent_media_description_contains_media_id_in_placeholder(
 
 
 @pytest.mark.asyncio
-async def test_sent_voice_keeps_explicit_text_after_caching(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("media_type", "id_key", "label"),
+    [("image", "image_id", "图片"), ("emoji", "image_id", "表情包"),
+     ("voice", "voice_id", "语音"), ("video", "video_id", "视频")],
+)
+@pytest.mark.parametrize("stored", [True, False])
+async def test_sent_media_caption_contains_id_only_when_cached(
+    monkeypatch: pytest.MonkeyPatch, media_type: str, id_key: str, label: str, stored: bool,
 ) -> None:
-    """已缓存的语音保留调用者原文，媒体 ID 只存于媒体项。"""
+    """四类媒体的调用者描述仅在可回查时附上 ID。"""
+    from src.core.managers.media_manager import MediaManager
+
+    media_id = MediaManager.compute_media_hash("base64|aGVsbG8=")
     sender = MessageSender()
     adapter = SimpleNamespace(
         get_bot_info=AsyncMock(return_value={"bot_id": "bot", "bot_name": "Bot"}),
@@ -311,29 +320,30 @@ async def test_sent_voice_keeps_explicit_text_after_caching(
     sender._converter = SimpleNamespace(  # type: ignore[assignment]
         message_to_envelope=AsyncMock(return_value={"message_info": {}, "message_segment": []})
     )
-    media_manager = SimpleNamespace(store_media=AsyncMock(return_value=True))
+    media_manager = SimpleNamespace(store_media=AsyncMock(return_value=stored))
     monkeypatch.setattr("src.core.managers.media_manager.get_media_manager", lambda: media_manager)
     stream_manager = SimpleNamespace(
         get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
     )
     monkeypatch.setattr("src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager)
-    text = "  明天十点开会 [语音]  "
+    text = f"[{label}:晚安]"
     message = Message(
-        message_id="voice-1",
+        message_id="media-1",
         content={"text": text, "media": [{
-            "type": "voice", "data": "base64|aGVsbG8=", "context_mode": "provided",
+            "type": media_type, "data": "base64|aGVsbG8=", "context_mode": "caption",
         }]},
         processed_plain_text=text,
-        message_type=MessageType.VOICE,
+        message_type=MessageType(media_type),
         platform="qq", chat_type="group", stream_id="stream-1",
     )
 
     assert await sender.send_message(message, adapter_signature="mock:adapter:qq")
-    media_manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", "voice")
+    media_manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", media_type)
     assert isinstance(message.content, dict)
-    assert message.content["media"][0]["voice_id"]
-    assert message.processed_plain_text == text
-    assert message.content["text"] == text
+    assert bool(message.content["media"][0].get(id_key)) is stored
+    expected = f"[{label}({media_id}):晚安]" if stored else text
+    assert message.processed_plain_text == expected
+    assert message.content["text"] == expected
     stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
 
 
