@@ -8,18 +8,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from src.app.plugin_system.api import send_api
-from src.core.models.message import MessageType
+from src.core.models.message import Message, MessageType
 
 
 @dataclass
 class _Captured:
     """捕获 send_message 调用时的消息与 adapter_signature。"""
 
-    message: object | None = None
+    message: Message | None = None
     adapter_signature: str | None = None
     called: bool = False
 
@@ -73,7 +74,7 @@ def _build_fakes(captured: _Captured, *, adapter_platform: str = "qq") -> dict[s
     class _FakeMessageSender:
         async def send_message(
             self,
-            message: object,
+            message: Message,
             adapter_signature: str | None = None,
         ) -> bool:
             captured.called = True
@@ -185,6 +186,264 @@ async def test_send_image_with_adapter_signature_passes_through(
 
 
 @pytest.mark.asyncio
+async def test_send_image_marks_only_opted_in_binary_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """图片内联标记仅在显式选择时随媒体元信息传递。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured, adapter_platform="qq")
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+
+    assert await send_api.send_image(
+        "aGVsbG8=", stream_id="some_stream",
+        adapter_signature="onebot:adapter:napcat", include_in_context=True,
+    )
+    assert isinstance(captured.message, Message)
+    assert isinstance(captured.message.content, dict)
+    assert captured.message.content["media"][0]["include_in_context"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_url", ["https://example.com/image.png", "file:///media/image.png"])
+async def test_send_image_url_with_legacy_context_flag_uses_placeholder(
+    monkeypatch: pytest.MonkeyPatch, media_url: str,
+) -> None:
+    """旧图片入口发送 URL 时忽略仅适用于 base64 的内联选项。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+
+    assert await send_api.send_image(
+        media_url, "some_stream",
+        adapter_signature="onebot:adapter:napcat", include_in_context=True,
+    )
+    assert isinstance(captured.message, Message)
+    assert isinstance(captured.message.content, dict)
+    item = captured.message.content["media"][0]
+    assert item["context_mode"] == "placeholder"
+    assert "include_in_context" not in item
+    assert item["data"] == media_url
+
+    assert await send_api.send_image(
+        "aGVsbG8=", stream_id="some_stream",
+        adapter_signature="onebot:adapter:napcat",
+    )
+    assert isinstance(captured.message, Message)
+    assert isinstance(captured.message.content, dict)
+    assert "include_in_context" not in captured.message.content["media"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "media_type,message_type",
+    [
+        ("image", MessageType.IMAGE),
+        ("emoji", MessageType.EMOJI),
+        ("voice", MessageType.VOICE),
+        ("video", MessageType.VIDEO),
+    ],
+)
+async def test_send_media_defaults_to_placeholder(
+    monkeypatch: pytest.MonkeyPatch, media_type: send_api.MediaType, message_type: MessageType,
+) -> None:
+    """四类 Bot 媒体共享占位符默认策略，不隐式识别。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+
+    assert await send_api.send_media(
+        media_type, "aGVsbG8=", "some_stream",
+        adapter_signature="onebot:adapter:napcat",
+    )
+    assert isinstance(captured.message, Message)
+    assert isinstance(captured.message.content, dict)
+    assert captured.message.message_type == message_type
+    assert captured.message.content["media"][0]["context_mode"] == "placeholder"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_type", ["image", "emoji", "voice", "video"])
+async def test_send_media_provided_uses_caller_text_without_recognition(
+    monkeypatch: pytest.MonkeyPatch, media_type: send_api.MediaType,
+) -> None:
+    """四类媒体均可使用调用者文案，不触发框架媒体识别。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+    recognize = AsyncMock()
+    monkeypatch.setattr("src.app.plugin_system.api.media_api.recognize_media", recognize)
+
+    text = "  自定义上下文 [语音] 原文  "
+    assert await send_api.send_media(
+        media_type, "aGVsbG8=", "some_stream", context_mode="provided",
+        processed_plain_text=text, adapter_signature="onebot:adapter:napcat",
+    )
+    recognize.assert_not_awaited()
+    assert isinstance(captured.message, Message)
+    assert isinstance(captured.message.content, dict)
+    assert captured.message.processed_plain_text == text
+    assert captured.message.content["text"] == text
+    assert captured.message.content["media"][0]["context_mode"] == "provided"
+
+
+@pytest.mark.asyncio
+async def test_send_voice_explicit_text_uses_provided_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """语音调用者提供的文字应原样进入历史，而非被占位符改写。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+    recognize = AsyncMock()
+    monkeypatch.setattr("src.app.plugin_system.api.media_api.recognize_media", recognize)
+
+    text = "  明天十点开会 [语音]  "
+    assert await send_api.send_voice(
+        "aGVsbG8=", "some_stream", processed_plain_text=text,
+        adapter_signature="onebot:adapter:napcat",
+    )
+    recognize.assert_not_awaited()
+    message = captured.message
+    assert isinstance(message, Message)
+    assert isinstance(message.content, dict)
+    assert message.processed_plain_text == text
+    assert message.content["text"] == text
+    assert message.content["media"][0]["context_mode"] == "provided"
+
+
+@pytest.mark.asyncio
+async def test_send_voice_without_text_keeps_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未指定文字时语音仍使用现有的占位符历史。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+
+    assert await send_api.send_voice(
+        "aGVsbG8=", "some_stream", adapter_signature="onebot:adapter:napcat",
+    )
+    message = captured.message
+    assert isinstance(message, Message)
+    assert isinstance(message.content, dict)
+    assert message.processed_plain_text == "[语音]"
+    assert "context_mode" not in message.content["media"][0]
+
+
+@pytest.mark.asyncio
+async def test_send_voice_rejects_blank_explicit_text() -> None:
+    """显式传入空白语音文字不能作为有效上下文。"""
+    with pytest.raises(ValueError, match="processed_plain_text"):
+        await send_api.send_voice("aGVsbG8=", "some_stream", processed_plain_text="  ")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [None, "", "  \t  "])
+async def test_send_media_provided_requires_nonempty_text(text: str | None) -> None:
+    """调用者模式不能用空白内容伪装为有效上下文。"""
+    with pytest.raises(ValueError, match="processed_plain_text"):
+        await send_api.send_media(
+            "voice", "aGVsbG8=", "some_stream",
+            context_mode="provided", processed_plain_text=text,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_url", ["https://example.org/video.mp4", "file:///media/video.mp4"])
+async def test_send_media_provided_supports_url(
+    monkeypatch: pytest.MonkeyPatch, media_url: str,
+) -> None:
+    """媒体资源 URI 可自带文本，但不承诺资源已被本地缓存。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+
+    assert await send_api.send_media(
+        "video", media_url, "some_stream",
+        processed_plain_text="视频字幕", context_mode="provided",
+        adapter_signature="onebot:adapter:napcat",
+    )
+    assert isinstance(captured.message, Message)
+    assert isinstance(captured.message.content, dict)
+    item = captured.message.content["media"][0]
+    assert item == {"type": "video", "data": media_url, "context_mode": "provided"}
+    assert captured.message.processed_plain_text == "视频字幕"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_mode", ["native", "description"])
+async def test_send_media_file_url_rejects_uncached_modes(context_mode: send_api.MediaContextMode) -> None:
+    """文件资源尚未缓存时不能请求识别或原生内联。"""
+    with pytest.raises(ValueError, match="URL 媒体不支持"):
+        await send_api.send_media(
+            "image", "file:///media/image.png", "some_stream",
+            context_mode=context_mode,
+        )
+
+
+@pytest.mark.asyncio
+async def test_send_media_rejects_unsupported_native_type() -> None:
+    """不支持原生内联的媒体不可静默降级成成功。"""
+    with pytest.raises(ValueError, match="native"):
+        await send_api.send_media("voice", "aGVsbG8=", "some_stream", context_mode="native")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_type", ["image", "emoji", "voice", "video"])
+async def test_send_media_description_uses_recognition(
+    monkeypatch: pytest.MonkeyPatch, media_type: send_api.MediaType,
+) -> None:
+    """描述策略对每类媒体使用对应识别入口。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+    recognize = AsyncMock(return_value="识别结果")
+    monkeypatch.setattr("src.app.plugin_system.api.media_api.recognize_media", recognize)
+
+    assert await send_api.send_media(
+        media_type, "aGVsbG8=", "some_stream", context_mode="description",
+        adapter_signature="onebot:adapter:napcat",
+    )
+    recognize.assert_awaited_once_with("aGVsbG8=", media_type)
+    assert isinstance(captured.message, Message)
+    assert isinstance(captured.message.content, dict)
+    assert captured.message.content["media"][0]["context_mode"] == "description"
+    assert isinstance(captured.message.processed_plain_text, str)
+    assert captured.message.processed_plain_text.endswith("识别结果")
+
+
+@pytest.mark.asyncio
+async def test_send_media_description_without_result_uses_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """识别未得到描述时保留占位符，不宣称历史包含描述。"""
+    captured = _Captured()
+    fakes = _build_fakes(captured)
+    fakes["adapter_manager"].register("onebot:adapter:napcat")
+    _apply_fakes(monkeypatch, fakes)
+    monkeypatch.setattr(
+        "src.app.plugin_system.api.media_api.recognize_media", AsyncMock(return_value=None),
+    )
+
+    assert await send_api.send_media(
+        "image", "aGVsbG8=", "some_stream", context_mode="description",
+        adapter_signature="onebot:adapter:napcat",
+    )
+    assert isinstance(captured.message, Message)
+    assert isinstance(captured.message.content, dict)
+    assert captured.message.content["media"][0]["context_mode"] == "placeholder"
+    assert captured.message.processed_plain_text == "[图片]"
+
+
+@pytest.mark.asyncio
 async def test_send_custom_with_adapter_signature_passes_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -218,7 +477,7 @@ async def test_send_message_passes_adapter_signature_to_sender(
     class _FakeMessageSender:
         async def send_message(
             self,
-            message: object,
+            message: Message,
             adapter_signature: str | None = None,
         ) -> bool:
             captured.called = True
@@ -230,8 +489,6 @@ async def test_send_message_passes_adapter_signature_to_sender(
         "src.core.transport.message_send.get_message_sender",
         lambda: _FakeMessageSender(),
     )
-
-    from src.core.models.message import Message
 
     msg = Message(content="hi", platform="qq", stream_id="s1")
     ok = await send_api.send_message(

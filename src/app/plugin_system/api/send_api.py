@@ -3,12 +3,12 @@
 为插件提供简洁的消息发送接口，基于 transport 层的 MessageSender 实现。
 """
 import asyncio
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from src.core.models.message import Message, MessageType
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 
 def _build_media_content(
@@ -24,13 +24,12 @@ def _build_media_content(
     采用相同的数据结构 ``{"text": ..., "media": [{"type", "data", "id"}]}``，
     避免裸 base64 作为 ``Message.content`` 落库后被当作文本参与 token 计数。
 
-    媒体 ``data`` 经 ``normalize_base64`` 规范化、``id`` 用与 MediaManager 识别
-    流程相同的哈希算法计算，保证发送端媒体的 ``image_id`` / ``voice_id`` /
-    ``video_id`` 可在媒体表中回查，与接收端媒体项完全对称。
+    base64 媒体经 ``normalize_base64`` 规范化，``id`` 用 MediaManager
+    相同的哈希算法计算；HTTP(S)/file URL 不生成 ID，由平台自行获取资源。
 
     Args:
         media_type: 媒体段类型（``image`` / ``emoji`` / ``voice`` / ``video``）。
-        media_data: 媒体数据（base64 或 URL）。
+        media_data: 媒体数据（base64、HTTP(S) 或 file URL）。
         text: 消息的人类可读文本（占位符，如 ``[图片]``）。
         media_id_key: 媒体 ID 字段名（``image_id`` / ``voice_id`` / ``video_id``）。
 
@@ -39,6 +38,9 @@ def _build_media_content(
     """
     from src.core.managers.media_manager import MediaManager
     from src.core.transport.message_receive.utils import normalize_base64
+
+    if media_data.startswith(("http://", "https://", "file://")):
+        return {"text": text, "media": [{"type": media_type, "data": media_data}]}
 
     normalized_data = normalize_base64(media_data)
     return {
@@ -56,6 +58,85 @@ def _build_media_content(
 # =============================================================================
 # 基础消息发送
 # =============================================================================
+
+
+MediaType = Literal["image", "emoji", "voice", "video"]
+MediaContextMode = Literal["placeholder", "provided", "description", "native"]
+
+
+async def send_media(
+    media_type: MediaType,
+    media_data: str,
+    stream_id: str,
+    platform: str | None = None,
+    processed_plain_text: str | None = None,
+    reply_to: str | None = None,
+    adapter_signature: str | None = None,
+    *,
+    context_mode: MediaContextMode = "placeholder",
+) -> bool:
+    """发送并缓存媒体，指定此条消息后续在聊天上下文中的表达方式。
+
+    ``placeholder`` 对可缓存媒体保留媒体 ID 占位符；``provided`` 原样保留调用者提供的
+    上下文文本；``description`` 调用相应媒体识别 API 并附加描述；
+    ``native`` 请求聊天流程将原始媒体内联到模型请求中，当前仅支持图片。
+    URL 资源不支持识别或原生内联，文件 URL 是否可发送取决于适配器。
+
+    Args:
+        media_type: 图片、表情包、语音或视频类型。
+        media_data: base64、HTTP(S) 或 file URL 媒体数据。
+        stream_id: 聊天流 ID。
+        platform: 平台名称，可从聊天流推断。
+        processed_plain_text: 供历史消息与模型阅读的文本；provided 模式必填且非空。
+        reply_to: 被回复的消息 ID。
+        adapter_signature: 指定发送目标适配器组件签名。
+        context_mode: 历史消息的上下文表达模式；provided 不会调用识别服务。
+
+    Returns:
+        是否发送成功。
+
+    Raises:
+        ValueError: 不支持的媒体类型、模式或媒体与模式组合。
+    """
+    id_keys = {"image": "image_id", "emoji": "image_id", "voice": "voice_id", "video": "video_id"}
+    labels = {"image": "图片", "emoji": "表情包", "voice": "语音", "video": "视频"}
+    if media_type not in id_keys:
+        raise ValueError(f"不支持的媒体类型: {media_type}")
+    if context_mode not in ("placeholder", "provided", "description", "native"):
+        raise ValueError(f"不支持的上下文模式: {context_mode}")
+    if context_mode == "native" and media_type != "image":
+        raise ValueError(f"{media_type} 不支持 native 上下文模式")
+    if context_mode == "provided" and (
+        not isinstance(processed_plain_text, str) or not processed_plain_text.strip()
+    ):
+        raise ValueError("provided 模式要求非空 processed_plain_text")
+
+    text = processed_plain_text if processed_plain_text is not None else f"[{labels[media_type]}]"
+    content = _build_media_content(media_type, media_data, text, id_keys[media_type])
+    if context_mode in ("description", "native") and id_keys[media_type] not in content["media"][0]:
+        raise ValueError(f"URL 媒体不支持 {context_mode} 上下文模式")
+    if context_mode == "description":
+        from src.app.plugin_system.api.media_api import recognize_media
+
+        description = await recognize_media(media_data, media_type)
+        if description and description.strip():
+            text = f"{text} {description.strip()}".strip()
+            content["text"] = text
+        else:
+            context_mode = "placeholder"
+
+    content["media"][0]["context_mode"] = context_mode
+    if context_mode == "native":
+        content["media"][0]["include_in_context"] = True
+    return await _send_message(
+        content=content,
+        message_type=MessageType(media_type),
+        stream_id=stream_id,
+        platform=platform,
+        processed_plain_text=text,
+        reply_to=reply_to,
+        adapter_signature=adapter_signature,
+    )
 
 
 async def send_text(
@@ -106,6 +187,8 @@ async def send_image(
     processed_plain_text: str = "[图片]",
     reply_to: str | None = None,
     adapter_signature: str | None = None,
+    *,
+    include_in_context: bool = False,
 ) -> bool:
     """发送图片消息
 
@@ -118,6 +201,7 @@ async def send_image(
         adapter_signature: 目标适配器组件签名（可选），格式为
                            ``plugin_name:adapter:adapter_name``；指定后直接通过该
                            适配器发送，不再按 platform 推断
+        include_in_context: 是否在后续模型上下文中内联此图片（仅适用于 base64 图片）
 
     Returns:
         是否发送成功
@@ -130,16 +214,17 @@ async def send_image(
             adapter_signature="onebot:adapter:napcat"
         )
     """
-    return await _send_message(
-        content=_build_media_content(
-            "image", image_data, processed_plain_text, "image_id"
-        ),
-        message_type=MessageType.IMAGE,
+    return await send_media(
+        "image", image_data,
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
         reply_to=reply_to,
         adapter_signature=adapter_signature,
+        context_mode=(
+            "native" if include_in_context and not image_data.startswith(("http://", "https://", "file://"))
+            else "placeholder"
+        ),
     )
 
 
@@ -172,11 +257,8 @@ async def send_emoji(
             adapter_signature="onebot:adapter:napcat"
         )
     """
-    return await _send_message(
-        content=_build_media_content(
-            "emoji", emoji_data, processed_plain_text, "image_id"
-        ),
-        message_type=MessageType.EMOJI,
+    return await send_media(
+        "emoji", emoji_data,
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
@@ -188,7 +270,7 @@ async def send_voice(
     voice_data: str,
     stream_id: str,
     platform: str | None = None,
-    processed_plain_text: str = "[语音]",
+    processed_plain_text: str | None = None,
     adapter_signature: str | None = None,
 ) -> bool:
     """发送语音消息
@@ -197,7 +279,8 @@ async def send_voice(
         voice_data: 语音数据（base64 或 URL）
         stream_id: 聊天流 ID
         platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
-        processed_plain_text: 人类可读文本（可选）
+        processed_plain_text: 可选的语音上下文文字；提供时原样保留，不调用识别服务。
+                      不提供时使用默认占位符。
         adapter_signature: 目标适配器组件签名（可选），格式为
                            ``plugin_name:adapter:adapter_name``；指定后直接通过该
                            适配器发送，不再按 platform 推断
@@ -212,14 +295,20 @@ async def send_voice(
             adapter_signature="onebot:adapter:napcat"
         )
     """
+    if processed_plain_text is not None and not processed_plain_text.strip():
+        raise ValueError("processed_plain_text 不能只包含空白字符")
+
+    text = processed_plain_text if processed_plain_text is not None else "[语音]"
+    content = _build_media_content("voice", voice_data, text, "voice_id")
+    if processed_plain_text is not None:
+        content["media"][0]["context_mode"] = "provided"
+
     return await _send_message(
-        content=_build_media_content(
-            "voice", voice_data, processed_plain_text, "voice_id"
-        ),
+        content=content,
         message_type=MessageType.VOICE,
         stream_id=stream_id,
         platform=platform,
-        processed_plain_text=processed_plain_text,
+        processed_plain_text=text,
         adapter_signature=adapter_signature,
     )
 
@@ -252,11 +341,8 @@ async def send_video(
             adapter_signature="onebot:adapter:napcat"
         )
     """
-    return await _send_message(
-        content=_build_media_content(
-            "video", video_data, processed_plain_text, "video_id"
-        ),
-        message_type=MessageType.VIDEO,
+    return await send_media(
+        "video", video_data,
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
