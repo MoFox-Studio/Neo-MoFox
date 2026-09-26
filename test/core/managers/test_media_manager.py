@@ -272,6 +272,27 @@ class TestMediaManagerRecognizeMedia:
             save.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("media_type", ["image", "emoji", "voice", "video"])
+    async def test_store_sent_media_reuses_existing_file(
+        self, make_manager: Any, tmp_path: Path, media_type: str
+    ) -> None:
+        """识别流程已存储的媒体不因发送而重复登记。"""
+        manager = make_manager()
+        media_hash = manager.compute_media_hash("base64|aGVsbG8=")
+        path = tmp_path / "media.bin"
+        path.write_bytes(b"hello")
+        lookup = {"image": "get_media_info", "emoji": "get_media_info", "voice": "get_voice_info", "video": "get_video_info"}[media_type]
+        with (
+            patch.object(manager._repository, lookup, new_callable=AsyncMock, return_value={"path": str(path)}) as info,
+            patch.object(manager._file_store, "save_to_pending", new_callable=AsyncMock) as save_file,
+            patch.object(manager._repository, "save_recognized_media", new_callable=AsyncMock) as save_record,
+        ):
+            assert await manager.store_media("base64|aGVsbG8=", media_type) is True
+            info.assert_awaited_once_with(media_hash)
+            save_file.assert_not_awaited()
+            save_record.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_recognize_media_with_cache(self, make_manager) -> None:
         """测试使用缓存的媒体识别。"""
         manager = make_manager()

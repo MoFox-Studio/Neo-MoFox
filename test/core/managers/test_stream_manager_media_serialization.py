@@ -118,6 +118,46 @@ async def test_restore_media_data_from_db_fills_missing_base64() -> None:
 
 
 @pytest.mark.asyncio
+async def test_context_image_marker_survives_history_round_trip() -> None:
+    """原图仅在运行时回填，Bot 图片内联标记持久保留。"""
+    content = {
+        "text": "[图片(img1)]",
+        "media": [{"type": "image", "image_id": "img1", "data": "aGVsbG8=", "include_in_context": True}],
+    }
+    serialized = _serialize_content_for_db(content)
+    assert "aGVsbG8=" not in serialized
+    manager = AsyncMock()
+    manager.get_media_file.return_value = "aGVsbG8="
+    with patch("src.core.managers.media_manager.get_media_manager", return_value=manager):
+        restored = await _restore_media_data_from_db(serialized)
+    assert restored == content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_type", "id_key", "mode"),
+    [("image", "image_id", "native"), ("emoji", "image_id", "description"),
+     ("voice", "voice_id", "placeholder"), ("video", "video_id", "description"),
+     ("image", "image_id", "provided"), ("emoji", "image_id", "provided"),
+     ("voice", "voice_id", "provided"), ("video", "video_id", "provided")],
+)
+async def test_media_context_mode_survives_history_round_trip(
+    media_type: str, id_key: str, mode: str,
+) -> None:
+    """四类媒体上下文模式随历史保存，并在恢复时保留。"""
+    content = {"text": "  开发者提供的内容  " if mode == "provided" else "[媒体]", "media": [{
+        "type": media_type, id_key: "media1", "data": "aGVsbG8=", "context_mode": mode,
+    }]}
+    serialized = _serialize_content_for_db(content)
+    assert "aGVsbG8=" not in serialized
+    manager = AsyncMock()
+    manager.get_media_file.return_value = "aGVsbG8="
+    with patch("src.core.managers.media_manager.get_media_manager", return_value=manager):
+        restored = await _restore_media_data_from_db(serialized)
+    assert restored == content
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("media_type,id_key", [("voice", "voice_id"), ("video", "video_id")])
 async def test_restore_media_data_from_db_fills_voice_and_video(
     media_type: str, id_key: str

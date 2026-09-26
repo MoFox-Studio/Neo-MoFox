@@ -197,6 +197,9 @@ class MessageSender:
             media_id = item.get(id_keys[media_type])
             if not isinstance(data, str) or not data.startswith(("base64|", "data:")):
                 item.pop(id_keys[media_type], None)
+                if item.get("context_mode") == "native":
+                    item["context_mode"] = "placeholder"
+                item.pop("include_in_context", None)
                 continue
             expected_id = MediaManager.compute_media_hash(data)
             if media_id != expected_id:
@@ -211,6 +214,9 @@ class MessageSender:
                 stored = False
             if not stored:
                 item.pop(id_keys[media_type], None)
+                if item.get("context_mode") == "native":
+                    item["context_mode"] = "placeholder"
+                item.pop("include_in_context", None)
                 continue
 
             if item.get("context_mode") == "provided":

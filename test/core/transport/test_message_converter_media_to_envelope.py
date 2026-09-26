@@ -71,6 +71,26 @@ async def test_message_to_envelope_builds_segments_from_media_list(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("media_type", ["image", "emoji", "voice", "video"])
+async def test_message_to_envelope_does_not_send_provided_context_as_text(
+    monkeypatch: pytest.MonkeyPatch, media_type: str,
+) -> None:
+    """调用者提供的上下文只进入历史，平台信封仅包含媒体段。"""
+    _patch_stream_manager(monkeypatch)
+    message = _make_media_message(
+        {"text": "自定义文案", "media": [{
+            "type": media_type, "data": "base64|aGVsbG8=", "context_mode": "provided",
+        }]},
+        MessageType(media_type),
+    )
+    message.processed_plain_text = "自定义文案"
+
+    envelope = await MessageConverter().message_to_envelope(message)
+
+    assert envelope["message_segment"] == [{"type": media_type, "data": "base64|aGVsbG8="}]
+
+
+@pytest.mark.asyncio
 async def test_message_to_envelope_supports_multiple_media_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

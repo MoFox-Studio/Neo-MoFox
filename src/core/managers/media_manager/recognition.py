@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from src.core.components.types import EventType, MediaEngine
@@ -51,6 +52,14 @@ class MediaRecognition:
         if media_type not in {"image", "emoji", "voice", "video"}:
             return False
         media_hash = compute_hash(base64_data)
+        if media_type == "voice":
+            existing = await self._repository.get_voice_info(media_hash)
+        elif media_type == "video":
+            existing = await self._repository.get_video_info(media_hash)
+        else:
+            existing = await self._repository.get_media_info(media_hash)
+        if existing and existing.get("path") and Path(existing["path"]).is_file():
+            return True
         pending_path = await self._file_store.save_to_pending(
             base64_data, media_hash, media_type
         )
