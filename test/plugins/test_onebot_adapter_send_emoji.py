@@ -217,7 +217,110 @@ async def test_cached_media_segments_use_valid_onebot_base64(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stored", [True, False])
+@pytest.mark.parametrize("segment_type", ["video", "videourl"])
+@pytest.mark.parametrize("video_data", [
+    None, "", "   ", "base64|", "base64://", "base64|   ", "base64://   ",
+    "http://", "file://", "ftp://example.org/clip.mp4",
+])
+async def test_invalid_video_source_does_not_report_sent(segment_type: str, video_data: str | None) -> None:
+    """视频缺少有效来源时不调用 OneBot，也不报告发送成功。"""
+    handler = _build_send_handler()
+    send_to_onebot = AsyncMock()
+    handler.send_message_to_onebot = send_to_onebot
+
+    result = await handler.handle_message(cast(Any, {
+        "message_info": {"group_info": {"group_id": "123"}},
+        "message_segment": {"type": segment_type, "data": video_data},
+    }))
+
+    assert result.success is False
+    send_to_onebot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("segment_type", ["video", "videourl"])
+@pytest.mark.parametrize(("video_data", "file_value"), [
+    ("base64://aGVsbG8=", "base64://aGVsbG8="),
+    ("base64|%%%", "base64://%%%"),
+    ("base64://aGV sbG8=", "base64://aGV sbG8="),
+    ("https://example.org/clip.mp4", "https://example.org/clip.mp4"),
+    ("file:///tmp/clip.mp4", "file:///tmp/clip.mp4"),
+    ("received-video.mp4", "received-video.mp4"),
+    ("opaque-file-code", "opaque-file-code"),
+])
+async def test_video_sources_forwarded_to_onebot(segment_type: str, video_data: str, file_value: str) -> None:
+    """非空视频来源转换为 OneBot video/file 消息段，不校验 Base64 格式。"""
+    handler = _build_send_handler()
+
+    payload = await handler.handle_seg_recursive(
+        {"type": segment_type, "data": video_data},
+        {"platform": "qq", "role": UserRole.MEMBER, "user_id": "1"},
+    )
+
+    assert payload == [{"type": "video", "data": {"file": file_value}}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["empty", "unsupported", "missing_target", "parse_error"])
+async def test_unsubmitted_message_reports_failure(failure: str) -> None:
+    """未能生成合法消息或发送目标时不报告成功。"""
+    handler = _build_send_handler()
+    send_to_onebot = AsyncMock()
+    handler.send_message_to_onebot = send_to_onebot
+    if failure == "parse_error":
+        handler.handle_seg_recursive = AsyncMock(side_effect=ValueError("解析失败"))
+    envelope = {
+        "message_info": {} if failure == "missing_target" else {"group_info": {"group_id": "123"}},
+        "message_segment": {"type": "face" if failure == "unsupported" else "text", "data": "hello"},
+    }
+
+    result = await handler.handle_message(cast(Any, {} if failure == "empty" else envelope))
+
+    assert result.success is False
+    send_to_onebot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response", [
+    {"status": "ok", "retcode": 0, "data": {}},
+    {"status": "ok", "data": {"message_id": 42}},
+    {"status": "ok", "retcode": 0, "data": {"message_id": "not-an-id"}},
+    {"status": "ok", "retcode": 0, "data": {"message_id": True}},
+    {"status": "ok", "retcode": 1, "data": {"message_id": 42}},
+    {"status": "async", "retcode": 1, "data": None},
+    {"status": "failed", "retcode": 100, "data": None},
+])
+async def test_unconfirmed_onebot_response_reports_failure(response: dict[str, Any]) -> None:
+    """只有同步成功且携带平台消息 ID 的响应才视为已发送。"""
+    handler = _build_send_handler()
+    handler.send_message_to_onebot = AsyncMock(return_value=response)
+
+    result = await handler.handle_message(cast(Any, {
+        "message_info": {"group_info": {"group_id": "123"}},
+        "message_segment": {"type": "text", "data": "hello"},
+    }))
+
+    assert result.success is False
+
+
+@pytest.mark.asyncio
+async def test_onebot_api_timeout_has_unknown_delivery_status() -> None:
+    """请求超时无法判断最终是否送达，不得报告确认成功。"""
+    handler = _build_send_handler()
+    handler.adapter.send_onebot_api = AsyncMock(side_effect=TimeoutError)
+
+    result = await handler.handle_message(cast(Any, {
+        "message_info": {"group_info": {"group_id": "123"}},
+        "message_segment": {"type": "text", "data": "hello"},
+    }))
+
+    assert result.success is False
+    assert result.error is not None
+    assert "结果未知" in result.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("stored", "confirmed"), [(True, True), (True, False), (False, True)])
 @pytest.mark.parametrize(
     ("media_type", "label", "onebot_type"),
     [("image", "图片", "image"), ("emoji", "表情包", "image"),
@@ -225,11 +328,13 @@ async def test_cached_media_segments_use_valid_onebot_base64(
 )
 async def test_url_media_send_uses_cached_bytes_in_onebot_payload(
     monkeypatch: pytest.MonkeyPatch, media_type: send_api.MediaType,
-    label: str, onebot_type: str, stored: bool,
+    label: str, onebot_type: str, stored: bool, confirmed: bool,
 ) -> None:
-    """URL 下载的字节经缓存与信封转换发送，缓存失败时不下发。"""
+    """URL 媒体仅在缓存成功且收到平台消息 ID 后写入历史。"""
     handler = _build_send_handler()
-    send_to_onebot = AsyncMock(return_value={"status": "ok", "data": {"message_id": 42}})
+    send_to_onebot = AsyncMock(return_value={
+        "status": "ok", "retcode": 0, "data": {"message_id": 42} if confirmed else {},
+    })
     monkeypatch.setattr(handler, "send_message_to_onebot", send_to_onebot)
     adapter = SimpleNamespace(
         platform="qq",
@@ -260,7 +365,7 @@ async def test_url_media_send_uses_cached_bytes_in_onebot_payload(
         media_type, "https://example.org/media", "stream-1",
         processed_plain_text=f"[{label}(old-id):晚安]",
         adapter_signature="onebot:adapter:napcat",
-    ) is stored
+    ) is (stored and confirmed)
     media_manager.store_media.assert_awaited_once_with(f"base64|{encoded_media}", media_type)
     if stored:
         expected_data: dict[str, Any] = {"file": f"base64://{encoded_media}"}
@@ -274,10 +379,13 @@ async def test_url_media_send_uses_cached_bytes_in_onebot_payload(
                 "data": expected_data,
             }]},
         )
-        stream_manager.add_sent_message_to_history.assert_awaited_once()
-        message = stream_manager.add_sent_message_to_history.call_args.args[0]
-        media_id = MediaManager.compute_media_hash(f"base64|{encoded_media}")
-        assert message.processed_plain_text == f"[{label}({media_id}):晚安]"
+        if confirmed:
+            stream_manager.add_sent_message_to_history.assert_awaited_once()
+            message = stream_manager.add_sent_message_to_history.call_args.args[0]
+            media_id = MediaManager.compute_media_hash(f"base64|{encoded_media}")
+            assert message.processed_plain_text == f"[{label}({media_id}):晚安]"
+        else:
+            stream_manager.add_sent_message_to_history.assert_not_awaited()
     else:
         send_to_onebot.assert_not_awaited()
         stream_manager.add_sent_message_to_history.assert_not_awaited()
