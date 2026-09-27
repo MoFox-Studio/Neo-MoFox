@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from mofox_wire import GroupInfoPayload, MessageEnvelope, MessageInfoPayload, SegPayload, UserInfoPayload
 
@@ -36,7 +37,7 @@ class SendHandler:
 
         if not envelope:
             logger.warning("空的消息，跳过处理")
-            return PlatformSendResult(success=True)
+            return PlatformSendResult(success=False, error="消息为空")
 
         message_segment = envelope.get("message_segment")
         if isinstance(message_segment, list):
@@ -66,7 +67,7 @@ class SendHandler:
         处理普通消息发送
 
         Returns:
-            PlatformSendResult: 发送结果；成功但平台未返回 ID 时 message_id 为 None
+            PlatformSendResult: 仅同步成功且含平台消息 ID 时返回成功
         """
         message_info: MessageInfoPayload = envelope.get("message_info", {})
         message_segment: SegPayload = envelope.get("message_segment", {})  # type: ignore[assignment]
@@ -87,11 +88,11 @@ class SendHandler:
             processed_message = await self.handle_seg_recursive(seg_data, user_info or {}, is_group=is_group)
         except Exception as e:
             logger.error(f"处理消息时发生错误: {e}")
-            return PlatformSendResult(success=True)
+            return PlatformSendResult(success=False, error=str(e))
 
         if not processed_message:
             logger.critical("现在暂时不支持解析此回复！")
-            return PlatformSendResult(success=True)
+            return PlatformSendResult(success=False, error="没有可发送的消息段")
 
         # 🔧 确保 reply 消息段始终在列表最前面
         # 排序原则：reply 类型优先级最高（排序值为 0），其他类型保持原有顺序（排序值为 1）
@@ -110,10 +111,10 @@ class SendHandler:
             id_name = "user_id"
         else:
             logger.error("无法识别的消息类型")
-            return PlatformSendResult(success=True)
+            return PlatformSendResult(success=False, error="缺少发送目标")
         logger.debug(
             f"准备发送到 onebot 的消息体: action='{action}', {id_name}='{target_id}', "
-            f"message={str(processed_message)[:500]}"
+            f"segment_types={[item.get('type') for item in processed_message if isinstance(item, dict)]}"
         )
         response = await self.send_message_to_onebot(
             action or "",
@@ -122,23 +123,24 @@ class SendHandler:
                 "message": processed_message,
             },
         )
-        if response.get("status") != "ok":
-            logger.warning(f"消息发送失败，onebot返回：{response!s}")
+        if response.get("status") == "timeout":
+            return PlatformSendResult(success=False, error="OneBot 请求超时，发送结果未知", response=response)
+        if response.get("status") != "ok" or response.get("retcode") != 0:
+            logger.warning(f"消息发送未成功，OneBot 状态: {response.get('status')}, 返回码: {response.get('retcode')}")
             return PlatformSendResult(
                 success=False,
-                error=f"OneBot 消息发送失败: {response!s}",
+                error="OneBot 消息发送失败",
                 response=response,
             )
 
-        logger.info("消息发送成功")
-
-        # 提取平台返回的消息 ID，没有则返回 None
         data = response.get("data")
-        if isinstance(data, dict):
-            message_id = data.get("message_id")
-            if message_id is not None:
-                return PlatformSendResult(success=True, message_id=str(message_id))
-        return PlatformSendResult(success=True)
+        message_id = data.get("message_id") if isinstance(data, dict) else None
+        if type(message_id) is not int:
+            logger.warning("OneBot 响应缺少有效的 message_id")
+            return PlatformSendResult(success=False, error="OneBot 响应缺少消息 ID", response=response)
+
+        logger.info("消息发送成功")
+        return PlatformSendResult(success=True, message_id=str(message_id))
 
     async def send_command(self, envelope: MessageEnvelope) -> None:
         """
@@ -297,12 +299,19 @@ class SendHandler:
         elif seg_type == "voiceurl":
             voice_url = seg.get("data")
             new_payload = self.build_payload(payload, self.handle_voiceurl_message(str(voice_url)), False)
+        elif seg_type == "video":
+            video = seg.get("data")
+            if not isinstance(video, str):
+                raise ValueError("视频来源必须是字符串")
+            new_payload = self.build_payload(payload, self.handle_video_message(video), False)
         elif seg_type == "music":
             song_id = seg.get("data")
             new_payload = self.build_payload(payload, self.handle_music_message(str(song_id)), False)
         elif seg_type == "videourl":
             video_url = seg.get("data")
-            new_payload = self.build_payload(payload, self.handle_videourl_message(str(video_url)), False)
+            if not isinstance(video_url, str):
+                raise ValueError("视频来源必须是字符串")
+            new_payload = self.build_payload(payload, self.handle_video_message(video_url), False)
         elif seg_type == "file":
             file_path = seg.get("data")
             new_payload = self.build_payload(payload, self.handle_file_message(str(file_path)), False)
@@ -456,7 +465,9 @@ class SendHandler:
         if not encoded_voice:
             logger.warning("接收到空的语音消息，跳过处理")
             return {}
-        if encoded_voice.startswith(("base64://", "http://", "https://")):
+        if encoded_voice.startswith("base64|"):
+            file_value = f"base64://{encoded_voice[7:]}"
+        elif encoded_voice.startswith(("base64://", "http://", "https://")):
             file_value = encoded_voice
         else:
             file_value = f"base64://{encoded_voice}"
@@ -478,6 +489,32 @@ class SendHandler:
             "type": "music",
             "data": {"type": "163", "id": song_id},
         }
+
+    def handle_video_message(self, video_data: str) -> dict:
+        """将缓存视频转换为 OneBot 可发送的媒体源。"""
+        if not video_data.strip():
+            raise ValueError("视频来源不能为空")
+        if video_data.startswith("base64|"):
+            encoded_start = 7
+        elif video_data.startswith("base64://"):
+            encoded_start = 9
+        elif video_data.startswith(("http://", "https://")):
+            if not urlsplit(video_data).netloc:
+                raise ValueError("视频 URL 缺少主机名")
+            return self.handle_videourl_message(video_data)
+        elif video_data.startswith("file://"):
+            if not urlsplit(video_data).path:
+                raise ValueError("视频文件 URI 缺少路径")
+            return self.handle_videourl_message(video_data)
+        else:
+            if urlsplit(video_data).scheme:
+                raise ValueError("不支持的视频来源")
+            return self.handle_videourl_message(video_data)
+        if not video_data[encoded_start:].strip():
+            raise ValueError("视频 Base64 内容为空")
+        if encoded_start == 7:
+            video_data = video_data.replace("base64|", "base64://", 1)
+        return self.handle_videourl_message(video_data)
 
     def handle_videourl_message(self, video_url: str) -> dict:
         """处理视频链接消息"""
@@ -650,6 +687,9 @@ class SendHandler:
         try:
             response = await self.adapter.send_onebot_api(action, params, timeout=timeout)
             return response or {"status": "error", "message": "no response"}
+        except TimeoutError:
+            logger.warning("OneBot 请求等待响应超时，发送结果未知")
+            return {"status": "timeout"}
         except Exception as e:
             logger.error(f"发送消息失败: {e}")
             return {"status": "error", "message": str(e)}

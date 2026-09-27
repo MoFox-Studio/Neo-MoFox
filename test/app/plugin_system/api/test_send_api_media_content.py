@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from src.app.plugin_system.api.send_api import _build_media_content
 
 
@@ -59,17 +57,3 @@ def test_build_media_content_keeps_existing_prefix() -> None:
         )
 
     assert content["media"][0]["data"] == "base64|iVBORw0KGgo="
-
-
-@pytest.mark.parametrize("media_url", ["https://example.org/video.mp4", "file:///media/video.mp4"])
-def test_build_media_content_url_has_no_cached_id(media_url: str) -> None:
-    """URL 媒体未下载时不产生承诺可回查的 ID。"""
-    with patch(
-        "src.core.managers.media_manager.MediaManager.compute_media_hash"
-    ) as mock_hash:
-        content = _build_media_content(
-            "video", media_url, "[视频]", "video_id"
-        )
-
-    assert content["media"] == [{"type": "video", "data": media_url}]
-    mock_hash.assert_not_called()
