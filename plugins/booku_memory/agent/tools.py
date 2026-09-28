@@ -73,38 +73,93 @@ def _split_segments(command: str) -> list[str]:
     return [part.strip() for part in command.split("&&") if part.strip()]
 
 
-def _parse_segment(segment: str) -> tuple[str, dict[str, list[str]]]:
-    """解析单条命令段为操作名和参数表。"""
+def _tokenize(segment: str) -> list[tuple[str, int, int]]:
+    """切词，并保留每个词在原文里的位置区间。
 
-    tokens = shlex.split(segment)
+    与 ``shlex`` 不同：不成对的引号按普通字符处理（不会抛异常），
+    反斜杠不做转义（Windows 路径要原样保留），成对引号剥离但位置区间照旧。
+    """
+
+    tokens: list[tuple[str, int, int]] = []
+    buffer: list[str] = []
+    start = -1
+    index = 0
+    length = len(segment)
+
+    def flush(end: int) -> None:
+        nonlocal start
+        if buffer:
+            tokens.append(("".join(buffer), start, end))
+            buffer.clear()
+            start = -1
+
+    while index < length:
+        char = segment[index]
+        if char.isspace():
+            flush(index)
+            index += 1
+            continue
+        if char in ('"', "'"):
+            end = segment.find(char, index + 1)
+            if end != -1:
+                if start < 0:
+                    start = index
+                buffer.append(segment[index + 1 : end])
+                index = end + 1
+                continue
+        if start < 0:
+            start = index
+        buffer.append(char)
+        index += 1
+
+    flush(length)
+    return tokens
+
+
+def _parse_segment(segment: str) -> tuple[str, dict[str, list[str]]]:
+    """解析单条命令段为操作名和参数表。
+
+    参数值可以包含空格：从 ``-key`` 之后一直取到下一个 ``-key`` 之前，
+    值按原文还原（词间空格与换行保留）。LLM 生成的命令大多不给值加引号，
+    而标题与正文里常有空格，因此不能只取紧跟的一个词。
+    """
+
+    tokens = _tokenize(segment)
     if not tokens:
         raise ValueError("空命令段")
 
-    operation = tokens[0].strip().lower()
+    operation = tokens[0][0].strip().lower()
     options: dict[str, list[str]] = {}
+    state: dict[str, object] = {"key": None, "start": None, "end": None}
 
-    index = 1
-    while index < len(tokens):
-        token = tokens[index]
-        if not token.startswith("-"):
-            index += 1
-            continue
-
-        key = token.lstrip("-").strip().lower()
-        if not key:
-            index += 1
-            continue
-
-        value: str
-        if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
-            value = tokens[index + 1]
-            index += 2
+    def commit() -> None:
+        key = state["key"]
+        if not isinstance(key, str) or not key:
+            return
+        begin, finish = state["start"], state["end"]
+        if begin is None or finish is None:
+            options.setdefault(key, []).append("true")
         else:
-            value = "true"
-            index += 1
+            raw = segment[int(begin) : int(finish)].strip()
+            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+                raw = raw[1:-1].strip()
+            options.setdefault(key, []).append(raw)
+        state["key"], state["start"], state["end"] = None, None, None
 
-        options.setdefault(key, []).append(value)
+    for text, begin, finish in tokens[1:]:
+        if text.startswith("-") and len(text) > 1:
+            key = text.lstrip("-").strip().lower()
+            if key:
+                commit()
+                state["key"] = key
+                continue
+        if state["key"] is None:
+            continue
+        if state["start"] is None:
+            state["start"] = begin
+        state["end"] = finish
 
+    commit()
     return operation, options
 
 
