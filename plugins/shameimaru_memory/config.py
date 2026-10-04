@@ -247,6 +247,34 @@ class ShameimaruMemoryConfig(BaseConfig):
             le=200,
             tag="performance",
         )
+        delegate_to_engram: bool = Field(
+            default=True,
+            description="Engram Memory 可用时由其统一负责在线闪回注入",
+            label="交给 Engram 在线召回",
+            tag="ai",
+        )
+        recall_enabled: bool = Field(
+            default=True,
+            description="是否启用线索驱动的前馈召回",
+            label="启用前馈召回",
+            tag="ai",
+        )
+        recall_noise: float = Field(
+            default=0.12,
+            description="记忆候选选择扰动，仅改变已有记忆的选择顺序",
+            label="召回扰动",
+            ge=0.0,
+            le=1.0,
+            tag="performance",
+        )
+        recall_inhibition_seconds: int = Field(
+            default=1800,
+            description="同一聊天流对最近召回记忆的抑制时长（秒）",
+            label="召回抑制时长（秒）",
+            ge=0,
+            le=86400,
+            tag="performance",
+        )
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     storage: StorageSection = Field(default_factory=StorageSection)

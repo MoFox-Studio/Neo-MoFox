@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from plugins.shameimaru_memory.config import ShameimaruMemoryConfig
+from plugins.shameimaru_memory.recall import RecallCandidate, select_candidates
 from plugins.shameimaru_memory.models import (
     GroupSummary,
     NewsEntry,
@@ -294,6 +295,63 @@ async def test_store_watcher_reloads_memory_on_external_change(tmp_path: Path) -
         assert await store.get_persona("qq:1") == "外部改写"
     finally:
         await store.close()
+
+
+def test_recall_inhibition_changes_same_cue_selection() -> None:
+    """相同线索在上一轮召回后应优先选择另一条已有记忆。"""
+    candidates = [
+        RecallCandidate(
+            memory_id="m1",
+            text="小梅以前每天喝咖啡。",
+            timestamp=100.0,
+            person_ids=frozenset({"qq:1"}),
+        ),
+        RecallCandidate(
+            memory_id="m2",
+            text="小梅说咖啡会让她失眠。",
+            timestamp=100.0,
+            person_ids=frozenset({"qq:1"}),
+        ),
+    ]
+    first = select_candidates(
+        candidates,
+        query="小梅 咖啡",
+        person_ids={"qq:1"},
+        state={"__meta__": {"nonce": 0}},
+        stream_id="s1",
+        limit=1,
+        now=100.0,
+        noise=0.0,
+        inhibition_seconds=1800.0,
+    )
+    second = select_candidates(
+        candidates,
+        query="小梅 咖啡",
+        person_ids={"qq:1"},
+        state={
+            "__meta__": {"nonce": 1},
+            first[0].memory_id: {"last_recalled_at": 100.0, "count": 1},
+        },
+        stream_id="s1",
+        limit=1,
+        now=100.0,
+        noise=0.0,
+        inhibition_seconds=1800.0,
+    )
+    assert first[0].memory_id != second[0].memory_id
+
+
+@pytest.mark.asyncio
+async def test_store_recall_state_persists_and_increments(tmp_path: Path) -> None:
+    store = ShameimaruMemoryStore(_config(tmp_path))
+    await store.record_recall("s1", ["m1", "m1"], recalled_at=10.0)
+    await store.record_recall("s1", ["m2"], recalled_at=20.0)
+
+    restored = ShameimaruMemoryStore(_config(tmp_path))
+    state = await restored.get_recall_state("s1")
+    assert state["m1"] == {"last_recalled_at": 10.0, "count": 1}
+    assert state["m2"] == {"last_recalled_at": 20.0, "count": 1}
+    assert state["__meta__"]["nonce"] == 2
 
 
 async def test_collect_participants_skips_bot_messages() -> None:

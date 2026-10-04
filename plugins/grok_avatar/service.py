@@ -12,6 +12,10 @@
 from __future__ import annotations
 
 import asyncio
+import ast
+import base64
+import binascii
+from pathlib import Path
 from typing import Any, Literal
 
 import httpx
@@ -33,6 +37,9 @@ logger = get_logger("grok_avatar")
 
 #: onebot_expand 标准账号服务签名。
 _ACCOUNT_SERVICE_SIGNATURE = "onebot_expand:service:account_service"
+_FILE_SERVICE_SIGNATURE = "onebot_expand:service:file_service"
+_MESSAGE_SERVICE_SIGNATURE = "onebot_expand:service:message_service"
+_MAX_SPECIFIED_IMAGE_BYTES = 20 * 1024 * 1024
 
 AvatarMode = Literal["plain", "google_ring"]
 
@@ -84,6 +91,213 @@ class GrokAvatarService(BaseService):
         if not resp.content:
             raise RuntimeError("头像下载结果为空。")
         return resp.content
+
+    async def resolve_specified_image(self, image: str) -> bytes:
+        """解析 URL、data URL、base64 或本地路径为图片字节。"""
+        value = image.strip()
+        if not value:
+            raise RuntimeError("指定图片不能为空。")
+        if value.startswith("data:"):
+            try:
+                _, encoded = value.split(",", 1)
+            except ValueError as e:
+                raise RuntimeError("指定图片 data URL 格式无效。") from e
+            return self._decode_input_b64(encoded)
+        if value.startswith("base64|"):
+            return self._decode_input_b64(value[7:])
+
+        path = Path(value)
+        if path.is_file():
+            data = path.read_bytes()
+            self._validate_image_size(data)
+            return data
+        if value.startswith(("http://", "https://")):
+            return await self._download_url(value, "指定图片")
+        return self._decode_input_b64(value)
+
+    async def resolve_chat_image(self, stream_id: str, history_index: int = 0) -> bytes:
+        """从聊天记录按最新优先选择图片并解析为字节。"""
+        if not stream_id:
+            raise RuntimeError("无法确定当前聊天流，不能读取聊天记录图片。")
+        if history_index < 0:
+            raise RuntimeError("history_index 必须是非负整数。")
+
+        from src.app.plugin_system.api import stream_api
+
+        messages = await stream_api.get_stream_messages(stream_id, limit=100, offset=0)
+        candidates: list[dict[str, Any]] = []
+        for message in reversed(messages):
+            candidates.extend(self._message_image_candidates(message))
+        if history_index >= len(candidates):
+            raise RuntimeError(
+                f"聊天记录中只有 {len(candidates)} 张图片，history_index={history_index} 无效。"
+            )
+
+        candidate = candidates[history_index]
+        data = candidate.get("data")
+        if isinstance(data, str) and data.strip():
+            return self._decode_input_b64(data)
+
+        message_id = str(candidate.get("message_id", "") or "")
+        file_id = str(candidate.get("file") or candidate.get("image_id") or "")
+        if message_id:
+            file_id, raw_data = await self._fetch_onebot_image(message_id, file_id)
+            if raw_data:
+                return raw_data
+        if file_id:
+            data = await self._fetch_image_info(file_id)
+            if data:
+                return data
+        raise RuntimeError("找到了聊天记录图片，但无法下载图片内容。")
+
+    async def _fetch_onebot_image(
+        self,
+        message_id: str,
+        file_id: str,
+    ) -> tuple[str, bytes | None]:
+        """通过 onebot_expand 获取消息原始图片段。"""
+        from src.app.plugin_system.api import service_api
+
+        service = service_api.get_service(_MESSAGE_SERVICE_SIGNATURE)
+        get_msg = getattr(service, "get_msg", None) if service is not None else None
+        if get_msg is None:
+            return file_id, None
+        try:
+            result = await get_msg(message_id=message_id)
+        except Exception as e:
+            logger.debug(f"[grok_avatar] get_msg 获取历史图片失败: {e}")
+            return file_id, None
+
+        for segment in self._extract_onebot_segments(result):
+            if segment.get("type") != "image":
+                continue
+            segment_data = segment.get("data")
+            if not isinstance(segment_data, dict):
+                continue
+            file_id = str(segment_data.get("file") or segment_data.get("file_id") or file_id)
+            encoded = segment_data.get("base64") or segment_data.get("data")
+            if isinstance(encoded, str) and encoded.strip():
+                try:
+                    return file_id, self._decode_input_b64(encoded)
+                except RuntimeError:
+                    pass
+            url = segment_data.get("url")
+            if isinstance(url, str) and url.strip():
+                return file_id, await self._download_url(url, "聊天记录图片")
+        return file_id, None
+
+    async def _fetch_image_info(self, file_id: str) -> bytes | None:
+        """通过 onebot_expand file_service.get_image 获取图片。"""
+        from src.app.plugin_system.api import service_api
+
+        service = service_api.get_service(_FILE_SERVICE_SIGNATURE)
+        get_image = getattr(service, "get_image", None) if service is not None else None
+        if get_image is None:
+            return None
+        try:
+            result = await get_image(file=file_id)
+        except Exception as e:
+            logger.debug(f"[grok_avatar] get_image 获取历史图片失败: {e}")
+            return None
+        data = result.get("data", result) if isinstance(result, dict) else None
+        if not isinstance(data, dict):
+            return None
+        encoded = data.get("base64") or data.get("data")
+        if isinstance(encoded, str) and encoded.strip():
+            try:
+                return self._decode_input_b64(encoded)
+            except RuntimeError:
+                return None
+        for key in ("url", "file", "path"):
+            value = data.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if value.startswith(("http://", "https://")):
+                return await self._download_url(value, "聊天记录图片")
+            path = Path(value)
+            if path.is_file():
+                content = path.read_bytes()
+                self._validate_image_size(content)
+                return content
+        return None
+
+    async def _download_url(self, url: str, label: str) -> bytes:
+        try:
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(f"{label}下载 HTTP 错误: {e.response.status_code}") from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"{label}下载请求失败: {e}") from e
+        self._validate_image_size(resp.content)
+        return resp.content
+
+    @staticmethod
+    def _decode_input_b64(value: str) -> bytes:
+        encoded = value.strip()
+        if encoded.startswith("base64|"):
+            encoded = encoded[7:]
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as e:
+            raise RuntimeError("指定图片不是有效的 base64 图片数据。") from e
+        GrokAvatarService._validate_image_size(data)
+        return data
+
+    @staticmethod
+    def _validate_image_size(data: bytes) -> None:
+        if not data:
+            raise RuntimeError("图片内容为空。")
+        if len(data) > _MAX_SPECIFIED_IMAGE_BYTES:
+            raise RuntimeError("图片过大，不能超过 20 MB。")
+
+    @classmethod
+    def _message_image_candidates(cls, message: Any) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        message_id = str(getattr(message, "message_id", "") or "")
+        for content in (
+            getattr(message, "content", None),
+            getattr(message, "extra", None),
+            getattr(message, "raw_data", None),
+        ):
+            for media in cls._extract_media_items(content):
+                if str(media.get("type", "")).lower() not in {"image", "emoji"}:
+                    continue
+                candidates.append({**media, "message_id": message_id})
+        return candidates
+
+    @classmethod
+    def _extract_media_items(cls, content: Any) -> list[dict[str, Any]]:
+        if isinstance(content, str):
+            try:
+                content = ast.literal_eval(content)
+            except (SyntaxError, ValueError):
+                return []
+        if isinstance(content, dict):
+            if content.get("type") in {"image", "emoji"}:
+                return [content]
+            media = content.get("media")
+            if isinstance(media, list):
+                return [item for item in media if isinstance(item, dict)]
+            for key in ("message", "data"):
+                items = cls._extract_media_items(content.get(key))
+                if items:
+                    return items
+        if isinstance(content, list):
+            return [
+                item for item in content
+                if isinstance(item, dict) and item.get("type") in {"image", "emoji"}
+            ]
+        return []
+
+    @staticmethod
+    def _extract_onebot_segments(result: Any) -> list[dict[str, Any]]:
+        data = result.get("data", result) if isinstance(result, dict) else result
+        if not isinstance(data, dict):
+            return []
+        message = data.get("message")
+        return message if isinstance(message, list) else []
 
     async def _fetch_avatar_url(self, qq_number: str) -> str | None:
         """通过 onebot_expand 获取头像 URL；不可用时返回 None。"""
@@ -272,7 +486,20 @@ class GrokAvatarService(BaseService):
         """
         try:
             avatar_bytes = await self.download_avatar(qq_number)
-            grok_bytes = await self.generate_grok_avatar(avatar_bytes, config)
+            return await self.make_avatar_from_bytes(avatar_bytes, config, mode)
+        except (RuntimeError, FrameError) as e:
+            logger.warning(f"[grok_avatar] 生成失败 mode={mode}: {e}")
+            return False, str(e)
+
+    async def make_avatar_from_bytes(
+        self,
+        image_bytes: bytes,
+        config: GrokAvatarConfig,
+        mode: AvatarMode = "plain",
+    ) -> tuple[bool, str]:
+        """从任意输入图片生成头像并返回 base64。"""
+        try:
+            grok_bytes = await self.generate_grok_avatar(image_bytes, config)
 
             if mode == "google_ring":
                 frame = config.frame

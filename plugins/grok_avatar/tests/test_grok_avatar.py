@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import base64
 from pathlib import Path
 
 import httpx
@@ -212,6 +213,68 @@ def test_extract_avatar_url_accepts_standard_and_nested_fields() -> None:
     assert service._extract_avatar_url({"data": {"avatar": ""}}) is None
 
 
+def test_extract_media_candidates_supports_runtime_and_database_content() -> None:
+    service = GrokAvatarService.__new__(GrokAvatarService)
+
+    class _Message:
+        message_id = "m-1"
+        content = "{'media': [{'type': 'image', 'image_id': 'hash-1'}]}"
+        extra = {}
+        raw_data = None
+
+    candidates = service._message_image_candidates(_Message())
+    assert candidates == [{"type": "image", "image_id": "hash-1", "message_id": "m-1"}]
+
+
+def test_decode_input_b64_accepts_base64_prefixes() -> None:
+    service = GrokAvatarService.__new__(GrokAvatarService)
+    payload = b"image-bytes"
+    encoded = base64.b64encode(payload).decode()
+    assert service._decode_input_b64(encoded) == payload
+    assert service._decode_input_b64(f"base64|{encoded}") == payload
+
+
+@pytest.mark.asyncio
+async def test_resolve_chat_image_uses_onebot_get_msg_then_get_image(monkeypatch) -> None:
+    service = GrokAvatarService.__new__(GrokAvatarService)
+    calls: list[tuple[str, object]] = []
+
+    class _Message:
+        message_id = "m-2"
+        content = {"media": [{"type": "image", "image_id": "hash-2"}]}
+        extra = {}
+        raw_data = None
+
+    async def get_stream_messages(stream_id, limit, offset):
+        assert (stream_id, limit, offset) == ("stream-1", 100, 0)
+        return [_Message()]
+
+    class _MessageService:
+        async def get_msg(self, message_id):
+            calls.append(("get_msg", message_id))
+            return {"data": {"message": [{"type": "image", "data": {"file": "file-2"}}]}}
+
+    class _FileService:
+        async def get_image(self, file):
+            calls.append(("get_image", file))
+            return {"data": {"base64": base64.b64encode(b"image-bytes").decode()}}
+
+    from src.app.plugin_system.api import service_api, stream_api
+
+    monkeypatch.setattr(stream_api, "get_stream_messages", get_stream_messages)
+    monkeypatch.setattr(
+        service_api,
+        "get_service",
+        lambda signature: {
+            "onebot_expand:service:message_service": _MessageService(),
+            "onebot_expand:service:file_service": _FileService(),
+        }.get(signature),
+    )
+
+    assert await service.resolve_chat_image("stream-1") == b"image-bytes"
+    assert calls == [("get_msg", "m-2"), ("get_image", "file-2")]
+
+
 @pytest.mark.asyncio
 async def test_generate_uses_fresh_image_edit_request_with_original_avatar(monkeypatch) -> None:
     """每次调用必须把原始头像作为唯一图片重新上传，不能走历史对话续写。"""
@@ -274,6 +337,9 @@ def test_tool_schema_exposes_mode_and_qq() -> None:
     props = params.get("properties", params) if isinstance(params, dict) else {}
     assert "mode" in props
     assert "qq_number" in props
+    assert "source" in props
+    assert "image" in props
+    assert "history_index" in props
 
 
 def test_tool_resolve_qq_prefers_explicit_then_sender() -> None:

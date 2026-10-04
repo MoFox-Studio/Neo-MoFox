@@ -40,6 +40,7 @@ _STORE_VERSION = 1
 _SUMMARIES_DEFAULT = {"version": _STORE_VERSION, "groups": {}}
 _NEWS_DEFAULT = {"version": _STORE_VERSION, "entries": []}
 _PERSONAS_DEFAULT = {"version": _STORE_VERSION, "persons": {}}
+_RECALL_DEFAULT = {"version": _STORE_VERSION, "streams": {}}
 
 _WATCH_INTERVAL_SECONDS = 2.0
 
@@ -107,11 +108,13 @@ class ShameimaruMemoryStore:
         self.summaries_path = data_dir / "summaries.json"
         self.news_path = data_dir / "news.json"
         self.personas_path = data_dir / "personas.json"
+        self.recall_path = data_dir / "recall_state.json"
 
         self._lock = asyncio.Lock()
         self._summaries: dict[str, Any] = {}
         self._news: dict[str, Any] = {}
         self._personas: dict[str, Any] = {}
+        self._recall: dict[str, Any] = {}
         self._loaded = False
         self._file_mtimes: dict[Path, float] = {}
         self._watcher_task: asyncio.Task | None = None
@@ -133,9 +136,11 @@ class ShameimaruMemoryStore:
         self._summaries = self._load_json(self.summaries_path, _SUMMARIES_DEFAULT)
         self._news = self._load_json(self.news_path, _NEWS_DEFAULT)
         self._personas = self._load_json(self.personas_path, _PERSONAS_DEFAULT)
+        self._recall = self._load_json(self.recall_path, _RECALL_DEFAULT)
         self._record_mtime(self.summaries_path)
         self._record_mtime(self.news_path)
         self._record_mtime(self.personas_path)
+        self._record_mtime(self.recall_path)
         self._loaded = True
 
     @staticmethod
@@ -188,6 +193,14 @@ class ShameimaruMemoryStore:
         )
         self._record_mtime(self.personas_path)
 
+    def _write_recall(self) -> None:
+        """保存前馈召回的抑制状态。"""
+        _atomic_write_text(
+            self.recall_path,
+            json.dumps(self._recall, ensure_ascii=False, indent=2),
+        )
+        self._record_mtime(self.recall_path)
+
     # ------------------------------------------------------------------
     # 文件变化监视：外部修改本地文件时同步刷新内存缓存
     # ------------------------------------------------------------------
@@ -234,6 +247,7 @@ class ShameimaruMemoryStore:
                 (self.summaries_path, "_summaries", _SUMMARIES_DEFAULT),
                 (self.news_path, "_news", _NEWS_DEFAULT),
                 (self.personas_path, "_personas", _PERSONAS_DEFAULT),
+                (self.recall_path, "_recall", _RECALL_DEFAULT),
             ):
                 try:
                     mtime = path.stat().st_mtime
@@ -463,3 +477,30 @@ class ShameimaruMemoryStore:
         await self._ensure_loaded()
         persons = self._personas.get("persons", {})
         return {str(key): str(value or "") for key, value in persons.items()}
+
+    async def get_recall_state(self, stream_id: str) -> dict[str, Any]:
+        """读取指定聊天流的召回抑制状态。"""
+        await self._ensure_loaded()
+        raw = self._recall.get("streams", {}).get(stream_id, {})
+        return copy.deepcopy(raw) if isinstance(raw, dict) else {}
+
+    async def record_recall(
+        self, stream_id: str, memory_ids: list[str], *, recalled_at: float
+    ) -> None:
+        """记录本轮被唤回的记忆，供下一轮前馈抑制重复。"""
+        if not stream_id or not memory_ids:
+            return
+        await self._ensure_loaded()
+        async with self._lock:
+            streams = self._recall.setdefault("streams", {})
+            state = streams.setdefault(stream_id, {"__meta__": {"nonce": 0}})
+            meta = state.setdefault("__meta__", {})
+            meta["nonce"] = int(meta.get("nonce", 0) or 0) + 1
+            for memory_id in dict.fromkeys(memory_ids):
+                previous = state.get(memory_id, {})
+                count = int(previous.get("count", 0) or 0) if isinstance(previous, dict) else 0
+                state[memory_id] = {
+                    "last_recalled_at": recalled_at,
+                    "count": count + 1,
+                }
+            self._write_recall()

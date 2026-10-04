@@ -38,6 +38,8 @@ from .utils import format_local_time, message_time, person_id_of, person_name_of
 
 logger = log_api.get_logger("shameimaru_memory.job")
 
+_ENGRAM_SERVICE_SIGNATURE = "engram_memory:service:memory_service"
+
 
 def _is_enabled(plugin: Any) -> bool:
     """检查插件开关，兼容缺少新配置字段的旧测试或旧配置。"""
@@ -61,6 +63,28 @@ def _llm_task(config: Any, attr: str) -> str:
         return str(getattr(getattr(config, "llm", None), attr, "") or "actor")
     except Exception:  # noqa: BLE001
         return "actor"
+
+
+async def _ingest_news_into_engram(entry: NewsEntry) -> None:
+    """把后台新闻作为低优先级系统经历交给 Engram，失败不影响新闻层。"""
+    service = service_api.get_service(_ENGRAM_SERVICE_SIGNATURE)
+    ingest = getattr(service, "ingest_episode", None) if service is not None else None
+    if not callable(ingest) or not entry.stream_id:
+        return
+    person_ids = tuple(dict.fromkeys(ref.person_id for ref in entry.participants if ref.person_id))
+    if not person_ids:
+        return
+    try:
+        await ingest(
+            title=entry.title,
+            content=entry.content,
+            stream_id=entry.stream_id,
+            observed_at=entry.timestamp,
+            source_ref=entry.id,
+            person_ids=person_ids,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"新闻写入 Engram 失败，保留 Shameimaru 新闻: {entry.id}: {exc}")
 
 
 def _collect_participants(messages: list[Message]) -> list[PersonRef]:
@@ -412,6 +436,7 @@ async def _news_for_group(
             participants=participants,
         )
         evicted.extend(await store.append_news(entry, int(news_cfg.max_entries)))
+        await _ingest_news_into_engram(entry)
         created += 1
 
     # 仅废弃实际送入本轮 LLM 的摘要，避免 cap 截断时丢失旧摘要。

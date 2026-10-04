@@ -71,8 +71,9 @@ plugins/shameimaru_memory/
 
 1. 订阅 `on_prompt_build`，命中配置的模板（默认 `neo_default_chatter_user_prompt`）时执行；
 2. 收集当前聊天流 unread message 中出现的人物 ID；
-3. 按人物过滤新闻与人物背景，写入流私有 system reminder（`dynamic` 注入到对话尾部，`forever` 消费）；
-4. 无相关内容时删除对应 reminder，避免过期内容被继续注入。
+3. 默认执行一次线索驱动的前馈召回：结合当前上下文、人物、时间衰减、最近召回抑制和受控扰动，从已有新闻中选择记忆；该过程不强制调用 LLM 或 Embedding；
+4. 将选中的新闻与人物背景写入流私有 system reminder（`dynamic` 注入到对话尾部，`forever` 消费）；关闭 `recall_enabled` 时回退到原有按时间注入；
+5. 无相关内容时删除对应 reminder，避免过期内容被继续注入。
 
 ## 数据存储
 
@@ -83,6 +84,7 @@ plugins/shameimaru_memory/
 | `summaries.json` | 摘要层：按群聊分组的摘要条目（新闻层消费后标记为废弃，供知识层读取，按数量上限淘汰） |
 | `news.json` | 新闻层：全局新闻条目列表 |
 | `personas.json` | 人物层：`person_id -> 人物背景文本` |
+| `recall_state.json` | 按聊天流记录最近召回记忆及抑制状态 |
 
 知识层数据存储在 `booku_memory_store`（SQLite + 向量库），不在此目录。
 
@@ -162,6 +164,9 @@ plugins/shameimaru_memory/
 | `news_max_inject` | int | `5` | 单次回复最多注入的新闻条数 |
 | `persona_max_inject` | int | `5` | 单次回复最多注入的人物背景条数 |
 | `person_scan_history_limit` | int | `20` | 收集当前对话人物时扫描的最近历史消息条数（unread 被 flush 进 history 后兜底，避免漏掉当前对话人物） |
+| `recall_enabled` | bool | `true` | 是否启用线索驱动的前馈召回；关闭时回退到按时间注入 |
+| `recall_noise` | float | `0.12` | 只改变已有候选记忆的选择顺序，不生成新记忆 |
+| `recall_inhibition_seconds` | int | `1800` | 同一聊天流对最近召回记忆的抑制时长（秒） |
 
 ### 配置示例
 

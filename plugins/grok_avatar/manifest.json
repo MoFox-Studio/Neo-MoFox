@@ -1,8 +1,8 @@
 {
   "name": "grok_avatar",
   "display_name": "Grok Avatar 头像生成",
-  "version": "1.0.0",
-  "description": "以 onebot_expand 下载 QQ 头像为前置，调用配置注册的图像模型生成 Grok bot 风格头像；支持直接发送或叠加内嵌的 Google 四色圆环（Google Avatar Frame Generator 算法内嵌实现）后再发送",
+  "version": "1.0.1",
+  "description": "支持 QQ 头像、聊天记录图片和指定图片输入，调用配置注册的图像模型生成 Grok bot 风格头像；支持直接发送或叠加内嵌的 Google 四色圆环后再发送",
   "author": "Lycoris radiata",
   "license": "AGPL-3.0",
   "dependencies": {
