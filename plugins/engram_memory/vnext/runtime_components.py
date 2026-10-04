@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from src.app.plugin_system.api import prompt_api
 from src.app.plugin_system.api.event_api import EventDecision
@@ -102,13 +103,17 @@ def _ids(value: object, field: str, *, required: bool = False) -> tuple[str, ...
     return values
 
 
-def _optional_datetime(value: str | None, field: str) -> datetime | None:
-    """解析带时区的可选 ISO 时间。"""
+def _optional_datetime(
+    value: str | None, field: str, zone: ZoneInfo
+) -> datetime | None:
+    """将 ISO 时间转为 UTC，无时区使用配置时区，结束日期包含整日。"""
     if value is None:
         return None
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        raise ValueError(f"{field} 必须包含时区")
+        parsed = parsed.replace(tzinfo=zone)
+    if field == "end_time" and value == parsed.date().isoformat():
+        parsed = datetime.combine(parsed.date(), time.max, tzinfo=zone)
     return parsed.astimezone(UTC)
 
 
@@ -251,7 +256,9 @@ class VNextMemorySearchTool(BaseTool):
     name = "memory_search"
     description = (
         "搜索正式记忆，帮你想起相关的人和事；结果是线索目录，可用 memory_read 核对，不必在回复里复述。"
-        "同一人物或经历已有记忆时优先修订，不重复创建。"
+        "询问相识人物的信息时先检索，同名不能直接用人设或常识代答。"
+        "发现值得长期保存的新信息时，主动按人物和具体事项查重，再保存或修订，不等对方提醒。"
+        "同一事实或经历的补充优先修订，同一人物的新事实或独立经历另行保存。"
     )
 
     async def execute(
@@ -263,15 +270,30 @@ class VNextMemorySearchTool(BaseTool):
         start_time: str | None = None,
         end_time: str | None = None,
     ) -> tuple[bool, str | dict[str, object]]:
-        """按语义、人物及可选时间范围检索记忆。"""
-        result = await _owner(self.plugin).tools.memory_search(
+        """按语义、人物及可选时间范围检索记忆。
+
+        Args:
+            query: 要回想的具体人物、事实或经历。
+            person_ids: 查询所得准确人物 ID，可按主次人物筛选。
+            memory_kinds: 可选的正式记忆类型。
+            limit: 可选的结果条数上限。
+            start_time: 可选 ISO 8601 日期或时间，例如 2026-01-02、
+                带时区示例为 2026-01-02T09:00:00+08:00 或 2026-01-02T01:00:00Z；
+                无时区时按插件 diary.timezone，纯日期从当地零点开始。
+                不使用“昨天”等相对时间文本。
+            end_time: 格式与 start_time 相同；无时区时按插件 diary.timezone，
+                纯日期包含当地当天的最后一刻，完整时间则使用指定时刻。
+        """
+        owner = _owner(self.plugin)
+        zone = ZoneInfo(owner.config.diary.timezone)
+        result = await owner.tools.memory_search(
             query,
             _actor_context(self),
             person_ids=tuple(person_ids or ()),
             memory_kinds=tuple(memory_kinds or ()),
             limit=limit,
-            start_time=_optional_datetime(start_time, "start_time"),
-            end_time=_optional_datetime(end_time, "end_time"),
+            start_time=_optional_datetime(start_time, "start_time", zone),
+            end_time=_optional_datetime(end_time, "end_time", zone),
         )
         return True, {"memories": list(result)}
 
@@ -298,7 +320,11 @@ class VNextMemoryWriteAction(BaseAction):
     """保存有来源和明确人物关联的正式记忆。"""
 
     name = "memory_write"
-    description = "搜索去重后，记下值得长期保留的自然正文、主次人物与当前聊天来源，供以后回想；保存不是代对方公开。"
+    description = (
+        "自主判断当前聊天中哪些新信息值得长期保留，查重后在本轮主动保存，不等对方要求或提醒。"
+        "重要的单次事实和独立经历也值得记，已有同一事实的补充或更正用 memory_revise。"
+        "正文保留准确主次人物与真实聊天来源，只有工具成功才算保存；保存不是代对方公开。"
+    )
     associated_types: list[str] = ["text"]
 
     @classmethod
@@ -357,7 +383,10 @@ class VNextMemoryReviseAction(BaseAction):
     """在当前版本上修订正文和人物关联，保留旧版本。"""
 
     name = "memory_revise"
-    description = "基于当前 revision 修订同一记忆的正文和人物，可更正、澄清或补充依据；新经历仍应另建记忆。"
+    description = (
+        "发现当前聊天补充、更正或推进了已有事实或经历时，主动回读并基于当前 revision 修订正文和人物，不等提醒。"
+        "保留真实聊天来源与原有准确内容；同一人物的新事实或独立经历仍应另建记忆。"
+    )
     associated_types: list[str] = ["text"]
 
     @classmethod
@@ -471,6 +500,7 @@ class VNextPersonLookupTool(BaseTool):
         "同一段对话已读过的印象可以继续使用；私聊直接使用自动注入的印象，不要求聊天前再调用本工具。"
         "ID 不能用昵称代替。"
         "view=current 读当前，history 列出历史目录，revision 配合 revision_no 读指定历史正文。"
+        "结合记忆时间判断信息时效，印象更新时间不代表经历发生时间。"
         "历史只是当时的主观认识，不是当前事实或正式记忆依据。"
     )
 

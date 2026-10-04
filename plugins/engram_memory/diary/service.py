@@ -507,7 +507,18 @@ class DiaryService:
             LLMPayload(ROLE.USER, Text(json.dumps(payload, ensure_ascii=False)))
         )
         response = await request.send(stream=False)
-        result = json.loads((await response).strip())
+        message = (await response).strip()
+        lines = message.splitlines()
+        if len(lines) >= 3 and lines[0] in {"```json", "```"} and lines[-1] == "```":
+            message = "\n".join(lines[1:-1]).strip()
+        if not message:
+            raise ValueError("日记模型返回空响应")
+        try:
+            result = json.loads(message)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"日记模型返回无效 JSON，解析位置：{error.pos}"
+            ) from error
         if (
             not isinstance(result, dict)
             or set(result) != {"body"}
