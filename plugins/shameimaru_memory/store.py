@@ -332,21 +332,15 @@ class ShameimaruMemoryStore:
             group.group_id = group_id or group.group_id
             group.group_name = group_name or group.group_name
             group.entries.append(entry)
-            group.last_summarized_at = max(group.last_summarized_at, entry.timestamp)
             if max_entries > 0 and len(group.entries) > max_entries:
                 group.entries = group.entries[-max_entries:]
             groups[stream_id] = group.to_dict()
             self._write_summaries()
 
-    async def deprecate_group_summaries(
-        self, stream_id: str, entry_ids: set[str] | None = None
-    ) -> None:
-        """将指定摘要条目标记为废弃（不删除）。
+    async def deprecate_group_summaries(self, stream_id: str) -> None:
+        """将指定群聊的全部摘要条目标记为废弃（不删除）。
 
-        ``entry_ids`` 为空时兼容旧调用，将指定群聊的全部摘要标记为废弃；
-        传入 ID 集合时只标记本轮实际交给新闻层处理的摘要。
-
-        摘要被新闻层消费后标记为废弃而非删除：
+        摘要被新闻层消费后标记废弃而非删除：
         - 新闻层只消费未废弃的摘要，防止生成重复新闻；
         - 知识层（Dreaming）仍会读取废弃摘要了解群聊主题；
         - 废弃摘要随 ``append_summary`` 的条目上限淘汰逻辑按时间删除。
@@ -363,8 +357,6 @@ class ShameimaruMemoryStore:
                 return
             changed = False
             for entry in group.entries:
-                if entry_ids is not None and entry.id not in entry_ids:
-                    continue
                 if not entry.deprecated:
                     entry.deprecated = True
                     changed = True

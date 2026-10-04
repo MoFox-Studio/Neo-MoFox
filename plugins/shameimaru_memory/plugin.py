@@ -53,8 +53,6 @@ class ShameimaruMemoryPlugin(BasePlugin):
 
     def get_components(self) -> list[type]:
         """返回插件组件类。"""
-        if not bool(getattr(getattr(self.config, "plugin", None), "enabled", True)):
-            return []
         return [
             ShameimaruMemoryService,
             ShameimaruReadKnowledgeTool,
@@ -67,10 +65,6 @@ class ShameimaruMemoryPlugin(BasePlugin):
 
     async def on_plugin_loaded(self) -> None:
         """插件加载完成后：注册提示词模板、共享存储并启动文件监视。"""
-        if not bool(getattr(getattr(self.config, "plugin", None), "enabled", True)):
-            logger.info("shameimaru_memory 已禁用，跳过存储监视与周期任务注册")
-            return
-
         for name, template in PROMPT_TEMPLATES.items():
             try:
                 prompt_api.register_template(PromptTemplate(name=name, template=template))
@@ -135,8 +129,6 @@ class ShameimaruMemoryPlugin(BasePlugin):
 
         if not isinstance(self.config, ShameimaruMemoryConfig):
             logger.warning("shameimaru_memory config 未加载，无法注册 schedule")
-            return
-        if not self.config.plugin.enabled:
             return
 
         scheduler = get_unified_scheduler()
@@ -222,8 +214,6 @@ class ShameimaruMemoryPlugin(BasePlugin):
 
     async def _run_job_locked(self, name: str, job) -> None:
         """带互斥锁执行周期任务，防止重叠运行。"""
-        if not bool(getattr(getattr(self.config, "plugin", None), "enabled", True)):
-            return
         lock = self._job_locks.setdefault(name, asyncio.Lock())
         if lock.locked():
             logger.info(f"shameimaru_memory {name} 任务已在运行，跳过本次")
