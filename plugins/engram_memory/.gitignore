@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 运行时数据（本地记忆/向量/日记，不入库）
+data/
+*.db
+*.db-journal
+
+# 构建产物
+dist/
+build/
+*.mfp
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
