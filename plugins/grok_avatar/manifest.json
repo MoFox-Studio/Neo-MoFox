@@ -1,0 +1,52 @@
+{
+  "name": "grok_avatar",
+  "display_name": "Grok Avatar 头像生成",
+  "version": "1.0.0",
+  "description": "以 onebot_expand 下载 QQ 头像为前置，调用配置注册的图像模型生成 Grok bot 风格头像；支持直接发送或叠加内嵌的 Google 四色圆环（Google Avatar Frame Generator 算法内嵌实现）后再发送",
+  "author": "Lycoris radiata",
+  "license": "AGPL-3.0",
+  "dependencies": {
+    "plugins": [
+      "onebot_expand"
+    ],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "service",
+      "component_name": "grok_avatar",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "tool",
+      "component_name": "grok_avatar",
+      "dependencies": [
+        "grok_avatar:service:grok_avatar"
+      ],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "min_core_version": "1.0.0",
+  "api_version": {
+    "log_api": "1.0.0",
+    "service_api": "1.0.0",
+    "send_api": "1.0.0"
+  },
+  "python_dependencies": [
+    "httpx",
+    "pillow"
+  ],
+  "dependencies_required": false,
+  "categories": [
+    "tool"
+  ],
+  "tags": [
+    "avatar",
+    "image",
+    "grok",
+    "google-frame",
+    "tool"
+  ]
+}
