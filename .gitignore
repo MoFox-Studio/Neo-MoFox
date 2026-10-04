@@ -111,10 +111,3 @@ skills-lock.json
 !plugins/utility_commands/
 !plugins/skill_manager/
 !plugins/neo_default_chatter/
-!plugins/engram_memory/
-!plugins/engram_memory/**
-!plugins/grok_avatar/
-!plugins/grok_avatar/**
-!config/plugins/
-!config/plugins/engram_memory/
-!config/plugins/engram_memory/**
