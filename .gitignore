@@ -115,6 +115,9 @@ skills-lock.json
 !plugins/engram_memory/**
 !plugins/grok_avatar/
 !plugins/grok_avatar/**
+!config/
+config/*
 !config/plugins/
+config/plugins/*
 !config/plugins/engram_memory/
 !config/plugins/engram_memory/**

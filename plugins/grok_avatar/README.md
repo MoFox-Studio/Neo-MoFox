@@ -3,12 +3,12 @@
 将 QQ 用户头像转换为 Grok bot 风格的极简 2D 机器人头像，并直接发送到当前聊天。
 插件提供两个输出模式：普通 Grok bot 头像，或叠加 Google 四色圆环的头像。
 
-插件版本：`1.0.0`
+插件版本：`1.0.1`
 
 ## 功能
 
 - 由 LLM 通过 `grok_avatar` Tool 直接调用，不需要聊天命令。
-- 以目标 QQ 头像作为本次生成的原始图片输入。
+- 支持以目标 QQ 头像、当前聊天记录图片或指定图片作为本次生成的原始图片输入。
 - 使用固定的 Grok bot icon 韩文视觉规范生成头像。
 - 支持 `plain` 和 `google_ring` 两种模式。
 - Google 四色圆环算法内嵌在插件中，运行时不访问在线网页或依赖浏览器。
@@ -18,9 +18,9 @@
 ## 工作流程
 
 ```text
-目标 QQ 号
-    -> onebot_expand 标准 get_stranger_info 获取头像信息
-    -> 下载本次原始头像
+图片来源（QQ头像 / 聊天记录图片 / 指定图片）
+    -> onebot_expand 获取头像或历史图片信息
+    -> 下载本次原始图片
     -> 独立 POST /v1/images/edits multipart 请求
              image = 本次原始头像
              prompt = 固定 Grok bot icon 规格
@@ -28,8 +28,8 @@
          google_ring：本地叠加 Google 四色圆环后发送
 ```
 
-请求不会携带 `messages`、`previous_response_id`、上一轮生成图片或聊天历史。
-因此连续调用会重新下载原始头像，并分别创建独立的图片生成请求。
+图像请求不会携带 `messages`、`previous_response_id`、上一轮生成图片或聊天文本。
+因此每次调用都会以选定的原始图片创建独立的图片生成请求。
 
 ## 安装要求
 
@@ -101,16 +101,45 @@ Tool 名称：`grok_avatar`
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `mode` | `plain` / `google_ring` | `plain` 直接发送；`google_ring` 叠加四色圆环后发送 |
-| `qq_number` | 字符串，可选 | 目标 QQ 号。省略时使用当前聊天流触发消息的发送者 |
+| `qq_number` | 字符串，可选 | `source=avatar` 时的目标 QQ 号。省略时使用当前聊天流触发消息的发送者 |
+| `source` | `avatar` / `chat_history` / `specified` | 图片来源，默认 `avatar` |
+| `image` | 字符串，可选 | `source=specified` 时的 URL、data URL、`base64|...`、裸 base64 或本地路径 |
+| `history_index` | 非负整数 | `source=chat_history` 时的图片索引，`0` 为最新一张，`1` 为上一张 |
 
 示例调用：
 
 ```json
 {
     "mode": "google_ring",
+    "source": "avatar",
     "qq_number": "3863596004"
 }
 ```
+
+使用聊天记录中的最新图片：
+
+```json
+{
+    "mode": "plain",
+    "source": "chat_history",
+    "history_index": 0
+}
+```
+
+使用指定图片：
+
+```json
+{
+    "mode": "plain",
+    "source": "specified",
+    "image": "https://example.com/input.png"
+}
+```
+
+聊天记录图片会先读取 Neo-MoFox 消息中的媒体字段；历史记录只保留 `image_id` 或
+`file` 时，插件通过 `onebot_expand` 的 `message_service.get_msg` 和
+`file_service.get_image` 补回图片内容。图片内容会转换成字节后上传给图像模型，
+聊天文本、图片描述和生成历史不会发送给图像模型。指定图片大小限制为 20 MB。
 
 省略 `qq_number` 时：
 
@@ -155,6 +184,12 @@ https://q1.qlogo.cn/g?b=qq&nk=<QQ号>&s=640
 ```
 
 SnowLuma 不支持的 `get_qq_avatar` 扩展不会被调用。
+
+### 聊天记录图片无法下载
+
+确认 `onebot_expand` 已启用，并且协议端支持 `get_msg` 与 `get_image`。
+消息记录中如果只剩媒体哈希，插件会依次尝试 OneBot 原始消息、`get_image` 返回的
+base64、URL 或本地文件路径；这些入口都不可用时会返回明确的失败信息。
 
 ### 生成多次却像修改上一张图
 

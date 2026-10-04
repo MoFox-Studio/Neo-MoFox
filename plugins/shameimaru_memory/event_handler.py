@@ -13,15 +13,17 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from src.app.plugin_system.api import log_api, prompt_api, stream_api
+from src.app.plugin_system.api import log_api, prompt_api, service_api, stream_api
 from src.app.plugin_system.base import BaseEventHandler
 from src.core.components.types import EventType
 from src.core.prompt import SystemReminderConsumeType, SystemReminderInsertType
 from src.kernel.event import EventDecision
 
 from .config import ShameimaruMemoryConfig
+from .recall import RecallCandidate, select_candidates
 from .store import ShameimaruMemoryStore, shared_store
 from .utils import format_local_time, person_id_of
 
@@ -161,7 +163,18 @@ class ShameimaruPromptInjector(BaseEventHandler):
             return EventDecision.SUCCESS, params
         bucket = str(injection.bucket or "actor").strip()
 
+        if injection.delegate_to_engram and service_api.get_service(
+            "engram_memory:service:memory_service"
+        ) is not None:
+            self._sync_reminder(stream_id, bucket, _NEWS_REMINDER_NAME, "")
+            self._sync_reminder(stream_id, bucket, _PERSONA_REMINDER_NAME, "")
+            return EventDecision.SUCCESS, params
+
         stream = await stream_api.get_stream(stream_id)
+        context_text = self._build_context_text(
+            stream,
+            int(getattr(injection, "person_scan_history_limit", 20) or 20),
+        )
         person_ids = self._collect_unread_person_ids(
             stream,
             int(getattr(injection, "person_scan_history_limit", 20) or 20),
@@ -179,9 +192,20 @@ class ShameimaruPromptInjector(BaseEventHandler):
         news_matched = 0
         personas_matched = 0
         if injection.inject_news:
-            block, news_matched = await self._build_news_block(
-                store, person_ids, int(injection.news_max_inject)
-            )
+            if injection.recall_enabled:
+                block, news_matched = await self._build_news_block(
+                    store,
+                    stream_id,
+                    context_text,
+                    person_ids,
+                    int(injection.news_max_inject),
+                    float(injection.recall_noise),
+                    int(injection.recall_inhibition_seconds),
+                )
+            else:
+                block, news_matched = await self._build_legacy_news_block(
+                    store, person_ids, int(injection.news_max_inject)
+                )
             self._sync_reminder(stream_id, bucket, _NEWS_REMINDER_NAME, block)
 
         if injection.inject_personas:
@@ -198,14 +222,10 @@ class ShameimaruPromptInjector(BaseEventHandler):
         )
         return EventDecision.SUCCESS, params
 
-    async def _build_news_block(
+    async def _build_legacy_news_block(
         self, store: ShameimaruMemoryStore, person_ids: set[str], max_inject: int
     ) -> tuple[str, int]:
-        """构建涉及当前人物的新闻注入块。
-
-        Returns:
-            tuple[str, int]: (注入块文本，匹配到的新闻条数；无匹配时块为空)。
-        """
+        """前馈召回关闭时保留旧的按时间注入行为。"""
         news = await store.get_news()
         matched = [
             entry
@@ -214,6 +234,79 @@ class ShameimaruPromptInjector(BaseEventHandler):
         ]
         matched.sort(key=lambda entry: entry.timestamp, reverse=True)
         matched = matched[:max_inject]
+        if not matched:
+            return "", 0
+        lines = [
+            f"- [{format_local_time(entry.timestamp)}] {entry.title}：{entry.content}"
+            for entry in matched
+        ]
+        return (
+            f"{_NEWS_GUIDE_HEADER}\n{chr(10).join(lines)}\n\n{_NEWS_GUIDE_FOOTER}",
+            len(matched),
+        )
+
+    @staticmethod
+    def _build_context_text(stream: Any, history_limit: int) -> str:
+        """从当前上下文生成一次前馈召回的线索文本。"""
+        if stream is None or getattr(stream, "context", None) is None:
+            return ""
+        context = stream.context
+        messages = list(getattr(context, "unread_messages", None) or [])
+        messages.extend((getattr(context, "history_messages", None) or [])[-history_limit:])
+        return "\n".join(
+            str(getattr(message, "processed_plain_text", "") or "").strip()
+            for message in messages
+            if str(getattr(message, "sender_role", "") or "").lower() != "bot"
+            and str(getattr(message, "processed_plain_text", "") or "").strip()
+        )
+
+    async def _build_news_block(
+        self,
+        store: ShameimaruMemoryStore,
+        stream_id: str,
+        context_text: str,
+        person_ids: set[str],
+        max_inject: int,
+        noise: float,
+        inhibition_seconds: int,
+    ) -> tuple[str, int]:
+        """构建涉及当前人物的新闻注入块。
+
+        Returns:
+            tuple[str, int]: (注入块文本，匹配到的新闻条数；无匹配时块为空)。
+        """
+        news = await store.get_news()
+        news = [entry for entry in news if not entry.stream_id or entry.stream_id == stream_id]
+        candidates = [
+            RecallCandidate(
+                memory_id=entry.id,
+                text=f"{entry.title} {entry.content}",
+                timestamp=entry.timestamp,
+                person_ids=frozenset(ref.person_id for ref in entry.participants),
+            )
+            for entry in news
+        ]
+        state = await store.get_recall_state(stream_id)
+        selected = select_candidates(
+            candidates,
+            query=context_text,
+            person_ids=person_ids,
+            state=state,
+            stream_id=stream_id,
+            limit=max_inject,
+            now=time.time(),
+            noise=noise,
+            inhibition_seconds=inhibition_seconds,
+        )
+        selected_ids = {candidate.memory_id for candidate in selected}
+        matched = [entry for entry in news if entry.id in selected_ids]
+        by_id = {entry.id: entry for entry in matched}
+        matched = [by_id[candidate.memory_id] for candidate in selected]
+        await store.record_recall(
+            stream_id,
+            [candidate.memory_id for candidate in selected],
+            recalled_at=time.time(),
+        )
         if not matched:
             return "", 0
 

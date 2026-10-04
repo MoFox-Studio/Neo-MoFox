@@ -1,8 +1,7 @@
 """grok_avatar LLM Tool。
 
-供 LLM 直接调用的头像生成工具：以当前聊天流绑定的触发消息发送者
-（或显式传入的 QQ 号）为对象，走「头像下载 → 图像模型 → 可选谷歌圆环」
-链路，生成后直接发送到当前聊天流。
+供 LLM 直接调用的头像生成工具：支持 QQ 头像、聊天记录图片和指定图片，
+走「图片 → 图像模型 → 可选谷歌圆环」链路，生成后直接发送到当前聊天流。
 """
 
 from __future__ import annotations
@@ -27,9 +26,12 @@ class GrokAvatarTool(BaseTool):
 
     name = "grok_avatar"
     description = (
-        "把一个 QQ 号的当前头像转换成 Grok bot 风格的极简 2D 机器人图标并发送。"
+        "把 QQ 头像、聊天记录图片或指定图片转换成 Grok bot 风格的极简 2D 机器人图标并发送。"
         "两种模式：plain=直接发送生成结果；google_ring=生成后再叠加 Google 四色圆环发送。"
-        "省略 QQ 号时默认转换当前聊天对象（私聊为对方，群聊为触发消息的发送者）。"
+        "默认使用当前聊天对象的 QQ 头像；source=chat_history 时使用聊天记录图片；"
+        "source=specified 时使用 image 参数。"
+        "当用户说把刚发的图片、这张图或聊天记录中的图片变成头像时，"
+        "直接调用 source=chat_history，不要先调用 get_image、网页下载或图片反搜工具。"
     )
 
     async def execute(
@@ -42,12 +44,27 @@ class GrokAvatarTool(BaseTool):
             str | None,
             "目标 QQ 号（纯数字）。省略时使用当前聊天流关联的用户",
         ] = None,
+        source: Annotated[
+            Literal["avatar", "chat_history", "specified"],
+            "图片来源：avatar=QQ头像；chat_history=当前聊天记录图片；specified=指定图片",
+        ] = "avatar",
+        image: Annotated[
+            str | None,
+            "指定图片：URL、data URL、base64、base64|... 或本地路径；source=specified 时必填",
+        ] = None,
+        history_index: Annotated[
+            int,
+            "聊天记录图片索引，0 表示最新一张，1 表示上一张；仅 source=chat_history 生效",
+        ] = 0,
     ) -> tuple[bool, str]:
         """生成头像并发送到当前聊天流。
 
         Args:
             mode: 输出模式。
             qq_number: 目标 QQ 号，可选。
+            source: 图片来源。
+            image: source=specified 时的图片内容。
+            history_index: 聊天记录图片索引，按最新图片倒序。
 
         Returns:
             (是否成功, 结果说明)
@@ -62,17 +79,34 @@ class GrokAvatarTool(BaseTool):
         if not isinstance(service, GrokAvatarService):
             return False, "GrokAvatarService 服务未注册。"
 
+        output_mode = "google_ring" if mode == "google_ring" else "plain"
         target = self._resolve_qq(qq_number)
-        if not target:
-            return False, "无法确定目标 QQ 号，请显式提供 qq_number 参数。"
-        if not target.isdigit():
-            return False, f"QQ 号必须是纯数字：{target}"
-
-        ok, result = await service.make_avatar(
-            qq_number=target,
-            config=cfg,
-            mode="google_ring" if mode == "google_ring" else "plain",
-        )
+        if source == "avatar":
+            if not target:
+                return False, "无法确定目标 QQ 号，请显式提供 qq_number 参数。"
+            if not target.isdigit():
+                return False, f"QQ 号必须是纯数字：{target}"
+            ok, result = await service.make_avatar(target, cfg, output_mode)
+            source_label = f"{target} 的头像"
+        elif source == "specified":
+            if not image or not image.strip():
+                return False, "source=specified 时必须提供 image 参数。"
+            try:
+                image_bytes = await service.resolve_specified_image(image)
+            except RuntimeError as e:
+                return False, f"指定图片解析失败：{e}"
+            ok, result = await service.make_avatar_from_bytes(image_bytes, cfg, output_mode)
+            source_label = "指定图片"
+        elif source == "chat_history":
+            stream_id = self.get_current_stream_id()
+            try:
+                image_bytes = await service.resolve_chat_image(stream_id, history_index)
+            except RuntimeError as e:
+                return False, f"聊天记录图片解析失败：{e}"
+            ok, result = await service.make_avatar_from_bytes(image_bytes, cfg, output_mode)
+            source_label = f"聊天记录图片（第 {history_index + 1} 张最新图片）"
+        else:
+            return False, f"不支持的图片来源：{source}"
         if not ok:
             return False, f"生成失败：{result}"
 
@@ -92,7 +126,7 @@ class GrokAvatarTool(BaseTool):
         )
         if not sent:
             return False, "图片发送失败。"
-        return True, f"已发送 {target} 的 Grok bot 头像（{mode}）。"
+        return True, f"已发送 {source_label} 的 Grok bot 头像（{mode}）。"
 
     def _resolve_qq(self, qq_number: str | None) -> str:
         """解析目标 QQ 号：显式参数优先，其次触发消息发送者。"""
