@@ -1,0 +1,208 @@
+# 插件级开关。
+[plugin]
+# 插件总开关
+# 值类型：bool, 默认值：true
+enabled = true
+
+# vNext 数据库与向量索引路径。
+[storage]
+# 向量数据库路径（ChromaDB）
+# 值类型：str, 默认值："data/engram_memory/chroma"
+vector_db_path = "data/engram_memory/booku-import/chroma"
+
+# 正式记忆数据库路径
+# 值类型：str, 默认值："data/engram_memory/vnext.db"
+vnext_db_path = "data/engram_memory/booku-import/vnext.db"
+
+# Engram Memory vNext 认知记忆配置模型。
+[vnext]
+
+# Persona 更新与查询参数。
+[vnext.persona]
+# person_lookup 返回的近期相关记忆条数
+# 值类型：int, 默认值：10
+recent_memory_limit = 10
+
+# 补建、更新和重试共用的人物处理并发上限
+# 值类型：int, 默认值：3
+max_concurrency = 3
+
+# 人物印象辅助聊天的最近天数
+# 值类型：int, 默认值：7
+recent_chat_days = 7
+
+# 辅助聊天消息总上限，包含其他参与者和 Bot
+# 值类型：int, 默认值：500
+recent_chat_max_messages = 500
+
+# vNext 混合检索参数。
+[vnext.retrieval]
+# memory_search 默认返回条数
+# 值类型：int, 默认值：5
+default_limit = 5
+
+# memory_search 单次返回条数上限
+# 值类型：int, 默认值：20
+max_limit = 20
+
+# RRF 融合常数 k
+# 值类型：int, 默认值：60
+rrf_k = 60
+
+# ACT-R-lite 时间激活半衰期（天）
+# 值类型：float, 默认值：30.0
+activation_half_life_days = 30.0
+
+# 激活分数对 RRF 排序的影响权重
+# 值类型：float, 默认值：0.08
+activation_weight = 0.08
+
+# 仅在已有候选之间生效的有界确定性噪声
+# 值类型：float, 默认值：0.02
+activation_noise = 0.02
+
+# Flashback 自动联想参数。
+[vnext.flashback]
+# 是否启用回复前自然闪回
+# 值类型：bool, 默认值：true
+enabled = true
+
+# 回复前自然闪回的触发概率；0 关闭，1 每轮尝试，仍受相关性与冷却限制
+# 值类型：float, 默认值：0.25
+trigger_probability = 0.25
+
+# 闪回查询使用的最近聊天消息条数
+# 值类型：int, 默认值：6
+context_turns = 6
+
+# 闪回延迟预算（毫秒），超时本轮直接跳过
+# 值类型：int, 默认值：1200
+latency_budget_ms = 1200
+
+# 单轮闪回最多注入的记忆条数（0-2）
+# 值类型：int, 默认值：2
+max_memories = 2
+
+# 同一记忆在会话内闪回冷却轮数
+# 值类型：int, 默认值：3
+cooldown_turns = 3
+
+# 单轮 Episode 工作记忆最多装载条数
+# 值类型：int, 默认值：3
+max_working_memory = 3
+
+# Episode 关联扩散最大跳数
+# 值类型：int, 默认值：2
+relation_hops = 2
+
+# 只影响已有候选选择的受控重构扰动
+# 值类型：float, 默认值：0.06
+reconstruction_noise = 0.06
+
+# 当前工作记忆在流中的有效时长（秒）
+# 值类型：int, 默认值：900
+working_memory_ttl_seconds = 900
+
+# Claim/Hypothesis 自动审核参数。
+[vnext.claim_review]
+# 是否自动审核待处理 Claim/Hypothesis；关闭时只保存待审候选
+# 值类型：bool, 默认值：true
+enabled = true
+
+# 用于 Claim/Hypothesis 审核的模型任务名
+# 值类型：str, 默认值："actor"
+model_task = "actor"
+
+# 每次后台审核最多处理的候选数量
+# 值类型：int, 默认值：2
+max_per_run = 2
+
+# 可选 Neo4j Episode 关系镜像参数，默认关闭。
+[vnext.neo4j]
+enabled = false
+uri = "bolt://127.0.0.1:7687"
+user = "neo4j"
+password = ""
+database = "neo4j"
+
+# SystemReminder 注入参数。
+[vnext.prompt_injection]
+# 是否将记忆使用指引放到最新一轮输入；开启为动态 SystemReminder，关闭为固定 SystemReminder
+# 值类型：bool, 默认值：true
+reminder_at_end = true
+
+# 向量派生索引参数。
+[vnext.vector]
+# Outbox 工作项失败重试上限，达到后转 FAILED
+# 值类型：int, 默认值：3
+worker_retry_limit = 3
+
+# 独立于长期记忆的近期交流日记配置。
+[diary]
+
+# 群聊默认同时满足三小时与两百条消息后整理。
+[diary.group]
+# 启用此类聊天的日记整理与注入
+# 值类型：bool, 默认值：true
+enabled = true
+
+# 群聊日记触发方式
+# 值类型：Literal, 默认值："both"
+trigger_mode = "both"
+
+# 成功整理后的时间间隔（秒）
+# 值类型：int, 默认值：10800
+interval_seconds = 10800
+
+# 群聊未处理消息条数阈值
+# 值类型：int, 默认值：200
+message_threshold = 200
+
+# 注入的最近自然日数，包含今天
+# 值类型：int, 默认值：7
+context_days = 7
+
+# 私聊默认按累计消息条数整理。
+[diary.private]
+# 启用此类聊天的日记整理与注入
+# 值类型：bool, 默认值：true
+enabled = true
+
+# time 仅时间；messages 仅消息数；either 任一满足；both 同时满足
+# 值类型：Literal, 默认值："messages"
+trigger_mode = "messages"
+
+# 成功整理后的时间间隔（秒）
+# 值类型：int, 默认值：10800
+interval_seconds = 10800
+
+# 尚未处理的实际聊天消息条数
+# 值类型：int, 默认值：100
+message_threshold = 100
+
+# 注入的最近自然日数，包含今天
+# 值类型：int, 默认值：7
+context_days = 7
+# 独立日记数据库路径
+# 值类型：str, 默认值："data/engram_memory/chat_diary.db"
+database_path = "data/engram_memory/chat_diary.db"
+
+# 日记自然日所属时区
+# 值类型：str, 默认值："Asia/Shanghai"
+timezone = "Asia/Shanghai"
+
+# 不同聊天流的生成并发上限
+# 值类型：int, 默认值：3
+max_concurrency = 3
+
+# 每批连续新消息条数上限
+# 值类型：int, 默认值：100
+batch_messages = 100
+
+# 用于理解指代的少量前文条数
+# 值类型：int, 默认值：6
+context_messages = 6
+
+# 同一批次失败后的追加重试次数
+# 值类型：int, 默认值：2
+retry_limit = 2
