@@ -1853,7 +1853,7 @@ async def test_schema_auto_migration_stops_when_backup_fails(
     assert not list((tmp_path / "backups").glob("*.db"))
 
 
-@pytest.mark.parametrize("version", [None, 0, 6, 99])
+@pytest.mark.parametrize("version", [None, 0, 8, 99])
 @pytest.mark.asyncio
 async def test_schema_unknown_versions_are_not_modified(
     tmp_path: Any, version: int | None

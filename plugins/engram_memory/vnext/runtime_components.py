@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo
 
 from src.app.plugin_system.api import prompt_api
 from src.app.plugin_system.api.event_api import EventDecision
@@ -103,17 +102,13 @@ def _ids(value: object, field: str, *, required: bool = False) -> tuple[str, ...
     return values
 
 
-def _optional_datetime(
-    value: str | None, field: str, zone: ZoneInfo
-) -> datetime | None:
-    """将 ISO 时间转为 UTC，无时区使用配置时区，结束日期包含整日。"""
+def _optional_datetime(value: str | None, field: str) -> datetime | None:
+    """解析带时区的可选 ISO 时间。"""
     if value is None:
         return None
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=zone)
-    if field == "end_time" and value == parsed.date().isoformat():
-        parsed = datetime.combine(parsed.date(), time.max, tzinfo=zone)
+        raise ValueError(f"{field} 必须包含时区")
     return parsed.astimezone(UTC)
 
 
@@ -249,6 +244,8 @@ _PERSON_FIELDS: dict[str, object] = {
     "memory_kind": {"type": "string", "enum": [kind.value for kind in MemoryKind]},
 }
 
+_EXPLICIT_CORRECTION_TERMS = ("不是", "不对", "纠正", "更正", "记错", "不再", "已经不")
+
 
 class VNextMemorySearchTool(BaseTool):
     """查询可按人物、类型和时间筛选的正式记忆。"""
@@ -256,9 +253,7 @@ class VNextMemorySearchTool(BaseTool):
     name = "memory_search"
     description = (
         "搜索正式记忆，帮你想起相关的人和事；结果是线索目录，可用 memory_read 核对，不必在回复里复述。"
-        "询问相识人物的信息时先检索，同名不能直接用人设或常识代答。"
-        "发现值得长期保存的新信息时，主动按人物和具体事项查重，再保存或修订，不等对方提醒。"
-        "同一事实或经历的补充优先修订，同一人物的新事实或独立经历另行保存。"
+        "同一人物或经历已有记忆时优先修订，不重复创建。"
     )
 
     async def execute(
@@ -270,30 +265,15 @@ class VNextMemorySearchTool(BaseTool):
         start_time: str | None = None,
         end_time: str | None = None,
     ) -> tuple[bool, str | dict[str, object]]:
-        """按语义、人物及可选时间范围检索记忆。
-
-        Args:
-            query: 要回想的具体人物、事实或经历。
-            person_ids: 查询所得准确人物 ID，可按主次人物筛选。
-            memory_kinds: 可选的正式记忆类型。
-            limit: 可选的结果条数上限。
-            start_time: 可选 ISO 8601 日期或时间，例如 2026-01-02、
-                带时区示例为 2026-01-02T09:00:00+08:00 或 2026-01-02T01:00:00Z；
-                无时区时按插件 diary.timezone，纯日期从当地零点开始。
-                不使用“昨天”等相对时间文本。
-            end_time: 格式与 start_time 相同；无时区时按插件 diary.timezone，
-                纯日期包含当地当天的最后一刻，完整时间则使用指定时刻。
-        """
-        owner = _owner(self.plugin)
-        zone = ZoneInfo(owner.config.diary.timezone)
-        result = await owner.tools.memory_search(
+        """按语义、人物及可选时间范围检索记忆。"""
+        result = await _owner(self.plugin).tools.memory_search(
             query,
             _actor_context(self),
             person_ids=tuple(person_ids or ()),
             memory_kinds=tuple(memory_kinds or ()),
             limit=limit,
-            start_time=_optional_datetime(start_time, "start_time", zone),
-            end_time=_optional_datetime(end_time, "end_time", zone),
+            start_time=_optional_datetime(start_time, "start_time"),
+            end_time=_optional_datetime(end_time, "end_time"),
         )
         return True, {"memories": list(result)}
 
@@ -320,11 +300,7 @@ class VNextMemoryWriteAction(BaseAction):
     """保存有来源和明确人物关联的正式记忆。"""
 
     name = "memory_write"
-    description = (
-        "自主判断当前聊天中哪些新信息值得长期保留，查重后在本轮主动保存，不等对方要求或提醒。"
-        "重要的单次事实和独立经历也值得记，已有同一事实的补充或更正用 memory_revise。"
-        "正文保留准确主次人物与真实聊天来源，只有工具成功才算保存；保存不是代对方公开。"
-    )
+    description = "搜索去重后，记下值得长期保留的自然正文、主次人物与当前聊天来源，供以后回想；保存不是代对方公开。"
     associated_types: list[str] = ["text"]
 
     @classmethod
@@ -383,10 +359,7 @@ class VNextMemoryReviseAction(BaseAction):
     """在当前版本上修订正文和人物关联，保留旧版本。"""
 
     name = "memory_revise"
-    description = (
-        "发现当前聊天补充、更正或推进了已有事实或经历时，主动回读并基于当前 revision 修订正文和人物，不等提醒。"
-        "保留真实聊天来源与原有准确内容；同一人物的新事实或独立经历仍应另建记忆。"
-    )
+    description = "基于当前 revision 修订同一记忆的正文和人物，可更正、澄清或补充依据；新经历仍应另建记忆。"
     associated_types: list[str] = ["text"]
 
     @classmethod
@@ -448,7 +421,14 @@ class VNextMemoryReviseAction(BaseAction):
                 subject=subject,
                 participants=participants,
                 observed_at=evidence.observed_at,
-                change_reason=RevisionChangeReason.CLARIFICATION,
+                change_reason=(
+                    RevisionChangeReason.EXPLICIT_CORRECTION
+                    if any(
+                        term in f"{evidence.note or ''} {evidence.messages[0].snapshot.get('content', '')}"
+                        for term in _EXPLICIT_CORRECTION_TERMS
+                    )
+                    else RevisionChangeReason.CLARIFICATION
+                ),
                 evidence=(evidence,),
             )
             result = await owner.tools.memory_revise(data, context)
@@ -500,7 +480,6 @@ class VNextPersonLookupTool(BaseTool):
         "同一段对话已读过的印象可以继续使用；私聊直接使用自动注入的印象，不要求聊天前再调用本工具。"
         "ID 不能用昵称代替。"
         "view=current 读当前，history 列出历史目录，revision 配合 revision_no 读指定历史正文。"
-        "结合记忆时间判断信息时效，印象更新时间不代表经历发生时间。"
         "历史只是当时的主观认识，不是当前事实或正式记忆依据。"
     )
 
@@ -519,8 +498,99 @@ class VNextPersonLookupTool(BaseTool):
         )
 
 
+class VNextRecallAssociationTool(BaseTool):
+    """按当前线索主动回忆相关经历片段。"""
+
+    name = "recall_association"
+    description = (
+        "根据当前话题、人物或情绪主动联想过去经历；结果是有来源的 Episode 片段，"
+        "不是已经确认的当前事实，也不会修改记忆。"
+    )
+
+    async def execute(
+        self,
+        cue_text: str,
+        max_hops: int = 2,
+        limit: int = 5,
+    ) -> tuple[bool, str | dict[str, object]]:
+        """返回带 Episode ID 的关联经历。"""
+        stream_id = _actor_context(self).stream_id
+        if not stream_id:
+            return False, json.dumps({"error": "当前聊天流未绑定"}, ensure_ascii=False)
+        result = await _owner(self.plugin).episode_service.recall_association(
+            stream_id=stream_id,
+            cue_text=_text(cue_text, "cue_text"),
+            max_hops=max_hops,
+            limit=limit,
+        )
+        return True, {"episodes": list(result)}
+
+
+class VNextMemoryUpdateProposalTool(BaseTool):
+    """提交待确认的结构化记忆更新提案。"""
+
+    name = "propose_memory_update"
+    description = (
+        "提出 support、contradict、supersede 或 uncertain 记忆更新；"
+        "提案必须引用当前聊天流的 Episode ID，提交本身不会修改正式记忆。"
+    )
+
+    async def execute(
+        self,
+        claim: str,
+        evidence_ids: list[str],
+        operation: str = "uncertain",
+        target_memory_id: str | None = None,
+        confidence: float = 0.5,
+    ) -> tuple[bool, str | dict[str, object]]:
+        """保存 PENDING 提案并返回稳定 proposal_id。"""
+        stream_id = _actor_context(self).stream_id
+        if not stream_id:
+            return False, json.dumps({"error": "当前聊天流未绑定"}, ensure_ascii=False)
+        try:
+            result = await _owner(self.plugin).tools.propose_memory_update(
+                stream_id=stream_id,
+                claim=_text(claim, "claim"),
+                evidence_ids=tuple(evidence_ids),
+                operation=operation,
+                target_memory_id=target_memory_id,
+                confidence=confidence,
+            )
+        except ValueError as error:
+            return _action_result(error)
+        return True, {
+            "proposal_id": result.proposal_id,
+            "status": result.status,
+            "operation": result.operation,
+            "evidence_ids": list(result.evidence_ids),
+            "target_memory_id": result.target_memory_id,
+        }
+
+
+class VNextMemoryUpdateConfirmAction(BaseAction):
+    """确认已校验提案并执行正式记忆巩固。"""
+
+    name = "confirm_memory_update"
+    description = (
+        "确认一个待处理的记忆更新提案；代码会再次校验证据，"
+        "并在 supersede/contradict 时保留旧状态和关系历史。"
+    )
+    associated_types: list[str] = ["text"]
+
+    async def execute(self, proposal_id: str) -> tuple[bool, str]:
+        """确认提案并返回新正式 Memory 标识。"""
+        try:
+            result = await _owner(self.plugin).tools.confirm_memory_update(
+                _text(proposal_id, "proposal_id"),
+                _actor_context(self),
+            )
+        except ValueError as error:
+            return _action_result(error)
+        return True, json.dumps(result, ensure_ascii=False)
+
+
 class VNextMemoryService(BaseService):
-    """向其他插件提供带调用身份的记忆查询。"""
+    """向其他插件提供 Episode 召回、提案和正式记忆查询门面。"""
 
     name = "memory_service"
     description = "Engram Memory 正式记忆查询服务。"
@@ -533,11 +603,96 @@ class VNextMemoryService(BaseService):
             query, context, limit=limit
         )
 
+    async def read_working_memory(self, stream_id: str) -> dict[str, object] | None:
+        """读取当前流短期工作记忆，不提升其为正式事实。"""
+        owner = _owner(self.plugin)
+        working = await owner.episode_service.current_working_memory(stream_id)
+        pending = await owner.proposal_service.list_pending(stream_id)
+        if working is None and not pending:
+            return None
+        return {**(working or {"stream_id": stream_id}), "pending_proposals": list(pending)}
+
     async def read(
         self, memory_id: str, view: str, context: ToolContext
     ) -> dict[str, object]:
         """读取正式记忆及可选历史与来源。"""
         return await _owner(self.plugin).tools.memory_read(memory_id, view, context)
+
+    async def ingest_episode(
+        self,
+        *,
+        title: str,
+        content: str,
+        stream_id: str,
+        observed_at: float,
+        source_ref: str,
+        person_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, str]:
+        """接收其他记忆层整理出的 Episode，不直接提升为正式事实。"""
+        episode = await _owner(self.plugin).episode_service.record_external_episode(
+            title=title,
+            content=content,
+            stream_id=stream_id,
+            observed_at=datetime.fromtimestamp(float(observed_at), tz=UTC),
+            source_ref=source_ref,
+            participants=tuple(str(item) for item in person_ids),
+        )
+        await _owner(self.plugin).claim_service.extract_semantics(episode.episode_id)
+        await _owner(self.plugin).mirror_episode_to_graph(episode.episode_id)
+        return {
+            "episode_id": episode.episode_id,
+            "source_ref": source_ref,
+            "status": "EPISODE_RECORDED",
+        }
+
+    async def claim_review_status(
+        self, stream_id: str, limit: int = 20
+    ) -> tuple[dict[str, object], ...]:
+        """读取当前流 Claim/Hypothesis 的状态、来源、实体和事件。"""
+        return await _owner(self.plugin).claim_service.pending_status(stream_id, limit)
+
+    async def propose_memory_update(
+        self,
+        *,
+        stream_id: str,
+        claim: str,
+        evidence_ids: list[str] | tuple[str, ...],
+        operation: str,
+        target_memory_id: str | None = None,
+        confidence: float = 0.5,
+    ) -> dict[str, object]:
+        """保存 LM 更新提案，确认前不触碰正式 Memory。"""
+        proposal = await _owner(self.plugin).proposal_service.propose(
+            stream_id=stream_id,
+            claim=claim,
+            evidence_ids=tuple(evidence_ids),
+            operation=operation,
+            target_memory_id=target_memory_id,
+            confidence=confidence,
+        )
+        return {
+            "proposal_id": proposal.proposal_id,
+            "status": proposal.status,
+            "operation": proposal.operation,
+            "target_memory_id": proposal.target_memory_id,
+            "evidence_ids": list(proposal.evidence_ids),
+        }
+
+    async def recall_association(
+        self,
+        *,
+        stream_id: str,
+        cue_text: str,
+        max_hops: int = 2,
+        limit: int = 5,
+    ) -> tuple[dict[str, object], ...]:
+        """主动回忆关联经历，不直接返回或修改正式事实。"""
+        return await _owner(self.plugin).episode_service.recall_association(
+            stream_id=stream_id,
+            cue_text=cue_text,
+            max_hops=max_hops,
+            limit=limit,
+        )
 
 
 class VNextMemoryChangedEventHandler(BaseEventHandler):
@@ -564,7 +719,11 @@ class VNextFlashbackEventHandler(BaseEventHandler):
 
     name = "vnext_flashback_injector"
     description = "预取与当前话题相关的正式记忆，刷新当前流的闪回。"
-    init_subscribe = [EventType.ON_MESSAGE_RECEIVED, EventType.ON_PROMPT_BUILD]
+    init_subscribe = [
+        EventType.ON_MESSAGE_RECEIVED,
+        EventType.AFTER_MESSAGE_SENT,
+        EventType.ON_PROMPT_BUILD,
+    ]
     timeout = 2.0
 
     async def execute(
@@ -576,6 +735,11 @@ class VNextFlashbackEventHandler(BaseEventHandler):
             message = params.get("message")
             if message is not None:
                 owner.observe_message(message)
+            return EventDecision.SUCCESS, params
+        if event_name == EventType.AFTER_MESSAGE_SENT:
+            message = params.get("message")
+            if message is not None:
+                owner.observe_output_message(message)
             return EventDecision.SUCCESS, params
         if params.get("name") not in {
             "default_chatter_user_prompt",
@@ -590,8 +754,78 @@ class VNextFlashbackEventHandler(BaseEventHandler):
         if not stream_id:
             return EventDecision.SUCCESS, params
         candidates = await owner.consume_flashback_prefetch(stream_id)
+        working_memory = owner.consume_working_memory(stream_id)
+        formalized_episode_ids = await owner.flashback.formalized_episode_ids(
+            self._working_memory_episode_ids(working_memory)
+        )
+        self._reconcile_working_memory(
+            owner, stream_id, working_memory, formalized_episode_ids
+        )
         await self._reconcile_stream_reminders(owner, stream_id, candidates)
         return EventDecision.SUCCESS, params
+
+    def _reconcile_working_memory(
+        self,
+        owner: Any,
+        stream_id: str,
+        working_memory: dict[str, object] | None,
+        formalized_episode_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        """注入未被正式闪回覆盖的 Episode 工作记忆。"""
+        del owner
+        name = "engram_memory_working_memory"
+        content = (
+            self._working_memory_content(working_memory, formalized_episode_ids)
+            if working_memory is not None
+            else ""
+        )
+        if content:
+            prompt_api.add_stream_reminder(
+                stream_id,
+                "actor",
+                name,
+                content,
+                insert_type=prompt_api.SystemReminderInsertType.DYNAMIC,
+                consume=prompt_api.SystemReminderConsumeType.FOREVER,
+            )
+        else:
+            prompt_api.delete_stream_reminder(stream_id, "actor", name)
+
+    @staticmethod
+    def _working_memory_episode_ids(data: dict[str, object] | None) -> tuple[str, ...]:
+        """读取工作记忆中的来源 Episode ID。"""
+        if not data or not isinstance(data.get("selected_episodes"), list):
+            return ()
+        return tuple(
+            str(item.get("episode_id"))
+            for item in data["selected_episodes"]
+            if isinstance(item, dict) and item.get("episode_id")
+        )
+
+    @staticmethod
+    def _working_memory_content(
+        data: dict[str, object] | None,
+        formalized_episode_ids: frozenset[str] = frozenset(),
+    ) -> str:
+        """渲染当前工作记忆，不把片段伪装为确定事实。"""
+        if not data:
+            return ""
+        selected = data.get("selected_episodes")
+        if not isinstance(selected, list) or not selected:
+            return ""
+        lines = [
+            "【当前情境触发的经历线索】",
+            "这些是带来源的历史经历片段，不是新事实；请结合当前消息自然理解，明确当前说法优先。",
+        ]
+        for item in selected:
+            if not isinstance(item, dict):
+                continue
+            episode_id = str(item.get("episode_id") or "").strip()
+            content = str(item.get("content") or "").strip()
+            reason = str(item.get("reason") or "相关经历").strip()
+            if episode_id and episode_id not in formalized_episode_ids and content:
+                lines.append(f"- [{episode_id}]（{reason}）{content}")
+        return "\n".join(lines) if len(lines) > 2 else ""
 
     async def _reconcile_stream_reminders(
         self, owner: VNextRuntimeOwner, stream_id: str, candidates: tuple[object, ...]

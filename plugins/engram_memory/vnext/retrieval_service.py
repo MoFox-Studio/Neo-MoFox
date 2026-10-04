@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import math
 import re
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -12,14 +14,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .domain import RetrievalQuery, ScoredMemory, WriteContext
-from .enums import MemoryEventType, MemoryStatus
+from .enums import (
+    EvidenceSourceType,
+    MemoryEventType,
+    MemoryStatus,
+    RevisionChangeReason,
+)
 from .models import (
     MemoryEventModel,
+    EvidenceModel,
     MemoryModel,
     MemoryRetrievalEntryModel,
     MemoryRevisionModel,
     MemoryRevisionParticipantModel,
     MemoryRevisionSubjectModel,
+    RevisionEvidenceModel,
 )
 from .repository import MemoryRepository
 from .schema import VNextSchema
@@ -199,13 +208,25 @@ class RetrievalService:
         vector_backend: VectorSearchBackend,
         *,
         rrf_k: int = RRF_K,
+        activation_half_life_days: float = 30.0,
+        activation_weight: float = 0.08,
+        activation_noise: float = 0.02,
     ) -> None:
         """绑定 Schema 与向量检索后端。"""
         if isinstance(rrf_k, bool) or not isinstance(rrf_k, int) or rrf_k <= 0:
             raise ValueError("rrf_k 必须是正整数")
+        if activation_half_life_days <= 0:
+            raise ValueError("activation_half_life_days 必须大于 0")
+        if not 0 <= activation_weight <= 1:
+            raise ValueError("activation_weight 必须在 0-1 之间")
+        if not 0 <= activation_noise <= 1:
+            raise ValueError("activation_noise 必须在 0-1 之间")
         self._schema = schema
         self._vector_backend = vector_backend
         self._rrf_k = rrf_k
+        self._activation_half_life_days = activation_half_life_days
+        self._activation_weight = activation_weight
+        self._activation_noise = activation_noise
         self._repository = MemoryRepository(schema)
 
     async def search(
@@ -290,6 +311,9 @@ class RetrievalService:
             current_titles = await self._current_titles(
                 session, {entry.memory_id for entry in candidates}
             )
+            activation_scores = await self._activation_scores(
+                session, {entry.memory_id for entry in candidates}, query.text
+            )
             results = self._aggregate(
                 fused,
                 entries_by_id,
@@ -300,6 +324,7 @@ class RetrievalService:
                 query.top_k,
                 vector_similarities,
                 min_similarity,
+                activation_scores,
             )
             for scored in results:
                 await self._record_recall(session, scored, context)
@@ -443,8 +468,91 @@ class RetrievalService:
         )
         return {row.memory_id: row.title for row in rows}
 
-    @staticmethod
+    async def _activation_scores(
+        self,
+        session: AsyncSession,
+        memory_ids: set[str],
+        query_text: str,
+    ) -> dict[str, float]:
+        """计算时间基线、来源层级、纠正优先级与有界噪声。"""
+        if not memory_ids:
+            return {}
+        rows = tuple(
+            (
+                await session.execute(
+                    select(
+                        MemoryModel.memory_id,
+                        MemoryModel.last_experienced_at,
+                        MemoryRevisionModel.observed_at,
+                        MemoryRevisionModel.change_reason,
+                        EvidenceModel.source_type,
+                    )
+                    .join(
+                        MemoryRevisionModel,
+                        MemoryRevisionModel.revision_id
+                        == MemoryModel.current_revision_id,
+                    )
+                    .outerjoin(
+                        RevisionEvidenceModel,
+                        RevisionEvidenceModel.revision_id
+                        == MemoryRevisionModel.revision_id,
+                    )
+                    .outerjoin(
+                        EvidenceModel,
+                        EvidenceModel.evidence_id == RevisionEvidenceModel.evidence_id,
+                    )
+                    .where(MemoryModel.memory_id.in_(memory_ids))
+                )
+            ).all()
+        )
+        by_memory: dict[str, list[object]] = defaultdict(list)
+        for row in rows:
+            by_memory[row.memory_id].append(row)
+        source_weights = {
+            EvidenceSourceType.ACTOR_WRITE: 1.0,
+            EvidenceSourceType.ADMIN: 0.95,
+            EvidenceSourceType.MESSAGE_SET: 0.85,
+            EvidenceSourceType.EXTERNAL: 0.70,
+            EvidenceSourceType.SYSTEM_EVENT: 0.60,
+            EvidenceSourceType.LEGACY_RECORD: 0.45,
+        }
+        now = datetime.now(UTC)
+        scores: dict[str, float] = {}
+        for memory_id, memory_rows in by_memory.items():
+            first = memory_rows[0]
+            observed = first.last_experienced_at or first.observed_at or now
+            age_days = max(0.0, (now - observed).total_seconds() / 86400.0)
+            base = math.exp(-math.log(2.0) * age_days / self._activation_half_life_days)
+            sources = {
+                row.source_type
+                for row in memory_rows
+                if isinstance(row.source_type, EvidenceSourceType)
+            }
+            source_score = max(
+                (source_weights.get(source, 0.5) for source in sources),
+                default=0.5,
+            )
+            evidence_bonus = min(0.15, max(0, len(sources) - 1) * 0.05)
+            correction_bonus = (
+                0.20
+                if first.change_reason
+                in {
+                    RevisionChangeReason.EXPLICIT_CORRECTION,
+                    RevisionChangeReason.ADMIN_CORRECTION,
+                }
+                else 0.0
+            )
+            digest = hashlib.sha256(f"{query_text}\0{memory_id}".encode()).digest()
+            noise_unit = int.from_bytes(digest[:8], "big") / 2**64
+            bounded_noise = (noise_unit * 2.0 - 1.0) * self._activation_noise
+            scores[memory_id] = max(
+                0.0,
+                base * source_score + evidence_bonus + correction_bonus + bounded_noise,
+            )
+        return scores
+
     def _aggregate(
+        self,
         fused: tuple[tuple[str, float], ...],
         entries_by_id: dict[str, MemoryRetrievalEntryModel],
         current_titles: dict[str, str],
@@ -454,6 +562,7 @@ class RetrievalService:
         top_k: int,
         vector_similarities: dict[str, float] | None = None,
         min_similarity: float | None = None,
+        activation_scores: dict[str, float] | None = None,
     ) -> tuple[ScoredMemory, ...]:
         """按 memory_id 聚合入口级融合结果。
 
@@ -508,7 +617,10 @@ class RetrievalService:
                 if min_similarity is None
                 or memory_similarities.get(memory_id, -1.0) >= min_similarity
             ),
-            key=lambda item: (-item[1], item[0]),
+            key=lambda item: (
+                -(item[1] + (activation_scores or {}).get(item[0], 0.0) * self._activation_weight),
+                item[0],
+            ),
         )
         return tuple(
             ScoredMemory(
@@ -519,6 +631,7 @@ class RetrievalService:
                 lexical_rank=best_lexical.get(memory_id),
                 vector_rank=best_vector.get(memory_id),
                 vector_similarity=memory_similarities.get(memory_id),
+                activation_score=(activation_scores or {}).get(memory_id, 0.0),
             )
             for memory_id, score in ordered[:top_k]
         )

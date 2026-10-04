@@ -16,6 +16,9 @@
     { "component_type": "action", "component_name": "memory_write", "dependencies": [] },
     { "component_type": "action", "component_name": "memory_revise", "dependencies": [] },
     { "component_type": "action", "component_name": "memory_invalidate", "dependencies": [] },
+    { "component_type": "tool", "component_name": "recall_association", "dependencies": [] },
+    { "component_type": "tool", "component_name": "propose_memory_update", "dependencies": [] },
+    { "component_type": "action", "component_name": "confirm_memory_update", "dependencies": [] },
     { "component_type": "tool", "component_name": "person_lookup", "dependencies": [] },
     { "component_type": "service", "component_name": "memory_service", "dependencies": [] },
     { "component_type": "event_handler", "component_name": "memory_changed", "dependencies": [] },
@@ -38,7 +41,8 @@
     "prompt_api": "1.0.0",
     "router_api": "1.0.0",
     "storage_api": "1.0.0",
-    "log_api": "1.0.0"
+    "log_api": "1.0.0",
+    "service_api": "1.0.0"
   },
   "python_dependencies": ["tzdata"],
   "dependencies_required": true

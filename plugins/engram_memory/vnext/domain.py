@@ -230,6 +230,7 @@ class ScoredMemory:
     lexical_rank: int | None
     vector_rank: int | None
     vector_similarity: float | None = None
+    activation_score: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

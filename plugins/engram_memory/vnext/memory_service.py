@@ -39,6 +39,7 @@ from .models import (
     EvidenceModel,
     MemoryEventModel,
     MemoryModel,
+    MemoryRelationModel,
     MemoryRetrievalEntryModel,
     MemoryRevisionModel,
     MemoryRevisionParticipantModel,
@@ -649,6 +650,55 @@ class MemoryService:
                 after_status=MemoryStatus.TOMBSTONED,
             )
         )
+
+    async def relate_memory(
+        self,
+        source_memory_id: str,
+        target_memory_id: str,
+        relation_type: RelationType,
+        reason: str,
+        context: WriteContext,
+    ) -> None:
+        """为两个正式记忆追加关系边，不修改双方历史正文。"""
+        if source_memory_id == target_memory_id:
+            raise ValueError("正式记忆关系不能指向自身")
+        if not reason.strip():
+            raise ValueError("记忆关系必须提供 reason")
+        now = datetime.now(UTC)
+        async with self._schema.database.session() as session:
+            for memory_id in (source_memory_id, target_memory_id):
+                if await session.get(MemoryModel, memory_id) is None:
+                    raise ValueError(f"Memory {memory_id} 不存在")
+            await session.execute(
+                sqlite_insert(MemoryRelationModel)
+                .values(
+                    relation_id=_new_id(),
+                    source_memory_id=source_memory_id,
+                    target_memory_id=target_memory_id,
+                    relation_type=relation_type,
+                    reason=reason.strip(),
+                    created_at=now,
+                    created_by_type=context.actor_type,
+                )
+                .prefix_with("OR IGNORE")
+            )
+            session.add(
+                MemoryEventModel(
+                    event_id=_new_id(),
+                    memory_id=source_memory_id,
+                    revision_id=None,
+                    event_type=MemoryEventType.RELATED,
+                    actor_type=context.actor_type,
+                    actor_ref=context.actor_ref,
+                    stream_id=context.stream_id,
+                    occurred_at=now,
+                    payload_json={
+                        "target_memory_id": target_memory_id,
+                        "relation_type": relation_type.value,
+                        "reason": reason.strip(),
+                    },
+                )
+            )
 
     async def restore_memory(
         self,

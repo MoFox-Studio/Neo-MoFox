@@ -18,7 +18,10 @@ from src.app.plugin_system.api import event_api, log_api, stream_api
 
 from ..diary.runtime import DiaryRuntime
 from .doctor_service import DoctorService
+from .claim_service import ClaimHypothesisService
+from .backends.neo4j import Neo4jEpisodeGraph
 from .domain import MemoryChanged
+from .episode_service import EpisodeService
 from .enums import VectorIndexStatus
 from .flashback_service import FlashbackService
 from .framework_bridge import (
@@ -30,6 +33,7 @@ from .framework_bridge import (
 from .models import VectorIndexManifestModel
 from .persona_service import PersonaService
 from .persona_updater import PersonaUpdater
+from .proposal_service import ProposalService
 from .repository import MemoryRepository
 from .retrieval_service import RetrievalService, VectorSearchBackend
 from .runtime import (
@@ -146,6 +150,9 @@ class VNextRuntimeOwner:
             self.schema,
             self.vector_backend,
             rrf_k=vnext.retrieval.rrf_k,
+            activation_half_life_days=vnext.retrieval.activation_half_life_days,
+            activation_weight=vnext.retrieval.activation_weight,
+            activation_noise=vnext.retrieval.activation_noise,
         )
         self.tools = VNextToolService(
             self.schema,
@@ -155,6 +162,9 @@ class VNextRuntimeOwner:
             default_search_limit=vnext.retrieval.default_limit,
             max_search_limit=vnext.retrieval.max_limit,
             rrf_k=vnext.retrieval.rrf_k,
+            activation_half_life_days=vnext.retrieval.activation_half_life_days,
+            activation_weight=vnext.retrieval.activation_weight,
+            activation_noise=vnext.retrieval.activation_noise,
             on_memory_changed=self._on_memory_changed,
         )
         self.persona_service = PersonaService(self.schema, persona_config=vnext.persona)
@@ -183,6 +193,29 @@ class VNextRuntimeOwner:
             max_memories=vnext.flashback.max_memories,
             cooldown_turns=vnext.flashback.cooldown_turns,
         )
+        self.episode_service = EpisodeService(
+            self.schema,
+            max_working_memory=vnext.flashback.max_working_memory,
+            relation_hops=vnext.flashback.relation_hops,
+            reconstruction_noise=vnext.flashback.reconstruction_noise,
+            working_memory_ttl_seconds=vnext.flashback.working_memory_ttl_seconds,
+        )
+        self.proposal_service = ProposalService(self.schema)
+        self.claim_service = ClaimHypothesisService(
+            self.schema,
+            self.proposal_service,
+            enabled=vnext.claim_review.enabled,
+            model_task=vnext.claim_review.model_task,
+            max_per_run=vnext.claim_review.max_per_run,
+        )
+        self.neo4j_graph: Neo4jEpisodeGraph | None = None
+        if vnext.neo4j.enabled:
+            self.neo4j_graph = Neo4jEpisodeGraph(
+                vnext.neo4j.uri,
+                vnext.neo4j.user,
+                vnext.neo4j.password,
+                database=vnext.neo4j.database,
+            )
         self._initialized = False
         self._prompt_turns: dict[str, int] = {}
         self._flashback_trigger_turns: dict[str, tuple[int, bool]] = {}
@@ -195,6 +228,7 @@ class VNextRuntimeOwner:
         self._flashback_generations: dict[str, int] = {}
         self._task_ids_by_task: dict[asyncio.Task[Any], str] = {}
         self._flashback_locks: dict[str, asyncio.Lock] = {}
+        self._working_memory_results: dict[str, dict[str, object]] = {}
 
     async def initialize(self) -> None:
         """初始化记忆数据库并启动派生向量后台任务。"""
@@ -216,6 +250,8 @@ class VNextRuntimeOwner:
             )
             self._schema_initialized = True
             await self.schema.initialize()
+            if self.neo4j_graph is not None:
+                await self.neo4j_graph.connect()
             cleared_personas = await self.persona_service.clear_legacy_impressions()
             logger.info(f"人物印象启动核对完成：归档并清理 {cleared_personas} 份旧稿")
             await self.vector_index.ensure_active_manifest(
@@ -276,7 +312,13 @@ class VNextRuntimeOwner:
         self._task_ids_by_task.clear()
         self._prompt_turns.clear()
         self._flashback_locks.clear()
+        self._working_memory_results.clear()
         self._recent_messages.clear()
+        if self.neo4j_graph is not None:
+            try:
+                await self.neo4j_graph.close()
+            except Exception as error:  # noqa: BLE001
+                logger.warning(f"Neo4j Episode 图关闭失败: {type(error).__name__}: {error}")
         try:
             try:
                 await self.diary.close()
@@ -348,6 +390,13 @@ class VNextRuntimeOwner:
     ) -> tuple[object, ...]:
         """执行当前流的回复前闪回检索并缓存当前请求的结果。"""
         try:
+            recent_message = self._latest_recent_message(stream_id)
+            if recent_message is not None:
+                episode = await self.episode_service.record_episode(recent_message)
+                await self.mirror_episode_to_graph(episode.episode_id)
+                working_memory = await self.episode_service.recall_working_memory(episode)
+                if self._flashback_generations.get(stream_id) == generation:
+                    self._working_memory_results[stream_id] = working_memory
             turn_index = self._prompt_turns.get(stream_id)
             if turn_index is None:
                 turn_index = await self.flashback.next_turn_index(stream_id)
@@ -386,6 +435,98 @@ class VNextRuntimeOwner:
         for stream_id, prefetch_task_id in tuple(self._flashback_task_ids.items()):
             if prefetch_task_id == task_id:
                 self._flashback_task_ids.pop(stream_id, None)
+
+    def _latest_recent_message(self, stream_id: str) -> object | None:
+        """返回当前流最近收到的消息，供 Episode 低成本记录。"""
+        messages = self._recent_messages.get(stream_id)
+        if not messages:
+            return None
+        return next(reversed(messages.values()))
+
+    def observe_output_message(self, message: object) -> None:
+        """回复发送后只登记 OUTPUT Episode，不触发当前轮回忆或模型调用。"""
+        if not self._initialized:
+            return
+        stream_id = str(self._message_value(message, "stream_id") or "").strip()
+        if not stream_id:
+            return
+        task_info = create_managed_task(
+            self._record_output_episode(message),
+            name=f"engram_episode_output_{stream_id[:16]}",
+            daemon=True,
+        )
+        self._task_ids.add(task_info.task_id)
+        if task_info.task is not None:
+            self._task_ids_by_task[task_info.task] = task_info.task_id
+
+        review_task = create_managed_task(
+            self._review_output_candidates(message),
+            name=f"engram_claim_review_{stream_id[:16]}",
+            daemon=True,
+        )
+        self._task_ids.add(review_task.task_id)
+        if review_task.task is not None:
+            self._task_ids_by_task[review_task.task] = review_task.task_id
+
+    async def _review_output_candidates(self, message: object) -> None:
+        """输出后异步收集并审核当前流候选，不影响回复发送。"""
+        try:
+            stream_id = str(self._message_value(message, "stream_id") or "").strip()
+            if not stream_id:
+                return
+            await self.proposal_service.collect_consolidation_candidates(stream_id)
+            await self.claim_service.sync_pending_proposals(stream_id)
+            await self.claim_service.review_pending(stream_id)
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"Claim/Hypothesis 后台审核失败: {type(error).__name__}: {error}")
+        finally:
+            self._forget_current_task()
+
+    async def _record_output_episode(self, message: object) -> None:
+        """后台写入输出经历，失败只记录日志。"""
+        try:
+            episode = await self.episode_service.record_output_observation(message)
+            await self.mirror_episode_to_graph(episode.episode_id)
+            stream_id = str(self._message_value(message, "stream_id") or "").strip()
+            if stream_id:
+                await self.proposal_service.collect_consolidation_candidates(stream_id)
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"输出 Episode 记录失败: {type(error).__name__}: {error}")
+        finally:
+            self._forget_current_task()
+
+    async def mirror_episode_to_graph(self, episode_id: str) -> None:
+        """异步镜像 Episode 与关系边到可选 Neo4j，主库不依赖镜像成功。"""
+        if self.neo4j_graph is None:
+            return
+        try:
+            async with self.schema.database.session() as session:
+                from sqlalchemy import select
+
+                from .models import EpisodeModel, EpisodeRelationModel
+
+                episode = await session.get(EpisodeModel, episode_id)
+                if episode is None:
+                    return
+                relations = (await session.scalars(select(EpisodeRelationModel).where(
+                    EpisodeRelationModel.source_episode_id == episode_id,
+                ))).all()
+            await self.neo4j_graph.upsert_episode(
+                episode.episode_id,
+                {
+                    "stream_id": episode.stream_id,
+                    "observed_at": episode.observed_at.isoformat(),
+                    "episode_kind": episode.episode_kind,
+                    "salience": float(episode.salience),
+                },
+                tuple((item.target_episode_id, item.relation_type, float(item.weight)) for item in relations),
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"Neo4j Episode 镜像失败: {type(error).__name__}: {error}")
+
+    def consume_working_memory(self, stream_id: str) -> dict[str, object] | None:
+        """消费当前流最新工作记忆，防止旧工作记忆跨轮重复注入。"""
+        return self._working_memory_results.pop(stream_id, None)
 
     async def consume_flashback_prefetch(self, stream_id: str) -> tuple[object, ...]:
         """在延迟预算内等待并消费当前流的最新闪回预取结果。"""

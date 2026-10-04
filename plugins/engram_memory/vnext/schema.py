@@ -18,12 +18,124 @@ from src.app.plugin_system.api.storage_api import PluginDatabase
 from .models import ALL_MODELS, SchemaVersionModel
 
 SCHEMA_KEY = "engram_memory_vnext"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
+
+
+def create_episode_tables(connection: sqlite3.Connection) -> None:
+    """为已有 Engram 数据库追加 Episode-first 旁路表。"""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS engram_vnext_episode (
+            episode_id VARCHAR(36) PRIMARY KEY,
+            source_ref TEXT UNIQUE,
+            stream_id TEXT NOT NULL,
+            observed_at VARCHAR(32) NOT NULL,
+            raw_text TEXT NOT NULL,
+            compressed_text TEXT NOT NULL,
+            participants JSON NOT NULL,
+            topics JSON NOT NULL,
+            emotion TEXT,
+            scene TEXT,
+            salience FLOAT NOT NULL,
+            certainty FLOAT NOT NULL,
+            source_type VARCHAR(32) NOT NULL,
+            episode_kind VARCHAR(32) NOT NULL,
+            created_at VARCHAR(32) NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_episode_stream_time
+            ON engram_vnext_episode(stream_id, observed_at);
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_episode_kind
+            ON engram_vnext_episode(episode_kind, created_at);
+        CREATE TABLE IF NOT EXISTS engram_vnext_cue_set (
+            cue_id VARCHAR(36) PRIMARY KEY,
+            episode_id VARCHAR(36) REFERENCES engram_vnext_episode(episode_id),
+            stream_id TEXT NOT NULL,
+            hard_cues JSON NOT NULL,
+            soft_cues JSON NOT NULL,
+            created_at VARCHAR(32) NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_cue_stream_time
+            ON engram_vnext_cue_set(stream_id, created_at);
+        CREATE TABLE IF NOT EXISTS engram_vnext_episode_relation (
+            relation_id VARCHAR(36) PRIMARY KEY,
+            source_episode_id VARCHAR(36) NOT NULL REFERENCES engram_vnext_episode(episode_id),
+            target_episode_id VARCHAR(36) NOT NULL REFERENCES engram_vnext_episode(episode_id),
+            relation_type VARCHAR(32) NOT NULL,
+            weight FLOAT NOT NULL,
+            created_at VARCHAR(32) NOT NULL,
+            UNIQUE(source_episode_id, target_episode_id, relation_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_episode_relation_source
+            ON engram_vnext_episode_relation(source_episode_id);
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_episode_relation_target
+            ON engram_vnext_episode_relation(target_episode_id);
+        CREATE TABLE IF NOT EXISTS engram_vnext_working_memory (
+            working_memory_id VARCHAR(36) PRIMARY KEY,
+            stream_id TEXT NOT NULL,
+            cue_id VARCHAR(36) NOT NULL,
+            selected_episodes JSON NOT NULL,
+            conflicts JSON NOT NULL,
+            created_at VARCHAR(32) NOT NULL,
+            expires_at VARCHAR(32) NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_working_memory_stream
+            ON engram_vnext_working_memory(stream_id, created_at);
+        CREATE TABLE IF NOT EXISTS engram_vnext_memory_update_proposal (
+            proposal_id VARCHAR(36) PRIMARY KEY,
+            stream_id TEXT NOT NULL,
+            claim TEXT NOT NULL,
+            evidence_ids JSON NOT NULL,
+            operation VARCHAR(32) NOT NULL,
+            target_memory_id VARCHAR(36),
+            confidence FLOAT NOT NULL,
+            status VARCHAR(32) NOT NULL,
+            created_at VARCHAR(32) NOT NULL,
+            reviewed_at VARCHAR(32)
+        );
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_proposal_status
+            ON engram_vnext_memory_update_proposal(status, created_at);
+        CREATE TABLE IF NOT EXISTS engram_vnext_episode_semantic (
+            semantic_id VARCHAR(36) PRIMARY KEY,
+            episode_id VARCHAR(36) NOT NULL REFERENCES engram_vnext_episode(episode_id),
+            referenced_episode_ids JSON NOT NULL,
+            entities JSON NOT NULL,
+            events JSON NOT NULL,
+            extraction_method VARCHAR(32) NOT NULL,
+            confidence FLOAT NOT NULL,
+            created_at VARCHAR(32) NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_episode_semantic_episode
+            ON engram_vnext_episode_semantic(episode_id);
+        CREATE TABLE IF NOT EXISTS engram_vnext_claim_hypothesis (
+            item_id VARCHAR(36) PRIMARY KEY,
+            stream_id TEXT NOT NULL,
+            kind VARCHAR(16) NOT NULL CHECK (kind IN ('CLAIM', 'HYPOTHESIS')),
+            statement TEXT NOT NULL,
+            evidence_ids JSON NOT NULL,
+            referenced_episode_ids JSON NOT NULL,
+            entity_refs JSON NOT NULL,
+            event_refs JSON NOT NULL,
+            status VARCHAR(16) NOT NULL CHECK (
+                status IN ('PENDING', 'REVIEWING', 'ACCEPTED', 'REJECTED', 'DEFERRED')
+            ),
+            confidence FLOAT NOT NULL,
+            review_reason TEXT,
+            review_payload JSON,
+            target_memory_id VARCHAR(36),
+            proposal_id VARCHAR(36),
+            review_attempts INTEGER NOT NULL DEFAULT 0,
+            created_at VARCHAR(32) NOT NULL,
+            reviewed_at VARCHAR(32)
+        );
+        CREATE INDEX IF NOT EXISTS idx_engram_vnext_claim_stream_status
+            ON engram_vnext_claim_hypothesis(stream_id, status, created_at);
+        """
+    )
 
 
 def upgrade_persona_audit(connection: sqlite3.Connection, source_version: int) -> None:
     """在调用者事务内升级已知人物审查结构及版本，不改写历史内容。"""
-    if source_version not in {2, 3, 4}:
+    if source_version not in {2, 3, 4, 5, 6}:
         raise RuntimeError(f"不支持自动升级的 Engram Schema: {source_version}")
     if source_version in {2, 3}:
         connection.execute(
@@ -40,9 +152,10 @@ def upgrade_persona_audit(connection: sqlite3.Connection, source_version: int) -
             "CREATE UNIQUE INDEX uq_engram_vnext_persona_revision "
             "ON engram_vnext_persona_update_log(person_id, revision_no)"
         )
-    connection.execute(
-        "ALTER TABLE engram_vnext_persona_update_log ADD COLUMN seen_revision_ids JSON"
-    )
+    if source_version in {2, 3, 4}:
+        connection.execute(
+            "ALTER TABLE engram_vnext_persona_update_log ADD COLUMN seen_revision_ids JSON"
+        )
     updated = connection.execute(
         "UPDATE engram_vnext_schema_version SET version=?, applied_at=? "
         "WHERE schema_key=? AND version=?",
@@ -101,7 +214,7 @@ class VNextSchema:
                     "SELECT version FROM engram_vnext_schema_version WHERE schema_key=?",
                     (SCHEMA_KEY,),
                 ).fetchone()
-                if row is None or row[0] not in {1, 2, 3, 4, SCHEMA_VERSION}:
+                if row is None or row[0] not in {1, 2, 3, 4, 5, 6, SCHEMA_VERSION}:
                     raise RuntimeError(
                         "不支持的 Engram Schema 版本，拒绝自动修改未知结构"
                     )
@@ -150,6 +263,7 @@ class VNextSchema:
                     self._upgrade_legacy(connection, backup_path)
                 else:
                     upgrade_persona_audit(connection, source_version)
+                    create_episode_tables(connection)
                 if (
                     connection.execute("PRAGMA foreign_key_check").fetchone()
                     is not None

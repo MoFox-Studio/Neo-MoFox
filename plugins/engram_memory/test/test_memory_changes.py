@@ -34,7 +34,7 @@ from ..vnext.memory_service import MemoryService
 from ..vnext.models import EvidenceMessageSnapshotModel
 from ..vnext.repository import MemoryRepository
 from ..vnext.schema import VNextSchema
-from ..vnext.tool_service import VNextToolService
+from ..vnext.tool_service import ToolContext, VNextToolService
 
 
 def test_affected_people_include_removed_and_added_people() -> None:
@@ -341,3 +341,45 @@ async def test_change_event_keeps_params_and_only_enqueues(
     assert decision is runtime_components.EventDecision.SUCCESS
     assert result is params and set(result) == {"change"}
     enqueue.assert_awaited_once_with(change)
+
+
+async def test_system_episode_keeps_source_and_is_idempotent(tmp_path: Path) -> None:
+    """Shameimaru 后台事件保留系统来源、人物关联，并可安全重放。"""
+    schema = VNextSchema(str(tmp_path / "system-episode.db"))
+    await schema.initialize()
+    tools = VNextToolService(
+        schema,
+        cast(Any, SimpleNamespace(search=AsyncMock(return_value=()))),
+    )
+    now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    try:
+        first = await tools.ingest_system_episode(
+            title="群聊新闻",
+            content="A 与 B 讨论了新的计划。",
+            stream_id="group-1",
+            observed_at=now,
+            source_ref="news-1",
+            person_ids=("person-a", "person-b"),
+        )
+        second = await tools.ingest_system_episode(
+            title="群聊新闻",
+            content="A 与 B 讨论了新的计划。",
+            stream_id="group-1",
+            observed_at=now,
+            source_ref="news-1",
+            person_ids=("person-a", "person-b"),
+        )
+        assert second == first
+        current = await tools.memory_read(
+            first["memory_id"],
+            "full",
+            ToolContext(ActorType.ADMIN, actor_ref="test"),
+        )
+        assert current["primary_person_id"] == "person-a"
+        assert current["secondary_person_ids"] == ["person-b"]
+        source = current["evidence_metadata"][0]
+        assert source["source_type"] == EvidenceSourceType.SYSTEM_EVENT.value
+        assert source["source_ref"] == "news-1"
+        assert "不是用户主动确认" in source["note"]
+    finally:
+        await schema.close()

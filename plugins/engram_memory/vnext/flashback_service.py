@@ -190,6 +190,41 @@ class FlashbackService:
                 )
         return candidates
 
+    async def formalized_episode_ids(
+        self, episode_ids: tuple[str, ...]
+    ) -> frozenset[str]:
+        """返回已经进入 ACTIVE 正式版本来源的 Episode ID。"""
+        normalized = tuple(dict.fromkeys(
+            item.strip() for item in episode_ids if isinstance(item, str) and item.strip()
+        ))
+        if not normalized:
+            return frozenset()
+        async with self._schema.database.session() as session:
+            rows = await session.scalars(
+                select(EvidenceModel.source_ref)
+                .join(
+                    RevisionEvidenceModel,
+                    RevisionEvidenceModel.evidence_id == EvidenceModel.evidence_id,
+                )
+                .join(
+                    MemoryRevisionModel,
+                    MemoryRevisionModel.revision_id == RevisionEvidenceModel.revision_id,
+                )
+                .join(
+                    MemoryModel,
+                    MemoryModel.current_revision_id == MemoryRevisionModel.revision_id,
+                )
+                .where(
+                    MemoryModel.status == MemoryStatus.ACTIVE,
+                    EvidenceModel.source_ref.in_(tuple(f"episode:{item}" for item in normalized)),
+                )
+            )
+            return frozenset(
+                str(value).removeprefix("episode:")
+                for value in rows
+                if isinstance(value, str) and value.startswith("episode:")
+            )
+
     async def next_turn_index(self, stream_key: str) -> int:
         """从持久化暴露事件恢复指定会话的下一轮编号。"""
         async with self._schema.database.session() as session:
@@ -293,6 +328,7 @@ class FlashbackService:
             return ()
         gated.sort(
             key=lambda item: (
+                -item.activation_score,
                 -float(item.vector_similarity or 0.0),
                 -item.rrf_score,
                 item.memory_id,

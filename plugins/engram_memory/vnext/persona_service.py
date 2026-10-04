@@ -268,7 +268,10 @@ class PersonaService:
             return None
         latest = await session.scalar(
             select(PersonaUpdateLogModel)
-            .where(PersonaUpdateLogModel.person_id == person_id)
+            .where(
+                PersonaUpdateLogModel.person_id == person_id,
+                PersonaUpdateLogModel.revision_no.is_not(None),
+            )
             .order_by(
                 PersonaUpdateLogModel.created_at.desc(),
                 PersonaUpdateLogModel.update_id.desc(),
@@ -384,7 +387,22 @@ class PersonaService:
     ) -> tuple[str, ...]:
         """读取与当前可信正文对应的最近成功审查所处理版本。"""
         async with self._schema.database.session() as session:
-            latest = await self._current_review(session, person_id, impression_text)
+            if await self._current_review(session, person_id, impression_text) is None:
+                return ()
+            latest = await session.scalar(
+                select(PersonaUpdateLogModel)
+                .where(
+                    PersonaUpdateLogModel.person_id == person_id,
+                    PersonaUpdateLogModel.generator_version == PERSONA_GENERATOR_VERSION,
+                    PersonaUpdateLogModel.new_content_hash == _content_hash(impression_text),
+                    PersonaUpdateLogModel.seen_revision_ids.is_not(None),
+                )
+                .order_by(
+                    PersonaUpdateLogModel.created_at.desc(),
+                    PersonaUpdateLogModel.update_id.desc(),
+                )
+                .limit(1)
+            )
             return tuple(latest.seen_revision_ids or ()) if latest is not None else ()
 
     async def refresh(

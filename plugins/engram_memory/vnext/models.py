@@ -98,6 +98,175 @@ class SchemaVersionModel(Base):
     applied_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
+class EpisodeModel(Base):
+    """低成本经历痕迹，不等同于已确认的正式记忆。"""
+
+    __tablename__ = "engram_vnext_episode"
+
+    episode_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_ref: Mapped[str | None] = mapped_column(Text, unique=True)
+    stream_id: Mapped[str] = mapped_column(Text, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    raw_text: Mapped[str] = mapped_column(Text, nullable=False)
+    compressed_text: Mapped[str] = mapped_column(Text, nullable=False)
+    participants: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    topics: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    emotion: Mapped[str | None] = mapped_column(Text)
+    scene: Mapped[str | None] = mapped_column(Text)
+    salience: Mapped[float] = mapped_column(Float, nullable=False)
+    certainty: Mapped[float] = mapped_column(Float, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    episode_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_engram_vnext_episode_stream_time", "stream_id", "observed_at"),
+        Index("idx_engram_vnext_episode_kind", "episode_kind", "created_at"),
+    )
+
+
+class EpisodeSemanticModel(Base):
+    """Episode 的实体、事件和自然语言引用解析结果。"""
+
+    __tablename__ = "engram_vnext_episode_semantic"
+
+    semantic_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    episode_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("engram_vnext_episode.episode_id"), nullable=False
+    )
+    referenced_episode_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    entities: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
+    events: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
+    extraction_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_engram_vnext_episode_semantic_episode", "episode_id"),
+    )
+
+
+class ClaimHypothesisModel(Base):
+    """独立的 Claim/Hypothesis 认知对象，必须经过审核才能产生正式提案。"""
+
+    __tablename__ = "engram_vnext_claim_hypothesis"
+
+    item_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    stream_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    referenced_episode_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    entity_refs: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
+    event_refs: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    review_reason: Mapped[str | None] = mapped_column(Text)
+    review_payload: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    target_memory_id: Mapped[str | None] = mapped_column(String(36))
+    proposal_id: Mapped[str | None] = mapped_column(String(36))
+    review_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('CLAIM', 'HYPOTHESIS')", name="ck_engram_vnext_claim_kind"),
+        CheckConstraint(
+            "status IN ('PENDING', 'REVIEWING', 'ACCEPTED', 'REJECTED', 'DEFERRED')",
+            name="ck_engram_vnext_claim_status",
+        ),
+        Index("idx_engram_vnext_claim_stream_status", "stream_id", "status", "created_at"),
+    )
+
+
+class CueSetModel(Base):
+    """一次上下文触发得到的硬线索与软线索。"""
+
+    __tablename__ = "engram_vnext_cue_set"
+
+    cue_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    episode_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("engram_vnext_episode.episode_id")
+    )
+    stream_id: Mapped[str] = mapped_column(Text, nullable=False)
+    hard_cues: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    soft_cues: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_engram_vnext_cue_stream_time", "stream_id", "created_at"),
+    )
+
+
+class EpisodeRelationModel(Base):
+    """经历之间的轻量关联边，支持低成本多跳扩散。"""
+
+    __tablename__ = "engram_vnext_episode_relation"
+
+    relation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_episode_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("engram_vnext_episode.episode_id"), nullable=False
+    )
+    target_episode_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("engram_vnext_episode.episode_id"), nullable=False
+    )
+    relation_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_episode_id",
+            "target_episode_id",
+            "relation_type",
+            name="uq_engram_vnext_episode_relation",
+        ),
+        Index("idx_engram_vnext_episode_relation_source", "source_episode_id"),
+        Index("idx_engram_vnext_episode_relation_target", "target_episode_id"),
+    )
+
+
+class WorkingMemoryModel(Base):
+    """当前请求选出的有限工作记忆，不改变正式记忆正文。"""
+
+    __tablename__ = "engram_vnext_working_memory"
+
+    working_memory_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    stream_id: Mapped[str] = mapped_column(Text, nullable=False)
+    cue_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    selected_episodes: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON, nullable=False
+    )
+    conflicts: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_engram_vnext_working_memory_stream", "stream_id", "created_at"),
+    )
+
+
+class MemoryUpdateProposalModel(Base):
+    """LM 提出的结构化记忆更新，必须经过代码层验证后才可执行。"""
+
+    __tablename__ = "engram_vnext_memory_update_proposal"
+
+    proposal_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    stream_id: Mapped[str] = mapped_column(Text, nullable=False)
+    claim: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_memory_id: Mapped[str | None] = mapped_column(String(36))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+
+    __table_args__ = (
+        Index("idx_engram_vnext_proposal_status", "status", "created_at"),
+    )
+
+
 class MemoryModel(Base):
     """正式记忆身份，不保存正文或认知评估副本。"""
 
@@ -802,6 +971,11 @@ class VectorIndexManifestModel(Base):
 
 
 IMMUTABLE_MODELS: ClassVar[tuple[type[Base], ...]] = (
+    EpisodeModel,
+    EpisodeSemanticModel,
+    CueSetModel,
+    EpisodeRelationModel,
+    WorkingMemoryModel,
     MemoryRevisionModel,
     MemoryRevisionSubjectModel,
     MemoryRevisionParticipantModel,
@@ -829,6 +1003,13 @@ for _model in IMMUTABLE_MODELS:
 
 ALL_MODELS: tuple[type[Base], ...] = tuple(Base.metadata.tables) and (
     SchemaVersionModel,
+    EpisodeModel,
+    EpisodeSemanticModel,
+    CueSetModel,
+    EpisodeRelationModel,
+    WorkingMemoryModel,
+    MemoryUpdateProposalModel,
+    ClaimHypothesisModel,
     MemoryModel,
     MemoryRevisionModel,
     MemoryRevisionSubjectModel,

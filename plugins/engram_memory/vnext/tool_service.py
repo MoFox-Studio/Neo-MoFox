@@ -14,8 +14,10 @@ from .domain import (
     EvidenceInput,
     MemoryChanged,
     MemoryLifecycleInput,
+    ParticipantInput,
     RetrievalQuery,
     ReviseMemoryInput,
+    SubjectInput,
     WriteContext,
 )
 from .enums import (
@@ -33,6 +35,7 @@ from .memory_service import MemoryService
 from .models import (
     EvidenceMessageLinkModel,
     EvidenceModel,
+    EpisodeModel,
     MemoryEventModel,
     MemoryModel,
     MemoryRelationModel,
@@ -40,6 +43,7 @@ from .models import (
     MemoryRevisionParticipantModel,
     MemoryRevisionSubjectModel,
 )
+from .proposal_service import MemoryUpdateProposal
 from .persona_service import PersonaService
 from .repository import MemoryRepository
 from .retrieval_service import RetrievalService, VectorSearchBackend
@@ -90,6 +94,9 @@ class VNextToolService:
         default_search_limit: int = 5,
         max_search_limit: int = 20,
         rrf_k: int = 60,
+        activation_half_life_days: float = 30.0,
+        activation_weight: float = 0.08,
+        activation_noise: float = 0.02,
         on_memory_changed: Callable[[MemoryChanged], Awaitable[None]] | None = None,
     ) -> None:
         """装配共享数据库上的领域服务及查询数量限制。"""
@@ -101,7 +108,17 @@ class VNextToolService:
         self._memory = MemoryService(schema, embedding_model_id, on_memory_changed)
         self._repository = MemoryRepository(schema)
         self._evidence = EvidenceService(schema)
-        self._retrieval = RetrievalService(schema, vector_backend, rrf_k=rrf_k)
+        from .proposal_service import ProposalService
+
+        self._proposal_service = ProposalService(schema)
+        self._retrieval = RetrievalService(
+            schema,
+            vector_backend,
+            rrf_k=rrf_k,
+            activation_half_life_days=activation_half_life_days,
+            activation_weight=activation_weight,
+            activation_noise=activation_noise,
+        )
         self._persona = PersonaService(schema)
         self._recent_memory_limit = recent_memory_limit
         self._default_search_limit = default_search_limit
@@ -179,6 +196,185 @@ class VNextToolService:
         result = await self._memory.create_memory(data, context.to_write_context())
         return {"memory_id": result.memory_id, "revision_id": result.revision_id}
 
+    async def ingest_system_episode(
+        self,
+        *,
+        title: str,
+        content: str,
+        stream_id: str,
+        observed_at: datetime,
+        source_ref: str,
+        person_ids: tuple[str, ...],
+    ) -> dict[str, str]:
+        """摄入后台整理出的经历，不伪装成 Actor 的主动记忆。
+
+        系统事件必须保留来源引用，并使用幂等 operation key。它可以进入
+        正式检索和后续巩固，但优先级低于带真实聊天消息来源的 ACTOR_WRITE。
+        """
+        normalized_people = tuple(dict.fromkeys(item.strip() for item in person_ids if item.strip()))
+        if not normalized_people:
+            raise ValueError("系统经历必须至少关联一个人物")
+        if not stream_id.strip() or not source_ref.strip():
+            raise ValueError("系统经历必须提供 stream_id 和 source_ref")
+        data = CreateMemoryInput(
+            title=title.strip(),
+            content=content.strip(),
+            memory_kind=MemoryKind.EVENT,
+            subject=SubjectInput(SubjectKind.PERSON, person_id=normalized_people[0]),
+            participants=tuple(
+                ParticipantInput(ParticipantKind.PERSON, person_id=person_id)
+                for person_id in normalized_people[1:]
+            ),
+            observed_at=observed_at,
+            evidence=(
+                EvidenceInput(
+                    source_type=EvidenceSourceType.SYSTEM_EVENT,
+                    observed_at=observed_at,
+                    source_ref=source_ref,
+                    note="由 Shameimaru Memory 后台摘要整理产生；不是用户主动确认的事实。",
+                ),
+            ),
+        )
+        context = WriteContext(
+            actor_type=ActorType.SYSTEM,
+            actor_ref="shameimaru_memory",
+            stream_id=stream_id,
+            operation_key=f"shameimaru_memory:{source_ref}",
+        )
+        result = await self._memory.create_memory(data, context)
+        return {"memory_id": result.memory_id, "revision_id": result.revision_id}
+
+    async def propose_memory_update(
+        self,
+        *,
+        stream_id: str,
+        claim: str,
+        evidence_ids: tuple[str, ...],
+        operation: str,
+        target_memory_id: str | None = None,
+        confidence: float = 0.5,
+    ) -> MemoryUpdateProposal:
+        """保存 LM 提案；提案阶段绝不创建或修订正式 Memory。"""
+        return await self._proposal_service.propose(
+            stream_id=stream_id,
+            claim=claim,
+            evidence_ids=evidence_ids,
+            operation=operation,
+            target_memory_id=target_memory_id,
+            confidence=confidence,
+        )
+
+    async def confirm_memory_update(
+        self,
+        proposal_id: str,
+        context: ToolContext,
+    ) -> dict[str, str]:
+        """确认提案后才把 Episode 证据巩固为正式 Memory。"""
+        if context.actor_type not in {ActorType.ACTOR, ActorType.ADMIN}:
+            raise PermissionError("只有 ACTOR 或 ADMIN 可以确认记忆提案")
+        proposal = await self._proposal_service.get(proposal_id)
+        if proposal is None or proposal.status != "PENDING":
+            raise ValueError("提案不存在或已被处理")
+        if context.stream_id != proposal.stream_id:
+            raise ValueError("提案只能在创建它的聊天流中确认")
+        if proposal.operation == "uncertain":
+            raise ValueError("uncertain 提案必须审核并生成明确提案后才能确认")
+        async with self._schema.database.session() as session:
+            episodes = tuple(
+                (
+                    await session.scalars(
+                        select(EpisodeModel).where(
+                            EpisodeModel.episode_id.in_(proposal.evidence_ids),
+                            EpisodeModel.stream_id == proposal.stream_id,
+                        )
+                    )
+                ).all()
+            )
+        if {episode.episode_id for episode in episodes} != set(proposal.evidence_ids):
+            raise ValueError("提案 Evidence 已不存在或不属于当前流")
+        if any(episode.episode_kind in {"CUE", "OUTPUT"} for episode in episodes):
+            raise ValueError("查询线索和机器人输出不能作为事实提案 Evidence")
+        participants = tuple(
+            dict.fromkeys(
+                person_id
+                for episode in episodes
+                for person_id in episode.participants
+                if person_id
+            )
+        )
+        if not participants:
+            raise ValueError("提案 Evidence 没有关联人物，不能巩固为正式 Memory")
+        evidence = tuple(
+            EvidenceInput(
+                source_type=EvidenceSourceType.SYSTEM_EVENT,
+                observed_at=episode.observed_at,
+                source_ref=f"episode:{episode.episode_id}",
+                note=f"由结构化提案 {proposal.proposal_id} 确认；保留原始经历，不等同于模型推测。",
+            )
+            for episode in episodes
+        )
+        write_context = WriteContext(
+            actor_type=context.actor_type,
+            actor_ref=context.actor_ref,
+            stream_id=context.stream_id,
+            operation_key=f"proposal:{proposal.proposal_id}:create",
+        )
+        current = (
+            await self._repository.get_current_revision(proposal.target_memory_id)
+            if proposal.target_memory_id
+            else None
+        )
+        memory_kind = current.memory_kind if current is not None else MemoryKind.EVENT
+        result = await self._memory.create_memory(
+            CreateMemoryInput(
+                title=proposal.claim[:72],
+                content=proposal.claim,
+                memory_kind=memory_kind,
+                subject=SubjectInput(SubjectKind.PERSON, person_id=participants[0]),
+                participants=tuple(
+                    ParticipantInput(ParticipantKind.PERSON, person_id=person_id)
+                    for person_id in participants[1:]
+                ),
+                observed_at=max(episode.observed_at for episode in episodes),
+                evidence=evidence,
+            ),
+            write_context,
+        )
+        if proposal.operation in {"supersede", "contradict"}:
+            if proposal.target_memory_id is None:
+                raise ValueError("提案缺少目标 Memory")
+            relation_type = (
+                RelationType.SUPERSEDES
+                if proposal.operation == "supersede"
+                else RelationType.CONTRADICTS
+            )
+            await self._memory.relate_memory(
+                result.memory_id,
+                proposal.target_memory_id,
+                relation_type,
+                f"提案 {proposal.proposal_id}：{proposal.claim}",
+                write_context,
+            )
+            await self._memory.tombstone_memory(
+                MemoryLifecycleInput(
+                    proposal.target_memory_id,
+                    f"被提案 {proposal.proposal_id} 的新状态取代",
+                ),
+                WriteContext(
+                    actor_type=context.actor_type,
+                    actor_ref=context.actor_ref,
+                    stream_id=context.stream_id,
+                    operation_key=f"proposal:{proposal.proposal_id}:tombstone",
+                ),
+            )
+        await self._proposal_service.mark_confirmed(proposal.proposal_id)
+        return {
+            "proposal_id": proposal.proposal_id,
+            "memory_id": result.memory_id,
+            "revision_id": result.revision_id,
+            "status": "CONFIRMED",
+        }
+
     async def memory_revise(
         self, data: ReviseMemoryInput, context: ToolContext
     ) -> dict[str, str]:
@@ -255,6 +451,7 @@ class VNextToolService:
                     "last_experienced_at": memory.last_experienced_at,
                     "matched_by": list(result.matched_by),
                     "rrf_score": result.rrf_score,
+                    "activation_score": result.activation_score,
                 }
             )
         return tuple(views)

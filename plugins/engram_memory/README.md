@@ -1,5 +1,25 @@
 # Engram Memory
 
+## Cue-Driven Reconstructive Memory
+
+当前版本将在线回忆与后台候选收集分开：消息先进入 Episode 经历层，由规则线索、人物/主题关联和有限多跳扩散形成短期 Working Memory；正式 Memory/Revision 仍须经过明确提案确认或既有正式写入接口。当前尚未实现自动模型审核巩固，也未将 Episode 与正式 Memory 闪回统一为同一竞争器。
+
+- `ingest_episode`：跨插件写入 Episode，不直接创建正式事实。
+- `read_working_memory`：读取当前流的短期、有来源回忆片段。
+- `recall_association`：按当前 Cue 主动扩散相关经历。
+- `propose_memory_update`：提交 `support`、`contradict`、`supersede` 或 `uncertain` 提案。
+- `confirm_memory_update`：代码校验证据后才创建正式 Memory，并在纠正时保留历史与关系边。
+
+`claim_review_status` 可读取当前流的 Claim/Hypothesis 审核状态、Episode 引用、实体和事件解析结果。规则抽取只识别同流的历史 Episode、显式 UUID、完整引号和明确人物字段；模型审核不能增加 Evidence ID，审核失败会保留为 `DEFERRED`。
+
+回复后追加 OUTPUT Episode 及 Observation，区分激活片段与正文中明确出现的 Episode ID；没有 ID 的自然语言引用不做推测识别。观察记录关联发送时间之前、同流且仍有效的最近 Working Memory，表示候选激活上下文，不证明模型实际使用。重复输出事件不覆盖首次观察。
+
+后台每次最多从最近 100 条 INPUT/SUMMARY 和 100 次工作记忆中收集 5 条巩固候选：出现纠正线索、显著性达到 0.6，或被至少 3 个不同输入经历激活。主动查询不计入重复激活。候选以幂等 `uncertain` 提案保留原文和触发原因，不调用模型、不自动创建正式事实。`read_working_memory` 的 `pending_proposals` 提供当前流待审目录；审核后应以来源为依据创建明确提案，`uncertain` 本身不能直接确认。
+
+主动关联查询不再写入 Episode；历史 CUE 与 OUTPUT 不进入事实回忆候选，也不能用作事实提案证据。重构扰动由查询/经历 ID 与候选 ID 确定，参与排序；重复惩罚在每次选入后重新排名，同一输入可复查选择依据。
+
+随机扰动只影响已有 Episode 候选的选择，不改变 Episode 正文、不生成无来源事实，也不覆盖明确纠正。Shameimaru Memory 负责后台摘要和巩固素材，Engram Recall Engine 负责在线前馈与工作记忆。
+
 Engram Memory 保存可追溯、可检索、可修订的正式记忆，并根据正式记忆变化更新核心人物印象。
 
 ## 工作方式
@@ -7,12 +27,6 @@ Engram Memory 保存可追溯、可检索、可修订的正式记忆，并根据
 1. **保存正式记忆**：`memory_write` 创建记忆，`memory_revise` 保留旧版本并记录修订，`memory_invalidate` 作废不再有效的记忆。每条记忆保留人物关联、来源与稳定 ID。
 2. **更新人物印象**：正式记忆提交后发布变化事件。Persona 按受影响人物合并任务，依据全部关联正式记忆维护核心人物印象；启动后在后台补建尚未完成新方案生成的人物。
 3. **检索与回忆**：`memory_search` 检索正式记忆，`memory_read` 查看当前内容、版本历史和证据。`person_lookup` 默认返回当前人物印象与近期相关记忆，也可显式查询以前的印象。回复前可尝试自然闪回，仍受相关性、耗时预算和冷却条件限制。
-
-### 检索时间
-
-`memory_search` 的 `start_time`、`end_time` 接受 ISO 8601 日期或时间，例如 `2026-01-02`、`2026-01-02T09:00:00+08:00`、`2026-01-02T01:00:00Z`。未带时区时使用既有的 `diary.timezone`，带时区时保留其明确偏移，内部统一转为 UTC；不接受“昨天”等相对时间文本。
-
-纯开始日期从当地零点起，纯结束日期包含当地整日；完整日期时间按指定时刻筛选。时间范围作用于记忆的最近经历时间，缺省为创建时间，不是正文中任意提及的日期。
 
 ## 正式记忆结构
 
