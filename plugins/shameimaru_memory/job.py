@@ -39,6 +39,12 @@ from .utils import format_local_time, message_time, person_id_of, person_name_of
 logger = log_api.get_logger("shameimaru_memory.job")
 
 
+def _is_enabled(plugin: Any) -> bool:
+    """检查插件开关，兼容缺少新配置字段的旧测试或旧配置。"""
+    config = _get_config(plugin)
+    return bool(getattr(getattr(config, "plugin", None), "enabled", True))
+
+
 def _get_config(plugin: Any) -> Any:
     """读取插件配置。"""
     return getattr(plugin, "config", None)
@@ -160,6 +166,9 @@ async def run_summary_job(plugin: Any) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 统计信息。
     """
+    if not _is_enabled(plugin):
+        return {"groups": 0, "summarized": 0, "skipped": 0, "disabled": True}
+
     config = _get_config(plugin)
     store = _build_store(plugin)
     summary_cfg = config.summary
@@ -272,6 +281,16 @@ async def run_news_job(plugin: Any) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 统计信息。
     """
+    if not _is_enabled(plugin):
+        return {
+            "groups": 0,
+            "processed": 0,
+            "created": 0,
+            "evicted": 0,
+            "skipped": 0,
+            "disabled": True,
+        }
+
     config = _get_config(plugin)
     store = _build_store(plugin)
     news_cfg = config.news
@@ -333,6 +352,7 @@ async def _news_for_group(
     cap = int(getattr(news_cfg, "max_input_summaries", 0))
     if cap > 0 and len(entries) > cap:
         entries = entries[-cap:]
+    processed_entry_ids = {entry.id for entry in entries}
 
     # 构建本群可用人物清单（真实 person_id），供子 agent 选择，防止编造 ID
     roster_by_id: dict[str, PersonRef] = {}
@@ -388,13 +408,15 @@ async def _news_for_group(
             timestamp=now,
             title=title,
             content=content,
+            stream_id=group.stream_id,
             participants=participants,
         )
         evicted.extend(await store.append_news(entry, int(news_cfg.max_entries)))
         created += 1
 
-    # 参与处理的摘要已消费，标记为废弃（保留供 Dreaming 读取，新闻层不再消费）
-    await store.deprecate_group_summaries(group.stream_id)
+    # 仅废弃实际送入本轮 LLM 的摘要，避免 cap 截断时丢失旧摘要。
+    if items:
+        await store.deprecate_group_summaries(group.stream_id, processed_entry_ids)
     return created, evicted
 
 
@@ -415,6 +437,9 @@ async def run_dream_job(plugin: Any) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 统计信息。
     """
+    if not _is_enabled(plugin):
+        return {"groups": 0, "created": 0, "deleted": 0, "disabled": True}
+
     config = _get_config(plugin)
     store = _build_store(plugin)
     knowledge_cfg = config.knowledge
@@ -434,11 +459,17 @@ async def run_dream_job(plugin: Any) -> dict[str, Any]:
     stats: dict[str, Any] = {"groups": len(groups), "created": 0, "deleted": 0}
 
     for group in groups:
-        if not news_list:
-            break
+        group_news = [
+            entry
+            for entry in news_list
+            if entry.stream_id == group.stream_id
+            or (not entry.stream_id and len(groups) == 1)
+        ]
+        if not group_news:
+            continue
         try:
             created_ids = await _dream_group(
-                service, group, news_list, knowledge_cfg, knowledge_task
+                service, group, group_news, knowledge_cfg, knowledge_task
             )
             stats["created"] += len(created_ids)
             if created_ids:

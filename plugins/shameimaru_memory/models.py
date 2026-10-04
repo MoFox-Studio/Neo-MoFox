@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 
 @dataclass(slots=True)
@@ -62,10 +63,12 @@ class SummaryEntry:
     content: str
     participants: list[PersonRef] = field(default_factory=list)
     deprecated: bool = False
+    id: str = field(default_factory=lambda: f"summary-{uuid4().hex}")
 
     def to_dict(self) -> dict[str, Any]:
         """转换为字典。"""
         return {
+            "id": self.id,
             "timestamp": self.timestamp,
             "content": self.content,
             "participants": [ref.to_dict() for ref in self.participants],
@@ -85,6 +88,7 @@ class SummaryEntry:
             content=content,
             participants=participants_from(data.get("participants")),
             deprecated=bool(data.get("deprecated") or False),
+            id=str(data.get("id") or f"summary-{uuid4().hex}"),
         )
 
 
@@ -101,6 +105,7 @@ class NewsEntry:
     title: str
     content: str
     participants: list[PersonRef] = field(default_factory=list)
+    stream_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """转换为字典。"""
@@ -109,6 +114,7 @@ class NewsEntry:
             "timestamp": self.timestamp,
             "title": self.title,
             "content": self.content,
+            "stream_id": self.stream_id,
             "participants": [ref.to_dict() for ref in self.participants],
         }
 
@@ -125,6 +131,7 @@ class NewsEntry:
             timestamp=float(data.get("timestamp") or 0.0),
             title=str(data.get("title") or "").strip(),
             content=str(data.get("content") or "").strip(),
+            stream_id=str(data.get("stream_id") or "").strip(),
             participants=participants_from(data.get("participants")),
         )
 
@@ -138,6 +145,7 @@ class GroupSummary:
     group_id: str = ""
     group_name: str = ""
     entries: list[SummaryEntry] = field(default_factory=list)
+    last_summarized_at: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """转换为字典。"""
@@ -146,6 +154,7 @@ class GroupSummary:
             "platform": self.platform,
             "group_id": self.group_id,
             "group_name": self.group_name,
+            "last_summarized_at": self.last_summarized_at,
             "entries": [entry.to_dict() for entry in self.entries],
         }
 
@@ -167,5 +176,6 @@ class GroupSummary:
             platform=str(data.get("platform") or ""),
             group_id=str(data.get("group_id") or ""),
             group_name=str(data.get("group_name") or ""),
+            last_summarized_at=float(data.get("last_summarized_at") or 0.0),
             entries=entries,
         )

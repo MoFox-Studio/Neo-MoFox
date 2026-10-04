@@ -143,6 +143,8 @@ class ShameimaruPromptInjector(BaseEventHandler):
     ) -> tuple[EventDecision, dict[str, Any]]:
         """处理 on_prompt_build 事件，按需同步相关记忆 reminder。"""
         config = self._get_config()
+        if not bool(getattr(config.plugin, "enabled", True)):
+            return EventDecision.SUCCESS, params
         injection = config.injection
 
         if params.get("name") != injection.prompt_name:

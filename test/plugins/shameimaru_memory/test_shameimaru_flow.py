@@ -12,6 +12,7 @@ from plugins.shameimaru_memory import job as job_module
 from plugins.shameimaru_memory.config import ShameimaruMemoryConfig
 from plugins.shameimaru_memory.event_handler import ShameimaruPromptInjector
 from plugins.shameimaru_memory.models import NewsEntry, PersonRef, SummaryEntry
+from plugins.shameimaru_memory.service import ShameimaruMemoryService
 from plugins.shameimaru_memory.store import ShameimaruMemoryStore
 from src.core.components.types import EventType
 from src.core.models.message import Message
@@ -278,6 +279,71 @@ async def test_news_job_keeps_summaries_on_sub_agent_failure(tmp_path: Path, moc
     assert len(group.entries) == 1
     assert group.entries[0].content == "小梅宣布下个月要搬家了。"
     assert group.entries[0].deprecated is False
+
+
+@pytest.mark.asyncio
+async def test_news_job_only_deprecates_summaries_sent_to_llm(
+    tmp_path: Path, mocker
+) -> None:
+    """输入摘要被 cap 截断时，未送入 LLM 的旧摘要必须保留。"""
+    plugin = _plugin(tmp_path)
+    plugin.config.news.max_input_summaries = 2
+    store = job_module._build_store(plugin)
+    for index in range(3):
+        await store.append_summary(
+            "s1",
+            SummaryEntry(timestamp=float(index), content=f"摘要{index}"),
+            max_entries=50,
+        )
+
+    mocker.patch.object(
+        job_module,
+        "call_sub_agent",
+        AsyncMock(
+            return_value='[{"title": "新闻", "content": "内容", "participants": []}]'
+        ),
+    )
+
+    stats = await job_module.run_news_job(plugin)
+    assert stats["created"] == 1
+    group = await store.get_group_summary("s1")
+    assert [entry.deprecated for entry in group.entries] == [False, True, True]
+
+    news = await store.get_news()
+    assert news[0].stream_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_disabled_plugin_skips_all_memory_jobs(tmp_path: Path, mocker) -> None:
+    plugin = _plugin(tmp_path)
+    plugin.config.plugin.enabled = False
+    call_sub_agent = mocker.patch.object(job_module, "call_sub_agent", AsyncMock())
+
+    summary_stats = await job_module.run_summary_job(plugin)
+    news_stats = await job_module.run_news_job(plugin)
+    dream_stats = await job_module.run_dream_job(plugin)
+
+    assert summary_stats["disabled"] is True
+    assert news_stats["disabled"] is True
+    assert dream_stats["disabled"] is True
+    call_sub_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_memory_service_exposes_last_summary_time(tmp_path: Path) -> None:
+    """Service 返回的群摘要包含模型中实际维护的时间字段。"""
+    plugin = _plugin(tmp_path)
+    store = job_module._build_store(plugin)
+    await store.append_summary(
+        "s1",
+        SummaryEntry(timestamp=123.0, content="摘要"),
+        group_name="群A",
+        max_entries=50,
+    )
+
+    service = ShameimaruMemoryService(plugin=plugin)
+    groups = await service.get_group_summaries()
+    assert groups[0]["last_summarized_at"] == 123.0
 
 
 @pytest.mark.asyncio
@@ -571,6 +637,45 @@ async def test_dream_job_knowledge_izes_news(tmp_path: Path, mocker) -> None:
 
     # 被知识化的新闻涉及人物背景更新
     assert "亲姐妹" in await fresh_store.get_persona("qq:1")
+
+
+@pytest.mark.asyncio
+async def test_dream_job_only_sends_current_group_news(tmp_path: Path, mocker) -> None:
+    """Dreaming 每次只应把当前群来源的新闻交给子 agent。"""
+    plugin = _plugin(tmp_path)
+    store = job_module._build_store(plugin)
+    await store.append_summary("s1", SummaryEntry(timestamp=1.0, content="群A摘要"), max_entries=50)
+    await store.append_summary("s2", SummaryEntry(timestamp=2.0, content="群B摘要"), max_entries=50)
+    await store.append_news(
+        NewsEntry(id="n1", timestamp=3.0, title="群A新闻", content="A", stream_id="s1"),
+        max_entries=50,
+    )
+    await store.append_news(
+        NewsEntry(id="n2", timestamp=4.0, title="群B新闻", content="B", stream_id="s2"),
+        max_entries=50,
+    )
+
+    fake_service = MagicMock()
+    fake_service.create = AsyncMock(return_value={"action": "create"})
+    mocker.patch.object(job_module.service_api, "get_service", return_value=fake_service)
+    captured_users: list[str] = []
+
+    async def _fake_sub_agent(**kwargs: Any) -> str:
+        if kwargs["request_name"] == "shameimaru_dream":
+            captured_users.append(kwargs["user"])
+        return "[]"
+
+    mocker.patch.object(job_module, "call_sub_agent", side_effect=_fake_sub_agent)
+
+    stats = await job_module.run_dream_job(plugin)
+    assert stats["groups"] == 2
+    assert len(captured_users) == 2
+    group_a_user = next(user for user in captured_users if "群A摘要" in user)
+    group_b_user = next(user for user in captured_users if "群B摘要" in user)
+    assert "群A新闻" in group_a_user
+    assert "群B新闻" not in group_a_user
+    assert "群B新闻" in group_b_user
+    assert "群A新闻" not in group_b_user
 
 
 @pytest.mark.asyncio

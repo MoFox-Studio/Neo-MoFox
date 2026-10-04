@@ -112,17 +112,25 @@ def test_models_roundtrip() -> None:
         title="标题",
         content="内容",
         participants=[PersonRef(person_id="qq:1", name="A")],
+        stream_id="s1",
     )
     news_restored = NewsEntry.from_dict(news.to_dict())
     assert news_restored is not None
     assert news_restored.id == "news-1"
+    assert news_restored.stream_id == "s1"
     assert news_restored.participants[0].person_id == "qq:1"
 
-    group = GroupSummary(stream_id="s1", group_name="测试群", entries=[summary])
+    group = GroupSummary(
+        stream_id="s1",
+        group_name="测试群",
+        entries=[summary],
+        last_summarized_at=3.0,
+    )
     group_restored = GroupSummary.from_dict(group.to_dict())
     assert group_restored is not None
     assert len(group_restored.entries) == 1
     assert group_restored.group_name == "测试群"
+    assert group_restored.last_summarized_at == 3.0
 
 
 # ----------------------------------------------------------------------
