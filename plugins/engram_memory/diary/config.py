@@ -67,7 +67,9 @@ class DiaryConfig(SectionBase):
         default="data/engram_memory/chat_diary.db",
         description="独立日记数据库路径",
     )
-    timezone: str = Field(default="Asia/Shanghai", description="日记自然日所属时区")
+    timezone: str = Field(
+        default="Asia/Shanghai", description="日记自然日及无时区记忆查询使用的时区"
+    )
     max_concurrency: int = Field(
         default=3, ge=1, description="不同聊天流的生成并发上限"
     )

@@ -1085,11 +1085,36 @@ async def test_diary_formats_actual_bot_and_placeholder_without_guessing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_text", "expected_error"),
+    [
+        ('{"body":"今天看到他们讨论安排，还没有确定。"}', None),
+        ('```json\n{"body":"今天看到他们讨论安排，还没有确定。"}\n```', None),
+        ('```\n{"body":"今天看到他们讨论安排，还没有确定。"}\n```', None),
+        (
+            ' \r\n```json\r\n{"body":"今天看到他们讨论安排，还没有确定。"}\r\n```\r\n ',
+            None,
+        ),
+        (" \n ", "空响应"),
+        ("```json\n \n```", "空响应"),
+        ("不是 JSON", "无效 JSON"),
+        ('```json\n{"body":"正文"}', "无效 JSON"),
+        ('前言\n```json\n{"body":"正文"}\n```', "无效 JSON"),
+        ('```json\n{"body":"正文"}\n```\n后记', "无效 JSON"),
+        ('```python\n{"body":"正文"}\n```', "无效 JSON"),
+        ('{"body":', "无效 JSON"),
+        ('{"body":null}', "唯一 body 文本字段"),
+        ('{"body":"正文","extra":true}', "唯一 body 文本字段"),
+        ("[]", "唯一 body 文本字段"),
+    ],
+)
 async def test_diary_request_is_clean_and_persona_is_complete(
     diary_path: str,
     monkeypatch: pytest.MonkeyPatch,
+    response_text: str,
+    expected_error: str | None,
 ) -> None:
-    """独立请求使用完整人设与自然回顾口吻，保留事实边界且不带旧提醒。"""
+    """独立请求保留完整人设与事实边界，仅接受合法 JSON 及完整围栏。"""
     persona = {"name": "示例Bot", "personality": "自然说话", "safety": "遵守事实"}
     monkeypatch.setattr(
         diary_service.config_api,
@@ -1115,7 +1140,7 @@ async def test_diary_request_is_clean_and_persona_is_complete(
         async def send(self: Any, *, stream: bool) -> asyncio.Future[str]:
             """返回一次确定性日记响应，不访问外部模型。"""
             response: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-            response.set_result('{"body":"今天看到他们讨论安排，还没有确定。"}')
+            response.set_result(response_text)
             return response
 
         monkeypatch.setattr(type(request), "send", send)
@@ -1131,7 +1156,11 @@ async def test_diary_request_is_clean_and_persona_is_complete(
         "preceding_context": [{"text": "有空一起玩"}],
         "new_messages": [{"text": "时间还没定"}],
     }
-    assert await service.generate(payload) == "今天看到他们讨论安排，还没有确定。"
+    if expected_error is not None:
+        with pytest.raises(ValueError, match=expected_error):
+            await service.generate(payload)
+    else:
+        assert await service.generate(payload) == "今天看到他们讨论安排，还没有确定。"
     request = requests[0]
     assert request.request_name == diary_service.DIARY_REQUEST_NAME
     assert [item.role for item in request.payloads] == [ROLE.SYSTEM, ROLE.USER]

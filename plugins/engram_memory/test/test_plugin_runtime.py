@@ -583,10 +583,12 @@ def test_plugin_registers_exact_component_graph() -> None:
 
 
 def test_memory_query_schemas_distinguish_recall_from_disclosure() -> None:
-    """三个查询入口的真实 Schema 提供回想用途，不引导复述私人内容。"""
+    """查询与写入 Schema 要求自主查重保存，同时保留来源与隐私边界。"""
     from ..vnext.runtime_components import (
         VNextMemoryReadTool,
+        VNextMemoryReviseAction,
         VNextMemorySearchTool,
+        VNextMemoryWriteAction,
         VNextPersonLookupTool,
     )
 
@@ -605,6 +607,146 @@ def test_memory_query_schemas_distinguish_recall_from_disclosure() -> None:
     assert "revision_no" in VNextPersonLookupTool.description
     assert "群聊中跟某个人开始聊天或有人新参与时" in VNextPersonLookupTool.description
     assert "私聊直接使用自动注入的印象" in VNextPersonLookupTool.description
+    assert "印象更新时间不代表经历发生时间" in VNextPersonLookupTool.to_schema()[
+        "function"
+    ]["description"]
+    search_description = VNextMemorySearchTool.to_schema()["function"]["description"]
+    assert "询问相识人物的信息时先检索" in search_description
+    assert "同名不能直接用人设或常识代答" in search_description
+    assert "不等对方提醒" in search_description
+    assert "同一人物的新事实或独立经历另行保存" in search_description
+    assert "同一人物或经历已有记忆时优先修订" not in search_description
+    search_parameters = VNextMemorySearchTool.to_schema()["function"]["parameters"]
+    time_properties = search_parameters["properties"]
+    assert time_properties["start_time"]["type"] == "string"
+    assert "ISO 8601" in time_properties["start_time"]["description"]
+    assert "2026-01-02T09:00:00+08:00" in time_properties["start_time"]["description"]
+    assert "相对时间" in time_properties["start_time"]["description"]
+    for name in ("start_time", "end_time"):
+        assert "diary.timezone" in time_properties[name]["description"]
+        assert name not in search_parameters["required"]
+    assert "当天的最后一刻" in time_properties["end_time"]["description"]
+    for action, instructions in (
+        (
+            VNextMemoryWriteAction,
+            (
+                "自主判断",
+                "在本轮主动保存",
+                "不等对方要求或提醒",
+                "重要的单次事实和独立经历",
+                "真实聊天来源",
+                "只有工具成功才算保存",
+                "保存不是代对方公开",
+            ),
+        ),
+        (
+            VNextMemoryReviseAction,
+            (
+                "主动回读",
+                "不等提醒",
+                "真实聊天来源",
+                "同一人物的新事实或独立经历仍应另建记忆",
+            ),
+        ),
+    ):
+        schema = action.to_schema()["function"]
+        assert schema["description"] == action.description
+        for instruction in instructions:
+            assert instruction in schema["description"]
+        payload = schema["parameters"]["properties"]["payload"]
+        assert {"content", "primary_person_id", "source_message_ids"}.issubset(
+            payload["required"]
+        )
+        assert payload["additionalProperties"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("zone_name", "start_time", "end_time", "expected_start", "expected_end"),
+    [
+        ("Asia/Shanghai", None, None, None, None),
+        (
+            "Asia/Shanghai",
+            "2026-01-02",
+            "2026-01-02",
+            "2026-01-01T16:00:00+00:00",
+            "2026-01-02T15:59:59.999999+00:00",
+        ),
+        (
+            "Asia/Shanghai",
+            "2026-01-02 09:30:00",
+            "2026-01-02T18:00:00",
+            "2026-01-02T01:30:00+00:00",
+            "2026-01-02T10:00:00+00:00",
+        ),
+        (
+            "Asia/Shanghai",
+            "2026-01-02T09:30:00+02:00",
+            "2026-01-02T18:00:00Z",
+            "2026-01-02T07:30:00+00:00",
+            "2026-01-02T18:00:00+00:00",
+        ),
+        (
+            "UTC",
+            "2026-01-02",
+            "2026-01-02T12:00:00",
+            "2026-01-02T00:00:00+00:00",
+            "2026-01-02T12:00:00+00:00",
+        ),
+        (
+            "America/New_York",
+            "2026-03-08",
+            "2026-03-08",
+            "2026-03-08T05:00:00+00:00",
+            "2026-03-09T03:59:59.999999+00:00",
+        ),
+    ],
+)
+async def test_memory_search_uses_configured_timezone_and_complete_dates(
+    zone_name: str,
+    start_time: str | None,
+    end_time: str | None,
+    expected_start: str | None,
+    expected_end: str | None,
+) -> None:
+    """真实查询组件按配置转换时间，保留显式偏移并包含结束日期整日。"""
+    from ..plugin import EngramMemoryPlugin
+    from ..vnext.runtime_components import VNextMemorySearchTool
+
+    config = EngramMemoryConfig()
+    config.diary.timezone = zone_name
+    resource: Any = object.__new__(VNextRuntimeOwner)
+    search = AsyncMock(return_value=())
+    resource.config = config
+    resource.tools = SimpleNamespace(memory_search=search)
+    plugin = EngramMemoryPlugin(config)
+    setattr(plugin, "runtime_owner", resource)
+    tool = VNextMemorySearchTool(plugin)
+    assert await tool.execute(
+        "示例事件", start_time=start_time, end_time=end_time
+    ) == (True, {"memories": []})
+    search.assert_awaited_once()
+    search_call = search.await_args
+    assert search_call is not None
+    arguments = search_call.kwargs
+    assert arguments["start_time"] == (
+        datetime.fromisoformat(expected_start) if expected_start is not None else None
+    )
+    assert arguments["end_time"] == (
+        datetime.fromisoformat(expected_end) if expected_end is not None else None
+    )
+
+
+@pytest.mark.parametrize("value", ["昨天", "2026-02-30", "", "not-a-time"])
+def test_memory_search_rejects_invalid_time(value: str) -> None:
+    """无时区输入容许解释，非法或相对时间仍拒绝。"""
+    from zoneinfo import ZoneInfo
+
+    from ..vnext.runtime_components import _optional_datetime
+
+    for field in ("start_time", "end_time"):
+        with pytest.raises(ValueError):
+            _optional_datetime(value, field, ZoneInfo("Asia/Shanghai"))
 
 
 def test_flashback_prompt_conveys_sudden_recall_and_keeps_complete_material() -> None:
@@ -679,6 +821,12 @@ async def test_plugin_load_refreshes_routers_and_registers_guide(
         "在当下的场景用适合的方式表达",
         "多换换说法",
         "不把私人透露写成大家已经知道的事实",
+        "不能因为近期没聊过或记忆较少就跳过",
+        "不凭人设或常识直接认定是同一个人",
+        "不猜测 ID",
+        "不用另一个同名人物的知识补空白",
+        "不把长期没有更新当成状态一直未变",
+        "既往事实不会仅因年代久远就失效",
         "current",
         "history",
         "full",
@@ -686,6 +834,19 @@ async def test_plugin_load_refreshes_routers_and_registers_guide(
         "primary_person_id",
         "secondary_person_ids",
         "对方希望你怎样称呼他",
+        "每轮主动留意当前聊天的新信息，自主判断哪些值得长期记住",
+        "群聊和私聊都要积极发现",
+        "不等对方要求“帮我记住”或再次提醒",
+        "生日等明确的个人信息",
+        "不限于这些类别",
+        "不必只记反复出现的事",
+        "在本轮主动完成查重和保存",
+        "不能仅因人物相同就当作重复",
+        "不等于已经保存为正式记忆",
+        "不能用一句“我记住了”代替实际操作",
+        "不为调用工具而凑记忆",
+        "对方明确不希望保存的内容不写入",
+        "不用猜测补齐事实",
         "群聊里，跟某个人开始聊天",
         "必须先调用 `person_lookup`",
         "私聊里，对方的人物印象会作为 SystemReminder 自动注入上下文",
