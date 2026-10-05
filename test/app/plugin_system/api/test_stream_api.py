@@ -4,7 +4,7 @@
 - get_or_create_stream / get_stream
 - build_stream_from_database
 - load_stream_context
-- add_message_to_stream / add_message / add_sent_message_to_history
+- add_message_to_stream / add_message / add_message_to_history
 - delete_stream
 - get_stream_info / get_stream_messages
 - clear_stream_cache
@@ -95,7 +95,47 @@ class TestStreamAPI:
             result = await stream_api.add_message_to_stream(mock_message)
             
             assert result == mock_db_message
-    
+
+    @pytest.mark.asyncio
+    async def test_add_message_to_history_defaults_to_outgoing(self) -> None:
+        """add_message_to_history 默认按出站方向委托给 manager。"""
+        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
+            mock_manager = MagicMock()
+            mock_db_message = MagicMock()
+            mock_manager.add_message_to_history = AsyncMock(return_value=mock_db_message)
+            mock_get_mgr.return_value = mock_manager
+
+            mock_message = MagicMock(spec=Message)
+            result = await stream_api.add_message_to_history(mock_message)
+
+            assert result == mock_db_message
+            mock_manager.add_message_to_history.assert_awaited_once_with(
+                mock_message, direction="outgoing"
+            )
+
+    @pytest.mark.asyncio
+    async def test_add_message_to_history_incoming_direction(self) -> None:
+        """add_message_to_history 应透传进站方向。"""
+        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
+            mock_manager = MagicMock()
+            mock_db_message = MagicMock()
+            mock_manager.add_message_to_history = AsyncMock(return_value=mock_db_message)
+            mock_get_mgr.return_value = mock_manager
+
+            mock_message = MagicMock(spec=Message)
+            result = await stream_api.add_message_to_history(mock_message, direction="incoming")
+
+            assert result == mock_db_message
+            mock_manager.add_message_to_history.assert_awaited_once_with(
+                mock_message, direction="incoming"
+            )
+
+    @pytest.mark.asyncio
+    async def test_add_message_to_history_rejects_none(self) -> None:
+        """message 为 None 时应抛出 ValueError。"""
+        with pytest.raises(ValueError, match="message 不能为空"):
+            await stream_api.add_message_to_history(None)  # type: ignore[arg-type]
+
     @pytest.mark.asyncio
     async def test_delete_stream(self) -> None:
         """测试删除流。"""

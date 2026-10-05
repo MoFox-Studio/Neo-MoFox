@@ -535,11 +535,12 @@ class StreamManager:
 
             return db_message
 
-    async def add_sent_message_to_history(
+    async def add_message_to_history(
         self,
         message: "Message",
+        direction: str = "outgoing",
     ) -> "Messages":
-        """添加“已发送消息”到流历史消息。
+        """添加进站/出站历史消息到流。
 
         与 ``add_message`` 不同：
         - 该方法会将消息直接写入 ``history_messages``
@@ -547,19 +548,38 @@ class StreamManager:
 
         Args:
             message: 运行时消息对象
+            direction: 消息方向，``"outgoing"`` 表示出站消息（bot 发送，
+                person_id 固定记为 ``"bot"``），``"incoming"`` 表示进站消息
+                （按消息发送者解析 person_id）
 
         Returns:
             Messages: 创建或已存在的数据库消息记录
+
+        Raises:
+            ValueError: direction 不是 "incoming" 或 "outgoing"
+
+        Examples:
+            >>> db_msg = await sm.add_message_to_history(message, direction="incoming")
         """
+        if direction not in ("incoming", "outgoing"):
+            raise ValueError(
+                f"direction 必须是 'incoming' 或 'outgoing'，收到: {direction!r}"
+            )
+
         stream_id = message.stream_id
 
         lock = self._get_stream_lock(stream_id)
         async with lock:
 
+            if direction == "outgoing":
+                person_id: str | None = "bot"
+            else:
+                person_id = self._resolve_person_id_from_message(message)
+
             message_data = {
                 "message_id": message.message_id,
                 "stream_id": stream_id,
-                "person_id": "bot",
+                "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
                 "content": _serialize_content_for_db(message.content),

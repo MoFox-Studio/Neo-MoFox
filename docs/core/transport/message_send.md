@@ -21,7 +21,7 @@ message_send 负责将 core 侧 Message 下发到目标适配器，并在发送�
 5. 发布 ON_MESSAGE_SENT 事件，若 decision=STOP 则中止发送。
 6. 将待发送的二进制媒体登记到 MediaManager，确认文件和索引可回查；缓存失败则不下发。
 7. 调用 adapter._send_platform_message 真正下发。
-8. 发送成功后调用 StreamManager.add_sent_message_to_history 写入发送历史（剥离 base64 数据，保留媒体 ID 和上下文模式）。
+8. 发送成功后调用 StreamManager.add_message_to_history（出站方向）写入发送历史（剥离 base64 数据，保留媒体 ID 和上下文模式）。
 
 ## 插件媒体上下文
 

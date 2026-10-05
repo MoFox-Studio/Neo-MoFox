@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
 
 from src.core.managers.stream_manager import _serialize_content_for_db
 from src.core.models.message import Message
+
+if TYPE_CHECKING:
+    from src.core.managers.stream_manager import StreamManager
 
 
 @pytest.mark.asyncio
@@ -448,6 +452,137 @@ async def test_add_message_normalizes_direct_raw_person_id(monkeypatch) -> None:
 
     created_data = manager._messages_crud.create.await_args.args[0]
     assert created_data["person_id"] == "hash_qq_user_123"
+
+
+def _make_history_manager(stream_id: str, context) -> "StreamManager":
+    """构建带 mock CRUD 的 StreamManager，用于历史消息写入测试。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    manager._messages_crud.get_by = AsyncMock(return_value=None)
+    manager._messages_crud.create = AsyncMock(return_value=SimpleNamespace(id=1))
+    manager._update_stream_active_time = AsyncMock()  # type: ignore[method-assign]
+    manager._streams[stream_id] = SimpleNamespace(
+        context=context,
+        update_active_time=lambda: None,
+    )
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_add_message_to_history_outgoing_uses_bot_person_id() -> None:
+    """出站方向写入历史时 person_id 应固定为 bot，且不进入未读列表。"""
+    from src.core.models.stream import StreamContext
+
+    stream_id = "stream-history-out-001"
+    context = StreamContext(stream_id=stream_id)
+    manager = _make_history_manager(stream_id, context)
+
+    message = Message(
+        message_id="m-history-out-001",
+        content="hi",
+        processed_plain_text="hi",
+        sender_id="bot_1",
+        sender_name="Bot",
+        platform="qq",
+        chat_type="private",
+        stream_id=stream_id,
+    )
+
+    await manager.add_message_to_history(message, direction="outgoing")
+
+    created_data = manager._messages_crud.create.await_args.args[0]
+    assert created_data["person_id"] == "bot"
+    assert context.history_messages == [message]
+    assert context.unread_messages == []
+
+
+@pytest.mark.asyncio
+async def test_add_message_to_history_incoming_resolves_person_id(monkeypatch) -> None:
+    """进站方向写入历史时 person_id 应按消息发送者解析。"""
+    from src.core.models.stream import StreamContext
+
+    stream_id = "stream-history-in-001"
+    context = StreamContext(stream_id=stream_id)
+    manager = _make_history_manager(stream_id, context)
+
+    helper = SimpleNamespace(generate_person_id=lambda platform, user_id: "hash_qq_user_123")
+    monkeypatch.setattr(
+        "src.core.utils.user_query_helper.get_user_query_helper",
+        lambda: helper,
+    )
+
+    message = Message(
+        message_id="m-history-in-001",
+        content="hello",
+        processed_plain_text="hello",
+        sender_id="user_123",
+        sender_name="Alice",
+        platform="qq",
+        chat_type="private",
+        stream_id=stream_id,
+    )
+
+    await manager.add_message_to_history(message, direction="incoming")
+
+    created_data = manager._messages_crud.create.await_args.args[0]
+    assert created_data["person_id"] == "hash_qq_user_123"
+    assert context.history_messages == [message]
+    assert context.unread_messages == []
+
+
+@pytest.mark.asyncio
+async def test_add_message_to_history_rejects_unknown_direction() -> None:
+    """未知方向应抛出 ValueError，且不落库。"""
+    from src.core.models.stream import StreamContext
+
+    stream_id = "stream-history-bad-dir-001"
+    context = StreamContext(stream_id=stream_id)
+    manager = _make_history_manager(stream_id, context)
+
+    message = Message(
+        message_id="m-history-bad-001",
+        content="hello",
+        processed_plain_text="hello",
+        sender_id="user_123",
+        sender_name="Alice",
+        platform="qq",
+        chat_type="private",
+        stream_id=stream_id,
+    )
+
+    with pytest.raises(ValueError, match="direction"):
+        await manager.add_message_to_history(message, direction="sideways")
+
+    manager._messages_crud.create.assert_not_awaited()
+    assert context.history_messages == []
+
+
+@pytest.mark.asyncio
+async def test_add_message_to_history_removes_duplicate_unread() -> None:
+    """同 ID 消息已存在于未读列表时应先移除，避免同时出现在 unread/history。"""
+    from src.core.models.stream import StreamContext
+
+    stream_id = "stream-history-dedup-001"
+    context = StreamContext(stream_id=stream_id)
+    manager = _make_history_manager(stream_id, context)
+
+    message = Message(
+        message_id="m-history-dedup-001",
+        content="hi",
+        processed_plain_text="hi",
+        sender_id="bot_1",
+        sender_name="Bot",
+        platform="qq",
+        chat_type="private",
+        stream_id=stream_id,
+    )
+    context.unread_messages.append(message)
+
+    await manager.add_message_to_history(message, direction="outgoing")
+
+    assert context.unread_messages == []
+    assert context.history_messages == [message]
 
 
 def test_serialize_content_for_db_strips_small_binary_media_data() -> None:

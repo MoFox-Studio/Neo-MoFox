@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
-API_VERSION = "1.0.0"
+API_VERSION = "2.0.0"
 
 if TYPE_CHECKING:
     from src.core.models.message import Message
@@ -187,18 +187,31 @@ async def add_message(message: "Message") -> "Messages":
     return await _get_stream_manager().add_message(message)
 
 
-async def add_sent_message_to_history(message: "Message") -> "Messages":
-    """添加“已发送消息”到流历史消息。
+async def add_message_to_history(
+    message: "Message",
+    direction: str = "outgoing",
+) -> "Messages":
+    """添加进站/出站历史消息到流。
+
+    将消息直接写入流的历史消息（history_messages），不会写入未读列表。
+    出站消息按 bot 身份入库；进站消息按消息发送者身份解析入库。
 
     Args:
         message: 消息对象
+        direction: 消息方向，``"outgoing"`` 表示出站（bot 发送），
+            ``"incoming"`` 表示进站（用户发送）
 
     Returns:
         入库后的消息记录
+
+    Raises:
+        ValueError: message 为空，或 direction 不是 "incoming"/"outgoing"
     """
     if message is None:
         raise ValueError("message 不能为空")
-    return await _get_stream_manager().add_sent_message_to_history(message)
+    return await _get_stream_manager().add_message_to_history(
+        message, direction=direction
+    )
 
 
 async def delete_stream(stream_id: str, delete_messages: bool = True) -> bool:
@@ -379,7 +392,7 @@ __all__ = [
     "load_stream_context",
     "add_message_to_stream",
     "add_message",
-    "add_sent_message_to_history",
+    "add_message_to_history",
     "delete_stream",
     "get_stream_info",
     "get_stream_messages",
