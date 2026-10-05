@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 	from src.core.transport.message_receive.converter import MessageConverter
 
-API_VERSION = "2.0.0"
+API_VERSION = "1.1.0"
 
 def _get_adapter_manager():
 	"""延迟获取 AdapterManager，避免导入时循环依赖。
