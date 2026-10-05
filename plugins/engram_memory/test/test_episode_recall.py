@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,9 +12,16 @@ import pytest
 from sqlalchemy import func, select
 
 from ..vnext.domain import CreateMemoryInput, EvidenceInput, SubjectInput, WriteContext
-from ..vnext.enums import ActorType, EvidenceSourceType, MemoryKind, MemoryStatus, SubjectKind
+from ..vnext.enums import ActorType, EvidenceSourceType, MemoryEventType, MemoryKind, MemoryStatus, SubjectKind
 from ..vnext.episode_service import EpisodeService
-from ..vnext.models import CueSetModel, EpisodeModel, MemoryModel, MemoryRelationModel
+from ..vnext.models import (
+    CueSetModel,
+    EpisodeModel,
+    EpisodeRelationModel,
+    MemoryEventModel,
+    MemoryModel,
+    MemoryRelationModel,
+)
 from ..vnext.proposal_service import ProposalService
 from ..vnext.schema import VNextSchema
 from ..vnext.tool_service import ToolContext, VNextToolService
@@ -69,6 +76,167 @@ async def test_episode_is_not_formal_memory_and_recall_has_sources(schema: VNext
     async with schema.database.session() as session:
         assert await session.scalar(select(func.count()).select_from(MemoryModel)) == 0
         assert await session.scalar(select(func.count()).select_from(EpisodeModel)) == 2
+
+
+async def test_semantic_embedding_recalls_without_shared_topic_tokens(
+    schema: VNextSchema,
+) -> None:
+    """真实语义相似度可以补入没有共同主题词的经历。"""
+    service = EpisodeService(
+        schema,
+        embedding_function=lambda texts: _semantic_vectors(texts),
+        semantic_min_similarity=0.9,
+    )
+    source = await service.record_external_episode(
+        title="工作变化",
+        content="我辞掉了原来的岗位，去了一家新公司。",
+        stream_id="stream-1",
+        observed_at=datetime(2026, 10, 5, tzinfo=UTC),
+        source_ref="semantic:source",
+        participants=(),
+    )
+
+    recalled = await service.recall_association(
+        stream_id="stream-1",
+        cue_text="我换了新的工作单位。",
+        max_hops=1,
+        limit=3,
+    )
+
+    assert recalled
+    assert recalled[0]["episode_id"] == source.episode_id
+
+
+async def test_same_person_event_recall_crosses_streams_without_copying_source(
+    schema: VNextSchema,
+) -> None:
+    """同人物同主题经历可跨流联想，但 Episode 仍保留原聊天流。"""
+    service = EpisodeService(schema, reconstruction_noise=0)
+    source = await service.record_external_episode(
+        title="咖啡偏好",
+        content="我最近喜欢喝咖啡。",
+        stream_id="private-stream",
+        observed_at=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        source_ref="cross-stream:source",
+        participants=("person-1",),
+    )
+    current = await service.record_external_episode(
+        title="咖啡习惯",
+        content="今天又喝了咖啡。",
+        stream_id="group-stream",
+        observed_at=datetime(2026, 10, 5, 10, 1, tzinfo=UTC),
+        source_ref="cross-stream:current",
+        participants=("person-1",),
+    )
+
+    recalled = await service.recall_working_memory(current)
+
+    assert any(item["episode_id"] == source.episode_id for item in recalled["selected_episodes"])
+    async with schema.database.session() as session:
+        persisted_source = await session.get(EpisodeModel, source.episode_id)
+        relation = await session.scalar(
+            select(EpisodeRelationModel).where(
+                EpisodeRelationModel.source_episode_id == current.episode_id,
+                EpisodeRelationModel.target_episode_id == source.episode_id,
+                EpisodeRelationModel.relation_type == "CROSS_STREAM_EVENT",
+            )
+        )
+        assert persisted_source is not None
+        assert persisted_source.stream_id == "private-stream"
+        assert relation is not None
+
+
+@pytest.mark.parametrize(
+    ("source_person", "current_person", "source_text", "current_text"),
+    [
+        ("person-1", "person-2", "喜欢咖啡", "今天喝了咖啡"),
+        ("person-1", "person-1", "espresso", "gardening"),
+    ],
+)
+async def test_cross_stream_relation_requires_same_person_and_topic(
+    tmp_path: Path,
+    source_person: str,
+    current_person: str,
+    source_text: str,
+    current_text: str,
+) -> None:
+    """跨流关联必须同时匹配人物和主题。"""
+    schema = VNextSchema(str(tmp_path / "cross-stream-negative.db"))
+    await schema.initialize()
+    service = EpisodeService(schema)
+    source = await service.record_external_episode(
+        title=source_text,
+        content=source_text,
+        stream_id="private-stream",
+        observed_at=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+        source_ref=f"negative-cross-stream:source:{source_person}:{source_text}",
+        participants=(source_person,),
+    )
+    current = await service.record_external_episode(
+        title=current_text,
+        content=current_text,
+        stream_id="group-stream",
+        observed_at=datetime(2026, 10, 5, 10, 1, tzinfo=UTC),
+        source_ref=f"negative-cross-stream:current:{current_person}:{current_text}",
+        participants=(current_person,),
+    )
+
+    async with schema.database.session() as session:
+        relation = await session.scalar(
+            select(EpisodeRelationModel).where(
+                EpisodeRelationModel.source_episode_id == current.episode_id,
+                EpisodeRelationModel.target_episode_id == source.episode_id,
+                EpisodeRelationModel.relation_type == "CROSS_STREAM_EVENT",
+            )
+        )
+        assert relation is None
+    await schema.close()
+
+
+async def test_cross_stream_relation_ignores_events_older_than_30_days(
+    tmp_path: Path,
+) -> None:
+    """跨流 Episode 关联只检查最近 30 天。"""
+    schema = VNextSchema(str(tmp_path / "cross-stream-expiry.db"))
+    await schema.initialize()
+    service = EpisodeService(schema)
+    current_time = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    source = await service.record_external_episode(
+        title="espresso",
+        content="espresso preference",
+        stream_id="private-stream",
+        observed_at=current_time - timedelta(days=31),
+        source_ref="cross-stream-expiry:source",
+        participants=("person-1",),
+    )
+    current = await service.record_external_episode(
+        title="espresso",
+        content="espresso today",
+        stream_id="group-stream",
+        observed_at=current_time,
+        source_ref="cross-stream-expiry:current",
+        participants=("person-1",),
+    )
+
+    async with schema.database.session() as session:
+        relation = await session.scalar(
+            select(EpisodeRelationModel).where(
+                EpisodeRelationModel.source_episode_id == current.episode_id,
+                EpisodeRelationModel.target_episode_id == source.episode_id,
+                EpisodeRelationModel.relation_type == "CROSS_STREAM_EVENT",
+            )
+        )
+        assert relation is None
+    await schema.close()
+
+
+async def _semantic_vectors(texts: object) -> tuple[tuple[float, float], ...]:
+    """为测试输入提供两个语义簇的确定向量。"""
+    values = []
+    for text in texts:  # type: ignore[union-attr]
+        value = str(text)
+        values.append((1.0, 0.0) if any(term in value for term in ("工作", "岗位", "公司", "单位")) else (0.0, 1.0))
+    return tuple(values)
 
 
 async def test_proposal_confirmation_supersedes_but_preserves_history(schema: VNextSchema) -> None:
@@ -143,6 +311,93 @@ async def test_output_observation_preserves_activation_and_reference(schema: VNe
         assert observation["activated_episode_ids"] == [source.episode_id]
         assert observation["explicitly_referenced_episode_ids"] == [source.episode_id]
         assert await session.scalar(select(func.count()).select_from(MemoryModel)) == 0
+
+
+@pytest.mark.parametrize(
+    ("output_text", "expected_method"),
+    [
+        ("我记得 [memory-1]。", "explicit_memory_id"),
+        ("你说过喜欢咖啡。", "lexical_overlap"),
+        ("好的，我知道了。", "injected_without_evidence"),
+        ("好的，我知道了。", "injected_without_evidence_expired"),
+    ],
+)
+async def test_output_observation_classifies_memory_influence_evidence(
+    schema: VNextSchema,
+    output_text: str,
+    expected_method: str,
+) -> None:
+    """输出记录注入记忆及可见证据等级，不把纯注入当成因果证据。"""
+    service = EpisodeService(schema)
+    injected_at = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
+    if expected_method.endswith("_expired"):
+        injected_at -= timedelta(hours=1)
+    tools = VNextToolService(
+        schema,
+        cast(Any, SimpleNamespace(search=AsyncMock(return_value=()))),
+    )
+    memory = await tools._memory.create_memory(
+        CreateMemoryInput(
+            title="咖啡偏好",
+            content="你说过喜欢咖啡。",
+            memory_kind=MemoryKind.PREFERENCE,
+            subject=SubjectInput(SubjectKind.PERSON, person_id="person-1"),
+            observed_at=injected_at,
+            evidence=(EvidenceInput(EvidenceSourceType.ADMIN, injected_at),),
+        ),
+        WriteContext(ActorType.ADMIN, actor_ref="test"),
+    )
+    async with schema.database.session() as session:
+        session.add(
+            MemoryEventModel(
+                event_id="injected-memory-1",
+                memory_id=memory.memory_id,
+                revision_id=None,
+                event_type=MemoryEventType.FLASHBACK_EXPOSED,
+                actor_type=ActorType.SYSTEM,
+                actor_ref=None,
+                stream_id="stream-1",
+                occurred_at=injected_at,
+                payload_json={
+                    "turn_index": 4,
+                    "stage": "prompt_injected",
+                    "content": "咖啡偏好: 你说过喜欢咖啡。",
+                },
+            )
+        )
+    message = {
+        "message_id": f"output-{expected_method}",
+        "stream_id": "stream-1",
+        "time": injected_at + timedelta(
+            hours=1 if expected_method.endswith("_expired") else 0,
+            seconds=1,
+        ),
+        "content": output_text.replace("memory-1", memory.memory_id),
+        "person_id": "bot",
+    }
+    if expected_method == "injected_without_evidence":
+        await service.record_episode({
+            "message_id": "previous-output",
+            "stream_id": "stream-1",
+            "time": injected_at - timedelta(seconds=1),
+            "content": "上一轮回复结束。",
+            "person_id": "bot",
+        }, episode_kind="OUTPUT", source_type="ASSISTANT_MESSAGE")
+        message["time"] = injected_at + timedelta(seconds=1)
+
+    output = await service.record_output_observation(message)
+
+    async with schema.database.session() as session:
+        cues = (await session.scalars(
+            select(CueSetModel).where(CueSetModel.episode_id == output.episode_id)
+        )).all()
+        cue = next(item for item in cues if "observation" in item.soft_cues)
+        observation = cue.soft_cues["observation"]
+        expected_injected = [] if expected_method.endswith("_expired") else [memory.memory_id]
+        assert observation["injected_memory_ids"] == expected_injected
+        if expected_injected:
+            assert observation["memory_influence_evidence"][0]["method"] == expected_method
+        assert observation["causal_attribution"] == "not_proven"
 
 
 async def test_correction_candidate_targets_unique_matching_memory(schema: VNextSchema) -> None:

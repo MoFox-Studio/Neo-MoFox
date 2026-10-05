@@ -382,6 +382,32 @@ async def test_owner_close_releases_resources_and_is_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_background_consolidation_reviews_observed_streams_without_confirming(
+    owner: VNextRuntimeOwner,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """后台巩固只收集和审核候选，不替模型确认正式记忆。"""
+    owner._initialized = True
+    owner._recent_messages["stream-1"] = {"message-1": _message()}
+    owner.proposal_service.collect_consolidation_candidates = AsyncMock(return_value=())
+    owner.claim_service.sync_pending_proposals = AsyncMock(return_value=())
+    owner.claim_service.review_pending = AsyncMock(return_value=())
+    owner.tools.confirm_memory_update = AsyncMock()  # type: ignore[attr-defined]
+    sleeps = AsyncMock(side_effect=[None, asyncio.CancelledError()])
+    monkeypatch.setattr(runtime_owner.asyncio, "sleep", sleeps)
+
+    with pytest.raises(asyncio.CancelledError):
+        await owner._run_consolidation_loop()
+
+    owner.proposal_service.collect_consolidation_candidates.assert_awaited_once_with(
+        "stream-1"
+    )
+    owner.claim_service.sync_pending_proposals.assert_awaited_once_with("stream-1")
+    owner.claim_service.review_pending.assert_awaited_once_with("stream-1")
+    owner.tools.confirm_memory_update.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_persona_close_failure_does_not_leak_other_resources(
     owner: VNextRuntimeOwner,
 ) -> None:
@@ -441,22 +467,47 @@ async def test_flashback_context_includes_unpersisted_messages(
 
 
 @pytest.mark.asyncio
-async def test_consumed_flashback_records_exposure_only_once(
+async def test_consumed_flashback_does_not_claim_prompt_injection(
     owner: VNextRuntimeOwner,
 ) -> None:
-    """被当前回复消费的闪回结果只记录一次曝光并推进轮次。"""
+    """候选被消费时尚未进入 prompt，不应记录曝光事件。"""
     owner._initialized = True
     candidate = SimpleNamespace(memory_id="memory-1")
     owner._flashback_generations["stream-1"] = 1
     owner._flashback_results["stream-1"] = ((candidate,), 4, 1)
     assert await owner.consume_flashback_prefetch("stream-1") == (candidate,)
     assert await owner.consume_flashback_prefetch("stream-1") == ()
+    owner.flashback.record_exposure.assert_not_awaited()  # type: ignore[attr-defined]
+    assert owner._prompt_turns["stream-1"] == 5
+
+
+@pytest.mark.asyncio
+async def test_confirmed_flashback_injection_records_exposure(
+    owner: VNextRuntimeOwner,
+) -> None:
+    """只有 handler 确认安装进 prompt 的记忆才记录 FLASHBACK_EXPOSED。"""
+    candidate = SimpleNamespace(
+        memory_id="memory-1",
+        current_brief="咖啡偏好: 你说过喜欢咖啡。",
+        strength=0.25,
+        detail_level="gist",
+        blurred=True,
+    )
+    await owner.record_flashback_injection("stream-1", (candidate,), 4)
     owner.flashback.record_exposure.assert_awaited_once_with(  # type: ignore[attr-defined]
         ("memory-1",),
         "stream-1",
         4,
+        details={
+            "memory-1": {
+                "stage": "prompt_injected",
+                "content": "咖啡偏好: 你说过喜欢咖啡。",
+                "strength": 0.25,
+                "detail_level": "gist",
+                "blurred": True,
+            }
+        },
     )
-    assert owner._prompt_turns["stream-1"] == 5
 
 
 @pytest.mark.asyncio
@@ -557,6 +608,7 @@ def test_plugin_registers_exact_component_graph() -> None:
     assert {component.__name__ for component in components} == {
         "VNextMemorySearchTool",
         "VNextMemoryReadTool",
+        "VNextMemoryDecayCandidatesTool",
         "VNextPersonLookupTool",
         "VNextMemoryWriteAction",
         "VNextMemoryReviseAction",
@@ -572,7 +624,7 @@ def test_plugin_registers_exact_component_graph() -> None:
         "VNextDoctorRouter",
         "VNextMemoryAdminRouter",
     }
-    assert len(components) == 16
+    assert len(components) == 17
     for component in components:
         if issubclass(component, BaseAction):
             assert component.validate_associated_types() == ["text"]

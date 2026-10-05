@@ -296,6 +296,28 @@ class VNextMemoryReadTool(BaseTool):
         )
 
 
+class VNextMemoryDecayCandidatesTool(BaseTool):
+    """读取低强度记忆候选，不自动作废任何记忆。"""
+
+    name = "memory_decay_candidates"
+    description = (
+        "查看因长期未经历而变弱的正式记忆候选；结果只供核对和后续审核，"
+        "不会自动删除、作废或修改记忆。"
+    )
+
+    async def execute(
+        self, limit: int = 20
+    ) -> tuple[bool, str | dict[str, object]]:
+        """返回可审查的遗忘候选目录。"""
+        try:
+            result = await _owner(self.plugin).tools.memory_decay_candidates(
+                _actor_context(self), limit=limit
+            )
+        except (TypeError, ValueError, PermissionError) as error:
+            return _action_result(error)
+        return True, {"candidates": list(result), "automatic_action": "none"}
+
+
 class VNextMemoryWriteAction(BaseAction):
     """保存有来源和明确人物关联的正式记忆。"""
 
@@ -761,7 +783,14 @@ class VNextFlashbackEventHandler(BaseEventHandler):
         self._reconcile_working_memory(
             owner, stream_id, working_memory, formalized_episode_ids
         )
-        await self._reconcile_stream_reminders(owner, stream_id, candidates)
+        injected_candidates = await self._reconcile_stream_reminders(
+            owner, stream_id, candidates
+        )
+        await owner.record_flashback_injection(
+            stream_id,
+            injected_candidates,
+            owner._prompt_turns.get(stream_id, 0) - 1,
+        )
         return EventDecision.SUCCESS, params
 
     def _reconcile_working_memory(
@@ -829,7 +858,7 @@ class VNextFlashbackEventHandler(BaseEventHandler):
 
     async def _reconcile_stream_reminders(
         self, owner: VNextRuntimeOwner, stream_id: str, candidates: tuple[object, ...]
-    ) -> None:
+    ) -> tuple[object, ...]:
         """刷新当前版本，并移除作废或删除的聊天流闪回。"""
         prefix = "engram_memory_flashback_"
         tracked_names = self.plugin._flashback_reminder_streams.setdefault(
@@ -844,7 +873,7 @@ class VNextFlashbackEventHandler(BaseEventHandler):
         )
         if not normalized_ids:
             self.plugin._flashback_reminder_streams.pop(stream_id, None)
-            return
+            return ()
         current = await owner.flashback.current_reminder_candidates(normalized_ids)
         for name in tuple(tracked_names):
             item = current.get(name.removeprefix(prefix))
@@ -862,6 +891,11 @@ class VNextFlashbackEventHandler(BaseEventHandler):
                 tracked_names.add(name)
         if not tracked_names:
             self.plugin._flashback_reminder_streams.pop(stream_id, None)
+        return tuple(
+            current[str(getattr(candidate, "memory_id", ""))]
+            for candidate in candidates
+            if str(getattr(candidate, "memory_id", "")) in current
+        )
 
     def _upsert_stream_reminder(
         self, stream_id: str, name: str, candidate: Any
@@ -920,12 +954,33 @@ class VNextDoctorRouter(BaseRouter):
                 ],
             }
 
+        @self.app.get("/decay-candidates")
+        async def decay_candidates(limit: int = 20) -> dict[str, object]:
+            """返回低强度记忆候选，供人工检查。"""
+            candidates = await _owner(self.plugin).decay.list_decay_candidates(
+                limit=limit
+            )
+            return {
+                "automatic_action": "none",
+                "candidates": [
+                    {
+                        "memory_id": item.memory_id,
+                        "title": item.title,
+                        "strength": item.strength,
+                        "reason": item.reason,
+                        "last_experienced_at": item.last_experienced_at,
+                    }
+                    for item in candidates
+                ],
+            }
+
 
 __all__ = [
     "VNextDoctorRouter",
     "VNextFlashbackEventHandler",
     "VNextMemoryChangedEventHandler",
     "VNextMemoryReadTool",
+    "VNextMemoryDecayCandidatesTool",
     "VNextMemoryReviseAction",
     "VNextMemorySearchTool",
     "VNextMemoryService",

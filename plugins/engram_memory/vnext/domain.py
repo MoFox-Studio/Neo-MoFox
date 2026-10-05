@@ -234,6 +234,30 @@ class ScoredMemory:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryStrength:
+    """正式记忆当前强度及其可解释组成。"""
+
+    memory_id: str
+    strength: float
+    age_days: float
+    evidence_count: int
+    recall_count: int
+    last_recalled_at: datetime | None
+    last_experienced_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryDecayCandidate:
+    """等待人工或模型审查的低强度记忆候选。"""
+
+    memory_id: str
+    title: str
+    strength: float
+    reason: str
+    last_experienced_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class PersonImpression:
     """人物印象与近期相关记忆。"""
 

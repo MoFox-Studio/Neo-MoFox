@@ -190,16 +190,21 @@ class ClaimHypothesisService:
     async def sync_pending_proposals(self, stream_id: str) -> tuple[str, ...]:
         """为待审 MemoryUpdateProposal 建立对应 Claim/Hypothesis 对象。"""
         proposals = await self._proposals.list_pending(stream_id, limit=20)
+        semantic_by_proposal: dict[str, tuple[SemanticView, ...]] = {}
+        for proposal in proposals:
+            semantic_by_proposal[str(proposal["proposal_id"])] = tuple(
+                [
+                    await self.extract_semantics(str(evidence_id))
+                    for evidence_id in proposal["evidence_ids"]
+                ]
+            )
         created: list[str] = []
         async with self._schema.database.session() as session:
             for proposal in proposals:
                 item_id = str(uuid5(NAMESPACE_URL, f"engram:claim:{proposal['proposal_id']}"))
                 if await session.get(ClaimHypothesisModel, item_id) is not None:
                     continue
-                semantics = [
-                    await self.extract_semantics(str(evidence_id))
-                    for evidence_id in proposal["evidence_ids"]
-                ]
+                semantics = semantic_by_proposal[str(proposal["proposal_id"])]
                 session.add(ClaimHypothesisModel(
                     item_id=item_id,
                     stream_id=stream_id,

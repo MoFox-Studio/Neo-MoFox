@@ -70,6 +70,27 @@ class VNextRetrievalSection(SectionBase):
         le=0.2,
         description="仅在已有候选之间生效的有界确定性噪声",
     )
+    memory_half_life_days: float = Field(
+        default=90.0,
+        ge=1.0,
+        description="正式记忆强度的时间半衰期（天）",
+    )
+    recall_half_life_days: float = Field(
+        default=30.0,
+        ge=1.0,
+        description="召回强化贡献的时间半衰期（天）",
+    )
+    forget_threshold: float = Field(
+        default=0.12,
+        ge=0.0,
+        le=1.0,
+        description="进入遗忘候选的最低强度阈值；不会直接作废记忆",
+    )
+    forget_min_age_days: float = Field(
+        default=30.0,
+        ge=0.0,
+        description="记忆进入遗忘候选前必须经过的最短时间（天）",
+    )
 
 
 @config_section("flashback", title="自然闪回", tag="ai")
@@ -135,6 +156,22 @@ class VNextFlashbackSection(SectionBase):
         le=7200,
         description="当前工作记忆在流中的有效时长（秒）",
     )
+    semantic_recall_enabled: bool = Field(
+        default=True,
+        description="是否使用 Embedding 补充 Episode 语义关联",
+    )
+    semantic_candidate_limit: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Episode 语义召回最多编码的近期候选数",
+    )
+    semantic_min_similarity: float = Field(
+        default=0.45,
+        ge=0.0,
+        le=1.0,
+        description="Episode 语义关联的最低余弦相似度",
+    )
 
 
 @config_section("claim_review", title="Claim/Hypothesis 审核", tag="ai")
@@ -156,6 +193,22 @@ class ClaimReviewSection(SectionBase):
         ge=1,
         le=10,
         description="每次后台审核最多处理的候选数量",
+    )
+    background_enabled: bool = Field(
+        default=True,
+        description="是否定期扫描已观测聊天流并收集待审巩固候选",
+    )
+    background_interval_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        description="后台巩固扫描间隔（秒）",
+    )
+    background_stream_limit: int = Field(
+        default=20,
+        ge=1,
+        le=100,
+        description="每轮后台巩固最多扫描的聊天流数量",
     )
 
 

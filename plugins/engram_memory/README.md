@@ -16,11 +16,23 @@
 
 后台每次最多从最近 100 条 INPUT/SUMMARY 和 100 次工作记忆中收集 5 条巩固候选：出现纠正线索、显著性达到 0.6，或被至少 3 个不同输入经历激活。主动查询不计入重复激活。候选以幂等 `uncertain` 提案保留原文和触发原因，不调用模型、不自动创建正式事实。`read_working_memory` 的 `pending_proposals` 提供当前流待审目录；审核后应以来源为依据创建明确提案，`uncertain` 本身不能直接确认。
 
+启用后台巩固后，Runtime Owner 会以 `vnext.claim_review.background_interval_seconds` 为间隔扫描已经观测到的聊天流，依次执行候选收集、Claim/Hypothesis 同步和有限审核。后台任务由框架统一托管，插件卸载时取消并等待；它不会调用 `confirm_memory_update`，因此审核通过仍只会留下可核对的明确提案。
+
 主动关联查询不再写入 Episode；历史 CUE 与 OUTPUT 不进入事实回忆候选，也不能用作事实提案证据。重构扰动由查询/经历 ID 与候选 ID 确定，参与排序；重复惩罚在每次选入后重新排名，同一输入可复查选择依据。
 
 随机扰动只影响已有 Episode 候选的选择，不改变 Episode 正文、不生成无来源事实，也不覆盖明确纠正。Shameimaru Memory 负责后台摘要和巩固素材，Engram Recall Engine 负责在线前馈与工作记忆。
 
 Engram Memory 保存可追溯、可检索、可修订的正式记忆，并根据正式记忆变化更新核心人物印象。
+
+## 强度衰减与语义回忆
+
+正式记忆现在有一个运行时强度视图。强度由最近经历时间、证据来源质量、证据数量和召回事件共同计算；时间会使强度衰减，近期被实际召回会提供有限强化。强度不会改写 Revision，也不会删除 Evidence。
+
+当记忆超过最小年龄且强度低于阈值时，系统只生成 `memory_decay_candidates` 候选，并可通过 Doctor 的 `/api/engram-vnext/decay-candidates` 查看。候选必须经过明确核对后才能执行 `memory_invalidate`；系统不会因为长期未使用而静默作废正式记忆。`memory_search` 和 `memory_read` 会返回当前强度、年龄、证据数和召回次数，便于解释排序与遗忘建议。
+
+Episode 工作记忆在规则人物/主题关联之外，可使用 Engram 已配置的 Embedding 任务补充语义关联。Embedding 请求失败、返回格式错误或关闭 `semantic_recall_enabled` 时，会回退到确定性的规则与关系召回，不生成无来源内容。语义通道只改变已有 Episode 候选的选择，不改变 Episode 正文，也不把经历直接提升为正式 Memory。
+
+相关配置位于 `config/plugins/engram_memory/config.toml`：`vnext.retrieval.memory_half_life_days`、`recall_half_life_days`、`forget_threshold`、`forget_min_age_days` 控制正式记忆强度；`vnext.flashback.semantic_recall_enabled`、`semantic_candidate_limit`、`semantic_min_similarity` 控制 Episode 语义补召回。
 
 ## 工作方式
 

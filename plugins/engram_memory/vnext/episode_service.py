@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -16,6 +17,7 @@ from .models import (
     CueSetModel,
     EpisodeModel,
     EpisodeRelationModel,
+    MemoryEventModel,
     WorkingMemoryModel,
 )
 from .cognitive_engine import CognitiveRecallEngine
@@ -59,6 +61,10 @@ _STOPWORDS = frozenset(
         "最近",
     }
 )
+
+EmbeddingFunction = Callable[
+    [Sequence[str]], Awaitable[Sequence[Sequence[float]]]
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +132,9 @@ class EpisodeService:
         reconstruction_noise: float = 0.06,
         working_memory_ttl_seconds: int = 900,
         cognitive_engine: CognitiveRecallEngine | None = None,
+        embedding_function: EmbeddingFunction | None = None,
+        semantic_candidate_limit: int = 50,
+        semantic_min_similarity: float = 0.45,
     ) -> None:
         """绑定数据库与低成本在线召回参数。"""
         if max_working_memory <= 0:
@@ -136,11 +145,18 @@ class EpisodeService:
             raise ValueError("reconstruction_noise 必须在 0-0.2 之间")
         if working_memory_ttl_seconds <= 0:
             raise ValueError("working_memory_ttl_seconds 必须大于 0")
+        if semantic_candidate_limit <= 0:
+            raise ValueError("semantic_candidate_limit 必须大于 0")
+        if not 0 <= semantic_min_similarity <= 1:
+            raise ValueError("semantic_min_similarity 必须在 0-1 之间")
         self._schema = schema
         self._max_working_memory = max_working_memory
         self._relation_hops = relation_hops
         self._reconstruction_noise = reconstruction_noise
         self._working_memory_ttl = working_memory_ttl_seconds
+        self._embedding_function = embedding_function
+        self._semantic_candidate_limit = semantic_candidate_limit
+        self._semantic_min_similarity = semantic_min_similarity
         self._cognitive_engine = cognitive_engine or CognitiveRecallEngine(
             reconstruction_budget=max_working_memory
         )
@@ -299,14 +315,14 @@ class EpisodeService:
         episode: EpisodeModel,
         now: datetime,
     ) -> None:
-        """按人物和主题共现建立低成本关联边。"""
+        """按人物和主题共现建立同流或受限跨流关联边。"""
+        time_floor = episode.observed_at - timedelta(days=30)
         recent = (
             await session.scalars(  # type: ignore[union-attr]
                 select(EpisodeModel)
                 .where(
-                    EpisodeModel.stream_id == episode.stream_id,
                     EpisodeModel.episode_id != episode.episode_id,
-                    EpisodeModel.observed_at >= episode.observed_at - timedelta(days=30),
+                    EpisodeModel.observed_at >= time_floor,
                 )
                 .order_by(EpisodeModel.observed_at.desc())
                 .limit(100)
@@ -319,8 +335,22 @@ class EpisodeService:
             shared_topics = topics & set(other.topics)
             if not shared_people and not shared_topics:
                 continue
-            weight = min(1.0, 0.45 * bool(shared_people) + 0.3 * min(len(shared_topics), 2))
-            relation_type = "SAME_PERSON" if shared_people else "TOPIC_OVERLAP"
+            cross_stream = other.stream_id != episode.stream_id
+            if cross_stream and (not shared_people or not shared_topics):
+                continue
+            weight = min(
+                1.0,
+                0.45 * bool(shared_people)
+                + 0.3 * min(len(shared_topics), 2)
+                + (0.1 if cross_stream else 0.0),
+            )
+            relation_type = (
+                "CROSS_STREAM_EVENT"
+                if cross_stream
+                else "SAME_PERSON"
+                if shared_people
+                else "TOPIC_OVERLAP"
+            )
             await session.execute(
                 sqlite_insert(EpisodeRelationModel)
                 .values(
@@ -372,6 +402,24 @@ class EpisodeService:
                 ).all()
             )
             relation_ids = {item.target_episode_id: float(item.weight) for item in relations}
+            related_stream_episodes = []
+            if relation_ids:
+                related_stream_episodes = list(
+                    (
+                        await session.scalars(
+                            select(EpisodeModel).where(
+                                EpisodeModel.episode_id.in_(tuple(relation_ids)),
+                                EpisodeModel.episode_kind.notin_(("CUE", "OUTPUT")),
+                            )
+                        )
+                    ).all()
+                )
+                known_ids = {item.episode_id for item in direct}
+                direct.extend(
+                    item
+                    for item in related_stream_episodes
+                    if item.episode_id not in known_ids
+                )
             if episode.episode_kind == "CUE":
                 for item in direct:
                     shared_people = set(episode.participants) & set(item.participants)
@@ -402,13 +450,26 @@ class EpisodeService:
             candidates: dict[str, tuple[EpisodeModel, float, str]] = {}
             current_topics = set(episode.topics)
             current_people = set(episode.participants)
+            semantic_scores = await self._semantic_scores(episode, direct)
             for item in direct:
                 shared_topics = current_topics & set(item.topics)
                 shared_people = current_people & set(item.participants)
                 graph_weight = relation_ids.get(item.episode_id, 0.0)
-                if not shared_topics and not shared_people and not graph_weight:
+                semantic_score = semantic_scores.get(item.episode_id, 0.0)
+                if (
+                    not shared_topics
+                    and not shared_people
+                    and not graph_weight
+                    and semantic_score < self._semantic_min_similarity
+                ):
                     continue
-                reason = "人物关联" if shared_people else "主题关联"
+                reason = (
+                    "人物关联"
+                    if shared_people
+                    else "主题关联"
+                    if shared_topics
+                    else "语义关联"
+                )
                 if graph_weight:
                     reason += " + 经历扩散"
                     if item.episode_id not in first_hop_ids:
@@ -419,6 +480,7 @@ class EpisodeService:
                 score = (
                     overlap
                     + graph_weight
+                    + 0.45 * semantic_score
                     + 0.2 * recency
                     + 0.15 * float(item.salience)
                     + 0.1 * float(item.certainty)
@@ -512,6 +574,50 @@ class EpisodeService:
                 "conflicts": conflicts,
             }
 
+    async def _semantic_scores(
+        self,
+        episode: EpisodeView,
+        candidates: Sequence[EpisodeModel],
+    ) -> dict[str, float]:
+        """用真实 Embedding 为有限近期候选补充语义相似度。"""
+        if self._embedding_function is None or not candidates:
+            return {}
+        selected = tuple(candidates[: self._semantic_candidate_limit])
+        texts = (episode.raw_text, *(item.compressed_text for item in selected))
+        try:
+            vectors = tuple(await self._embedding_function(texts))
+        except Exception:
+            return {}
+        if len(vectors) != len(texts):
+            return {}
+        query = self._normalized_vector(vectors[0])
+        if query is None:
+            return {}
+        scores: dict[str, float] = {}
+        for item, vector in zip(selected, vectors[1:], strict=True):
+            normalized = self._normalized_vector(vector)
+            if normalized is None or len(normalized) != len(query):
+                continue
+            scores[item.episode_id] = max(
+                0.0,
+                min(1.0, sum(left * right for left, right in zip(query, normalized, strict=True))),
+            )
+        return scores
+
+    @staticmethod
+    def _normalized_vector(value: Sequence[float]) -> tuple[float, ...] | None:
+        """校验并归一化一个有限非零向量。"""
+        try:
+            values = tuple(float(item) for item in value)
+        except (TypeError, ValueError):
+            return None
+        if not values or any(not math.isfinite(item) for item in values):
+            return None
+        norm = math.sqrt(sum(item * item for item in values))
+        if norm == 0:
+            return None
+        return tuple(item / norm for item in values)
+
     async def record_output_observation(self, message: MessageLike) -> EpisodeView:
         """登记输出及其可核验的激活上下文，不推断模型是否使用了回忆。"""
         episode = await self.record_episode(
@@ -532,6 +638,49 @@ class EpisodeService:
                 str(item["episode_id"]) for item in working.selected_episodes
                 if item.get("episode_id")
             ] if working is not None else []
+            previous_output_at = await session.scalar(
+                select(EpisodeModel.observed_at).where(
+                    EpisodeModel.stream_id == episode.stream_id,
+                    EpisodeModel.episode_kind == "OUTPUT",
+                    EpisodeModel.episode_id != episode.episode_id,
+                    EpisodeModel.observed_at < episode.observed_at,
+                ).order_by(EpisodeModel.observed_at.desc()).limit(1)
+            )
+            injected_rows = tuple((await session.execute(
+                select(
+                    MemoryEventModel.memory_id,
+                    MemoryEventModel.payload_json,
+                ).where(
+                    MemoryEventModel.event_type == "FLASHBACK_EXPOSED",
+                    MemoryEventModel.stream_id == episode.stream_id,
+                    MemoryEventModel.occurred_at <= episode.observed_at,
+                    MemoryEventModel.occurred_at >= episode.observed_at - timedelta(minutes=30),
+                    *(
+                        (MemoryEventModel.occurred_at > previous_output_at,)
+                        if previous_output_at is not None
+                        else ()
+                    ),
+                ).order_by(MemoryEventModel.occurred_at.desc())
+            )).all())
+            injected: dict[str, dict[str, object]] = {}
+            for row in injected_rows:
+                payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+                if payload.get("stage") != "prompt_injected":
+                    continue
+                injected.setdefault(str(row.memory_id), payload)
+            memory_evidence: list[dict[str, object]] = []
+            for memory_id, payload in injected.items():
+                if memory_id in episode.raw_text:
+                    method = "explicit_memory_id"
+                else:
+                    content = str(payload.get("content") or "")
+                    shared = set(_tokens(content)) & set(_tokens(episode.raw_text))
+                    method = "lexical_overlap" if len(shared) >= 2 else "injected_without_evidence"
+                memory_evidence.append({
+                    "memory_id": memory_id,
+                    "method": method,
+                    "confidence": "direct_reference" if method == "explicit_memory_id" else "weak_textual" if method == "lexical_overlap" else "exposure_only",
+                })
             observation = {
                 "working_memory_id": working.working_memory_id if working else None,
                 "activated_episode_ids": activated,
@@ -540,6 +689,9 @@ class EpisodeService:
                 ],
                 "conflicts": list(working.conflicts) if working else [],
                 "reference_detection": "literal_id_only",
+                "injected_memory_ids": list(injected),
+                "memory_influence_evidence": memory_evidence,
+                "causal_attribution": "not_proven",
             }
             await session.execute(sqlite_insert(CueSetModel).values(
                 cue_id=observation_id, episode_id=episode.episode_id,

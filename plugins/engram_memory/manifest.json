@@ -13,6 +13,7 @@
   "include": [
     { "component_type": "tool", "component_name": "memory_search", "dependencies": [] },
     { "component_type": "tool", "component_name": "memory_read", "dependencies": [] },
+    { "component_type": "tool", "component_name": "memory_decay_candidates", "dependencies": [] },
     { "component_type": "action", "component_name": "memory_write", "dependencies": [] },
     { "component_type": "action", "component_name": "memory_revise", "dependencies": [] },
     { "component_type": "action", "component_name": "memory_invalidate", "dependencies": [] },

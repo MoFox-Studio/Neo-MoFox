@@ -31,6 +31,7 @@ from .enums import (
     SubjectKind,
 )
 from .evidence_service import EvidenceService
+from .decay_service import MemoryDecayService
 from .memory_service import MemoryService
 from .models import (
     EvidenceMessageLinkModel,
@@ -111,6 +112,11 @@ class VNextToolService:
         from .proposal_service import ProposalService
 
         self._proposal_service = ProposalService(schema)
+        self._decay = MemoryDecayService(
+            schema,
+            half_life_days=activation_half_life_days * 3.0,
+            recall_half_life_days=activation_half_life_days,
+        )
         self._retrieval = RetrievalService(
             schema,
             vector_backend,
@@ -440,6 +446,7 @@ class VNextToolService:
             ):
                 continue
             people = await self._people_view(revision.revision_id)
+            strength = await self._decay.strength(result.memory_id)
             views.append(
                 {
                     "memory_id": memory.memory_id,
@@ -452,9 +459,32 @@ class VNextToolService:
                     "matched_by": list(result.matched_by),
                     "rrf_score": result.rrf_score,
                     "activation_score": result.activation_score,
+                    "memory_strength": strength.strength if strength else None,
+                    "memory_age_days": strength.age_days if strength else None,
                 }
             )
         return tuple(views)
+
+    async def memory_decay_candidates(
+        self,
+        context: ToolContext,
+        *,
+        limit: int = 20,
+    ) -> tuple[dict[str, object], ...]:
+        """读取低强度记忆候选；读取本身不会修改正式记忆。"""
+        if context.actor_type not in {ActorType.ACTOR, ActorType.ADMIN}:
+            raise PermissionError("只有 ACTOR 或 ADMIN 可以读取遗忘候选")
+        candidates = await self._decay.list_decay_candidates(limit=limit)
+        return tuple(
+            {
+                "memory_id": item.memory_id,
+                "title": item.title,
+                "strength": item.strength,
+                "reason": item.reason,
+                "last_experienced_at": item.last_experienced_at,
+            }
+            for item in candidates
+        )
 
     async def memory_read(
         self, memory_id: str, view: str, context: ToolContext
@@ -485,6 +515,12 @@ class VNextToolService:
                 memory_id, revision.revision_id, full=False
             ),
         }
+        strength = await self._decay.strength(memory_id)
+        if strength is not None:
+            current["memory_strength"] = strength.strength
+            current["memory_age_days"] = strength.age_days
+            current["memory_recall_count"] = strength.recall_count
+            current["memory_evidence_count"] = strength.evidence_count
         if view == "current":
             return current
         revisions = await self._repository.list_revisions(memory_id)

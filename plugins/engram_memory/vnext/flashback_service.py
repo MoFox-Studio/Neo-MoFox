@@ -16,8 +16,10 @@ from uuid import uuid4
 from sqlalchemy import and_, select
 
 from .domain import RetrievalQuery, ScoredMemory
+from .decay_service import MemoryDecayService
 from .enums import ActorType, MemoryEventType, MemoryStatus, VectorIndexStatus
 from .models import (
+    EvidenceModel,
     EvidenceMessageLinkModel,
     EvidenceMessageSnapshotModel,
     MemoryEventModel,
@@ -38,6 +40,10 @@ class FlashbackCandidate:
     title: str
     current_brief: str
     matched_cue: str
+    strength: float = 1.0
+    detail_level: str = "detailed"
+    blurred: bool = False
+    blur_notice: str | None = None
 
     def to_prompt_block(self) -> str:
         """构造当前聊天突然唤起的记忆闪回文本。"""
@@ -47,7 +53,9 @@ class FlashbackCandidate:
             "若与当下对话无关就不要提及；若相关，请结合此时此刻的情境用自然、契合当下的方式表达。\n"
             f"memory_id: {self.memory_id}\n"
             f"标题: {self.title}\n"
-            f"突然想起的内容: {self.current_brief}\n"
+            f"回忆细节等级: {self.detail_level}\n"
+            + (f"回忆边界: {self.blur_notice}\n" if self.blur_notice else "")
+            + f"突然想起的内容: {self.current_brief}\n"
             f"触发片段: {self.matched_cue}"
         )
 
@@ -181,12 +189,29 @@ class FlashbackService:
                     continue
                 title = str(row.title or "").strip()
                 content = str(row.content or "").strip()
-                current_brief = f"{title}: {content[:160]}" if content else title
+                strength = await MemoryDecayService(self._schema).strength(
+                    row.memory_id
+                )
+                recall = MemoryDecayService.recall_view(
+                    title=title,
+                    content=content,
+                    strength=strength.strength if strength is not None else 0.5,
+                )
+                recall_content = str(recall["content"] or "").strip()
+                current_brief = f"{title}: {recall_content}" if recall_content else title
                 candidates[row.memory_id] = FlashbackCandidate(
                     memory_id=row.memory_id,
                     title=title,
                     current_brief=current_brief,
                     matched_cue=title or "相关经历",
+                    strength=strength.strength if strength is not None else 0.5,
+                    detail_level=str(recall["detail_level"]),
+                    blurred=bool(recall["blurred"]),
+                    blur_notice=(
+                        str(recall["notice"])
+                        if recall.get("notice") is not None
+                        else None
+                    ),
                 )
         return candidates
 
@@ -338,12 +363,31 @@ class FlashbackService:
         now = datetime.now(UTC)
         candidates: list[FlashbackCandidate] = []
         for item in selected:
+            strength = await MemoryDecayService(self._schema).strength(item.memory_id)
+            current = await self._current_brief(item)
+            recall = MemoryDecayService.recall_view(
+                title=item.title,
+                content=current.partition(": ")[2] if ": " in current else current,
+                strength=strength.strength if strength is not None else 0.5,
+            )
             candidates.append(
                 FlashbackCandidate(
                     memory_id=item.memory_id,
                     title=item.title,
-                    current_brief=await self._current_brief(item),
+                    current_brief=(
+                        f"{item.title}: {recall['content']}"
+                        if recall["content"]
+                        else item.title
+                    ),
                     matched_cue=item.title or "相关经历",
+                    strength=strength.strength if strength is not None else 0.5,
+                    detail_level=str(recall["detail_level"]),
+                    blurred=bool(recall["blurred"]),
+                    blur_notice=(
+                        str(recall["notice"])
+                        if recall.get("notice") is not None
+                        else None
+                    ),
                 )
             )
         if record_exposure:
@@ -352,6 +396,16 @@ class FlashbackService:
                 stream_key,
                 now,
                 turn_index,
+                {
+                    item.memory_id: {
+                        "stage": "selected_candidate",
+                        "strength": candidate.strength,
+                        "detail_level": candidate.detail_level,
+                        "blurred": candidate.blurred,
+                    }
+                    for item, candidate in zip(selected, candidates, strict=True)
+                },
+                MemoryEventType.RECALLED,
             )
         return tuple(candidates)
 
@@ -360,13 +414,17 @@ class FlashbackService:
         memory_ids: tuple[str, ...],
         stream_key: str,
         turn_index: int | None = None,
+        *,
+        details: dict[str, dict[str, object]] | None = None,
     ) -> None:
-        """为已接受注入的闪回候选记录暴露事件。"""
+        """为已进入 prompt 的闪回候选记录曝光事件。"""
         await self._record_exposed_batch(
             memory_ids,
             stream_key,
             datetime.now(UTC),
             turn_index,
+            details,
+            MemoryEventType.FLASHBACK_EXPOSED,
         )
 
     async def _record_exposed_batch(
@@ -375,13 +433,18 @@ class FlashbackService:
         stream_key: str,
         now: datetime,
         turn_index: int | None,
+        details: dict[str, dict[str, object]] | None = None,
+        event_type: MemoryEventType = MemoryEventType.FLASHBACK_EXPOSED,
     ) -> None:
         """在同一事务中记录一轮闪回的全部暴露事件。"""
         if not memory_ids:
             return
         if len(memory_ids) == 1:
             # 单条暴露通过独立入口写入，事务同样保持原子性。
-            await self._record_exposed(memory_ids[0], stream_key, now, turn_index)
+            await self._record_exposed(
+                memory_ids[0], stream_key, now, turn_index,
+                (details or {}).get(memory_ids[0]), event_type,
+            )
             return
         async with self._schema.database.session() as session:
             for memory_id in memory_ids:
@@ -390,15 +453,17 @@ class FlashbackService:
                         event_id=str(uuid4()),
                         memory_id=memory_id,
                         revision_id=None,
-                        event_type=MemoryEventType.FLASHBACK_EXPOSED,
+                        event_type=event_type,
                         actor_type=ActorType.SYSTEM,
                         actor_ref=None,
                         stream_id=stream_key,
                         occurred_at=now,
                         payload_json=(
-                            {"turn_index": turn_index}
-                            if turn_index is not None
-                            else None
+                            {
+                                **({"turn_index": turn_index} if turn_index is not None else {}),
+                                **(details or {}).get(memory_id, {}),
+                            }
+                            or None
                         ),
                     )
                 )
@@ -464,6 +529,8 @@ class FlashbackService:
         stream_key: str,
         now: datetime,
         turn_index: int | None = None,
+        details: dict[str, object] | None = None,
+        event_type: MemoryEventType = MemoryEventType.FLASHBACK_EXPOSED,
     ) -> None:
         """记录指定记忆在本会话中的 FLASHBACK_EXPOSED 暴露事件。"""
         async with self._schema.database.session() as session:
@@ -472,13 +539,17 @@ class FlashbackService:
                     event_id=str(uuid4()),
                     memory_id=memory_id,
                     revision_id=None,
-                    event_type=MemoryEventType.FLASHBACK_EXPOSED,
+                    event_type=event_type,
                     actor_type=ActorType.SYSTEM,
                     actor_ref=None,
                     stream_id=stream_key,
                     occurred_at=now,
-                    payload_json={"turn_index": turn_index}
-                    if turn_index is not None
-                    else None,
+                    payload_json=(
+                        {
+                            **({"turn_index": turn_index} if turn_index is not None else {}),
+                            **(details or {}),
+                        }
+                        or None
+                    ),
                 )
             )

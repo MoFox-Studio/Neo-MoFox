@@ -18,6 +18,7 @@ from .vnext.runtime_components import (
     VNextDoctorRouter,
     VNextFlashbackEventHandler,
     VNextMemoryChangedEventHandler,
+    VNextMemoryDecayCandidatesTool,
     VNextMemoryInvalidateAction,
     VNextMemoryUpdateConfirmAction,
     VNextMemoryUpdateProposalTool,
@@ -63,6 +64,7 @@ class EngramMemoryPlugin(BasePlugin):
         return [
             VNextMemorySearchTool,
             VNextMemoryReadTool,
+            VNextMemoryDecayCandidatesTool,
             VNextPersonLookupTool,
             VNextMemoryWriteAction,
             VNextMemoryReviseAction,
