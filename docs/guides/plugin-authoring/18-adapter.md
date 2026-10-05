@@ -384,6 +384,33 @@ class DemoBridgeAdapter(BaseAdapter):
 
 这样你更容易知道问题出在哪一层。
 
+### 连接恢复时静默导入历史
+
+历史补录与实时收消息使用不同入口。把旧信封送到 CoreSink 会发布实时事件、执行命令并可能唤醒聊天；恢复历史应使用公开的 `stream_api.import_history_message()`，等待它返回后再推进适配器水位。
+
+```python
+from mofox_wire import MessageBuilder
+from src.app.plugin_system.api import stream_api
+
+async def import_text_history(message_id: str, original_time: float) -> None:
+    """静默保存一条带原时间的历史消息。"""
+    envelope = (
+        MessageBuilder().direction("incoming").message_id(message_id)
+        .from_user("example-user", platform="example", nickname="Example")
+        .text("历史消息").timestamp_ms(int(original_time * 1000)).build()
+    )
+    envelope["message_info"]["time"] = original_time
+    await stream_api.import_history_message(envelope)
+```
+
+`message_info.time` 必须为有限且大于零的原始 Unix 时间。仅设置顶层 `timestamp_ms` 不会修改核心存储的时间。回复关系通过 `reply` 消息段传递；Bot 自身历史使用 `is_bot=True`，私聊还须传入 `peer_user_id`，避免归入 Bot 自己的会话。
+
+历史导入会解析并保存媒体段及其哈希 ID，但不会调用图片、语音或视频识别器；占位文本保持未识别状态。实时入站消息仍按默认转换流程执行媒体识别。
+
+此接口不发布实时消息事件，不添加未读，不修改当前消息或已有流的活跃时间。重复 ID 返回已有记录，不覆盖内容与原时间；跨平台或跨会话的 ID 冲突会失败。已清空的上下文不会因旧历史再次出现，数据库中的历史仍可翻阅。
+
+按原时间翻阅使用 `get_stream_history(stream_id, limit, offset)`，最新记录起算分页，页内时间正序；同一时间按数据库 ID 稳定排序。`get_stream_messages()` 保持按入库 ID 分页，适合消费游标，不用于展示时间轴。`get_history_anchor()` 和 `get_history_targets()` 分别提供恢复前已有锚点和已知会话，不创建流。
+
 ## 18.9 生命周期钩子在 Adapter 里比别的组件更实用
 
 对很多组件来说，生命周期钩子有时像“可有可无的扩展点”。

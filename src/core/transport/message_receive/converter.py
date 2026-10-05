@@ -191,11 +191,14 @@ class MessageConverter:
 
     # ─── envelope → message ───────────────────
 
-    async def envelope_to_message(self, envelope: MessageEnvelope) -> Message:
+    async def envelope_to_message(
+        self, envelope: MessageEnvelope, *, recognize_media: bool = True,
+    ) -> Message:
         """将 MessageEnvelope 转换为 Message。
 
         Args:
             envelope: mofox-wire 消息信封
+            recognize_media: 是否识别消息中的媒体内容
 
         Returns:
             Message: 核心业务消息对象
@@ -231,7 +234,7 @@ class MessageConverter:
         result = self._parse_segments(segments, depth=0)
 
         # 如果解析过程中发现有媒体资源，则后续需要考虑是否运行视觉语言模型识别
-        if result.media:
+        if result.media and recognize_media:
             # 提前提取 stream_id 以供逐项过滤 VLM
             stream_id = extract_stream_id(message_info)
             result = await self._recognize_media_with_manager(result, stream_id)

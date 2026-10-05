@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import math
+from typing import TYPE_CHECKING, Any, cast
+
+from mofox_wire import MessageEnvelope
 
 from src.core.components.types import ChatType
 
@@ -201,6 +204,116 @@ async def add_sent_message_to_history(message: "Message") -> "Messages":
     return await _get_stream_manager().add_sent_message_to_history(message)
 
 
+async def import_history_message(
+    envelope: MessageEnvelope, *, peer_user_id: str = "", is_bot: bool = False,
+) -> "Messages":
+    """保存入站历史信封，不发布实时事件或触发聊天。
+
+    Args:
+        envelope: 包含原始 message_info.time 的历史信封。
+        peer_user_id: 私聊对端 ID；Bot 自身发言时必须指定。
+        is_bot: 是否为当前 Bot 自身发送的历史消息。
+
+    Returns:
+        已提交的核心消息记录。
+    """
+    from src.core.models.stream import ChatStream
+    from src.core.transport.message_receive.converter import MessageConverter
+    from src.app.plugin_system.api.person_api import get_or_create_person, get_person
+
+    info = envelope.get("message_info") or {}
+    original_time = info.get("time")
+    if (
+        envelope.get("direction") != "incoming"
+        or isinstance(original_time, bool)
+        or not isinstance(original_time, (int, float))
+        or not math.isfinite(original_time)
+        or original_time <= 0
+    ):
+        raise ValueError("历史信封必须包含有效的原始消息时间")
+    _validate_non_empty(str(info.get("message_id") or ""), "message_id")
+    message = await MessageConverter().envelope_to_message(envelope, recognize_media=False)
+    _validate_non_empty(message.platform, "platform")
+    _validate_non_empty(message.sender_id, "sender_id")
+    if message.chat_type == "private":
+        if is_bot:
+            _validate_non_empty(peer_user_id, "peer_user_id")
+        peer_user_id = peer_user_id or message.sender_id
+        message.stream_id = ChatStream.generate_stream_id(
+            platform=message.platform, user_id=peer_user_id,
+        )
+    if is_bot:
+        message.sender_role = "bot"
+    else:
+        if await get_person(message.platform, message.sender_id) is None:
+            await get_or_create_person(
+                platform=message.platform, user_id=message.sender_id,
+                nickname=message.sender_name, cardname=message.sender_cardname,
+            )
+    manager = _get_stream_manager()
+    await manager.get_or_create_stream(
+        stream_id=message.stream_id, platform=message.platform,
+        user_id=peer_user_id if message.chat_type == "private" else message.sender_id,
+        chat_type=message.chat_type,
+        group_id=str(message.extra.get("group_id") or ""),
+        group_name=str(message.extra.get("group_name") or ""),
+    )
+    return await manager.add_history_message(message)
+
+
+async def get_history_anchor(
+    platform: str, chat_type: str, target_id: str, before_time: float,
+) -> str | None:
+    """读取连接恢复前已提交的会话消息 ID，不创建聊天流。
+
+    Args:
+        platform: 平台名称。
+        chat_type: group 或 private。
+        target_id: 群或私聊对端 ID。
+        before_time: 原始消息时间的排他上界。
+
+    Returns:
+        最后提交的消息 ID；没有已有记录时为 None。
+    """
+    from src.core.models.sql_alchemy import Messages
+    from src.core.models.stream import ChatStream
+    from src.kernel.db import QueryBuilder
+
+    _validate_non_empty(platform, "platform")
+    _validate_non_empty(target_id, "target_id")
+    if chat_type not in {"group", "private"}:
+        raise ValueError("chat_type 必须是 group 或 private")
+    stream_id = ChatStream.generate_stream_id(
+        platform=platform,
+        group_id=target_id if chat_type == "group" else "",
+        user_id=target_id if chat_type == "private" else "",
+    )
+    rows = await (
+        QueryBuilder(Messages).filter(
+            stream_id=stream_id, platform=platform, time__lt=before_time,
+        ).order_by("-time", "-id").limit(1).all()
+    )
+    return str(cast(Messages, rows[0]).message_id) if rows else None
+
+
+async def get_history_targets(platform: str) -> list[tuple[str, str]]:
+    """读取核心库中的已有群及私聊对端，不创建流或更新活跃时间。"""
+    from src.core.models.sql_alchemy import ChatStreams, PersonInfo
+    from src.kernel.db import CRUDBase, QueryBuilder
+
+    _validate_non_empty(platform, "platform")
+    streams = cast(list[ChatStreams], await QueryBuilder(ChatStreams).filter(platform=platform).all())
+    targets: list[tuple[str, str]] = []
+    for stream in streams:
+        if stream.chat_type == "group" and stream.group_id:
+            targets.append(("group", stream.group_id))
+        elif stream.chat_type == "private" and stream.person_id:
+            person = await CRUDBase(PersonInfo).get_by(person_id=stream.person_id, platform=platform)
+            if person is not None:
+                targets.append(("private", person.user_id))
+    return targets
+
+
 async def delete_stream(stream_id: str, delete_messages: bool = True) -> bool:
     """删除流及其消息。
 
@@ -236,7 +349,10 @@ async def get_stream_messages(
     limit: int = 100,
     offset: int = 0,
 ) -> list["Message"]:
-    """获取流的消息（支持分页）。
+    """按入库 ID 分页续读消息，页内返回入库正序。
+
+    迟到历史可能具有更大的 ID 和更早的原时间。时间轴翻阅使用
+    get_stream_history，而不是此接口。
 
     Args:
         stream_id: 聊天流 ID
@@ -254,6 +370,16 @@ async def get_stream_messages(
         limit=limit,
         offset=offset,
     )
+
+
+async def get_stream_history(
+    stream_id: str, limit: int = 100, offset: int = 0,
+) -> list["Message"]:
+    """按原始时间翻阅历史，不改变按入库顺序续读接口的语义。"""
+    _validate_non_empty(stream_id, "stream_id")
+    _validate_limit_offset(limit, "limit")
+    _validate_limit_offset(offset, "offset")
+    return await _get_stream_manager().get_stream_history(stream_id, limit, offset)
 
 
 def clear_stream_cache(stream_id: str | None = None) -> None:
@@ -380,9 +506,13 @@ __all__ = [
     "add_message_to_stream",
     "add_message",
     "add_sent_message_to_history",
+    "import_history_message",
+    "get_history_anchor",
+    "get_history_targets",
     "delete_stream",
     "get_stream_info",
     "get_stream_messages",
+    "get_stream_history",
     "clear_stream_cache",
     "refresh_stream",
     "activate_stream",

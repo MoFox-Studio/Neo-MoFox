@@ -445,7 +445,7 @@ class StreamManager:
         query = QueryBuilder(self._Messages).filter(stream_id=stream_id)
         if stream_record.context_cleared_at is not None:
             query = query.filter(time__gt=stream_record.context_cleared_at)
-        query = query.order_by("-id")
+        query = query.order_by("-time", "-id")
         if max_messages is not None:
             query = query.limit(max_messages)
         messages_records = await query.all()
@@ -521,8 +521,9 @@ class StreamManager:
                 platform=message.platform,
                 stream_id=stream_id
             )
-            if not db_message:
-                db_message = await self._messages_crud.create(message_data)
+            if db_message is not None:
+                return db_message
+            db_message = await self._messages_crud.create(message_data)
 
             # 更新流实例内容
             chat_stream = self._streams.get(stream_id)
@@ -533,6 +534,62 @@ class StreamManager:
             # 更新流活跃时间
             await self._update_stream_active_time(stream_id)
 
+            return db_message
+
+    async def add_history_message(self, message: "Message") -> "Messages":
+        """静默保存历史消息，不增加未读或更新流的活跃时间。
+
+        Args:
+            message: 保留原始消息时间与发送者身份的历史消息。
+
+        Returns:
+            创建或已存在的数据库记录。
+        """
+        stream_id = message.stream_id
+        async with self._get_stream_lock(stream_id):
+            db_message = await self._messages_crud.get_by(
+                message_id=message.message_id,
+            )
+            if db_message is not None and (
+                db_message.platform != message.platform or db_message.stream_id != stream_id
+            ):
+                raise ValueError("历史消息 ID 与其他平台或会话的记录冲突")
+            created = db_message is None
+            if db_message is None:
+                db_message = await self._messages_crud.create({
+                    "message_id": message.message_id,
+                    "stream_id": stream_id,
+                    "person_id": (
+                        "bot" if message.sender_role == "bot"
+                        else self._resolve_person_id_from_message(message)
+                    ),
+                    "time": message.time,
+                    "message_type": message.message_type.value,
+                    "content": _serialize_content_for_db(message.content),
+                    "processed_plain_text": message.processed_plain_text,
+                    "reply_to": message.reply_to,
+                    "platform": message.platform,
+                })
+
+            chat_stream = self._streams.get(stream_id)
+            if chat_stream is not None:
+                context = chat_stream.context
+                stream_record = await self._streams_crud.get_by(stream_id=stream_id)
+                cleared_at = stream_record.context_cleared_at if stream_record else None
+                known = any(
+                    item.message_id == message.message_id
+                    for item in [*context.history_messages, *context.unread_messages]
+                )
+                if not created and not known:
+                    message = await self._db_message_to_runtime(
+                        db_message, chat_type=chat_stream.chat_type,
+                    )
+                visible = cleared_at is None or message.time > cleared_at
+                if visible and not known:
+                    context.history_messages.append(message)
+                    context.history_messages.sort(key=lambda item: item.time)
+                    if context.max_history_messages > 0:
+                        context.history_messages = context.history_messages[-context.max_history_messages:]
             return db_message
 
     async def add_sent_message_to_history(
@@ -718,6 +775,30 @@ class StreamManager:
 
         return [
             await self._db_message_to_runtime(msg) for msg in reversed(messages_records) # type: ignore
+        ]
+
+    async def get_stream_history(
+        self, stream_id: str, limit: int = 100, offset: int = 0,
+    ) -> list["Message"]:
+        """按原始消息时间分页读取历史，页内返回时间正序。
+
+        Args:
+            stream_id: 聊天流 ID。
+            limit: 每页记录数。
+            offset: 从时间最新的记录开始跳过的条数。
+
+        Returns:
+            原时间排列的消息；同一时间使用数据库 ID 稳定排序。
+        """
+        records = await (
+            QueryBuilder(self._Messages).filter(stream_id=stream_id)
+            .order_by("-time", "-id").limit(limit).offset(offset).all()
+        )
+        stream = await self._streams_crud.get_by(stream_id=stream_id)
+        chat_type = stream.chat_type if stream else "private"
+        return [
+            await self._db_message_to_runtime(record, chat_type=chat_type)
+            for record in reversed(records)
         ]
 
     def clear_cache(self, stream_id: str | None = None) -> None:
