@@ -42,6 +42,8 @@ DIARY_INSTRUCTIONS = """回想 target_date 这一天的聊天，过几天再接�
 聊天中真实说出的承诺和约定仍按来源保留，不把对方的意愿变成自己的承诺。
 
 existing_diary 是目标日期已有的整篇底稿，new_messages 是这批新增的真实聊天。
+previous_diaries 是这个聊天在目标日期之前的日记，只供理解前情、延续话题和辨认变化，不能改写。
+前面的日记不是当天新发生的事；遇到延续的话题，可以简要衔接，按新增聊天写清当天的进展，不复制旧日记。
 preceding_context 只是理解指代和回复的前文，不是新发生的事，不据此重复记入当天。
 可以改写底稿前面的段落、合并重复话题、补后续和纠正误解；不局限末尾追加。
 保留前面仍准确、有用的事情及必要变化过程，不为了润色反复换说法，也不能只顾最新消息而全删前文。
@@ -418,9 +420,8 @@ class DiaryService:
         )
         if not rows:
             return False
-        day = (
-            datetime.fromtimestamp(float(rows[0]["time"]), self.zone).date().isoformat()
-        )
+        target_date = datetime.fromtimestamp(float(rows[0]["time"]), self.zone).date()
+        day = target_date.isoformat()
         batch = []
         for row in rows:
             if (
@@ -434,11 +435,21 @@ class DiaryService:
         end_id = int(batch[-1]["id"])
         diary = None
         if allowed:
+            first_day = target_date - timedelta(
+                days=self.config.policy_for(details.chat_type).context_days - 1
+            )
             payload: dict[str, object] = {
                 "target_date": day,
                 "timezone": self.config.timezone,
                 "chat_type": details.chat_type,
                 "existing_diary": old.body if old else "",
+                "previous_diaries": [
+                    {"date": item.day, "body": item.body}
+                    for item in await self.store.diaries(
+                        details.stream_id, first_day.isoformat()
+                    )
+                    if item.day < day and item.body.strip()
+                ],
                 "preceding_context": await self.source.formatted(
                     details,
                     await self.source.context(
@@ -484,7 +495,7 @@ class DiaryService:
         return True
 
     async def generate(self, payload: dict[str, object]) -> str:
-        """执行一次干净模型请求，不附加任何日记、记忆提醒或工具历史。"""
+        """使用日记整理资料和完整人设生成正文，不附加聊天提醒或工具历史。"""
         if self._generator is not None:
             return await self._generator(payload)
         persona = config_api.get_core_config().personality.model_dump(mode="json")
@@ -516,9 +527,7 @@ class DiaryService:
         try:
             result = json.loads(message)
         except json.JSONDecodeError as error:
-            raise ValueError(
-                f"日记模型返回无效 JSON，解析位置：{error.pos}"
-            ) from error
+            raise ValueError(f"日记模型返回无效 JSON，解析位置：{error.pos}") from error
         if (
             not isinstance(result, dict)
             or set(result) != {"body"}

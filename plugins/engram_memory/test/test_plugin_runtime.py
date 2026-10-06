@@ -565,11 +565,12 @@ def test_plugin_registers_exact_component_graph() -> None:
         "VNextFlashbackEventHandler",
         "VNextMemoryService",
         "VNextPrivatePersonaEventHandler",
+        "VNextGroupPersonaEventHandler",
         "ChatDiaryEventHandler",
         "VNextDoctorRouter",
         "VNextMemoryAdminRouter",
     }
-    assert len(components) == 13
+    assert len(components) == 14
     for component in components:
         if issubclass(component, BaseAction):
             assert component.validate_associated_types() == ["text"]
@@ -577,9 +578,41 @@ def test_plugin_registers_exact_component_graph() -> None:
     assert names["VNextMemoryChangedEventHandler"] == "memory_changed"
     assert names["VNextFlashbackEventHandler"] == "vnext_flashback_injector"
     assert names["VNextPrivatePersonaEventHandler"] == "private_persona"
+    assert names["VNextGroupPersonaEventHandler"] == "group_persona"
+    handlers = {component.name: component for component in components}
+    assert handlers["group_persona"].weight < handlers["chat_diary"].weight
     assert isinstance(plugin.config, EngramMemoryConfig)
     plugin.config.plugin.enabled = False
     assert plugin.get_components() == []
+
+
+def test_group_persona_limits_are_configurable() -> None:
+    """群聊窗口与人数使用唯一配置默认值，并支持独立的正整数设置。"""
+    config = EngramMemoryConfig()
+    assert config.vnext.prompt_injection.group_persona_message_limit == 50
+    assert config.vnext.prompt_injection.group_persona_max_people == 10
+    configured = EngramMemoryConfig.from_dict(
+        {
+            "vnext": {
+                "prompt_injection": {
+                    "group_persona_message_limit": 7,
+                    "group_persona_max_people": 3,
+                }
+            }
+        }
+    )
+    assert configured.vnext.prompt_injection.group_persona_message_limit == 7
+    assert configured.vnext.prompt_injection.group_persona_max_people == 3
+
+
+@pytest.mark.parametrize(
+    "field", ["group_persona_message_limit", "group_persona_max_people"]
+)
+@pytest.mark.parametrize("value", [0, -1])
+def test_group_persona_limits_reject_nonpositive_values(field: str, value: int) -> None:
+    """群聊配置拒绝非正数，不引入隐式关闭或另一个默认值。"""
+    with pytest.raises(ValueError):
+        EngramMemoryConfig.from_dict({"vnext": {"prompt_injection": {field: value}}})
 
 
 def test_memory_query_schemas_distinguish_recall_from_disclosure() -> None:
@@ -605,11 +638,15 @@ def test_memory_query_schemas_distinguish_recall_from_disclosure() -> None:
     assert "history" in VNextMemoryReadTool.description
     assert "full" in VNextMemoryReadTool.description
     assert "revision_no" in VNextPersonLookupTool.description
-    assert "群聊中跟某个人开始聊天或有人新参与时" in VNextPersonLookupTool.description
-    assert "私聊直接使用自动注入的印象" in VNextPersonLookupTool.description
-    assert "印象更新时间不代表经历发生时间" in VNextPersonLookupTool.to_schema()[
-        "function"
-    ]["description"]
+    persona_description = VNextPersonLookupTool.to_schema()["function"]["description"]
+    assert "读取与当前问题相关的信息" in persona_description
+    assert "读取对应正文和来源" in persona_description
+    for implementation_note in ("自动注入", "窗口", "聊天前再调用", "先调用本工具"):
+        assert implementation_note not in persona_description
+    assert (
+        "印象更新时间不代表经历发生时间"
+        in VNextPersonLookupTool.to_schema()["function"]["description"]
+    )
     search_description = VNextMemorySearchTool.to_schema()["function"]["description"]
     assert "询问相识人物的信息时先检索" in search_description
     assert "同名不能直接用人设或常识代答" in search_description
@@ -722,9 +759,10 @@ async def test_memory_search_uses_configured_timezone_and_complete_dates(
     plugin = EngramMemoryPlugin(config)
     setattr(plugin, "runtime_owner", resource)
     tool = VNextMemorySearchTool(plugin)
-    assert await tool.execute(
-        "示例事件", start_time=start_time, end_time=end_time
-    ) == (True, {"memories": []})
+    assert await tool.execute("示例事件", start_time=start_time, end_time=end_time) == (
+        True,
+        {"memories": []},
+    )
     search.assert_awaited_once()
     search_call = search.await_args
     assert search_call is not None
@@ -847,13 +885,26 @@ async def test_plugin_load_refreshes_routers_and_registers_guide(
         "不为调用工具而凑记忆",
         "对方明确不希望保存的内容不写入",
         "不用猜测补齐事实",
-        "群聊里，跟某个人开始聊天",
-        "必须先调用 `person_lookup`",
-        "私聊里，对方的人物印象会作为 SystemReminder 自动注入上下文",
-        "不要求开始聊天前再调用工具",
+        "已有的人物印象是你在相处中形成的认识",
+        "用 `person_lookup` 读取对应内容",
+        "选择 `history` 或 `revision` 视图",
+        "核对所需正文与来源",
+        "不代表不认识这个人或没有相关记忆",
+        "需要查证时读取对应信息",
     ):
         assert instruction in guide
     assert "相关时自然融入回答" not in guide
+    for implementation_note in (
+        "自动刷新",
+        "自动注入",
+        "最新输入末尾",
+        "参与者窗口",
+        "SystemReminder",
+        "必须先调用 `person_lookup`",
+        "不需要先调用 `person_lookup`",
+        "开始聊天前再调用工具",
+    ):
+        assert implementation_note not in guide
 
 
 @pytest.mark.asyncio
@@ -897,6 +948,7 @@ async def test_plugin_unload_cleans_guide_when_owner_close_fails(
     plugin.runtime_owner = cast(VNextRuntimeOwner, resource)
     plugin._flashback_reminder_streams["stream-1"] = {"flashback-test"}
     plugin._persona_reminder_streams.add("stream-private")
+    plugin._group_persona_reminder_streams.add("stream-group")
     delete_stream = Mock()
     delete_guide = Mock()
     monkeypatch.setattr(
@@ -905,14 +957,18 @@ async def test_plugin_unload_cleans_guide_when_owner_close_fails(
     monkeypatch.setattr(plugin_module, "delete_owned_reminder", delete_guide)
     with pytest.raises(RuntimeError, match="owner-test"):
         await plugin.on_plugin_unloaded()
-    assert delete_stream.call_count == 2
+    assert delete_stream.call_count == 3
     delete_stream.assert_any_call("stream-1", "actor", "flashback-test")
     delete_stream.assert_any_call(
         "stream-private", "actor", plugin_module.PERSONA_REMINDER_NAME
     )
+    delete_stream.assert_any_call(
+        "stream-group", "actor", plugin_module.GROUP_PERSONA_REMINDER_NAME
+    )
     delete_guide.assert_called_once_with("actor", "engram_memory_guide")
     assert not plugin._flashback_reminder_streams
     assert not plugin._persona_reminder_streams
+    assert not plugin._group_persona_reminder_streams
     assert plugin.runtime_owner is None
 
 

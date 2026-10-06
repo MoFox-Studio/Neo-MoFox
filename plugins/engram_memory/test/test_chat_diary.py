@@ -729,10 +729,112 @@ async def test_diary_batches_keep_order_dates_and_full_replacement(
             "2026-01-02",
         ]
         assert seen[-1]["existing_diary"] == "完整正文2"
+        assert seen[0]["previous_diaries"] == []
+        assert seen[1]["previous_diaries"] == [
+            {"date": "2026-01-01", "body": "完整正文1"}
+        ]
+        assert seen[2]["previous_diaries"] == seen[1]["previous_diaries"]
         assert (await store.get_day("s1", "2026-01-01")).body == "完整正文1"
         assert (await store.get_day("s1", "2026-01-02")).body == "完整正文3"
         assert (await store.progress("s1")).cursor_id == 4
         assert not await service.process_batch(details, 4, now=3)
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("chat_type", ["group", "private"])
+@pytest.mark.parametrize(
+    ("context_days", "missing_days"), [(1, False), (3, False), (7, False), (7, True)]
+)
+@pytest.mark.asyncio
+async def test_diary_generation_reads_previous_days_but_only_updates_target(
+    diary_path: str, chat_type: str, context_days: int, missing_days: bool
+) -> None:
+    """按目标自然日提供同流前序完整日记，保存仅替换目标日且不补缺日。"""
+    store = DiaryStore(diary_path)
+    await store.initialize()
+    try:
+        first_date = datetime.fromisoformat("2025-12-30").date()
+        target_date = datetime.fromisoformat("2026-01-07").date()
+        for stream_id in ("s1", "s2"):
+            progress = await store.ensure_stream(
+                stream_id, chat_type, start_time=0, bootstrap_through=12, now=1
+            )
+            for index in range(1, 12):
+                previous_date = first_date + timedelta(days=index - 1)
+                if missing_days and previous_date.day == 4:
+                    continue
+                body = f"{stream_id}-{previous_date.isoformat()}"
+                if previous_date.day == 6:
+                    body += "完整前序正文" * 1000
+                if missing_days and previous_date.day == 3:
+                    body = "   "
+                await store.commit_batch(
+                    progress,
+                    through_id=index,
+                    now=index + 1,
+                    diary=Diary(
+                        stream_id,
+                        previous_date.isoformat(),
+                        body,
+                        index,
+                        float(index),
+                        index + 1,
+                    ),
+                )
+                saved_progress = await store.progress(stream_id)
+                assert saved_progress is not None
+                progress = saved_progress
+        before = await store.diaries("s1", first_date.isoformat())
+        other_before = await store.diaries("s2", first_date.isoformat())
+        config = DiaryConfig()
+        config.policy_for(chat_type).context_days = context_days
+        other_type = "private" if chat_type == "group" else "group"
+        config.policy_for(other_type).context_days = 2
+        seen: list[dict[str, object]] = []
+
+        async def generate(payload: dict[str, object]) -> str:
+            """记录日记整理的真实输入，返回目标日完整正文。"""
+            seen.append(payload)
+            return "目标日期的新正文"
+
+        service = DiaryService(
+            config,
+            store,
+            source=ChatSource([chat_row(12, "2026-01-07T00:30:00+08:00")]),
+            generator=generate,
+        )
+        details = StreamDetails("s1", "qq", chat_type, "example-group", "example-user")
+        assert await service.process_batch(
+            details,
+            12,
+            now=datetime.fromisoformat("2026-10-05T12:00:00+08:00").timestamp(),
+        )
+        expected = [
+            {"date": item.day, "body": item.body}
+            for item in before
+            if (target_date - timedelta(days=context_days - 1)).isoformat()
+            <= item.day
+            < target_date.isoformat()
+            and item.body.strip()
+        ]
+        assert len(seen) == 1
+        assert seen[0]["target_date"] == "2026-01-07"
+        assert seen[0]["existing_diary"] == "s1-2026-01-07"
+        assert seen[0]["previous_diaries"] == expected
+        if context_days == 7 and not missing_days:
+            assert [item["date"] for item in expected] == [
+                f"2026-01-{number:02d}" for number in range(1, 7)
+            ]
+        after = await store.diaries("s1", first_date.isoformat())
+        assert tuple(item for item in after if item.day != "2026-01-07") == tuple(
+            item for item in before if item.day != "2026-01-07"
+        )
+        target = await store.get_day("s1", "2026-01-07")
+        assert target is not None and target.body == "目标日期的新正文"
+        assert await store.diaries("s2", first_date.isoformat()) == other_before
+        progress = await store.progress("s1")
+        assert progress is not None and progress.cursor_id == 12
     finally:
         await store.close()
 
@@ -1153,6 +1255,7 @@ async def test_diary_request_is_clean_and_persona_is_complete(
         "target_date": "2026-10-03",
         "timezone": "Asia/Shanghai",
         "existing_diary": "旧稿",
+        "previous_diaries": [{"date": "2026-10-02", "body": "昨天聊到一起玩"}],
         "preceding_context": [{"text": "有空一起玩"}],
         "new_messages": [{"text": "时间还没定"}],
     }
@@ -1183,6 +1286,9 @@ async def test_diary_request_is_clean_and_persona_is_complete(
         "聊天中真实说出的承诺和约定仍按来源保留",
         "本人陈述、别人转述、建议、计划和实际结果要分清",
         "不能只顾最新消息而全删前文",
+        "previous_diaries 是这个聊天在目标日期之前的日记",
+        "只供理解前情、延续话题和辨认变化，不能改写",
+        "只更新 target_date 对应的日记",
         "不把历史的明天当现在的明天",
         "唯一字段 body 为更新后的完整当天正文",
     ):

@@ -436,6 +436,424 @@ async def test_private_persona_skips_internal_or_non_actor_requests(
     lookup.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_group_persona_tail_refreshes_latest_window_and_versions(
+    reminder_store: SystemReminderStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """群聊按配置去重限额，含暂无印象，每次请求替换末尾并保持流隔离。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.app.plugin_system.api import prompt_api
+    from src.app.plugin_system.types import EventType
+    from src.kernel.event import EventBus
+
+    from .. import plugin as plugin_module
+    from ..config import EngramMemoryConfig
+    from ..vnext import persona_injection
+
+    stream_id = "stream-group"
+    config = EngramMemoryConfig()
+    config.vnext.prompt_injection.group_persona_message_limit = 4
+    config.vnext.prompt_injection.group_persona_max_people = 2
+    plugin = plugin_module.EngramMemoryPlugin(config)
+    persona = SimpleNamespace(
+        impression_text="完整已有印象第一版①"
+        + "完整正文" * 2000
+        + "\n记忆依据：① [Memory: example]",
+        is_current=True,
+    )
+    diary = _DiaryRuntime("保留日记")
+    snapshots = {"person-a": persona}
+    read_persona = AsyncMock(side_effect=lambda person_id: snapshots.get(person_id))
+    plugin.runtime_owner = cast(
+        plugin_module.VNextRuntimeOwner,
+        SimpleNamespace(
+            config=config,
+            persona_service=SimpleNamespace(get_persona=read_persona),
+            diary=diary,
+        ),
+    )
+    rows = [
+        {"person_id": person_id, "sender_id": user_id, "sender_name": name}
+        for person_id, user_id, name in (
+            ("person-outside", "user-outside", "窗口外的人"),
+            ("person-a", "user-a", "同名"),
+            ("person-b", "user-b", "同名"),
+            ("person-a", "user-a", "同名"),
+            ("person-bot", "bot-user", "Bot"),
+        )
+    ]
+
+    async def recent_messages(
+        selected_stream: str, timestamp: float, *, limit: int, filter_bot: bool
+    ) -> list[dict[str, str]]:
+        """按实际配置返回固定的最近消息窗口，不连接数据库。"""
+        assert selected_stream == stream_id
+        assert timestamp > 0
+        assert filter_bot is False
+        return rows[-limit:]
+
+    query = AsyncMock(side_effect=recent_messages)
+    monkeypatch.setattr(
+        persona_injection.message_api, "get_messages_before_time_in_chat", query
+    )
+    monkeypatch.setattr(
+        persona_injection.stream_api,
+        "get_stream_info",
+        AsyncMock(return_value={"chat_type": "group", "platform": "qq"}),
+    )
+    monkeypatch.setattr(
+        persona_injection.adapter_api,
+        "get_bot_info_by_platform",
+        AsyncMock(return_value={"bot_id": "bot-user"}),
+    )
+    reminder_store.set(
+        f"stream:{stream_id}:actor",
+        "engram_memory_guide",
+        "记忆指引",
+        insert_type="dynamic",
+    )
+    reminder_store.set(
+        f"stream:{stream_id}:actor", REMINDER_NAME, "保留日记", insert_type="dynamic"
+    )
+    request = _new_request(stream_id, reminder_store)
+    request.add_payload(LLMPayload(ROLE.USER, Text("历史消息")))
+    request.add_payload(LLMPayload(ROLE.ASSISTANT, Text("历史回复")))
+    request.add_payload(LLMPayload(ROLE.USER, Text("本轮消息")))
+    params = {
+        "request_name": "example_chat",
+        "meta_data": {"stream_id": stream_id},
+        "payloads": request.payloads,
+    }
+    handler = persona_injection.VNextGroupPersonaEventHandler(plugin)
+    diary_handler = ChatDiaryEventHandler(plugin)
+    bus = EventBus()
+    for subscriber in (handler, diary_handler):
+        bus.subscribe(
+            EventType.BEFORE_LLM_REQUEST,
+            subscriber.execute,
+            priority=subscriber.weight,
+        )
+    _, params = await bus.publish(EventType.BEFORE_LLM_REQUEST, params)
+    assert [call.args[0] for call in read_persona.await_args_list] == [
+        "person-a",
+        "person-b",
+    ]
+    assert query.call_args is not None
+    assert query.call_args.kwargs["limit"] == 4
+    group_name = persona_injection.GROUP_REMINDER_NAME
+    latest = _text_parts(params["payloads"][-1])
+    assert group_name in latest[-1]
+    assert "以下是你对这些人的已有印象，供相处时参考" in latest[-1]
+    assert "需要查证时读取对应信息" in latest[-1]
+    for implementation_note in ("自动刷新", "自动注入", "窗口", "先调用工具"):
+        assert implementation_note not in latest[-1]
+    assert persona.impression_text in latest[-1]
+    assert "核心人物 ID：person-b\n（暂无印象）" in latest[-1]
+    assert "person-outside" not in latest[-1]
+    assert "person-bot" not in latest[-1]
+    assert latest[-1].index("person-a") < latest[-1].index("person-b")
+    assert any("保留日记" in text for text in latest)
+    assert all(group_name not in text for text in _text_parts(params["payloads"][0]))
+    items = reminder_store.get_items(f"stream:{stream_id}:actor", names=[group_name])
+    assert items[0].insert_type is prompt_api.SystemReminderInsertType.DYNAMIC
+    assert items[0].consume_type is prompt_api.SystemReminderConsumeType.FOREVER
+    assert stream_id in plugin._group_persona_reminder_streams
+    assert not plugin._persona_reminder_streams
+
+    persona.impression_text = "完整已有印象第二版①"
+    rows[:] = [
+        {"person_id": person_id, "sender_id": person_id, "sender_name": person_id}
+        for person_id in ("person-c", "person-a", "person-c")
+    ]
+    resumed = _new_request(stream_id, reminder_store)
+    for payload in params["payloads"]:
+        resumed.add_payload(payload)
+    resumed.add_payload(LLMPayload(ROLE.ASSISTANT, Text("上轮回复")))
+    resumed.add_payload(LLMPayload(ROLE.USER, Text("新的本轮消息")))
+    params["payloads"] = resumed.payloads
+    _, params = await bus.publish(EventType.BEFORE_LLM_REQUEST, params)
+    texts = [text for payload in params["payloads"] for text in _text_parts(payload)]
+    assert sum(f"[{group_name}]" in text for text in texts) == 1
+    assert "完整已有印象第二版①" in _text_parts(params["payloads"][-1])[-1]
+    assert not any("第一版" in text or "person-b" in text for text in texts)
+    assert (
+        "核心人物 ID：person-c\n（暂无印象）" in _text_parts(params["payloads"][-1])[-1]
+    )
+    other = _new_request("other-group", reminder_store)
+    other.add_payload(LLMPayload(ROLE.USER, Text("另一个群")))
+    assert all(group_name not in text for text in _text_parts(other.payloads[0]))
+
+
+@pytest.mark.parametrize("missing", ["snapshot", "uncertified", "empty"])
+@pytest.mark.asyncio
+async def test_group_persona_missing_impression_counts_toward_people_limit(
+    reminder_store: SystemReminderStore,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+) -> None:
+    """没有可信正文者仍占人数名额，不能越过限额补入更早的有印象者。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.app.plugin_system.types import EventType
+
+    from .. import plugin as plugin_module
+    from ..config import EngramMemoryConfig
+    from ..vnext import persona_injection
+
+    config = EngramMemoryConfig()
+    config.vnext.prompt_injection.group_persona_max_people = 1
+    plugin = plugin_module.EngramMemoryPlugin(config)
+    snapshot = SimpleNamespace(
+        impression_text="   " if missing == "empty" else "未经认证的旧稿",
+        is_current=missing != "uncertified",
+    )
+    lookup = AsyncMock(return_value=None if missing == "snapshot" else snapshot)
+    plugin.runtime_owner = cast(
+        plugin_module.VNextRuntimeOwner,
+        SimpleNamespace(
+            config=config, persona_service=SimpleNamespace(get_persona=lookup)
+        ),
+    )
+    monkeypatch.setattr(
+        persona_injection.stream_api,
+        "get_stream_info",
+        AsyncMock(return_value={"chat_type": "group", "platform": "qq"}),
+    )
+    monkeypatch.setattr(
+        persona_injection.adapter_api,
+        "get_bot_info_by_platform",
+        AsyncMock(return_value=None),
+    )
+    query = AsyncMock(
+        return_value=[
+            {"person_id": person_id, "sender_id": person_id, "sender_name": "参与者"}
+            for person_id in ("person-older", "person-latest")
+        ]
+    )
+    monkeypatch.setattr(
+        persona_injection.message_api, "get_messages_before_time_in_chat", query
+    )
+    payloads = [
+        LLMPayload(ROLE.USER, [Text("聊天正文"), Text("[engram_memory_guide]\n指引")])
+    ]
+    params = {
+        "request_name": "example_chat",
+        "meta_data": {"stream_id": "stream-group"},
+        "payloads": payloads,
+    }
+    await persona_injection.VNextGroupPersonaEventHandler(plugin).execute(
+        EventType.BEFORE_LLM_REQUEST, params
+    )
+    lookup.assert_awaited_once_with("person-latest")
+    assert query.call_args is not None
+    assert query.call_args.kwargs["limit"] == 50
+    block = _text_parts(params["payloads"][-1])[-1]
+    assert "核心人物 ID：person-latest\n（暂无印象）" in block
+    assert "person-older" not in block
+    assert "未经认证的旧稿" not in block
+
+
+@pytest.mark.parametrize("missing", ["stream", "window", "only_bot"])
+@pytest.mark.asyncio
+async def test_group_persona_empty_window_removes_only_owned_blocks(
+    reminder_store: SystemReminderStore,
+    monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+) -> None:
+    """缺少流或参与者时撤掉群聊旧稿，保留普通正文和其他提醒。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.app.plugin_system.types import EventType
+
+    from .. import plugin as plugin_module
+    from ..config import EngramMemoryConfig
+    from ..vnext import persona_injection
+
+    config = EngramMemoryConfig()
+    plugin = plugin_module.EngramMemoryPlugin(config)
+    lookup = AsyncMock()
+    plugin.runtime_owner = cast(
+        plugin_module.VNextRuntimeOwner,
+        SimpleNamespace(
+            config=config, persona_service=SimpleNamespace(get_persona=lookup)
+        ),
+    )
+    monkeypatch.setattr(
+        persona_injection.stream_api,
+        "get_stream_info",
+        AsyncMock(
+            return_value=None
+            if missing == "stream"
+            else {"chat_type": "group", "platform": "qq"}
+        ),
+    )
+    monkeypatch.setattr(
+        persona_injection.adapter_api,
+        "get_bot_info_by_platform",
+        AsyncMock(return_value=None),
+    )
+    query = AsyncMock(
+        return_value=[
+            {"person_id": person_id, "sender_id": person_id, "sender_name": person_id}
+            for person_id in ("bot", "system", "")
+        ]
+        if missing == "only_bot"
+        else []
+    )
+    monkeypatch.setattr(
+        persona_injection.message_api, "get_messages_before_time_in_chat", query
+    )
+    stream_id = "stream-group"
+    name = persona_injection.GROUP_REMINDER_NAME
+    reminder_store.set(
+        f"stream:{stream_id}:actor", name, "旧群聊印象", insert_type="dynamic"
+    )
+    reminder_store.set(
+        f"stream:{stream_id}:actor", REMINDER_NAME, "保留日记", insert_type="dynamic"
+    )
+    plugin._group_persona_reminder_streams.add(stream_id)
+    ordinary_text = f"正文提到 [{name}]，不是独立提醒块"
+    request = _new_request(stream_id, reminder_store)
+    request.add_payload(LLMPayload(ROLE.USER, Text(ordinary_text)))
+    params = {
+        "request_name": "example_chat",
+        "meta_data": {"stream_id": stream_id},
+        "payloads": request.payloads,
+    }
+    await persona_injection.VNextGroupPersonaEventHandler(plugin).execute(
+        EventType.BEFORE_LLM_REQUEST, params
+    )
+    texts = _text_parts(params["payloads"][0])
+    assert ordinary_text in texts
+    assert not any("旧群聊印象" in text for text in texts)
+    assert any("保留日记" in text for text in texts)
+    assert not reminder_store.get_items(f"stream:{stream_id}:actor", names=[name])
+    assert stream_id not in plugin._group_persona_reminder_streams
+    lookup.assert_not_awaited()
+    if missing == "stream":
+        query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_group_persona_read_failure_is_not_missing_impression(
+    reminder_store: SystemReminderStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """人物读取错误原样传播，不把失败伪装为成功读取的暂无印象。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.app.plugin_system.types import EventType
+
+    from .. import plugin as plugin_module
+    from ..config import EngramMemoryConfig
+    from ..vnext import persona_injection
+
+    config = EngramMemoryConfig()
+    plugin = plugin_module.EngramMemoryPlugin(config)
+    plugin.runtime_owner = cast(
+        plugin_module.VNextRuntimeOwner,
+        SimpleNamespace(
+            config=config,
+            persona_service=SimpleNamespace(
+                get_persona=AsyncMock(side_effect=RuntimeError("read-test"))
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        persona_injection.stream_api,
+        "get_stream_info",
+        AsyncMock(return_value={"chat_type": "group", "platform": "qq"}),
+    )
+    monkeypatch.setattr(
+        persona_injection.adapter_api,
+        "get_bot_info_by_platform",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        persona_injection.message_api,
+        "get_messages_before_time_in_chat",
+        AsyncMock(
+            return_value=[
+                {
+                    "person_id": "person-a",
+                    "sender_id": "user-a",
+                    "sender_name": "参与者",
+                }
+            ]
+        ),
+    )
+    params = {
+        "request_name": "example_chat",
+        "meta_data": {"stream_id": "stream-group"},
+        "payloads": [LLMPayload(ROLE.USER, Text("[engram_memory_guide]\n指引"))],
+    }
+    with pytest.raises(RuntimeError, match="read-test"):
+        await persona_injection.VNextGroupPersonaEventHandler(plugin).execute(
+            EventType.BEFORE_LLM_REQUEST, params
+        )
+    assert not reminder_store.get_items(
+        "stream:stream-group:actor", names=[persona_injection.GROUP_REMINDER_NAME]
+    )
+
+
+@pytest.mark.parametrize("request_kind", ["private", "diary", "persona", "non_actor"])
+@pytest.mark.asyncio
+async def test_group_persona_skips_private_and_internal_requests(
+    reminder_store: SystemReminderStore,
+    monkeypatch: pytest.MonkeyPatch,
+    request_kind: str,
+) -> None:
+    """群聊处理器不查询私聊参与者，不污染内部生成或非 Actor 请求。"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.app.plugin_system.types import EventType
+
+    from .. import plugin as plugin_module
+    from ..config import EngramMemoryConfig
+    from ..vnext import persona_injection
+
+    plugin = plugin_module.EngramMemoryPlugin(EngramMemoryConfig())
+    lookup = AsyncMock()
+    plugin.runtime_owner = cast(
+        plugin_module.VNextRuntimeOwner,
+        SimpleNamespace(persona_service=SimpleNamespace(get_persona=lookup)),
+    )
+    get_stream = AsyncMock(return_value={"chat_type": "private"})
+    query = AsyncMock()
+    monkeypatch.setattr(persona_injection.stream_api, "get_stream_info", get_stream)
+    monkeypatch.setattr(
+        persona_injection.message_api, "get_messages_before_time_in_chat", query
+    )
+    payloads = [LLMPayload(ROLE.USER, Text("原始输入"))]
+    if request_kind != "non_actor":
+        payloads[0].content.append(Text("[engram_memory_guide]\n指引"))
+    payloads[0].content.append(Text("[engram_memory_private_persona]\n私聊已有印象"))
+    if request_kind == "non_actor":
+        payloads[0].content.pop()
+    original = _text_parts(payloads[0])
+    params = {
+        "request_name": {
+            "diary": "engram_chat_diary_update",
+            "persona": "engram_vnext_persona_update",
+        }.get(request_kind, "example_chat"),
+        "meta_data": {"stream_id": "stream-private"},
+        "payloads": payloads,
+    }
+    await persona_injection.VNextGroupPersonaEventHandler(plugin).execute(
+        EventType.BEFORE_LLM_REQUEST, params
+    )
+    assert _text_parts(params["payloads"][0]) == original
+    lookup.assert_not_awaited()
+    query.assert_not_awaited()
+    if request_kind != "private":
+        get_stream.assert_not_awaited()
+
+
 def test_reminder_payload_is_scoped_to_stream_and_removal_is_local(
     reminder_store: SystemReminderStore,
 ) -> None:

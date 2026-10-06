@@ -24,7 +24,9 @@ class DiaryPolicy(SectionBase):
         default=100, ge=1, description="尚未处理的实际聊天消息条数"
     )
     context_days: int = Field(
-        default=7, ge=1, description="注入的最近自然日数，包含今天"
+        default=7,
+        ge=1,
+        description="聊天参考和日记整理的自然日窗口，包含当前或目标日期",
     )
 
     def is_due(self, *, message_count: int, elapsed_seconds: float) -> bool:

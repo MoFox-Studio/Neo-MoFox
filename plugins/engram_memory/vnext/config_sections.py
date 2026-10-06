@@ -104,6 +104,16 @@ class PromptInjectionSection(SectionBase):
         default=True,
         description="是否将记忆使用指引放到最新一轮输入；开启为动态 SystemReminder，关闭为固定 SystemReminder",
     )
+    group_persona_message_limit: int = Field(
+        default=50,
+        ge=1,
+        description="群聊自动人物印象选取参与者的最近消息条数，包含 Bot 消息",
+    )
+    group_persona_max_people: int = Field(
+        default=10,
+        ge=1,
+        description="群聊末尾自动注入的人物印象人数上限，暂无印象者同样计入",
+    )
 
 
 @config_section("vector", title="向量索引", tag="database")
