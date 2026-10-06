@@ -4,6 +4,8 @@
     "version": "1.0.0",
     "description": "命令驱动的 Booku 记忆系统插件，提供长期记忆工具 memory_command 和短期便签工具 temporary_memo。",
     "author": "MoFox Team",
+    "categories": ["tool"],
+    "tags": ["memory", "booku", "knowledge"],
     "dependencies": {
         "plugins": [],
         "components": []

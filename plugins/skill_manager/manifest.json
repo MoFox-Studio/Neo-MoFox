@@ -4,6 +4,8 @@
   "version": "1.1.0",
   "description": "Skill 管理器：索引本地 skill 目录并按需注入 SKILL.md/引用文档/脚本能力",
   "author": "MoFox Team",
+  "categories": ["tool"],
+  "tags": ["skill", "tool", "management"],
   "dependencies": {
     "plugins": [],
     "components": []

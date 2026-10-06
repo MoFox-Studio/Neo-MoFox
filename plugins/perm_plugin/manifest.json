@@ -5,6 +5,8 @@
     "description": "系统权限管理插件，提供聊天内 /perm 命令，供机器人主人查询和修改用户权限",
     "author": "MoFox Team",
     "license": "GPL-3.0",
+    "categories": ["moderation"],
+    "tags": ["permission", "moderation", "admin"],
     "dependencies": {
         "plugins": [],
         "components": []

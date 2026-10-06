@@ -5,6 +5,8 @@
     "description": "实用命令集合插件，收纳一组常用的运维/管理类命令，目前提供 /清空上下文",
     "author": "MoFox Team",
     "license": "GPL-3.0",
+    "categories": ["tool"],
+    "tags": ["utility", "command", "admin"],
     "dependencies": {
         "plugins": [],
         "components": []

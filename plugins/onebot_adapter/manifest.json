@@ -4,6 +4,8 @@
     "version": "2.0.0",
     "description": "OneBot 11 适配器（基于 Neo-MoFox 重写）",
     "author": "MoFox Team",
+    "categories": ["tool"],
+    "tags": ["onebot", "adapter", "qq"],
     "dependencies": {
         "plugins": [],
         "components": []
