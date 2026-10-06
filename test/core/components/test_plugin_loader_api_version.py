@@ -4,14 +4,17 @@
 ``_check_api_version_compatibility`` 的逐模块语义化版本校验、
 ``_check_core_version_compatibility`` 的核心版本校验，
 以及 ``_prune_unloadable_plugins`` 在版本不兼容时的剔除行为。
+官方插件的真实清单在当前核心下必须通过版本和依赖校验。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.app.plugin_system.api import PLUGIN_API_VERSIONS
-from src.core.components.loader import PluginLoader, PluginManifest
+from src.core.components.loader import PluginLoader, PluginManifest, load_manifest
 
 
 def _manifest(
@@ -130,6 +133,23 @@ def test_dict_api_version_current_versions_compatible() -> None:
     )
     assert ok is True
     assert "兼容" in reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plugin_name",
+    ["default_chatter", "neo_default_chatter", "perm_plugin", "utility_commands"],
+)
+async def test_official_stream_api_plugin_manifests_are_loadable(plugin_name: str) -> None:
+    """官方插件的真实清单应被当前加载器接受，不启动插件或写入数据。"""
+    plugin_path = Path(__file__).resolve().parents[3] / "plugins" / plugin_name
+    manifest = await load_manifest(str(plugin_path))
+    assert manifest is not None
+    assert manifest.name == plugin_name
+    loader = PluginLoader()
+    loadable = loader._prune_unloadable_plugins({plugin_name: manifest})
+    assert plugin_name in loadable, loader.get_failed_plugins()
+    assert loader.get_failed_plugins() == {}
 
 
 def test_send_api_minor_version_accepts_existing_plugins() -> None:

@@ -1,7 +1,7 @@
 {
     "name": "default_chatter",
     "display_name": "默认聊天器",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "description": "默认聊天组件，提供基础的消息处理和回复功能",
     "author": "MoFox Team",
     "dependencies": {
@@ -45,7 +45,7 @@
         "log_api": "1.0.0",
         "prompt_api": "1.0.0",
         "send_api": "1.0.0",
-        "stream_api": "1.0.0"
+        "stream_api": "2.0.0"
     },
     "min_core_version": "1.2.0-rc.2",
     "python_dependencies": [
