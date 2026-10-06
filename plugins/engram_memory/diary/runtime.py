@@ -124,7 +124,9 @@ class DiaryRuntime:
                 if details is None:
                     continue
                 policy = self.config.policy_for(details.chat_type)
-                if not policy.enabled or not await self.service.source.allowed(details):
+                if not policy.enabled or not await self.service.source.allowed(
+                    details, collection=self.service.source.collection_config(details)
+                ):
                     self._delete_reminder(stream_id)
                     continue
                 progress = await self.service.prepare_stream(details, self._clock())
@@ -173,6 +175,7 @@ class DiaryRuntime:
         """只统计当前许可的实际消息，达到阈值即可停止计数。"""
         count = 0
         threshold = self.config.policy_for(details.chat_type).message_threshold
+        collection = self.service.source.collection_config(details)
         while progress.cursor_id < through_id:
             rows = await self.service.source.page(
                 progress, through_id, limit=self.config.batch_messages
@@ -180,7 +183,9 @@ class DiaryRuntime:
             if not rows:
                 break
             for row in rows:
-                if await self.service.source.allowed(details, row):
+                if await self.service.source.allowed(
+                    details, row, collection=collection
+                ):
                     count += 1
                     if count >= threshold:
                         return count
@@ -226,7 +231,9 @@ class DiaryRuntime:
         if details is None:
             return ""
         policy = self.config.policy_for(details.chat_type)
-        if not policy.enabled or not await self.service.source.allowed(details):
+        if not policy.enabled or not await self.service.source.allowed(
+            details, collection=self.service.source.collection_config(details)
+        ):
             return ""
         today = datetime.fromtimestamp(self._clock(), self.service.zone).date()
         since = (today - timedelta(days=policy.context_days - 1)).isoformat()

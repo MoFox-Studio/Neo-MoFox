@@ -132,18 +132,23 @@ class DiarySource:
             user_id,
         )
 
+    def collection_config(self, details: StreamDetails) -> CollectionConfig | None:
+        """读取当前采集配置，供一次消息检查共用。"""
+        if details.platform != "qq":
+            return None
+        return cast(CollectionConfig | None, config_api.get_config("snowluma_adapter"))
+
     async def allowed(
         self,
         details: StreamDetails,
         message: Mapping[str, Any] | None = None,
+        *,
+        collection: CollectionConfig | None,
     ) -> bool:
-        """未知策略拒绝回填；私聊始终以对话对象而非 Bot 账号判断。"""
-        if details.platform != "qq":
+        """按传入配置判断许可；私聊始终以对话对象而非 Bot 账号判断。"""
+        if details.platform != "qq" or collection is None:
             return False
-        loaded = config_api.get_config("snowluma_adapter")
-        if loaded is None:
-            return False
-        features = cast(CollectionConfig, loaded).features
+        features = collection.features
         user_id = (
             details.user_id
             if details.chat_type == "private"
@@ -324,7 +329,12 @@ class DiarySource:
             int(row["id"]): row for row in rows if int(row["id"]) < int(first["id"])
         }
         ordered = [preceding[row_id] for row_id in sorted(preceding)][-limit:]
-        return [row for row in ordered if await self.allowed(details, row)]
+        collection = self.collection_config(details)
+        return [
+            row
+            for row in ordered
+            if await self.allowed(details, row, collection=collection)
+        ]
 
     async def formatted(
         self,
@@ -430,7 +440,12 @@ class DiaryService:
             ):
                 break
             batch.append(row)
-        allowed = [row for row in batch if await self.source.allowed(details, row)]
+        collection = self.source.collection_config(details)
+        allowed = [
+            row
+            for row in batch
+            if await self.source.allowed(details, row, collection=collection)
+        ]
         old = await self.store.get_day(details.stream_id, day)
         end_id = int(batch[-1]["id"])
         diary = None
@@ -478,12 +493,13 @@ class DiaryService:
                     ),
                     now,
                 )
+        collection = self.source.collection_config(details)
         if not self.config.policy_for(
             details.chat_type
-        ).enabled or not await self.source.allowed(details):
+        ).enabled or not await self.source.allowed(details, collection=collection):
             raise RuntimeError("生成期间聊天日记已关闭或采集许可已撤回")
         for row in allowed:
-            if not await self.source.allowed(details, row):
+            if not await self.source.allowed(details, row, collection=collection):
                 raise RuntimeError("生成期间发言者的采集许可已变化")
         await self.store.commit_batch(
             progress,

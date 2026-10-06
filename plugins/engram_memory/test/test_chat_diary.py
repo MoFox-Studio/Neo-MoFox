@@ -10,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import event
@@ -22,7 +22,7 @@ from ..diary import runtime as diary_runtime
 from ..diary import service as diary_service
 from ..diary.config import DiaryConfig
 from ..diary.events import ChatDiaryEventHandler
-from ..diary.service import DiaryService, DiarySource, StreamDetails
+from ..diary.service import CollectionConfig, DiaryService, DiarySource, StreamDetails
 from ..diary.store import Diary, DiaryStore, Progress
 from ..vnext.framework_bridge import ManagedTaskHandle
 
@@ -136,7 +136,17 @@ class ChatSource(DiarySource):
         """返回测试流的公开路由身份。"""
         return self.stream_details.get(stream_id)
 
-    async def allowed(self, details: StreamDetails, message: object = None) -> bool:
+    def collection_config(self, details: StreamDetails) -> CollectionConfig | None:
+        """测试消息源不读取外部配置。"""
+        return None
+
+    async def allowed(
+        self,
+        details: StreamDetails,
+        message: object = None,
+        *,
+        collection: CollectionConfig | None,
+    ) -> bool:
         """模拟当前采集许可。"""
         return self.permitted
 
@@ -927,25 +937,66 @@ async def test_diary_existing_collection_config_without_external_service(
     source = DiarySource()
     group = StreamDetails("group-stream", "qq", "group", "123", "")
     private = StreamDetails("private-stream", "qq", "private", "", "101")
-    assert await source.allowed(group)
-    assert not await source.allowed(group, {"sender_id": "789"})
+    collection = source.collection_config(group)
+    assert await source.allowed(group, collection=collection)
+    assert not await source.allowed(group, {"sender_id": "789"}, collection=collection)
     assert not await source.allowed(
-        StreamDetails("other-group", "qq", "group", "124", "")
+        StreamDetails("other-group", "qq", "group", "124", ""), collection=collection
     )
-    assert await source.allowed(private, {"sender_id": "bot"})
+    assert await source.allowed(private, {"sender_id": "bot"}, collection=collection)
     assert not await source.allowed(
-        StreamDetails("blocked-private", "qq", "private", "", "456")
+        StreamDetails("blocked-private", "qq", "private", "", "456"),
+        collection=collection,
     )
     features.private_list_type = "whitelist"
     features.private_list = [101]
-    assert await source.allowed(private)
+    assert await source.allowed(private, collection=collection)
     features.ban_user_id.append(101)
-    assert not await source.allowed(private)
+    assert not await source.allowed(private, collection=collection)
     monkeypatch.setattr(diary_service.config_api, "get_config", lambda name: None)
-    assert not await source.allowed(group)
+    assert not await source.allowed(group, collection=source.collection_config(group))
     assert not await source.allowed(
-        StreamDetails("unknown-platform", "other", "group", "123", "")
+        StreamDetails("unknown-platform", "other", "group", "123", ""),
+        collection=collection,
     )
+
+
+@pytest.mark.asyncio
+async def test_diary_count_reads_collection_config_once(
+    diary_path: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """分页计数共用一次许可读取，下一次计数重新读取当前封禁名单。"""
+    features = SimpleNamespace(
+        group_list_type="whitelist",
+        group_list=[123],
+        private_list_type="blacklist",
+        private_list=[],
+        ban_user_id=[789],
+    )
+    get_config = Mock(return_value=SimpleNamespace(features=features))
+    monkeypatch.setattr(diary_service.config_api, "get_config", get_config)
+    config = DiaryConfig(database_path=diary_path, batch_messages=40)
+    config.group.message_threshold = 100
+    source = DiarySource()
+    source._windows["s1"] = [
+        {
+            **chat_row(index, "2026-01-01T08:00:00+08:00"),
+            "sender_id": "789" if index % 2 == 0 else "101",
+        }
+        for index in range(1, 251)
+    ]
+    service = DiaryService(config, DiaryStore(diary_path), source=source)
+    runtime = diary_runtime.DiaryRuntime(config, service=service)
+    details = StreamDetails("s1", "qq", "group", "123", "")
+    progress = Progress("s1", "group", 0, 0, 0, 1, None, "")
+    assert await runtime._count_allowed(details, progress, 250) == 100
+    get_config.assert_called_once_with("snowluma_adapter")
+
+    features.ban_user_id.append(101)
+    get_config.reset_mock()
+    assert await runtime._count_allowed(details, progress, 250) == 0
+    get_config.assert_called_once_with("snowluma_adapter")
 
 
 @pytest.mark.parametrize("datetime_messages", [False, True])
