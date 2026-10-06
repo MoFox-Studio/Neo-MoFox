@@ -27,6 +27,12 @@ UserQueryHelper 提供统一用户查询与更新能力，封装 PersonInfo、Ch
 - get_or_create_person
 不存在时创建用户并初始化交互统计。
 
+- get_person(platform, user_id)
+已知平台和平台用户 ID 时，只读查询人物；不存在时返回 None。
+
+- get_person_by_id(person_id)
+已知内部人物 ID 时，只读查询人物；不存在时返回 None，不创建记录，也不更新任何字段。聊天流中的 person_id 可以直接用于此查询，返回记录的 user_id 才是平台用户 ID。插件使用公开入口 `src.app.plugin_system.api.person_api.get_person_by_id`，不要直接调用内部查询辅助类或 CRUD。
+
 - update_person_info
 更新 nickname/cardname，不存在时自动创建。
 

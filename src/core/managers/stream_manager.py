@@ -418,7 +418,10 @@ class StreamManager:
         stream_id: str,
         max_messages: int | None = None,
     ) -> "StreamContext":
-        """从数据库加载 StreamContext。
+        """按原发送时间加载上下文，并应用上下文清空边界。
+
+        有数量限制时选最近的记录，再按时间正序放入历史。
+        时间相同时按数据库自增主键排序，平台消息 ID 不参与排序。
 
         Args:
             stream_id: 流ID
@@ -445,7 +448,7 @@ class StreamManager:
         query = QueryBuilder(self._Messages).filter(stream_id=stream_id)
         if stream_record.context_cleared_at is not None:
             query = query.filter(time__gt=stream_record.context_cleared_at)
-        query = query.order_by("-id")
+        query = query.order_by("-time", "-id")
         if max_messages is not None:
             query = query.limit(max_messages)
         messages_records = await query.all()
@@ -535,11 +538,14 @@ class StreamManager:
 
             return db_message
 
-    async def add_sent_message_to_history(
+    async def add_message_to_history(
         self,
         message: "Message",
+        direction: str = "outgoing",
+        *,
+        silent: bool = False,
     ) -> "Messages":
-        """添加“已发送消息”到流历史消息。
+        """添加进站/出站历史消息到流。
 
         与 ``add_message`` 不同：
         - 该方法会将消息直接写入 ``history_messages``
@@ -547,19 +553,40 @@ class StreamManager:
 
         Args:
             message: 运行时消息对象
+            direction: 消息方向，``"outgoing"`` 表示出站消息（bot 发送，
+                person_id 固定记为 ``"bot"``），``"incoming"`` 表示进站消息
+                （按消息发送者解析 person_id）
+            silent: 静默补录，不改变未读或活跃时间；按原时间维护历史，
+                清空边界之前的消息只持久化
 
         Returns:
             Messages: 创建或已存在的数据库消息记录
+
+        Raises:
+            ValueError: direction 不是 "incoming" 或 "outgoing"
+
+        Examples:
+            >>> db_msg = await sm.add_message_to_history(message, direction="incoming")
         """
+        if direction not in ("incoming", "outgoing"):
+            raise ValueError(
+                f"direction 必须是 'incoming' 或 'outgoing'，收到: {direction!r}"
+            )
+
         stream_id = message.stream_id
 
         lock = self._get_stream_lock(stream_id)
         async with lock:
 
+            if direction == "outgoing":
+                person_id: str | None = "bot"
+            else:
+                person_id = self._resolve_person_id_from_message(message)
+
             message_data = {
                 "message_id": message.message_id,
                 "stream_id": stream_id,
-                "person_id": "bot",
+                "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
                 "content": _serialize_content_for_db(message.content),
@@ -573,10 +600,34 @@ class StreamManager:
                 platform=message.platform,
                 stream_id=stream_id,
             )
+            created = db_message is None
             if not db_message:
                 db_message = await self._messages_crud.create(message_data)
 
             chat_stream = self._streams.get(stream_id)
+            if silent:
+                if chat_stream:
+                    context = chat_stream.context
+                    known = any(
+                        item.message_id == message.message_id
+                        for item in [*context.history_messages, *context.unread_messages]
+                    )
+                    if not known:
+                        stream_record = await self._streams_crud.get_by(stream_id=stream_id)
+                        cleared_at = stream_record.context_cleared_at if stream_record else None
+                        if not created:
+                            message = await self._db_message_to_runtime(
+                                db_message, chat_type=chat_stream.chat_type,
+                            )
+                        if cleared_at is None or message.time > cleared_at:
+                            context.history_messages.append(message)
+                            context.history_messages.sort(key=lambda item: item.time)
+                            if context.max_history_messages > 0:
+                                context.history_messages = context.history_messages[
+                                    -context.max_history_messages:
+                                ]
+                return db_message
+
             if chat_stream:
                 context = chat_stream.context
 
@@ -694,12 +745,15 @@ class StreamManager:
         limit: int = 100,
         offset: int = 0,
     ) -> list["Message"]:
-        """获取流的消息（支持分页）。
+        """按原发送时间查询一页历史，并按正序返回该页。
+
+        先按 time、数据库 id 倒序分页，再反转结果。
+        新增或补录消息可能改变 offset 对应的记录，因此 offset 不是固定游标。
 
         Args:
             stream_id: 流ID
             limit: 最大返回消息数
-            offset: 跳过的消息数
+            offset: 从最新记录开始跳过的消息数
 
         Returns:
             list[Message]: 运行时消息对象列表
@@ -707,14 +761,8 @@ class StreamManager:
         Examples:
             >>> messages = await sm.get_stream_messages("abc123", limit=50, offset=0)
         """
-        messages_records = (
-            await QueryBuilder(self._Messages)
-            .filter(stream_id=stream_id)
-            .order_by("-id")
-            .limit(limit)
-            .offset(offset)
-            .all()
-        )
+        query = QueryBuilder(self._Messages).filter(stream_id=stream_id).order_by("-time", "-id")
+        messages_records = await query.limit(limit).offset(offset).all()
 
         return [
             await self._db_message_to_runtime(msg) for msg in reversed(messages_records) # type: ignore

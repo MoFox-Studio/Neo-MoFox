@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 from src.app.plugin_system.api import message_api
@@ -137,3 +140,115 @@ async def test_get_person_ids_from_messages_returns_sorted_unique() -> None:
     result = await message_api.get_person_ids_from_messages(messages)
 
     assert result == ["p1", "p2"]
+
+
+# =============================================================================
+# 消息信封与消息互转
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_envelope_to_message_delegates_to_converter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """envelope_to_message 应委托给 MessageConverter.envelope_to_message。"""
+    from mofox_wire import MessageEnvelope
+
+    expected = object()
+    fake_converter = SimpleNamespace(
+        envelope_to_message=AsyncMock(return_value=expected)
+    )
+    monkeypatch.setattr(message_api, "_get_message_converter", lambda: fake_converter)
+
+    envelope: MessageEnvelope = {
+        "direction": "incoming",
+        "message_info": {
+            "platform": "qq",
+            "message_id": "m1",
+            "time": 1000.0,
+            "user_info": {
+                "platform": "qq",
+                "user_id": "u1",
+                "user_nickname": "Alice",
+            },
+        },
+        "message_segment": [{"type": "text", "data": "hello"}],
+    }
+
+    result = await message_api.envelope_to_message(envelope)
+
+    assert result is expected
+    fake_converter.envelope_to_message.assert_awaited_once_with(
+        envelope, recognize_media=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_envelope_to_message_forwards_recognize_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """envelope_to_message 应透传媒体识别开关。"""
+    fake_converter = SimpleNamespace(envelope_to_message=AsyncMock())
+    monkeypatch.setattr(message_api, "_get_message_converter", lambda: fake_converter)
+
+    await message_api.envelope_to_message({}, recognize_media=False)  # type: ignore[arg-type]
+
+    fake_converter.envelope_to_message.assert_awaited_once_with(
+        {}, recognize_media=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_envelope_to_message_rejects_non_dict() -> None:
+    """envelope 非 dict 时应抛出 TypeError。"""
+    with pytest.raises(TypeError, match="envelope 必须是 MessageEnvelope 或 dict"):
+        await message_api.envelope_to_message("not-an-envelope")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_message_to_envelope_delegates_to_converter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """message_to_envelope 应委托给 MessageConverter.message_to_envelope。"""
+    from src.core.models.message import Message
+
+    expected = {"direction": "outgoing"}
+    fake_converter = SimpleNamespace(
+        message_to_envelope=AsyncMock(return_value=expected)
+    )
+    monkeypatch.setattr(message_api, "_get_message_converter", lambda: fake_converter)
+
+    message = Message(
+        message_id="m1",
+        content="hello",
+        processed_plain_text="hello",
+        platform="qq",
+        stream_id="s1",
+    )
+
+    result = await message_api.message_to_envelope(message)
+
+    assert result == expected
+    fake_converter.message_to_envelope.assert_awaited_once_with(message)
+
+
+@pytest.mark.asyncio
+async def test_message_to_envelope_rejects_non_message() -> None:
+    """message 非 Message 类型时应抛出 TypeError。"""
+    with pytest.raises(TypeError, match="message 必须是 Message 类型"):
+        await message_api.message_to_envelope({"message_id": "m1"})  # type: ignore[arg-type]
+
+
+def test_get_message_converter_returns_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_get_message_converter 应返回缓存的 MessageConverter 单例。"""
+    from src.core.transport.message_receive.converter import MessageConverter
+
+    monkeypatch.setattr(message_api, "_message_converter", None)
+
+    first = message_api._get_message_converter()
+    second = message_api._get_message_converter()
+
+    assert isinstance(first, MessageConverter)
+    assert first is second

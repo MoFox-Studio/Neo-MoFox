@@ -156,6 +156,34 @@ async def test_image_placeholder_still_injects_image_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recognize_media_false_skips_manager_but_preserves_parsed_media() -> None:
+    """关闭媒体识别时仍解析媒体并注入哈希，但不调用媒体管理器。"""
+    mock_manager, patch_get = _patch_manager()
+    with patch_get:
+        message = await MessageConverter().envelope_to_message(
+            _make_envelope([{"type": "image", "data": _RAW_BASE64}]),
+            recognize_media=False,
+        )
+
+    expected_hash = compute_media_hash(_RAW_BASE64)
+    assert message.extra["media"][0]["image_id"] == expected_hash
+    assert message.processed_plain_text == "[图片]"
+    mock_manager.recognize_media.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_recognize_media_defaults_to_enabled() -> None:
+    """默认转换仍执行媒体识别。"""
+    mock_manager, patch_get = _patch_manager()
+    with patch_get:
+        await MessageConverter().envelope_to_message(
+            _make_envelope([{"type": "image", "data": _RAW_BASE64}])
+        )
+
+    mock_manager.recognize_media.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_emoji_placeholder_still_injects_image_id() -> None:
     """表情包占位符保持既有行为：注入 image_id。"""
     _, patch_get = _patch_manager(recognize_return=None)
