@@ -1,9 +1,11 @@
+"""聊天流创建、历史写入和上下文加载的行为测试。"""
+
 from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -179,6 +181,9 @@ async def test_build_stream_from_database_includes_bot_info(monkeypatch) -> None
     assert stream is not None
     assert stream.bot_id == "10001"
     assert stream.bot_nickname == "MoFox"
+    manager.load_stream_context.assert_awaited_once_with(
+        "stream-db-001", max_messages=100, order_by="time"
+    )
     adapter_manager.get_bot_info_by_platform.assert_awaited_once_with("qq")
 
 
@@ -342,7 +347,8 @@ async def test_load_stream_context_does_not_query_stream_info_per_message(monkey
         def filter(self, **_kwargs):
             return self
 
-        def order_by(self, *_args):
+        def order_by(self, *fields):
+            assert fields == ("-id",)
             return self
 
         def limit(self, _limit):
@@ -365,6 +371,187 @@ async def test_load_stream_context_does_not_query_stream_info_per_message(monkey
 
     assert len(context.history_messages) == 3
     manager.get_stream_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("order_by", "offset", "limit", "expected_ids"),
+    [("id", 1, 2, [2, 3]), ("time", 2, 2, [1, 3])],
+)
+async def test_get_stream_messages_order_and_pagination(
+    monkeypatch, order_by: str, offset: int, limit: int, expected_ids: list[int]
+) -> None:
+    """按 ID 或时间排序后分页，并以正序返回所选消息。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    records = [
+        SimpleNamespace(id=1, time=10.0),
+        SimpleNamespace(id=2, time=30.0),
+        SimpleNamespace(id=3, time=20.0),
+        SimpleNamespace(id=4, time=30.0),
+    ]
+
+    class _FakeQuery:
+        def __init__(self) -> None:
+            self.order_fields: tuple[str, ...] = ()
+            self.page_limit = 0
+            self.page_offset = 0
+
+        def filter(self, **_kwargs):
+            return self
+
+        def order_by(self, *fields: str):
+            self.order_fields = fields
+            return self
+
+        def limit(self, value: int):
+            self.page_limit = value
+            return self
+
+        def offset(self, value: int):
+            self.page_offset = value
+            return self
+
+        async def all(self):
+            if self.order_fields == ("-time", "-id"):
+                ordered = sorted(records, key=lambda item: (item.time, item.id), reverse=True)
+            else:
+                ordered = sorted(records, key=lambda item: item.id, reverse=True)
+            return ordered[self.page_offset : self.page_offset + self.page_limit]
+
+    query = _FakeQuery()
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.QueryBuilder", lambda _model: query
+    )
+    manager._db_message_to_runtime = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda record: record.id
+    )
+
+    messages = await manager.get_stream_messages(
+        "stream-order", limit=limit, offset=offset, order_by=order_by  # type: ignore[arg-type]
+    )
+
+    assert messages == expected_ids
+    assert query.page_limit == limit
+    assert query.page_offset == offset
+
+
+@pytest.mark.asyncio
+async def test_get_stream_messages_default_preserves_id_order() -> None:
+    """默认读取仍按 ID 分页并正序返回。"""
+    from src.core.managers.stream_manager import StreamManager
+    from unittest.mock import patch
+
+    manager = StreamManager()
+    records = [SimpleNamespace(id=2), SimpleNamespace(id=1)]
+
+    class _FakeQuery:
+        def filter(self, **_kwargs):
+            return self
+
+        def order_by(self, *fields: str):
+            assert fields == ("-id",)
+            return self
+
+        def limit(self, _limit: int):
+            return self
+
+        def offset(self, _offset: int):
+            return self
+
+        async def all(self):
+            return records
+
+    with patch(
+        "src.core.managers.stream_manager.QueryBuilder", lambda _model: _FakeQuery()
+    ):
+        manager._db_message_to_runtime = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda record: record.id
+        )
+        assert await manager.get_stream_messages("stream-default") == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_load_stream_context_time_order_respects_clear_boundary(monkeypatch) -> None:
+    """时间排序冷加载应用清空边界，并按时间正序返回。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    manager._streams_crud.get_by = AsyncMock(
+        return_value=SimpleNamespace(
+            stream_id="stream-clear-time",
+            chat_type="private",
+            context_cleared_at=15.0,
+        )
+    )
+    records = [
+        SimpleNamespace(id=1, time=10.0),
+        SimpleNamespace(id=2, time=20.0),
+        SimpleNamespace(id=3, time=20.0),
+        SimpleNamespace(id=4, time=30.0),
+    ]
+
+    class _FakeQuery:
+        def __init__(self) -> None:
+            self.filters: list[dict[str, object]] = []
+            self.order_fields: tuple[str, ...] = ()
+            self.page_limit: int | None = None
+
+        def filter(self, **kwargs):
+            self.filters.append(kwargs)
+            return self
+
+        def order_by(self, *fields: str):
+            self.order_fields = fields
+            return self
+
+        def limit(self, value: int):
+            self.page_limit = value
+            return self
+
+        async def all(self):
+            boundary = self.filters[1]["time__gt"]
+            selected = [record for record in records if record.time > boundary]
+            selected.sort(key=lambda item: (item.time, item.id), reverse=True)
+            if self.page_limit is not None:
+                selected = selected[: self.page_limit]
+            return selected
+
+    query = _FakeQuery()
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.QueryBuilder", lambda _model: query
+    )
+    monkeypatch.setattr(
+        "src.core.managers.stream_manager.get_core_config",
+        lambda: SimpleNamespace(chat=SimpleNamespace(max_history_messages=60)),
+    )
+    manager._db_message_to_runtime = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda record, **_kwargs: record.id
+    )
+
+    context = await manager.load_stream_context(
+        "stream-clear-time", max_messages=3, order_by="time"
+    )
+
+    assert query.order_fields == ("-time", "-id")
+    assert context.history_messages == [2, 3, 4]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["load_stream_context", "get_stream_messages"])
+async def test_stream_manager_rejects_invalid_order_before_io(method_name: str) -> None:
+    """未知排序值应在数据库查询前被拒绝。"""
+    from src.core.managers.stream_manager import StreamManager
+
+    manager = StreamManager()
+    manager._streams_crud.get_by = AsyncMock()
+    with pytest.raises(ValueError, match="order_by 必须是 'id' 或 'time'"):
+        if method_name == "load_stream_context":
+            await manager.load_stream_context("stream-invalid", order_by="bad")  # type: ignore[arg-type]
+        else:
+            await manager.get_stream_messages("stream-invalid", order_by="bad")  # type: ignore[arg-type]
+    manager._streams_crud.get_by.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -461,10 +648,13 @@ def _make_history_manager(stream_id: str, context) -> "StreamManager":
     manager = StreamManager()
     manager._messages_crud.get_by = AsyncMock(return_value=None)
     manager._messages_crud.create = AsyncMock(return_value=SimpleNamespace(id=1))
+    manager._streams_crud.get_by = AsyncMock(
+        return_value=SimpleNamespace(context_cleared_at=None)
+    )
     manager._update_stream_active_time = AsyncMock()  # type: ignore[method-assign]
     manager._streams[stream_id] = SimpleNamespace(
         context=context,
-        update_active_time=lambda: None,
+        update_active_time=Mock(),
     )
     return manager
 
@@ -583,6 +773,121 @@ async def test_add_message_to_history_removes_duplicate_unread() -> None:
 
     assert context.unread_messages == []
     assert context.history_messages == [message]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["incoming", "outgoing"])
+async def test_silent_history_preserves_live_state(direction: str) -> None:
+    """静默补录与实时消息重叠时保留未读和当前处理状态。"""
+    from src.core.models.stream import StreamContext
+
+    stream_id = "stream-silent-overlap"
+    message = Message(
+        message_id="live-message",
+        content="live",
+        platform="qq",
+        stream_id=stream_id,
+        sender_id="example_user",
+        time=200.0,
+    )
+    context = StreamContext(
+        stream_id=stream_id,
+        unread_messages=[message],
+        current_message=message,
+        last_message_time=200.0,
+        triggering_user_id="example_user",
+        processing_message_id=message.message_id,
+        is_chatter_processing=True,
+    )
+    unread_messages = context.unread_messages
+    manager = _make_history_manager(stream_id, context)
+
+    await manager.add_message_to_history(message, direction=direction, silent=True)
+
+    assert context.unread_messages is unread_messages
+    assert context.unread_messages == [message]
+    assert context.history_messages == []
+    assert context.current_message is message
+    assert context.last_message_time == 200.0
+    assert context.triggering_user_id == "example_user"
+    assert context.processing_message_id == message.message_id
+    assert context.is_chatter_processing is True
+    manager._streams[stream_id].update_active_time.assert_not_called()
+    manager._update_stream_active_time.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("imported_time", "limit", "expected_times"),
+    [(100.0, 2, [150.0, 200.0]), (175.0, 2, [175.0, 200.0]),
+     (100.0, 0, [100.0, 150.0, 200.0])],
+)
+async def test_silent_history_retains_latest_by_time(
+    imported_time: float, limit: int, expected_times: list[float],
+) -> None:
+    """静默补录按原时间排序并仅裁剪较旧的内存历史。"""
+    from src.core.models.stream import StreamContext
+
+    stream_id = "stream-silent-order"
+    recent_messages = [
+        Message(message_id=f"recent-{timestamp}", content="recent", time=timestamp,
+                stream_id=stream_id, platform="qq")
+        for timestamp in [150.0, 200.0]
+    ]
+    context = StreamContext(
+        stream_id=stream_id,
+        max_history_messages=limit,
+        history_messages=recent_messages,
+    )
+    manager = _make_history_manager(stream_id, context)
+    imported = Message(
+        message_id="imported-message",
+        content="historical",
+        processed_plain_text="historical",
+        time=imported_time,
+        reply_to="prior-message",
+        stream_id=stream_id,
+        platform="qq",
+    )
+
+    await manager.add_message_to_history(imported, silent=True)
+
+    assert [message.time for message in context.history_messages] == expected_times
+    saved = manager._messages_crud.create.await_args.args[0]
+    assert saved["time"] == imported_time
+    assert saved["reply_to"] == "prior-message"
+    assert saved["processed_plain_text"] == "historical"
+    manager._streams[stream_id].update_active_time.assert_not_called()
+    manager._update_stream_active_time.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cleared_at", "visible"), [(None, True), (99.0, True), (100.0, False), (150.0, False)],
+)
+async def test_silent_history_respects_cleared_boundary(
+    cleared_at: float | None, visible: bool,
+) -> None:
+    """清空边界之前的补录只入库，不重新进入当前上下文。"""
+    from src.core.models.stream import StreamContext
+
+    stream_id = "stream-silent-cleared"
+    context = StreamContext(stream_id=stream_id)
+    manager = _make_history_manager(stream_id, context)
+    manager._streams_crud.get_by.return_value = SimpleNamespace(
+        context_cleared_at=cleared_at
+    )
+    message = Message(
+        message_id="historical-message", content="historical", time=100.0,
+        platform="qq", stream_id=stream_id,
+    )
+
+    await manager.add_message_to_history(message, silent=True)
+
+    manager._messages_crud.create.assert_awaited_once()
+    assert context.history_messages == ([message] if visible else [])
+    assert context.unread_messages == []
+    manager._update_stream_active_time.assert_not_awaited()
 
 
 def test_serialize_content_for_db_strips_small_binary_media_data() -> None:

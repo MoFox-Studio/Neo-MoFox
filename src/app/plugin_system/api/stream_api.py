@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from src.core.components.types import ChatType
 
@@ -143,12 +143,15 @@ async def build_stream_from_database(stream_id: str) -> "ChatStream | None":
 async def load_stream_context(
     stream_id: str,
     max_messages: int | None = None,
+    *,
+    order_by: Literal["id", "time"] = "id",
 ) -> "StreamContext":
     """从数据库加载 StreamContext。
 
     Args:
         stream_id: 聊天流 ID
         max_messages: 最大加载消息数，可选
+        order_by: 消息排序字段，``"id"`` 或 ``"time"``
 
     Returns:
         聊天流上下文
@@ -156,7 +159,9 @@ async def load_stream_context(
     _validate_non_empty(stream_id, "stream_id")
     if max_messages is not None:
         _validate_limit_offset(max_messages, "max_messages")
-    return await _get_stream_manager().load_stream_context(stream_id, max_messages)
+    return await _get_stream_manager().load_stream_context(
+        stream_id, max_messages, order_by=order_by
+    )
 
 
 async def add_message_to_stream(message: "Message") -> "Messages":
@@ -190,6 +195,8 @@ async def add_message(message: "Message") -> "Messages":
 async def add_message_to_history(
     message: "Message",
     direction: str = "outgoing",
+    *,
+    silent: bool = False,
 ) -> "Messages":
     """添加进站/出站历史消息到流。
 
@@ -200,6 +207,7 @@ async def add_message_to_history(
         message: 消息对象
         direction: 消息方向，``"outgoing"`` 表示出站（bot 发送），
             ``"incoming"`` 表示进站（用户发送）
+        silent: 静默补录，保留实时未读和活跃时间，按原时间维护历史并尊重清空边界
 
     Returns:
         入库后的消息记录
@@ -210,7 +218,7 @@ async def add_message_to_history(
     if message is None:
         raise ValueError("message 不能为空")
     return await _get_stream_manager().add_message_to_history(
-        message, direction=direction
+        message, direction=direction, silent=silent
     )
 
 
@@ -231,23 +239,28 @@ async def delete_stream(stream_id: str, delete_messages: bool = True) -> bool:
     )
 
 
-async def get_stream_info(stream_id: str) -> dict[str, Any] | None:
+async def get_stream_info(
+    stream_id: str, *, include_user_id: bool = False,
+) -> dict[str, Any] | None:
     """获取流的综合信息。
 
     Args:
         stream_id: 聊天流 ID
+        include_user_id: 包含私聊对端的原平台用户 ID，只读查询人物记录
 
     Returns:
         流信息字典，未找到则返回 None
     """
     _validate_non_empty(stream_id, "stream_id")
-    return await _get_stream_manager().get_stream_info(stream_id)
+    return await _get_stream_manager().get_stream_info(stream_id, include_user_id=include_user_id)
 
 
 async def get_stream_messages(
     stream_id: str,
     limit: int = 100,
     offset: int = 0,
+    *,
+    order_by: Literal["id", "time"] = "id",
 ) -> list["Message"]:
     """获取流的消息（支持分页）。
 
@@ -255,6 +268,7 @@ async def get_stream_messages(
         stream_id: 聊天流 ID
         limit: 单页数量
         offset: 偏移量
+        order_by: 消息排序字段，``"id"`` 或 ``"time"``
 
     Returns:
         消息列表
@@ -266,6 +280,7 @@ async def get_stream_messages(
         stream_id=stream_id,
         limit=limit,
         offset=offset,
+        order_by=order_by,
     )
 
 

@@ -23,6 +23,14 @@ message_send 负责将 core 侧 Message 下发到目标适配器，并在发送�
 7. 调用 adapter._send_platform_message 真正下发。
 8. 发送成功后调用 StreamManager.add_message_to_history（出站方向）写入发送历史（剥离 base64 数据，保留媒体 ID 和上下文模式）。
 
+## 历史读取与信封转换
+
+`stream_api.load_stream_context` 和 `stream_api.get_stream_messages` 支持关键字参数 `order_by="id"` 或 `order_by="time"`，默认 `"id"`，保留现有调用与分页行为。时间模式按消息时间倒序选择分页记录，并按正序返回；时间相同时以数据库 ID 决定顺序。流从数据库自动重建时按时间加载，避免晚导入的旧消息因较大 ID 被当作最新消息。
+
+`stream_api.add_message_to_history(..., silent=True)` 可静默补录历史，不改变实时未读和活跃时间。
+
+`message_api.envelope_to_message(envelope, recognize_media=False)` 保留段解析、媒体哈希和回复关系处理，但跳过媒体管理器的识别、存储和事件阶段，因此不会触发 VLM、ASR 或媒体存储副作用。默认 `True` 保持原有识别行为。
+
 ## 插件媒体上下文
 
 `src.app.plugin_system.api.send_api.send_media` 统一发送图片、表情包、语音和视频。`context_mode` 决定该条媒体在后续聊天中的表达方式：

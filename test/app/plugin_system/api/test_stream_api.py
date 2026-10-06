@@ -81,6 +81,23 @@ class TestStreamAPI:
             result = await stream_api.load_stream_context("stream_123", max_messages=50)
             
             assert result == mock_context
+            mock_manager.load_stream_context.assert_awaited_once_with(
+                "stream_123", 50, order_by="id"
+            )
+
+    @pytest.mark.asyncio
+    async def test_load_stream_context_forwards_time_order(self) -> None:
+        """load_stream_context 应透传显式时间排序。"""
+        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
+            manager = MagicMock()
+            manager.load_stream_context = AsyncMock(return_value=MagicMock())
+            mock_get_mgr.return_value = manager
+
+            await stream_api.load_stream_context("stream_123", order_by="time")
+
+            manager.load_stream_context.assert_awaited_once_with(
+                "stream_123", None, order_by="time"
+            )
     
     @pytest.mark.asyncio
     async def test_add_message_to_stream(self) -> None:
@@ -110,7 +127,7 @@ class TestStreamAPI:
 
             assert result == mock_db_message
             mock_manager.add_message_to_history.assert_awaited_once_with(
-                mock_message, direction="outgoing"
+                mock_message, direction="outgoing", silent=False
             )
 
     @pytest.mark.asyncio
@@ -127,7 +144,37 @@ class TestStreamAPI:
 
             assert result == mock_db_message
             mock_manager.add_message_to_history.assert_awaited_once_with(
-                mock_message, direction="incoming"
+                mock_message, direction="incoming", silent=False
+            )
+
+    @pytest.mark.asyncio
+    async def test_add_message_to_history_forwards_silent(self) -> None:
+        """静默参数通过公开入口透传，不启用默认发送副作用。"""
+        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
+            manager = MagicMock()
+            manager.add_message_to_history = AsyncMock()
+            mock_get_mgr.return_value = manager
+            message = MagicMock(spec=Message)
+
+            await stream_api.add_message_to_history(message, direction="incoming", silent=True)
+
+            manager.add_message_to_history.assert_awaited_once_with(
+                message, direction="incoming", silent=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_stream_info_forwards_peer_lookup(self) -> None:
+        """对端查询选项通过公开入口透传，不要求插件读取内部模型。"""
+        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
+            manager = MagicMock()
+            manager.get_stream_info = AsyncMock(return_value={"user_id": "example_user"})
+            mock_get_mgr.return_value = manager
+
+            info = await stream_api.get_stream_info("example_stream", include_user_id=True)
+
+            assert info == {"user_id": "example_user"}
+            manager.get_stream_info.assert_awaited_once_with(
+                "example_stream", include_user_id=True,
             )
 
     @pytest.mark.asyncio
@@ -174,6 +221,9 @@ class TestStreamAPI:
             result = await stream_api.get_stream_messages("stream_123", limit=100)
             
             assert len(result) == 2
+            mock_manager.get_stream_messages.assert_awaited_once_with(
+                stream_id="stream_123", limit=100, offset=0, order_by="id"
+            )
     
     def test_clear_stream_cache(self) -> None:
         """测试清除流缓存。"""

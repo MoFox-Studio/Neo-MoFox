@@ -178,7 +178,24 @@ async def test_envelope_to_message_delegates_to_converter(
     result = await message_api.envelope_to_message(envelope)
 
     assert result is expected
-    fake_converter.envelope_to_message.assert_awaited_once_with(envelope)
+    fake_converter.envelope_to_message.assert_awaited_once_with(
+        envelope, recognize_media=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_envelope_to_message_forwards_recognize_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """envelope_to_message 应透传媒体识别开关。"""
+    fake_converter = SimpleNamespace(envelope_to_message=AsyncMock())
+    monkeypatch.setattr(message_api, "_get_message_converter", lambda: fake_converter)
+
+    await message_api.envelope_to_message({}, recognize_media=False)  # type: ignore[arg-type]
+
+    fake_converter.envelope_to_message.assert_awaited_once_with(
+        {}, recognize_media=False
+    )
 
 
 @pytest.mark.asyncio

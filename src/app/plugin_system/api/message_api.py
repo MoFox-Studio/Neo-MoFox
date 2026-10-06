@@ -923,14 +923,20 @@ def _get_message_converter() -> MessageConverter:
 	return _message_converter
 
 
-async def envelope_to_message(envelope: MessageEnvelope) -> Message:
+async def envelope_to_message(
+	envelope: MessageEnvelope,
+	*,
+	recognize_media: bool = True,
+) -> Message:
 	"""将消息信封（MessageEnvelope）转换为消息（Message）。
 
 	委托 transport 层 MessageConverter，与适配器接收路径保持一致：
 	媒体段会规范化 base64、注入媒体 ID，并按配置触发 VLM/ASR 识别。
+	recognize_media=False 时跳过媒体识别、存储及相关事件处理，不调用 VLM/ASR。
 
 	Args:
 		envelope: mofox-wire 消息信封
+		recognize_media: 是否执行媒体识别、存储与相关事件处理
 
 	Returns:
 		核心业务消息对象
@@ -941,7 +947,9 @@ async def envelope_to_message(envelope: MessageEnvelope) -> Message:
 	"""
 	if not isinstance(envelope, dict):
 		raise TypeError("envelope 必须是 MessageEnvelope 或 dict")
-	return await _get_message_converter().envelope_to_message(envelope)
+	return await _get_message_converter().envelope_to_message(
+		envelope, recognize_media=recognize_media
+	)
 
 
 async def message_to_envelope(message: Message) -> MessageEnvelope:
