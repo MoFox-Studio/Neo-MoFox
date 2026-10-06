@@ -144,10 +144,7 @@ async def load_stream_context(
     stream_id: str,
     max_messages: int | None = None,
 ) -> "StreamContext":
-    """按原发送时间加载聊天上下文，排除清空边界之前的消息。
-
-    有数量限制时先选最近的消息，再按时间正序返回。
-    同时间的消息按数据库自增主键排序，不按平台消息 ID 排序。
+    """从数据库加载 StreamContext。
 
     Args:
         stream_id: 聊天流 ID
@@ -196,22 +193,15 @@ async def add_message_to_history(
     *,
     silent: bool = False,
 ) -> "Messages":
-    """添加进站/出站历史消息到流。
-
-    将消息直接写入流的历史消息（history_messages），不会写入未读列表。
-    出站消息按 bot 身份入库；进站消息按消息发送者身份解析入库。
+    """添加进站或出站消息到流历史消息。
 
     Args:
         message: 消息对象
-        direction: 消息方向，``"outgoing"`` 表示出站（bot 发送），
-            ``"incoming"`` 表示进站（用户发送）
-        silent: 静默补录，保留实时未读和活跃时间，按原时间维护历史并尊重清空边界
+        direction: ``incoming`` 或 ``outgoing``
+        silent: 静默补录，不影响未读消息和活跃时间
 
     Returns:
         入库后的消息记录
-
-    Raises:
-        ValueError: message 为空，或 direction 不是 "incoming"/"outgoing"
     """
     if message is None:
         raise ValueError("message 不能为空")
@@ -240,9 +230,6 @@ async def delete_stream(stream_id: str, delete_messages: bool = True) -> bool:
 async def get_stream_info(stream_id: str) -> dict[str, Any] | None:
     """获取流的综合信息。
 
-    私聊人物以内部 person_id 关联。需要平台用户 ID 时，
-    使用 person_api.get_person_by_id() 查询对应人物。
-
     Args:
         stream_id: 聊天流 ID
 
@@ -258,15 +245,12 @@ async def get_stream_messages(
     limit: int = 100,
     offset: int = 0,
 ) -> list["Message"]:
-    """按原发送时间读取历史消息，支持从最新记录向前分页。
-
-    先按 time、数据库 id 倒序选择一页，再正序返回该页。
-    offset 表示跳过多少条较新的记录；新增或补录消息可能改变页的位置。
+    """获取流的消息（支持分页）。
 
     Args:
         stream_id: 聊天流 ID
         limit: 单页数量
-        offset: 从最新记录开始跳过的数量
+        offset: 偏移量
 
     Returns:
         消息列表

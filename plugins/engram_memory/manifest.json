@@ -1,7 +1,7 @@
 {
   "name": "engram_memory",
   "display_name": "Engram Memory",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "可追溯的正式记忆写入、修订与作废，支持检索、人物印象与自然闪回",
   "author": "MoFox Team",
   "categories": "tool",
@@ -36,7 +36,7 @@
     "database_api": "1.0.0",
     "event_api": "1.1.0",
     "llm_api": "1.1.0",
-    "stream_api": "1.0.0",
+    "stream_api": "2.0.0",
     "message_api": "1.0.0",
     "person_api": "1.0.0",
     "prompt_api": "1.0.0",

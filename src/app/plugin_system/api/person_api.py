@@ -153,20 +153,7 @@ async def get_person(
 
 
 async def get_person_by_id(person_id: str) -> "PersonInfo | None":
-    """按内部人物 ID 查询人物，不创建记录或更新任何字段。
-
-    聊天流返回的 person_id 可直接传入。该 ID 是内部关联标识，
-    不是平台用户 ID；平台用户 ID 从返回记录的 user_id 字段读取。
-
-    Args:
-        person_id: 内部人物 ID
-
-    Returns:
-        人物记录，不存在时返回 None
-
-    Raises:
-        ValueError: person_id 不是非空字符串
-    """
+    """按内部人物 ID 只读查询人物。"""
     _validate_non_empty(person_id, "person_id")
     return await _get_user_query_helper().get_person_by_id(person_id)
 

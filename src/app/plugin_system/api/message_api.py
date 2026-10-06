@@ -15,12 +15,11 @@ from src.core.models.message import Message
 from src.core.models.sql_alchemy import Messages, PersonInfo
 from src.kernel.db import QueryBuilder
 
+API_VERSION = "1.1.0"
+
 if TYPE_CHECKING:
 	from mofox_wire import MessageEnvelope
-
 	from src.core.transport.message_receive.converter import MessageConverter
-
-API_VERSION = "1.1.0"
 
 def _get_adapter_manager():
 	"""延迟获取 AdapterManager，避免导入时循环依赖。
@@ -901,20 +900,11 @@ async def filter_bot_messages(messages: list[dict[str, Any]]) -> list[dict[str, 
 	return await _apply_filter_bot(messages)
 
 
-# =============================================================================
-# 消息信封与消息互转
-# =============================================================================
+_message_converter: "MessageConverter | None" = None
 
 
-_message_converter: MessageConverter | None = None
-
-
-def _get_message_converter() -> MessageConverter:
-	"""延迟获取 MessageConverter 单例，避免导入时循环依赖。
-
-	Returns:
-		消息转换器实例
-	"""
+def _get_message_converter() -> "MessageConverter":
+	"""延迟获取消息转换器单例。"""
 	global _message_converter
 	if _message_converter is None:
 		from src.core.transport.message_receive.converter import MessageConverter
@@ -924,27 +914,11 @@ def _get_message_converter() -> MessageConverter:
 
 
 async def envelope_to_message(
-	envelope: MessageEnvelope,
+	envelope: "MessageEnvelope",
 	*,
 	recognize_media: bool = True,
 ) -> Message:
-	"""将消息信封（MessageEnvelope）转换为消息（Message）。
-
-	委托 transport 层 MessageConverter，与适配器接收路径保持一致：
-	媒体段会规范化 base64、注入媒体 ID，并按配置触发 VLM/ASR 识别。
-	recognize_media=False 时跳过媒体识别、存储及相关事件处理，不调用 VLM/ASR。
-
-	Args:
-		envelope: mofox-wire 消息信封
-		recognize_media: 是否执行媒体识别、存储与相关事件处理
-
-	Returns:
-		核心业务消息对象
-
-	Raises:
-		TypeError: envelope 不是 MessageEnvelope 或 dict
-		ValueError: envelope 缺少必要字段（message_info / message_segment）
-	"""
+	"""将消息信封转换为核心消息对象。"""
 	if not isinstance(envelope, dict):
 		raise TypeError("envelope 必须是 MessageEnvelope 或 dict")
 	return await _get_message_converter().envelope_to_message(
@@ -952,21 +926,8 @@ async def envelope_to_message(
 	)
 
 
-async def message_to_envelope(message: Message) -> MessageEnvelope:
-	"""将消息（Message）转换为消息信封（MessageEnvelope）。
-
-	委托 transport 层 MessageConverter，与发送路径保持一致：
-	按 message_type 构建媒体/文本段，补充 reply/at 段与目标用户、群组信息。
-
-	Args:
-		message: 核心业务消息对象
-
-	Returns:
-		mofox-wire 消息信封
-
-	Raises:
-		TypeError: message 不是 Message 类型
-	"""
+async def message_to_envelope(message: Message) -> "MessageEnvelope":
+	"""将核心消息对象转换为消息信封。"""
 	if not isinstance(message, Message):
 		raise TypeError("message 必须是 Message 类型")
 	return await _get_message_converter().message_to_envelope(message)

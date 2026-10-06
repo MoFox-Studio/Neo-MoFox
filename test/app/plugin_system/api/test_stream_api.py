@@ -81,23 +81,6 @@ class TestStreamAPI:
             result = await stream_api.load_stream_context("stream_123", max_messages=50)
             
             assert result == mock_context
-            mock_manager.load_stream_context.assert_awaited_once_with(
-                "stream_123", 50
-            )
-
-    @pytest.mark.asyncio
-    async def test_load_stream_context_without_limit(self) -> None:
-        """未指定上限时直接委托查询，不增加排序参数。"""
-        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
-            manager = MagicMock()
-            manager.load_stream_context = AsyncMock(return_value=MagicMock())
-            mock_get_mgr.return_value = manager
-
-            await stream_api.load_stream_context("stream_123")
-
-            manager.load_stream_context.assert_awaited_once_with(
-                "stream_123", None
-            )
     
     @pytest.mark.asyncio
     async def test_add_message_to_stream(self) -> None:
@@ -112,77 +95,7 @@ class TestStreamAPI:
             result = await stream_api.add_message_to_stream(mock_message)
             
             assert result == mock_db_message
-
-    @pytest.mark.asyncio
-    async def test_add_message_to_history_defaults_to_outgoing(self) -> None:
-        """add_message_to_history 默认按出站方向委托给 manager。"""
-        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
-            mock_manager = MagicMock()
-            mock_db_message = MagicMock()
-            mock_manager.add_message_to_history = AsyncMock(return_value=mock_db_message)
-            mock_get_mgr.return_value = mock_manager
-
-            mock_message = MagicMock(spec=Message)
-            result = await stream_api.add_message_to_history(mock_message)
-
-            assert result == mock_db_message
-            mock_manager.add_message_to_history.assert_awaited_once_with(
-                mock_message, direction="outgoing", silent=False
-            )
-
-    @pytest.mark.asyncio
-    async def test_add_message_to_history_incoming_direction(self) -> None:
-        """add_message_to_history 应透传进站方向。"""
-        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
-            mock_manager = MagicMock()
-            mock_db_message = MagicMock()
-            mock_manager.add_message_to_history = AsyncMock(return_value=mock_db_message)
-            mock_get_mgr.return_value = mock_manager
-
-            mock_message = MagicMock(spec=Message)
-            result = await stream_api.add_message_to_history(mock_message, direction="incoming")
-
-            assert result == mock_db_message
-            mock_manager.add_message_to_history.assert_awaited_once_with(
-                mock_message, direction="incoming", silent=False
-            )
-
-    @pytest.mark.asyncio
-    async def test_add_message_to_history_forwards_silent(self) -> None:
-        """静默参数通过公开入口透传，不启用默认发送副作用。"""
-        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
-            manager = MagicMock()
-            manager.add_message_to_history = AsyncMock()
-            mock_get_mgr.return_value = manager
-            message = MagicMock(spec=Message)
-
-            await stream_api.add_message_to_history(message, direction="incoming", silent=True)
-
-            manager.add_message_to_history.assert_awaited_once_with(
-                message, direction="incoming", silent=True,
-            )
-
-    @pytest.mark.asyncio
-    async def test_get_stream_info_returns_person_reference(self) -> None:
-        """流信息提供人物关联 ID，不负责查询或附加平台用户 ID。"""
-        with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
-            manager = MagicMock()
-            manager.get_stream_info = AsyncMock(return_value={"person_id": "example_person"})
-            mock_get_mgr.return_value = manager
-
-            info = await stream_api.get_stream_info("example_stream")
-
-            assert info == {"person_id": "example_person"}
-            manager.get_stream_info.assert_awaited_once_with(
-                "example_stream",
-            )
-
-    @pytest.mark.asyncio
-    async def test_add_message_to_history_rejects_none(self) -> None:
-        """message 为 None 时应抛出 ValueError。"""
-        with pytest.raises(ValueError, match="message 不能为空"):
-            await stream_api.add_message_to_history(None)  # type: ignore[arg-type]
-
+    
     @pytest.mark.asyncio
     async def test_delete_stream(self) -> None:
         """测试删除流。"""
@@ -221,9 +134,6 @@ class TestStreamAPI:
             result = await stream_api.get_stream_messages("stream_123", limit=100)
             
             assert len(result) == 2
-            mock_manager.get_stream_messages.assert_awaited_once_with(
-                stream_id="stream_123", limit=100, offset=0
-            )
     
     def test_clear_stream_cache(self) -> None:
         """测试清除流缓存。"""

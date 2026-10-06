@@ -545,7 +545,7 @@ class StreamManager:
         *,
         silent: bool = False,
     ) -> "Messages":
-        """添加进站/出站历史消息到流。
+        """添加进站或出站消息到流历史消息。
 
         与 ``add_message`` 不同：
         - 该方法会将消息直接写入 ``history_messages``
@@ -553,11 +553,8 @@ class StreamManager:
 
         Args:
             message: 运行时消息对象
-            direction: 消息方向，``"outgoing"`` 表示出站消息（bot 发送，
-                person_id 固定记为 ``"bot"``），``"incoming"`` 表示进站消息
-                （按消息发送者解析 person_id）
-            silent: 静默补录，不改变未读或活跃时间；按原时间维护历史，
-                清空边界之前的消息只持久化
+            direction: ``incoming`` 或 ``outgoing``
+            silent: 静默补录，不影响未读消息和活跃时间
 
         Returns:
             Messages: 创建或已存在的数据库消息记录
@@ -569,20 +566,18 @@ class StreamManager:
             >>> db_msg = await sm.add_message_to_history(message, direction="incoming")
         """
         if direction not in ("incoming", "outgoing"):
-            raise ValueError(
-                f"direction 必须是 'incoming' 或 'outgoing'，收到: {direction!r}"
-            )
+            raise ValueError("direction 必须是 'incoming' 或 'outgoing'")
 
         stream_id = message.stream_id
 
         lock = self._get_stream_lock(stream_id)
         async with lock:
 
-            if direction == "outgoing":
-                person_id: str | None = "bot"
-            else:
-                person_id = self._resolve_person_id_from_message(message)
-
+            person_id = (
+                "bot"
+                if direction == "outgoing"
+                else self._resolve_person_id_from_message(message)
+            )
             message_data = {
                 "message_id": message.message_id,
                 "stream_id": stream_id,
@@ -631,12 +626,12 @@ class StreamManager:
             if chat_stream:
                 context = chat_stream.context
 
-                # 移除同 ID 的未读消息，避免同一条消息同时出现在 unread/history
-                context.unread_messages = [
-                    msg
-                    for msg in context.unread_messages
-                    if msg.message_id != message.message_id
-                ]
+                if not silent:
+                    context.unread_messages = [
+                        msg
+                        for msg in context.unread_messages
+                        if msg.message_id != message.message_id
+                    ]
 
                 exists_in_history = any(
                     msg.message_id == message.message_id
@@ -645,9 +640,11 @@ class StreamManager:
                 if not exists_in_history:
                     context.add_history_message(message)
 
-                chat_stream.update_active_time()
+                if not silent:
+                    chat_stream.update_active_time()
 
-            await self._update_stream_active_time(stream_id)
+            if not silent:
+                await self._update_stream_active_time(stream_id)
 
             return db_message
 
@@ -761,8 +758,14 @@ class StreamManager:
         Examples:
             >>> messages = await sm.get_stream_messages("abc123", limit=50, offset=0)
         """
-        query = QueryBuilder(self._Messages).filter(stream_id=stream_id).order_by("-time", "-id")
-        messages_records = await query.limit(limit).offset(offset).all()
+        messages_records = (
+            await QueryBuilder(self._Messages)
+            .filter(stream_id=stream_id)
+            .order_by("-time", "-id")
+            .limit(limit)
+            .offset(offset)
+            .all()
+        )
 
         return [
             await self._db_message_to_runtime(msg) for msg in reversed(messages_records) # type: ignore

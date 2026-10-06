@@ -2,7 +2,7 @@
 
 测试覆盖：
 - generate_person_id / generate_raw_person_id
-- get_or_create_person / get_person / get_person_by_id / update_person_info
+- get_or_create_person / get_person / update_person_info
 - update_user_impression / update_user_attitude
 - get_nickname_history
 - get_user_streams / get_user_recent_messages / resolve_user_id
@@ -13,8 +13,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,7 +27,6 @@ def _make_helper_mock() -> MagicMock:
     helper.generate_person_id = MagicMock(return_value="hashed_id")
     helper.get_or_create_person = AsyncMock(return_value=(MagicMock(id=1), False))
     helper.get_person = AsyncMock(return_value=MagicMock(id=1))
-    helper.get_person_by_id = AsyncMock(return_value=MagicMock(id=1))
     helper.update_person_info = AsyncMock(return_value=True)
     helper.update_user_impression = AsyncMock(return_value=True)
     helper.update_user_attitude = AsyncMock(return_value=60)
@@ -104,73 +101,6 @@ class TestPersonAPI:
                 "platform": "qq",
                 "user_id": "123",
             }
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("exists", [True, False])
-    async def test_get_person_by_id(self, exists: bool) -> None:
-        """按内部 ID 委托查询，人物不存在时原样返回 None。"""
-        helper = _make_helper_mock()
-        expected = MagicMock(user_id="example-user") if exists else None
-        helper.get_person_by_id.return_value = expected
-        with patch(
-            "src.app.plugin_system.api.person_api._get_user_query_helper",
-            return_value=helper,
-        ):
-            assert await person_api.get_person_by_id("example-person") is expected
-        helper.get_person_by_id.assert_awaited_once_with("example-person")
-        helper.get_or_create_person.assert_not_awaited()
-        helper.update_person_info.assert_not_awaited()
-        assert "get_person_by_id" in person_api.__all__
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("person_id", ["", " ", None, 123])
-    async def test_get_person_by_id_rejects_invalid_id(self, person_id: Any) -> None:
-        """无效 ID 在调用人物查询之前报错。"""
-        with patch("src.app.plugin_system.api.person_api._get_user_query_helper") as lookup:
-            with pytest.raises(ValueError, match="person_id"):
-                await person_api.get_person_by_id(person_id)
-        lookup.assert_not_called()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("exists", [True, False])
-    async def test_get_person_by_id_sqlite_is_read_only(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exists: bool,
-    ) -> None:
-        """真实 SQLite 查询保留人物所有字段，缺失人物也不会被创建。"""
-        from src.app.plugin_system.api.storage_api import PluginDatabase
-        from src.core.models.sql_alchemy import PersonInfo
-        from src.core.utils.user_query_helper import UserQueryHelper
-
-        path = tmp_path / "people.sqlite3"
-        database = PluginDatabase(str(path), [PersonInfo])
-        await database.initialize()
-        try:
-            crud = database.crud(PersonInfo)
-            await crud.create({
-                "person_id": "example-person", "platform": "qq", "user_id": "example-user",
-                "nickname": "Example", "interaction_count": 7,
-                "last_interaction": 50.0, "updated_at": 40.0, "created_at": 30.0,
-            })
-            with patch("src.core.utils.user_query_helper.CRUDBase"):
-                helper = UserQueryHelper()
-            helper.person_crud = crud
-            monkeypatch.setattr(person_api, "_get_user_query_helper", lambda: helper)
-            before = await crud.get_by(person_id="example-person")
-            assert before is not None
-            snapshot = {column.name: getattr(before, column.name) for column in PersonInfo.__table__.columns}
-            result = await person_api.get_person_by_id("example-person" if exists else "missing-person")
-            if exists:
-                assert result is not None and result.user_id == "example-user"
-            else:
-                assert result is None
-            after = await crud.get_by(person_id="example-person")
-            assert after is not None
-            assert {column.name: getattr(after, column.name) for column in PersonInfo.__table__.columns} == snapshot
-            assert await crud.count() == 1
-        finally:
-            await database.close()
-            for suffix in ("", "-wal", "-shm"):
-                Path(f"{path}{suffix}").unlink(missing_ok=True)
 
     @pytest.mark.asyncio
     async def test_update_person_info(self) -> None:

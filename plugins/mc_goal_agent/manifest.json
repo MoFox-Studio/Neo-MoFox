@@ -1,0 +1,44 @@
+{
+  "name": "mc_goal_agent",
+  "version": "1.0.1",
+  "description": "Minecraft 目标代理：基于 ReAct 循环让 bot 自主完成长线目标。用户在 MC 平台发送「代理完成: <目标>」触发，Agent 分步调用 MC 工具完成目标，支持多目标并发、持久化与重启恢复。强依赖 mc_adapter 与 mc_tools 插件已加载。",
+  "author": "MoFox Team",
+  "dependencies": {
+    "plugins": ["mc_adapter", "mc_tools"],
+    "components": [
+      "mc_adapter:service:mc_bridge"
+    ]
+  },
+  "include": [
+    {
+      "component_type": "agent",
+      "component_name": "mc_goal_agent",
+      "description": "Minecraft 目标代理 Agent：ReAct 循环分步完成用户目标，动态收集 mc_tools 注册的 MC 平台工具作为私有 usables，仅在 minecraft 平台可用",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "event_handler",
+      "component_name": "mc_goal_trigger",
+      "description": "目标代理触发器：订阅 ON_MESSAGE_RECEIVED，解析「代理完成: <目标>」关键词前缀启动后台代理，weight=5，不拦截消息",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "api_version": {
+    "event_api": "1.0.0",
+    "llm_api": "1.0.0",
+    "send_api": "1.0.0",
+    "stream_api": "2.0.0",
+    "log_api": "1.0.0",
+    "adapter_api": "1.0.0",
+    "message_api": "1.0.0",
+    "service_api": "1.0.0",
+    "agent_api": "1.0.0",
+    "storage_api": "1.0.0"
+  },
+  "min_core_version": "1.2.0-rc.2",
+  "python_dependencies": [],
+  "dependencies_required": true
+}
