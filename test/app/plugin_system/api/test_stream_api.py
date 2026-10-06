@@ -82,21 +82,21 @@ class TestStreamAPI:
             
             assert result == mock_context
             mock_manager.load_stream_context.assert_awaited_once_with(
-                "stream_123", 50, order_by="id"
+                "stream_123", 50
             )
 
     @pytest.mark.asyncio
-    async def test_load_stream_context_forwards_time_order(self) -> None:
-        """load_stream_context 应透传显式时间排序。"""
+    async def test_load_stream_context_without_limit(self) -> None:
+        """未指定上限时直接委托查询，不增加排序参数。"""
         with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
             manager = MagicMock()
             manager.load_stream_context = AsyncMock(return_value=MagicMock())
             mock_get_mgr.return_value = manager
 
-            await stream_api.load_stream_context("stream_123", order_by="time")
+            await stream_api.load_stream_context("stream_123")
 
             manager.load_stream_context.assert_awaited_once_with(
-                "stream_123", None, order_by="time"
+                "stream_123", None
             )
     
     @pytest.mark.asyncio
@@ -163,18 +163,18 @@ class TestStreamAPI:
             )
 
     @pytest.mark.asyncio
-    async def test_get_stream_info_forwards_peer_lookup(self) -> None:
-        """对端查询选项通过公开入口透传，不要求插件读取内部模型。"""
+    async def test_get_stream_info_returns_person_reference(self) -> None:
+        """流信息提供人物关联 ID，不负责查询或附加平台用户 ID。"""
         with patch('src.app.plugin_system.api.stream_api._get_stream_manager') as mock_get_mgr:
             manager = MagicMock()
-            manager.get_stream_info = AsyncMock(return_value={"user_id": "example_user"})
+            manager.get_stream_info = AsyncMock(return_value={"person_id": "example_person"})
             mock_get_mgr.return_value = manager
 
-            info = await stream_api.get_stream_info("example_stream", include_user_id=True)
+            info = await stream_api.get_stream_info("example_stream")
 
-            assert info == {"user_id": "example_user"}
+            assert info == {"person_id": "example_person"}
             manager.get_stream_info.assert_awaited_once_with(
-                "example_stream", include_user_id=True,
+                "example_stream",
             )
 
     @pytest.mark.asyncio
@@ -222,7 +222,7 @@ class TestStreamAPI:
             
             assert len(result) == 2
             mock_manager.get_stream_messages.assert_awaited_once_with(
-                stream_id="stream_123", limit=100, offset=0, order_by="id"
+                stream_id="stream_123", limit=100, offset=0
             )
     
     def test_clear_stream_cache(self) -> None:

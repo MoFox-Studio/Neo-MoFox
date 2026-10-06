@@ -14,7 +14,7 @@
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 from async_lru import alru_cache
 from sqlalchemy import update as sa_update
 
@@ -407,7 +407,6 @@ class StreamManager:
         chat_stream.context = await self.load_stream_context(
             stream_id,
             max_messages=get_core_config().chat.max_history_messages,
-            order_by="time",
         )
 
         logger.debug(f"从数据库构建流: {stream_id}")
@@ -418,15 +417,15 @@ class StreamManager:
         self,
         stream_id: str,
         max_messages: int | None = None,
-        *,
-        order_by: Literal["id", "time"] = "id",
     ) -> "StreamContext":
-        """从数据库加载 StreamContext。
+        """按原发送时间加载上下文，并应用上下文清空边界。
+
+        有数量限制时选最近的记录，再按时间正序放入历史。
+        时间相同时按数据库自增主键排序，平台消息 ID 不参与排序。
 
         Args:
             stream_id: 流ID
             max_messages: 最大加载消息数，None 表示加载全部消息
-            order_by: 消息排序字段，``"id"`` 保持数据库 ID 顺序，``"time"`` 按消息时间排序
 
         Returns:
             StreamContext: 加载的上下文对象
@@ -435,9 +434,6 @@ class StreamManager:
             >>> context = await sm.load_stream_context("abc123", max_messages=100)
         """
         from src.core.models.stream import StreamContext
-
-        if order_by not in ("id", "time"):
-            raise ValueError("order_by 必须是 'id' 或 'time'")
 
         # 获取流配置
         stream_record = await self._streams_crud.get_by(stream_id=stream_id)
@@ -452,7 +448,7 @@ class StreamManager:
         query = QueryBuilder(self._Messages).filter(stream_id=stream_id)
         if stream_record.context_cleared_at is not None:
             query = query.filter(time__gt=stream_record.context_cleared_at)
-        query = query.order_by("-time", "-id") if order_by == "time" else query.order_by("-id")
+        query = query.order_by("-time", "-id")
         if max_messages is not None:
             query = query.limit(max_messages)
         messages_records = await query.all()
@@ -700,14 +696,11 @@ class StreamManager:
     # ==================== Query & Utilities ====================
 
     @alru_cache(maxsize=256)
-    async def get_stream_info(
-        self, stream_id: str, *, include_user_id: bool = False,
-    ) -> dict[str, Any] | None:
+    async def get_stream_info(self, stream_id: str) -> dict[str, Any] | None:
         """获取流的综合信息。
 
         Args:
             stream_id: 流ID
-            include_user_id: 包含私聊对端的原平台用户 ID，只读查询人物记录
 
         Returns:
             dict | None: 流信息字典，如果未找到则返回 None
@@ -734,7 +727,7 @@ class StreamManager:
             stream_id=stream_id
         ).count()
 
-        info = {
+        return {
             "stream_id": stream.stream_id,
             "platform": stream.platform,
             "chat_type": stream.chat_type,
@@ -745,31 +738,22 @@ class StreamManager:
             "last_active_time": stream.last_active_time,
             "created_at": stream.created_at,
         }
-        if include_user_id:
-            from src.core.utils.user_query_helper import get_user_query_helper
-
-            person = (
-                await get_user_query_helper().person_crud.get_by(person_id=normalized_person_id)
-                if normalized_person_id else None
-            )
-            info["user_id"] = person.user_id if person else None
-        return info
 
     async def get_stream_messages(
         self,
         stream_id: str,
         limit: int = 100,
         offset: int = 0,
-        *,
-        order_by: Literal["id", "time"] = "id",
     ) -> list["Message"]:
-        """获取流的消息（支持分页）。
+        """按原发送时间查询一页历史，并按正序返回该页。
+
+        先按 time、数据库 id 倒序分页，再反转结果。
+        新增或补录消息可能改变 offset 对应的记录，因此 offset 不是固定游标。
 
         Args:
             stream_id: 流ID
             limit: 最大返回消息数
-            offset: 跳过的消息数
-            order_by: 消息排序字段，``"id"`` 保持数据库 ID 分页，``"time"`` 按消息时间分页
+            offset: 从最新记录开始跳过的消息数
 
         Returns:
             list[Message]: 运行时消息对象列表
@@ -777,11 +761,7 @@ class StreamManager:
         Examples:
             >>> messages = await sm.get_stream_messages("abc123", limit=50, offset=0)
         """
-        if order_by not in ("id", "time"):
-            raise ValueError("order_by 必须是 'id' 或 'time'")
-
-        query = QueryBuilder(self._Messages).filter(stream_id=stream_id)
-        query = query.order_by("-time", "-id") if order_by == "time" else query.order_by("-id")
+        query = QueryBuilder(self._Messages).filter(stream_id=stream_id).order_by("-time", "-id")
         messages_records = await query.limit(limit).offset(offset).all()
 
         return [

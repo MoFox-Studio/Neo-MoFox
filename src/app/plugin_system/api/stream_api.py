@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
@@ -143,15 +143,15 @@ async def build_stream_from_database(stream_id: str) -> "ChatStream | None":
 async def load_stream_context(
     stream_id: str,
     max_messages: int | None = None,
-    *,
-    order_by: Literal["id", "time"] = "id",
 ) -> "StreamContext":
-    """从数据库加载 StreamContext。
+    """按原发送时间加载聊天上下文，排除清空边界之前的消息。
+
+    有数量限制时先选最近的消息，再按时间正序返回。
+    同时间的消息按数据库自增主键排序，不按平台消息 ID 排序。
 
     Args:
         stream_id: 聊天流 ID
         max_messages: 最大加载消息数，可选
-        order_by: 消息排序字段，``"id"`` 或 ``"time"``
 
     Returns:
         聊天流上下文
@@ -159,9 +159,7 @@ async def load_stream_context(
     _validate_non_empty(stream_id, "stream_id")
     if max_messages is not None:
         _validate_limit_offset(max_messages, "max_messages")
-    return await _get_stream_manager().load_stream_context(
-        stream_id, max_messages, order_by=order_by
-    )
+    return await _get_stream_manager().load_stream_context(stream_id, max_messages)
 
 
 async def add_message_to_stream(message: "Message") -> "Messages":
@@ -239,36 +237,36 @@ async def delete_stream(stream_id: str, delete_messages: bool = True) -> bool:
     )
 
 
-async def get_stream_info(
-    stream_id: str, *, include_user_id: bool = False,
-) -> dict[str, Any] | None:
+async def get_stream_info(stream_id: str) -> dict[str, Any] | None:
     """获取流的综合信息。
+
+    私聊人物以内部 person_id 关联。需要平台用户 ID 时，
+    使用 person_api.get_person_by_id() 查询对应人物。
 
     Args:
         stream_id: 聊天流 ID
-        include_user_id: 包含私聊对端的原平台用户 ID，只读查询人物记录
 
     Returns:
         流信息字典，未找到则返回 None
     """
     _validate_non_empty(stream_id, "stream_id")
-    return await _get_stream_manager().get_stream_info(stream_id, include_user_id=include_user_id)
+    return await _get_stream_manager().get_stream_info(stream_id)
 
 
 async def get_stream_messages(
     stream_id: str,
     limit: int = 100,
     offset: int = 0,
-    *,
-    order_by: Literal["id", "time"] = "id",
 ) -> list["Message"]:
-    """获取流的消息（支持分页）。
+    """按原发送时间读取历史消息，支持从最新记录向前分页。
+
+    先按 time、数据库 id 倒序选择一页，再正序返回该页。
+    offset 表示跳过多少条较新的记录；新增或补录消息可能改变页的位置。
 
     Args:
         stream_id: 聊天流 ID
         limit: 单页数量
-        offset: 偏移量
-        order_by: 消息排序字段，``"id"`` 或 ``"time"``
+        offset: 从最新记录开始跳过的数量
 
     Returns:
         消息列表
@@ -280,7 +278,6 @@ async def get_stream_messages(
         stream_id=stream_id,
         limit=limit,
         offset=offset,
-        order_by=order_by,
     )
 
 

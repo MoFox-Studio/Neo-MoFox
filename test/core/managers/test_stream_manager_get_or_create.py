@@ -182,7 +182,7 @@ async def test_build_stream_from_database_includes_bot_info(monkeypatch) -> None
     assert stream.bot_id == "10001"
     assert stream.bot_nickname == "MoFox"
     manager.load_stream_context.assert_awaited_once_with(
-        "stream-db-001", max_messages=100, order_by="time"
+        "stream-db-001", max_messages=100
     )
     adapter_manager.get_bot_info_by_platform.assert_awaited_once_with("qq")
 
@@ -348,7 +348,7 @@ async def test_load_stream_context_does_not_query_stream_info_per_message(monkey
             return self
 
         def order_by(self, *fields):
-            assert fields == ("-id",)
+            assert fields == ("-time", "-id")
             return self
 
         def limit(self, _limit):
@@ -375,13 +375,13 @@ async def test_load_stream_context_does_not_query_stream_info_per_message(monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("order_by", "offset", "limit", "expected_ids"),
-    [("id", 1, 2, [2, 3]), ("time", 2, 2, [1, 3])],
+    ("offset", "limit", "expected_ids"),
+    [(0, 2, [2, 4]), (1, 2, [3, 2]), (2, 2, [1, 3]), (4, 2, [])],
 )
 async def test_get_stream_messages_order_and_pagination(
-    monkeypatch, order_by: str, offset: int, limit: int, expected_ids: list[int]
+    monkeypatch: pytest.MonkeyPatch, offset: int, limit: int, expected_ids: list[int]
 ) -> None:
-    """按 ID 或时间排序后分页，并以正序返回所选消息。"""
+    """按原时间和主键分页，再正序返回；入库顺序不决定时间顺序。"""
     from src.core.managers.stream_manager import StreamManager
 
     manager = StreamManager()
@@ -414,10 +414,8 @@ async def test_get_stream_messages_order_and_pagination(
             return self
 
         async def all(self):
-            if self.order_fields == ("-time", "-id"):
-                ordered = sorted(records, key=lambda item: (item.time, item.id), reverse=True)
-            else:
-                ordered = sorted(records, key=lambda item: item.id, reverse=True)
+            assert self.order_fields == ("-time", "-id")
+            ordered = sorted(records, key=lambda item: (item.time, item.id), reverse=True)
             return ordered[self.page_offset : self.page_offset + self.page_limit]
 
     query = _FakeQuery()
@@ -429,7 +427,7 @@ async def test_get_stream_messages_order_and_pagination(
     )
 
     messages = await manager.get_stream_messages(
-        "stream-order", limit=limit, offset=offset, order_by=order_by  # type: ignore[arg-type]
+        "stream-order", limit=limit, offset=offset
     )
 
     assert messages == expected_ids
@@ -438,20 +436,20 @@ async def test_get_stream_messages_order_and_pagination(
 
 
 @pytest.mark.asyncio
-async def test_get_stream_messages_default_preserves_id_order() -> None:
-    """默认读取仍按 ID 分页并正序返回。"""
+async def test_get_stream_messages_returns_time_order() -> None:
+    """不传排序参数时也按原时间查询，不按入库主键选择记录。"""
     from src.core.managers.stream_manager import StreamManager
     from unittest.mock import patch
 
     manager = StreamManager()
-    records = [SimpleNamespace(id=2), SimpleNamespace(id=1)]
+    records = [SimpleNamespace(id=1, time=30.0), SimpleNamespace(id=2, time=10.0)]
 
     class _FakeQuery:
         def filter(self, **_kwargs):
             return self
 
         def order_by(self, *fields: str):
-            assert fields == ("-id",)
+            assert fields == ("-time", "-id")
             return self
 
         def limit(self, _limit: int):
@@ -469,7 +467,7 @@ async def test_get_stream_messages_default_preserves_id_order() -> None:
         manager._db_message_to_runtime = AsyncMock(  # type: ignore[method-assign]
             side_effect=lambda record: record.id
         )
-        assert await manager.get_stream_messages("stream-default") == [1, 2]
+        assert await manager.get_stream_messages("stream-default") == [2, 1]
 
 
 @pytest.mark.asyncio
@@ -531,7 +529,7 @@ async def test_load_stream_context_time_order_respects_clear_boundary(monkeypatc
     )
 
     context = await manager.load_stream_context(
-        "stream-clear-time", max_messages=3, order_by="time"
+        "stream-clear-time", max_messages=3
     )
 
     assert query.order_fields == ("-time", "-id")
@@ -540,13 +538,13 @@ async def test_load_stream_context_time_order_respects_clear_boundary(monkeypatc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method_name", ["load_stream_context", "get_stream_messages"])
-async def test_stream_manager_rejects_invalid_order_before_io(method_name: str) -> None:
-    """未知排序值应在数据库查询前被拒绝。"""
+async def test_stream_manager_rejects_removed_order_parameter(method_name: str) -> None:
+    """不再接受排序选项，不保留旧 ID 排序的兼容分支。"""
     from src.core.managers.stream_manager import StreamManager
 
     manager = StreamManager()
     manager._streams_crud.get_by = AsyncMock()
-    with pytest.raises(ValueError, match="order_by 必须是 'id' 或 'time'"):
+    with pytest.raises(TypeError, match="order_by"):
         if method_name == "load_stream_context":
             await manager.load_stream_context("stream-invalid", order_by="bad")  # type: ignore[arg-type]
         else:
