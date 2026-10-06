@@ -102,9 +102,10 @@ class EmojiSenderService(BaseService):
     _SHORT_ID_LENGTH = 12
 
     def __init__(self, plugin: Any) -> None:
-        """初始化服务并创建使用历史容器。"""
+        """初始化服务的使用历史与拒绝哈希集合。"""
         super().__init__(plugin)
         self._usage_history: dict[str, deque[str]] = {}
+        self._rejected_hashes: set[str] = set()
 
     def _dedup_enabled(self) -> bool:
         """使用历史去重是否开启。"""
@@ -215,19 +216,21 @@ class EmojiSenderService(BaseService):
         Path(path_value).unlink(missing_ok=True)
 
     async def _pick_next_manual_meme_file(self) -> Path | None:
-        """从手动目录获取下一个未入库的表情包文件。"""
+        """从手动目录获取下一个未入库且未被拒绝的表情包文件。"""
         manual_dir = await asyncio.to_thread(self._manual_memes_dir)
         candidates = await asyncio.to_thread(self._list_meme_files, manual_dir, ordered=True)
         if not candidates:
             return None
 
-        # 逐个检查，找到第一个未入库的
+        # 逐个检查，找到第一个未处理的
         for candidate in candidates:
             try:
                 _, meme_id = await asyncio.to_thread(self._read_file_with_hash, candidate)
             except Exception:
                 continue
 
+            if meme_id in self._rejected_hashes:
+                continue
             if not await self._already_ingested(meme_id):
                 return candidate
 
@@ -546,7 +549,7 @@ class EmojiSenderService(BaseService):
         mime: str,
         is_gif_collage: bool = False,
     ) -> dict[str, Any] | None:
-        """调用 VLM 对表情包做收藏决策与标注。"""
+        """调用 VLM 做收藏决策与标注，失败或标注不完整时返回 None。"""
         try:
             model_set = get_model_set_by_task("vlm")
         except Exception:
@@ -611,7 +614,11 @@ class EmojiSenderService(BaseService):
             logger.warning("VLM 输出无法解析为 JSON，跳过")
             return None
 
-        keep = bool(obj.get("keep"))
+        keep = obj.get("keep")
+        if not isinstance(keep, bool):
+            logger.warning("VLM 收藏决策必须为布尔值，跳过")
+            return None
+
         description = str(obj.get("description") or "").strip()
         tags = obj.get("emotion_tags")
         if not isinstance(tags, list):
@@ -622,7 +629,8 @@ class EmojiSenderService(BaseService):
         ]
 
         if keep and (not description or not filtered_tags):
-            keep = False
+            logger.warning("VLM 收藏标注缺少有效描述或情感标签，跳过")
+            return None
 
         if len(description) > 200:
             description = description[:197] + "..."
@@ -672,7 +680,7 @@ class EmojiSenderService(BaseService):
                 logger.warning(f"读取候选表情包失败: {source} - {e}")
                 return
 
-            if await self._already_ingested(meme_id):
+            if meme_id in self._rejected_hashes or await self._already_ingested(meme_id):
                 return
 
             # 压缩图片用于 VLM
@@ -694,7 +702,10 @@ class EmojiSenderService(BaseService):
                 mime=vlm_mime,
                 is_gif_collage=is_gif_collage
             )
-            if not labeled or not labeled.get("keep"):
+            if not labeled:
+                return
+            if labeled.get("keep") is False:
+                self._rejected_hashes.add(meme_id)
                 return
 
             description = str(labeled.get("description") or "").strip()
