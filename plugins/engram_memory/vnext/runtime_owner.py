@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -23,8 +24,18 @@ from .decay_service import MemoryDecayService
 from .backends.neo4j import Neo4jEpisodeGraph
 from .domain import MemoryChanged
 from .episode_service import EpisodeService
+from .backends.layersplit_store import LayerSplitStore
 from .enums import VectorIndexStatus
-from .flashback_service import FlashbackService
+from .feedforward_service import (
+    CHANNEL_EMOTIONAL,
+    CHANNEL_FACTUAL,
+    CHANNEL_GROUP,
+    CHANNEL_PRIVATE,
+    ChannelSettings,
+    FeedForwardRetrievalService,
+    FeedForwardSettings,
+)
+from .flashback_service import FlashbackCandidate, FlashbackService
 from .framework_bridge import (
     TaskNotFoundError,
     cancel_managed_task,
@@ -41,6 +52,7 @@ from .runtime import (
     DEFAULT_EMBEDDING_MODEL_TASK,
     ChromaVectorSink,
     VectorOutboxWorker,
+    message_to_snapshot,
 )
 from .schema import VNextSchema
 from .tool_service import VNextToolService
@@ -201,6 +213,48 @@ class VNextRuntimeOwner:
             max_memories=vnext.flashback.max_memories,
             cooldown_turns=vnext.flashback.cooldown_turns,
         )
+        ff = vnext.feedforward
+        self.feedforward = FeedForwardRetrievalService(
+            self.schema,
+            self.retrieval,
+            FeedForwardSettings(
+                max_memories=ff.max_memories,
+                candidate_limit=ff.candidate_limit,
+                hot_candidates=ff.hot_candidates,
+                feature_dim=ff.feature_dim,
+                retrieval_threshold=ff.retrieval_threshold,
+                temperature=ff.temperature,
+                noise_scale=ff.noise_scale,
+                mismatch_penalty=ff.mismatch_penalty,
+                working_weight=ff.working_weight,
+                kda_weight=ff.kda_weight,
+                recency_weight=ff.recency_weight,
+                inhibition_weight=ff.inhibition_weight,
+                latency_budget_ms=ff.latency_budget_ms,
+                channels={
+                    CHANNEL_PRIVATE: ChannelSettings(
+                        ff.private_decay, ff.private_retention_per_day, ff.kda_learning_rate
+                    ),
+                    CHANNEL_GROUP: ChannelSettings(
+                        ff.group_decay, ff.group_retention_per_day, ff.kda_learning_rate
+                    ),
+                    CHANNEL_EMOTIONAL: ChannelSettings(
+                        ff.emotional_decay, ff.emotional_retention_per_day, ff.kda_learning_rate
+                    ),
+                    CHANNEL_FACTUAL: ChannelSettings(
+                        ff.factual_decay, ff.factual_retention_per_day, ff.kda_learning_rate
+                    ),
+                },
+            ),
+            layers=LayerSplitStore(
+                sensory_capacity=ff.sensory_capacity,
+                sensory_ttl_seconds=ff.sensory_ttl_seconds,
+                working_capacity=ff.working_capacity,
+                working_half_life_turns=ff.working_half_life_turns,
+                hot_capacity=ff.hot_capacity,
+                hot_ttl_seconds=ff.hot_ttl_seconds,
+            ),
+        )
         self.episode_service = EpisodeService(
             self.schema,
             max_working_memory=vnext.flashback.max_working_memory,
@@ -225,12 +279,17 @@ class VNextRuntimeOwner:
         )
         self.neo4j_graph: Neo4jEpisodeGraph | None = None
         if vnext.neo4j.enabled:
-            self.neo4j_graph = Neo4jEpisodeGraph(
-                vnext.neo4j.uri,
-                vnext.neo4j.user,
-                vnext.neo4j.password,
-                database=vnext.neo4j.database,
-            )
+            uri = os.environ.get("ENGRAM_NEO4J_URI") or vnext.neo4j.uri
+            password = os.environ.get("ENGRAM_NEO4J_PASSWORD") or vnext.neo4j.password
+            if password:
+                self.neo4j_graph = Neo4jEpisodeGraph(
+                    uri,
+                    vnext.neo4j.user,
+                    password,
+                    database=vnext.neo4j.database,
+                )
+            else:
+                logger.warning("Neo4j 已启用但未配置密码，跳过 Episode 图镜像")
         self._initialized = False
         self._prompt_turns: dict[str, int] = {}
         self._flashback_trigger_turns: dict[str, tuple[int, bool]] = {}
@@ -268,7 +327,13 @@ class VNextRuntimeOwner:
             self._schema_initialized = True
             await self.schema.initialize()
             if self.neo4j_graph is not None:
-                await self.neo4j_graph.connect()
+                try:
+                    await self.neo4j_graph.connect()
+                except Exception as error:  # noqa: BLE001
+                    # 镜像是旁路能力，不能阻断正式记忆加载
+                    logger.warning(f"Neo4j 连接失败，禁用 Episode 图镜像: {type(error).__name__}: {error}")
+                    await self.neo4j_graph.close()
+                    self.neo4j_graph = None
             cleared_personas = await self.persona_service.clear_legacy_impressions()
             logger.info(f"人物印象启动核对完成：归档并清理 {cleared_personas} 份旧稿")
             await self.vector_index.ensure_active_manifest(
@@ -293,6 +358,7 @@ class VNextRuntimeOwner:
 
     async def _on_memory_changed(self, change: MemoryChanged) -> None:
         """发布已提交的正式记忆变化，向量投递由独立后台任务处理。"""
+        self.feedforward.forget(change.memory_id)
         await event_api.publish_event(
             "engram_memory:memory_changed",
             {"change": change},
@@ -335,6 +401,7 @@ class VNextRuntimeOwner:
         self._working_memory_results.clear()
         self._consolidation_task_id = None
         self._recent_messages.clear()
+        self.feedforward.layers.clear()
         if self.neo4j_graph is not None:
             try:
                 await self.neo4j_graph.close()
@@ -376,6 +443,18 @@ class VNextRuntimeOwner:
             recent[message_id] = message
             while len(recent) > self.config.vnext.flashback.context_turns:
                 recent.pop(next(iter(recent)))
+        if self.config.vnext.feedforward.enabled:
+            try:
+                snapshot = message_to_snapshot(message)  # type: ignore[arg-type]
+            except ValueError:
+                snapshot = None
+            if snapshot is not None:
+                self.feedforward.perceive(
+                    stream_id,
+                    snapshot.text,
+                    person_id=snapshot.snapshot.get("person_id"),  # type: ignore[arg-type]
+                    observed_at=snapshot.time,
+                )
         if self._initialized:
             self._schedule_flashback_prefetch(stream_id)
 
@@ -808,6 +887,8 @@ class VNextRuntimeOwner:
         record_exposure: bool,
     ) -> tuple[object, ...]:
         """按当前轮次的触发决定检索闪回，并显式控制曝光记录。"""
+        if self.config.vnext.feedforward.enabled:
+            return await self._feedforward_for_stream(stream_id)
         settings = self.config.vnext.flashback
         if not settings.enabled or settings.max_memories == 0:
             return ()
@@ -825,4 +906,35 @@ class VNextRuntimeOwner:
             stream_key=stream_id,
             turn_index=turn_index,
             record_exposure=record_exposure,
+        )
+
+    async def _feedforward_for_stream(self, stream_id: str) -> tuple[object, ...]:
+        """每轮必然执行前馈检索，并转换为闪回候选以复用注入链路。"""
+        recent = self._recent_messages.get(stream_id, {})
+        chat_type = "private"
+        for message in reversed(tuple(recent.values())):
+            message_type = str(self._message_value(message, "message_type") or "").casefold()
+            if message_type:
+                chat_type = "private" if message_type == "private" else "group"
+                break
+        fallback = (
+            await self.recent_turns_for_flashback(stream_id)
+            if not self.feedforward.layers.sensory(stream_id, datetime.now(UTC))
+            else ()
+        )
+        cue = self.feedforward.build_cue(
+            stream_id, chat_type=chat_type, fallback_turns=fallback
+        )
+        if cue is None:
+            return ()
+        result = await self.feedforward.feed_forward(cue)
+        return tuple(
+            FlashbackCandidate(
+                memory_id=item.memory_id,
+                title=item.title,
+                current_brief=f"{item.title}: {item.content}" if item.content else item.title,
+                matched_cue=item.title or "相关经历",
+                strength=item.probability,
+            )
+            for item in result.selected
         )

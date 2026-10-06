@@ -269,7 +269,7 @@ class MessageSender:
             group_id=group_id,
             chat_type=message.chat_type,
         )
-        await sm.add_message_to_history(message)
+        await sm.add_sent_message_to_history(message)
 
     def _infer_adapter_signature(self, message: "Message") -> str | None:
         """推断目标 Adapter 签名。

@@ -213,6 +213,12 @@ class FeedForwardSection(SectionBase):
     kda_weight: float = Field(
         default=0.6, ge=0.0, le=5.0, description="KDA 线索读出扩散权重"
     )
+    recency_weight: float = Field(
+        default=1.5, ge=0.0, le=5.0, description="最新一条输入的单独检索扩散权重"
+    )
+    inhibition_weight: float = Field(
+        default=0.6, ge=0.0, le=5.0, description="连续复述但本轮未被新线索指向时的返回抑制强度"
+    )
     latency_budget_ms: int = Field(
         default=1500, ge=100, description="单轮前馈耗时预算（毫秒），超时本轮不注入"
     )
@@ -305,10 +311,21 @@ class ClaimReviewSection(SectionBase):
 class Neo4jSection(SectionBase):
     """可选 Neo4j Episode 关系镜像参数。"""
 
-    enabled: bool = Field(default=False, description="是否启用 Neo4j Episode 图镜像")
-    uri: str = Field(default="bolt://127.0.0.1:7687", input_type="text")
+    enabled: bool = Field(
+        default=True,
+        description="是否启用 Neo4j Episode 图镜像；连接失败只记录警告，主库照常工作",
+    )
+    uri: str = Field(
+        default="bolt://127.0.0.1:7687",
+        input_type="text",
+        description="设置环境变量 ENGRAM_NEO4J_URI 时优先使用环境变量",
+    )
     user: str = Field(default="neo4j", input_type="text")
-    password: str = Field(default="", input_type="password")
+    password: str = Field(
+        default="",
+        input_type="password",
+        description="设置环境变量 ENGRAM_NEO4J_PASSWORD 时优先使用环境变量",
+    )
     database: str = Field(default="neo4j", input_type="text")
 
 

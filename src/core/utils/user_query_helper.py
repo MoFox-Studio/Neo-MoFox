@@ -235,10 +235,6 @@ class UserQueryHelper:
         person_id = self.generate_person_id(platform, user_id)
         return await self.person_crud.get_by(person_id=person_id)
 
-    async def get_person_by_id(self, person_id: str) -> "PersonInfo | None":
-        """按内部人物 ID 只读查询人物，不创建或更新记录。"""
-        return await self.person_crud.get_by(person_id=person_id)
-
     async def get_nickname_history(
         self,
         platform: str,

@@ -34,6 +34,27 @@ Episode 工作记忆在规则人物/主题关联之外，可使用 Engram 已配
 
 相关配置位于 `config/plugins/engram_memory/config.toml`：`vnext.retrieval.memory_half_life_days`、`recall_half_life_days`、`forget_threshold`、`forget_min_age_days` 控制正式记忆强度；`vnext.flashback.semantic_recall_enabled`、`semantic_candidate_limit`、`semantic_min_similarity` 控制 Episode 语义补召回。
 
+## 前馈式记忆检索
+
+开启 `vnext.feedforward.enabled`（默认开启）后，每轮回复前都会执行一次前馈检索，替代按概率触发的自然闪回；关闭后回到原闪回逻辑。流程：
+
+- L0 感知缓冲收集当前流最近输入，构造线索（文本、人物、情绪、时间）；
+- 候选池 = 混合检索命中 ∪ L2 热缓存 ∪ L1 工作集；
+- ACT-R 按访问历史计算基础激活，叠加工作记忆、KDA 读出、相似度扩散与人物部分匹配；私聊、群聊、情感、事实四个通道各有衰减率；
+- 单层 Transformer 块（语义/人物/主题/情绪/时间/激活六头注意力 + GELU FFN + 残差 LayerNorm）重排候选，门控随线索类型变化；
+- Boltzmann 选择至多 `max_memories` 条，低于 `retrieval_threshold` 或与线索无真实关联的不注入；
+- 选中记忆写入 L1 复述与 KDA 通道（delta 规则），同类线索下次更容易想起。
+
+全部状态在进程内，重启后重新预热；正式记忆变化时清除对应缓存。前馈只读取 ACTIVE 记忆，不创建或改写记忆，选中结果复用闪回注入链路。参数见 `vnext.feedforward.*`。
+
+话题切换时，最新一条输入会单独检索一次并以 `recency_weight` 参与扩散；连续被选中、但本轮最新输入并不指向的记忆按复述次数受 `inhibition_weight` 返回抑制，避免先被想起的记忆一直占据首位。
+
+## Neo4j Episode 图
+
+`neo4j` 驱动随框架默认安装，`vnext.neo4j.enabled` 默认开启。驱动只用于把 Episode 与关联边镜像到图数据库，主库仍是 SQLite。密码优先读取环境变量 `ENGRAM_NEO4J_PASSWORD`，地址优先读取 `ENGRAM_NEO4J_URI`；未配置密码时跳过镜像，连接失败只记录警告，不会阻断插件加载。
+
+使用项目根目录的 `docker-compose.yml` 时，Neo4j 服务会一同启动，启动前需设置强密码 `NEO4J_PASSWORD`。本地运行时可自行启动 Neo4j 5，并设置上述环境变量或 `vnext.neo4j.password`。
+
 ## 工作方式
 
 1. **保存正式记忆**：`memory_write` 创建记忆，`memory_revise` 保留旧版本并记录修订，`memory_invalidate` 作废不再有效的记忆。每条记忆保留人物关联、来源与稳定 ID。

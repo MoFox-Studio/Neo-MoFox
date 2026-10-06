@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.0.0"
 
 if TYPE_CHECKING:
     from src.core.models.message import Message
@@ -150,12 +150,6 @@ async def get_person(
         platform=platform,
         user_id=user_id,
     )
-
-
-async def get_person_by_id(person_id: str) -> "PersonInfo | None":
-    """按内部人物 ID 只读查询人物。"""
-    _validate_non_empty(person_id, "person_id")
-    return await _get_user_query_helper().get_person_by_id(person_id)
 
 
 async def update_person_info(
@@ -382,7 +376,6 @@ __all__ = [
     # 用户记录管理
     "get_or_create_person",
     "get_person",
-    "get_person_by_id",
     "update_person_info",
     "update_user_impression",
     "update_user_attitude",

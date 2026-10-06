@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
-API_VERSION = "2.0.0"
+API_VERSION = "1.0.0"
 
 if TYPE_CHECKING:
     from src.core.models.message import Message
@@ -187,27 +187,18 @@ async def add_message(message: "Message") -> "Messages":
     return await _get_stream_manager().add_message(message)
 
 
-async def add_message_to_history(
-    message: "Message",
-    direction: str = "outgoing",
-    *,
-    silent: bool = False,
-) -> "Messages":
-    """添加进站或出站消息到流历史消息。
+async def add_sent_message_to_history(message: "Message") -> "Messages":
+    """添加“已发送消息”到流历史消息。
 
     Args:
         message: 消息对象
-        direction: ``incoming`` 或 ``outgoing``
-        silent: 静默补录，不影响未读消息和活跃时间
 
     Returns:
         入库后的消息记录
     """
     if message is None:
         raise ValueError("message 不能为空")
-    return await _get_stream_manager().add_message_to_history(
-        message, direction=direction, silent=silent
-    )
+    return await _get_stream_manager().add_sent_message_to_history(message)
 
 
 async def delete_stream(stream_id: str, delete_messages: bool = True) -> bool:
@@ -388,7 +379,7 @@ __all__ = [
     "load_stream_context",
     "add_message_to_stream",
     "add_message",
-    "add_message_to_history",
+    "add_sent_message_to_history",
     "delete_stream",
     "get_stream_info",
     "get_stream_messages",

@@ -43,7 +43,7 @@ class TestPersonAPI:
 
     def test_api_version(self) -> None:
         """API_VERSION 应存在且非空。"""
-        assert person_api.API_VERSION == "1.1.0"
+        assert person_api.API_VERSION == "1.0.0"
 
     # ── 身份标识生成（同步） ──
 

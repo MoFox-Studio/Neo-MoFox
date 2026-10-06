@@ -16,6 +16,7 @@ dependencies = [
     "json-repair>=0.57.1",
     "mcp>=1.26.0",
     "mofox-wire>=0.1.7",
+    "neo4j>=5.0.0",
     "openai>=2.16.0",
     "packaging>=26.0",
     "prompt-toolkit>=3.0.52",

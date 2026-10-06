@@ -1,4 +1,4 @@
-"""Neo4j Episode 图适配器；驱动是可选依赖，默认不连接外部服务。"""
+"""Neo4j Episode 图适配器；驱动已默认安装，连接需显式启用。"""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class Neo4jEpisodeGraph:
         try:
             from neo4j import AsyncGraphDatabase
         except ImportError as error:
-            raise Neo4jUnavailableError("未安装可选依赖 neo4j") from error
+            raise Neo4jUnavailableError("neo4j 驱动未安装") from error
         self._driver = AsyncGraphDatabase.driver(self.uri, auth=(self.user, self.password))
         await self._driver.verify_connectivity()
 

@@ -124,6 +124,8 @@ class FeedForwardSettings:
     mismatch_penalty: float = 0.6
     working_weight: float = 0.8
     kda_weight: float = 0.6
+    recency_weight: float = 1.5
+    inhibition_weight: float = 0.6
     relevance_floor: float = 0.0
     latency_budget_ms: int = 1500
     channels: dict[str, ChannelSettings] = field(
@@ -166,6 +168,8 @@ class FeedForwardCue:
     person_ids: tuple[str, ...]
     chat_type: str
     now: datetime
+    #: 最新一条输入文本；为空时退回使用 text 整体
+    latest_text: str = ""
 
     @property
     def channel(self) -> str:
@@ -342,6 +346,7 @@ class FeedForwardRetrievalService:
         sensory = self.layers.sensory(stream_id, current)
         if sensory:
             text = "\n".join(item.text for item in sensory)
+            latest = sensory[-1].text
             people = tuple(
                 dict.fromkeys(
                     item.person_id
@@ -350,7 +355,9 @@ class FeedForwardRetrievalService:
                 )
             )
         else:
-            text = "\n".join(piece.strip() for piece in fallback_turns if piece.strip())
+            pieces = [piece.strip() for piece in fallback_turns if piece.strip()]
+            text = "\n".join(pieces)
+            latest = pieces[-1] if pieces else ""
             people = ()
         if not text.strip():
             return None
@@ -360,6 +367,7 @@ class FeedForwardRetrievalService:
             person_ids=people,
             chat_type=chat_type,
             now=current,
+            latest_text=latest,
         )
 
     async def feed_forward(self, cue: FeedForwardCue) -> FeedForwardResult:
@@ -396,7 +404,25 @@ class FeedForwardRetrievalService:
             for item in retrieved
             if item.lexical_rank is not None
         }
+        latest_text = cue.latest_text.strip()
+        recency: dict[str, float] = {}
+        if latest_text and latest_text != cue.text.strip():
+            for item in await self._retrieval.search(
+                RetrievalQuery(text=latest_text, top_k=self._settings.candidate_limit)
+            ):
+                score = max(
+                    float(item.vector_similarity or 0.0),
+                    1.0 / (1.0 + item.lexical_rank) if item.lexical_rank is not None else 0.0,
+                )
+                recency[item.memory_id] = max(0.0, score)
+                similarity.setdefault(item.memory_id, 0.0)
+        elif latest_text:
+            recency = {
+                memory_id: max(similarity.get(memory_id, 0.0), lexical.get(memory_id, 0.0))
+                for memory_id in {*similarity, *lexical}
+            }
         working = self.layers.working_bonus(cue.stream_id, turn)
+        rehearsals = self.layers.rehearsal_counts(cue.stream_id)
         pool = tuple(
             dict.fromkeys(
                 (
@@ -411,7 +437,7 @@ class FeedForwardRetrievalService:
             return FeedForwardResult(selected=(), candidate_count=0, gates={})
 
         dim = self._settings.feature_dim
-        cue_tokens = _tokenize(cue.text)
+        cue_tokens = _tokenize(cue.latest_text or cue.text)
         cue_key = hashed_features(cue_tokens, dim, salt="cue")
         values = {
             memory_id: self._value_vector(memory_id) for memory_id in facts
@@ -431,6 +457,7 @@ class FeedForwardRetrievalService:
                 (self._settings.kda_weight, kda_scores.get(memory_id, 0.0)),
                 (1.0, similarity.get(memory_id, 0.0)),
                 (0.5, lexical.get(memory_id, 0.0)),
+                (self._settings.recency_weight, recency.get(memory_id, 0.0)),
             ]
             if cue.person_ids and set(cue.person_ids) & set(fact.person_ids):
                 associations.append((0.6, 1.0))
@@ -439,6 +466,12 @@ class FeedForwardRetrievalService:
                 mismatches.append(
                     1.0 if set(cue.person_ids) & set(fact.person_ids) else 0.0
                 )
+            # 返回抑制：本轮新线索不指向它时，连续复述越多越让位
+            inhibition = (
+                -self._settings.inhibition_weight * math.log1p(rehearsals.get(memory_id, 0))
+                if recency.get(memory_id, 0.0) <= 0.0
+                else 0.0
+            )
             components[memory_id] = self.actr.activation(
                 access_times=fact.access_times,
                 now=cue.now,
@@ -446,6 +479,7 @@ class FeedForwardRetrievalService:
                 mismatches=mismatches,
                 noise_unit=self._noise_unit(cue, memory_id, turn),
                 decay=decay,
+                extra=inhibition,
             )
 
         query_views, gates = self._query_views(cue, cue_tokens)
@@ -474,7 +508,7 @@ class FeedForwardRetrievalService:
             memory_id: parts
             for memory_id, parts in final.items()
             if self._is_relevant(
-                memory_id, similarity, lexical, working, kda_scores, cue, facts
+                memory_id, similarity, lexical, working, kda_scores, recency, cue, facts
             )
         }
         chosen = (
@@ -510,6 +544,7 @@ class FeedForwardRetrievalService:
         lexical: dict[str, float],
         working: dict[str, float],
         kda_scores: dict[str, float],
+        recency: dict[str, float],
         cue: FeedForwardCue,
         facts: dict[str, _CandidateFacts],
     ) -> bool:
@@ -519,6 +554,7 @@ class FeedForwardRetrievalService:
             lexical.get(memory_id, 0.0),
             working.get(memory_id, 0.0),
             kda_scores.get(memory_id, 0.0),
+            recency.get(memory_id, 0.0),
             1.0 if set(cue.person_ids) & set(facts[memory_id].person_ids) else 0.0,
         )
         return evidence > self._settings.relevance_floor

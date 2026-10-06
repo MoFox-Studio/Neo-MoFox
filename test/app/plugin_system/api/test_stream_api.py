@@ -4,7 +4,7 @@
 - get_or_create_stream / get_stream
 - build_stream_from_database
 - load_stream_context
-- add_message_to_stream / add_message / add_message_to_history
+- add_message_to_stream / add_message / add_sent_message_to_history
 - delete_stream
 - get_stream_info / get_stream_messages
 - clear_stream_cache

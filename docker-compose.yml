@@ -49,12 +49,35 @@ services:
     environment:
       TZ: Asia/Shanghai
       MOFOX_ACCEPT_STARTUP_AGREEMENTS: "1"
+      ENGRAM_NEO4J_URI: bolt://neo4j:7687
+      ENGRAM_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD to a strong password}
+    depends_on:
+      neo4j:
+        condition: service_healthy
     ports:
       - "8000:8000" # MoFox WebUI
     stdin_open: true
     tty: true
 
+  # ===== Neo4j - Engram Memory Episode 关系图 =====
+  neo4j:
+    image: neo4j:5-community
+    container_name: engram-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD to a strong password}
+      NEO4J_server_memory_heap_max__size: 512m
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p \"$${NEO4J_AUTH#neo4j/}\" 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
 volumes:
+  neo4j-data:
+    name: neo4j-data
   snowluma-data:
     name: snowluma-data
   snowluma-config:

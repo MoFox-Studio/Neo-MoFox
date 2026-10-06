@@ -39,7 +39,7 @@ async def test_url_media_cache_and_history_use_downloaded_bytes(
     )
     stream_manager = SimpleNamespace(
         get_stream_info=AsyncMock(return_value={"chat_type": "group", "group_id": "123"}),
-        get_or_create_stream=AsyncMock(), add_message_to_history=AsyncMock(),
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
     )
     manager = SimpleNamespace(store_media=AsyncMock(return_value=stored))
     monkeypatch.setattr("src.core.managers.adapter_manager.get_adapter_manager", lambda: adapter_manager)
@@ -56,14 +56,14 @@ async def test_url_media_cache_and_history_use_downloaded_bytes(
     manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", media_type)
     if stored:
         adapter._send_platform_message.assert_awaited_once()
-        stream_manager.add_message_to_history.assert_awaited_once()
-        message = stream_manager.add_message_to_history.call_args.args[0]
+        stream_manager.add_sent_message_to_history.assert_awaited_once()
+        message = stream_manager.add_sent_message_to_history.call_args.args[0]
         media_id = MediaManager.compute_media_hash("base64|aGVsbG8=")
         assert message.processed_plain_text == f"[{label}({media_id}):晚安]"
         assert message.content["media"][0][id_key] == media_id
     else:
         adapter._send_platform_message.assert_not_awaited()
-        stream_manager.add_message_to_history.assert_not_awaited()
+        stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -83,7 +83,7 @@ async def test_send_message_overrides_sender_with_bot_info(monkeypatch: pytest.M
 
     fake_stream_manager = SimpleNamespace(
         get_or_create_stream=AsyncMock(return_value=SimpleNamespace()),
-        add_message_to_history=AsyncMock(return_value=SimpleNamespace()),
+        add_sent_message_to_history=AsyncMock(return_value=SimpleNamespace()),
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager",
@@ -112,7 +112,7 @@ async def test_send_message_overrides_sender_with_bot_info(monkeypatch: pytest.M
     adapter.get_bot_info.assert_awaited_once()
     adapter._send_platform_message.assert_awaited_once()
     fake_stream_manager.get_or_create_stream.assert_awaited_once()
-    fake_stream_manager.add_message_to_history.assert_awaited_once_with(message)
+    fake_stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_send_message_uses_platform_message_id_for_sent_history(
 
     fake_stream_manager = SimpleNamespace(
         get_or_create_stream=AsyncMock(return_value=SimpleNamespace()),
-        add_message_to_history=AsyncMock(return_value=SimpleNamespace()),
+        add_sent_message_to_history=AsyncMock(return_value=SimpleNamespace()),
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager",
@@ -156,7 +156,7 @@ async def test_send_message_uses_platform_message_id_for_sent_history(
 
     assert ok is True
     assert message.message_id == "123456789"
-    fake_stream_manager.add_message_to_history.assert_awaited_once_with(message)
+    fake_stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
 
 
 @pytest.mark.asyncio
@@ -177,7 +177,7 @@ async def test_send_message_keeps_placeholder_id_when_platform_returns_none(
 
     fake_stream_manager = SimpleNamespace(
         get_or_create_stream=AsyncMock(return_value=SimpleNamespace()),
-        add_message_to_history=AsyncMock(return_value=SimpleNamespace()),
+        add_sent_message_to_history=AsyncMock(return_value=SimpleNamespace()),
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager",
@@ -198,7 +198,7 @@ async def test_send_message_keeps_placeholder_id_when_platform_returns_none(
 
     assert ok is True
     assert message.message_id == "action_send_text_internal"
-    fake_stream_manager.add_message_to_history.assert_awaited_once_with(message)
+    fake_stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
 
 
 @pytest.mark.asyncio
@@ -225,7 +225,7 @@ async def test_send_message_returns_false_and_skips_history_when_send_fails(
 
     fake_stream_manager = SimpleNamespace(
         get_or_create_stream=AsyncMock(),
-        add_message_to_history=AsyncMock(),
+        add_sent_message_to_history=AsyncMock(),
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager",
@@ -253,7 +253,7 @@ async def test_send_message_returns_false_and_skips_history_when_send_fails(
     assert ok is False
     media_manager.store_media.assert_awaited_once_with("base64|aGVsbG8=", "image")
     fake_stream_manager.get_or_create_stream.assert_not_awaited()
-    fake_stream_manager.add_message_to_history.assert_not_awaited()
+    fake_stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -276,7 +276,7 @@ async def test_sent_image_is_cached_before_history(monkeypatch: pytest.MonkeyPat
         "src.core.managers.media_manager.get_media_manager", lambda: media_manager
     )
     stream_manager = SimpleNamespace(
-        get_or_create_stream=AsyncMock(), add_message_to_history=AsyncMock()
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock()
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager
@@ -299,7 +299,7 @@ async def test_sent_image_is_cached_before_history(monkeypatch: pytest.MonkeyPat
     assert isinstance(message.content, dict)
     assert message.processed_plain_text == f"[图片({media_id})]"
     assert message.content["text"] == f"[图片({media_id})]"
-    stream_manager.add_message_to_history.assert_awaited_once_with(message)
+    stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
 
 
 @pytest.mark.asyncio
@@ -328,7 +328,7 @@ async def test_sent_media_description_contains_media_id_in_placeholder(
     manager = SimpleNamespace(store_media=AsyncMock(return_value=stored))
     monkeypatch.setattr("src.core.managers.media_manager.get_media_manager", lambda: manager)
     stream_manager = SimpleNamespace(
-        get_or_create_stream=AsyncMock(), add_message_to_history=AsyncMock(),
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager,
@@ -351,10 +351,10 @@ async def test_sent_media_description_contains_media_id_in_placeholder(
         assert message.content["media"][0][id_key] == media_id
         assert message.processed_plain_text == expected
         assert message.content["text"] == expected
-        stream_manager.add_message_to_history.assert_awaited_once_with(message)
+        stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
     else:
         adapter._send_platform_message.assert_not_awaited()
-        stream_manager.add_message_to_history.assert_not_awaited()
+        stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -384,7 +384,7 @@ async def test_sent_media_caller_description_contains_id_only_when_cached(
     media_manager = SimpleNamespace(store_media=AsyncMock(return_value=stored))
     monkeypatch.setattr("src.core.managers.media_manager.get_media_manager", lambda: media_manager)
     stream_manager = SimpleNamespace(
-        get_or_create_stream=AsyncMock(), add_message_to_history=AsyncMock(),
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
     )
     monkeypatch.setattr("src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager)
     text = f"[{label}:晚安]"
@@ -406,10 +406,10 @@ async def test_sent_media_caller_description_contains_id_only_when_cached(
         assert message.content["media"][0][id_key] == media_id
         assert message.processed_plain_text == expected
         assert message.content["text"] == expected
-        stream_manager.add_message_to_history.assert_awaited_once_with(message)
+        stream_manager.add_sent_message_to_history.assert_awaited_once_with(message)
     else:
         adapter._send_platform_message.assert_not_awaited()
-        stream_manager.add_message_to_history.assert_not_awaited()
+        stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -434,7 +434,7 @@ async def test_uncached_url_media_does_not_send(
     manager = SimpleNamespace(store_media=AsyncMock())
     monkeypatch.setattr("src.core.managers.media_manager.get_media_manager", lambda: manager)
     stream_manager = SimpleNamespace(
-        get_or_create_stream=AsyncMock(), add_message_to_history=AsyncMock(),
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager,
@@ -453,7 +453,7 @@ async def test_uncached_url_media_does_not_send(
     assert not await sender.send_message(message, adapter_signature="mock:adapter:qq")
     manager.store_media.assert_not_awaited()
     adapter._send_platform_message.assert_not_awaited()
-    stream_manager.add_message_to_history.assert_not_awaited()
+    stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -473,7 +473,7 @@ async def test_sent_image_store_failure_prevents_send(monkeypatch: pytest.Monkey
         lambda: SimpleNamespace(store_media=AsyncMock(return_value=False)),
     )
     stream_manager = SimpleNamespace(
-        get_or_create_stream=AsyncMock(), add_message_to_history=AsyncMock()
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock()
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager
@@ -492,7 +492,7 @@ async def test_sent_image_store_failure_prevents_send(monkeypatch: pytest.Monkey
 
     assert not await sender.send_message(message, adapter_signature="mock:adapter:qq")
     adapter._send_platform_message.assert_not_awaited()
-    stream_manager.add_message_to_history.assert_not_awaited()
+    stream_manager.add_sent_message_to_history.assert_not_awaited()
     assert isinstance(message.content, dict)
     assert message.content["media"][0]["image_id"] == "pending"
 
@@ -516,7 +516,7 @@ async def test_native_image_store_failure_prevents_send(
         lambda: SimpleNamespace(store_media=AsyncMock(return_value=False)),
     )
     stream_manager = SimpleNamespace(
-        get_or_create_stream=AsyncMock(), add_message_to_history=AsyncMock()
+        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock()
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager", lambda: stream_manager
@@ -536,7 +536,7 @@ async def test_native_image_store_failure_prevents_send(
 
     assert not await sender.send_message(message, adapter_signature="mock:adapter:qq")
     adapter._send_platform_message.assert_not_awaited()
-    stream_manager.add_message_to_history.assert_not_awaited()
+    stream_manager.add_sent_message_to_history.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -579,7 +579,7 @@ async def test_send_message_returns_false_on_unexpected_exception(
 
     fake_stream_manager = SimpleNamespace(
         get_or_create_stream=AsyncMock(),
-        add_message_to_history=AsyncMock(),
+        add_sent_message_to_history=AsyncMock(),
     )
     monkeypatch.setattr(
         "src.core.managers.stream_manager.get_stream_manager",
@@ -600,4 +600,4 @@ async def test_send_message_returns_false_on_unexpected_exception(
 
     assert ok is False
     fake_stream_manager.get_or_create_stream.assert_not_awaited()
-    fake_stream_manager.add_message_to_history.assert_not_awaited()
+    fake_stream_manager.add_sent_message_to_history.assert_not_awaited()

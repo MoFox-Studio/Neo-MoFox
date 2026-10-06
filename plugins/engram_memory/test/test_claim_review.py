@@ -161,8 +161,10 @@ def test_layersplit_routes_unique_bounded_candidates() -> None:
 
 
 @pytest.mark.asyncio
-async def test_neo4j_is_optional_and_lazy() -> None:
-    """Neo4j 适配器构造不连接网络，缺少驱动时给出明确可选依赖错误。"""
+async def test_neo4j_is_lazy_and_reports_driver_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neo4j 适配器构造不连接网络，驱动不可用时给出明确错误。"""
+    import sys
+    monkeypatch.setitem(sys.modules, "neo4j", None)
     graph = Neo4jEpisodeGraph("bolt://localhost:7687", "neo4j", "password")
     with pytest.raises(Neo4jUnavailableError):
         await graph.connect()

@@ -1657,6 +1657,7 @@ dependencies = [
     { name = "json-repair" },
     { name = "mcp" },
     { name = "mofox-wire" },
+    { name = "neo4j" },
     { name = "openai" },
     { name = "packaging" },
     { name = "pillow" },
@@ -1692,6 +1693,7 @@ requires-dist = [
     { name = "json-repair", specifier = ">=0.57.1" },
     { name = "mcp", specifier = ">=1.26.0" },
     { name = "mofox-wire", specifier = ">=0.1.7" },
+    { name = "neo4j", specifier = ">=5.0.0" },
     { name = "openai", specifier = ">=2.16.0" },
     { name = "packaging", specifier = ">=26.0" },
     { name = "pillow", specifier = ">=11.0.0" },
@@ -1713,6 +1715,18 @@ dev = [
     { name = "pytest-mock", specifier = ">=3.15.1" },
     { name = "pytest-randomly", specifier = ">=4.0.1" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+]
+
+[[package]]
+name = "neo4j"
+version = "6.4.0"
+source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
+dependencies = [
+    { name = "pytz" },
+]
+sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/80/db/024bd576bde5d97436d0acb71b41cf928c036ed8fec95ea1122eb05e47d1/neo4j-6.4.0.tar.gz", hash = "sha256:056676698f080b5af5b24b0fc5abb485b8db1b95edf366d01dcfd63bcff9b71d" }
+wheels = [
+    { url = "https://repo.huaweicloud.com/repository/pypi/packages/c9/5d/519aefe3b38a490924641e980a16ea6c70f6c96c08d84cf661d32c4a08c2/neo4j-6.4.0-py3-none-any.whl", hash = "sha256:fdd048ba827be138063b045cf59e40056fbf0405ac02dadc24f64e369fbd9d3d" },
 ]
 
 [[package]]
@@ -2693,6 +2707,15 @@ source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
 sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/69/9b/f23807317a113dc36e74e75eb265a02dd1a4d9082abc3c1064acd22997c4/python_multipart-0.0.27.tar.gz", hash = "sha256:9870a6a8c5a20a5bf4f07c017bd1489006ff8836cff097b6933355ee2b49b602" }
 wheels = [
     { url = "https://repo.huaweicloud.com/repository/pypi/packages/99/78/4126abcbdbd3c559d43e0db7f7b9173fc6befe45d39a2856cc0b8ec2a5a6/python_multipart-0.0.27-py3-none-any.whl", hash = "sha256:6fccfad17a27334bd0193681b369f476eda3409f17381a2d65aa7df3f7275645" },
+]
+
+[[package]]
+name = "pytz"
+version = "2026.5"
+source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
+sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/14/21/d83d6ef28c4c912c4bb4d1dcf591f7b8c6bde87b9c66f9f454677314e16d/pytz-2026.5.tar.gz", hash = "sha256:fa23724b9c486543b9ff54a327ee7569ac83ade54bb9afd0fc18676620401c86" }
+wheels = [
+    { url = "https://repo.huaweicloud.com/repository/pypi/packages/4f/ef/c66110d46fb800dda0bf33164182dfadabe26a90e4476844d502a23dca8e/pytz-2026.5-py2.py3-none-any.whl", hash = "sha256:e658af3757f9e26a9d25dd2aff38335acd92bc9104f890a894b2c1ba28311b03" },
 ]
 
 [[package]]

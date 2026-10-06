@@ -191,12 +191,7 @@ class MessageConverter:
 
     # ─── envelope → message ───────────────────
 
-    async def envelope_to_message(
-        self,
-        envelope: MessageEnvelope,
-        *,
-        recognize_media: bool = True,
-    ) -> Message:
+    async def envelope_to_message(self, envelope: MessageEnvelope) -> Message:
         """将 MessageEnvelope 转换为 Message。
 
         Args:
@@ -237,7 +232,7 @@ class MessageConverter:
         result = self._parse_segments(segments, depth=0)
 
         # 如果解析过程中发现有媒体资源，则后续需要考虑是否运行视觉语言模型识别
-        if result.media and recognize_media:
+        if result.media:
             # 提前提取 stream_id 以供逐项过滤 VLM
             stream_id = extract_stream_id(message_info)
             result = await self._recognize_media_with_manager(result, stream_id)

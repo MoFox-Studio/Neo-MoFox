@@ -9,17 +9,12 @@ from __future__ import annotations
 import random
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
-from src.core.models.message import Message
 from src.core.models.sql_alchemy import Messages, PersonInfo
 from src.kernel.db import QueryBuilder
 
-API_VERSION = "1.1.0"
-
-if TYPE_CHECKING:
-	from mofox_wire import MessageEnvelope
-	from src.core.transport.message_receive.converter import MessageConverter
+API_VERSION = "1.0.0"
 
 def _get_adapter_manager():
 	"""延迟获取 AdapterManager，避免导入时循环依赖。
@@ -898,37 +893,4 @@ async def filter_bot_messages(messages: list[dict[str, Any]]) -> list[dict[str, 
 		过滤后的消息字典列表
 	"""
 	return await _apply_filter_bot(messages)
-
-
-_message_converter: "MessageConverter | None" = None
-
-
-def _get_message_converter() -> "MessageConverter":
-	"""延迟获取消息转换器单例。"""
-	global _message_converter
-	if _message_converter is None:
-		from src.core.transport.message_receive.converter import MessageConverter
-
-		_message_converter = MessageConverter()
-	return _message_converter
-
-
-async def envelope_to_message(
-	envelope: "MessageEnvelope",
-	*,
-	recognize_media: bool = True,
-) -> Message:
-	"""将消息信封转换为核心消息对象。"""
-	if not isinstance(envelope, dict):
-		raise TypeError("envelope 必须是 MessageEnvelope 或 dict")
-	return await _get_message_converter().envelope_to_message(
-		envelope, recognize_media=recognize_media
-	)
-
-
-async def message_to_envelope(message: Message) -> "MessageEnvelope":
-	"""将核心消息对象转换为消息信封。"""
-	if not isinstance(message, Message):
-		raise TypeError("message 必须是 Message 类型")
-	return await _get_message_converter().message_to_envelope(message)
 
