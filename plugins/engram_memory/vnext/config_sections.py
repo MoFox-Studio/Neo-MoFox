@@ -174,6 +174,95 @@ class VNextFlashbackSection(SectionBase):
     )
 
 
+@config_section("feedforward", title="前馈式记忆检索", tag="ai")
+class FeedForwardSection(SectionBase):
+    """ACT-R × KDA × LayerSplit × Transformer 每轮前馈检索参数。"""
+
+    enabled: bool = Field(
+        default=True,
+        description="每轮回复前必然执行前馈检索，替代概率触发的自然闪回；关闭后回到原闪回",
+        label="启用前馈检索",
+    )
+    max_memories: int = Field(
+        default=3, ge=0, le=8, description="每轮最多注入的正式记忆条数"
+    )
+    candidate_limit: int = Field(
+        default=24, ge=1, le=100, description="混合检索为前馈提供的候选上限"
+    )
+    hot_candidates: int = Field(
+        default=8, ge=0, le=64, description="L2 热缓存直接进入候选池的条数"
+    )
+    feature_dim: int = Field(
+        default=64, ge=8, le=512, description="特征哈希与 KDA 状态矩阵维度"
+    )
+    retrieval_threshold: float = Field(
+        default=-2.5, ge=-10.0, le=5.0, description="ACT-R 检索阈值 τ，低于此激活不注入"
+    )
+    temperature: float = Field(
+        default=0.4, ge=0.05, le=5.0, description="Boltzmann 检索概率温度 s"
+    )
+    noise_scale: float = Field(
+        default=0.15, ge=0.0, le=1.0, description="ACT-R logistic 噪声尺度"
+    )
+    mismatch_penalty: float = Field(
+        default=0.6, ge=0.0, le=5.0, description="人物不匹配时的部分匹配惩罚 P"
+    )
+    working_weight: float = Field(
+        default=0.8, ge=0.0, le=5.0, description="L1 工作记忆扩散权重"
+    )
+    kda_weight: float = Field(
+        default=0.6, ge=0.0, le=5.0, description="KDA 线索读出扩散权重"
+    )
+    latency_budget_ms: int = Field(
+        default=1500, ge=100, description="单轮前馈耗时预算（毫秒），超时本轮不注入"
+    )
+    kda_learning_rate: float = Field(
+        default=0.5, ge=0.05, le=1.0, description="KDA delta 规则学习率 β"
+    )
+    private_decay: float = Field(
+        default=0.35, ge=0.05, le=0.95, description="私聊通道 ACT-R 衰减率 d"
+    )
+    private_retention_per_day: float = Field(
+        default=0.98, ge=0.5, le=1.0, description="私聊通道 KDA 每日保留率 γ"
+    )
+    group_decay: float = Field(
+        default=0.6, ge=0.05, le=0.95, description="群聊通道 ACT-R 衰减率 d"
+    )
+    group_retention_per_day: float = Field(
+        default=0.9, ge=0.5, le=1.0, description="群聊通道 KDA 每日保留率 γ"
+    )
+    emotional_decay: float = Field(
+        default=0.3, ge=0.05, le=0.95, description="情感通道 ACT-R 衰减率 d"
+    )
+    emotional_retention_per_day: float = Field(
+        default=0.99, ge=0.5, le=1.0, description="情感通道 KDA 每日保留率 γ"
+    )
+    factual_decay: float = Field(
+        default=0.25, ge=0.05, le=0.95, description="事实通道 ACT-R 衰减率 d"
+    )
+    factual_retention_per_day: float = Field(
+        default=0.995, ge=0.5, le=1.0, description="事实通道 KDA 每日保留率 γ"
+    )
+    sensory_capacity: int = Field(
+        default=8, ge=1, le=64, description="L0 感知缓冲每流保留的输入条数"
+    )
+    sensory_ttl_seconds: int = Field(
+        default=600, ge=30, le=86400, description="L0 感知缓冲有效秒数"
+    )
+    working_capacity: int = Field(
+        default=7, ge=1, le=32, description="L1 工作集每流容量"
+    )
+    working_half_life_turns: float = Field(
+        default=4.0, ge=0.5, le=64.0, description="L1 工作记忆按回复轮数的半衰期"
+    )
+    hot_capacity: int = Field(
+        default=256, ge=1, le=10000, description="L2 热缓存全局条数"
+    )
+    hot_ttl_seconds: int = Field(
+        default=3600, ge=60, le=86400, description="L2 热缓存有效秒数"
+    )
+
+
 @config_section("claim_review", title="Claim/Hypothesis 审核", tag="ai")
 class ClaimReviewSection(SectionBase):
     """经历巩固候选的自动审核参数。"""
@@ -257,6 +346,7 @@ class VNextConfig(SectionBase):
     persona: PersonaSection = Field(default_factory=PersonaSection)
     retrieval: VNextRetrievalSection = Field(default_factory=VNextRetrievalSection)
     flashback: VNextFlashbackSection = Field(default_factory=VNextFlashbackSection)
+    feedforward: FeedForwardSection = Field(default_factory=FeedForwardSection)
     claim_review: ClaimReviewSection = Field(default_factory=ClaimReviewSection)
     neo4j: Neo4jSection = Field(default_factory=Neo4jSection)
     prompt_injection: PromptInjectionSection = Field(

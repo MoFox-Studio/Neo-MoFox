@@ -1,0 +1,113 @@
+{
+  "folders": [
+    {
+      "name": "core-src",
+      "path": "src"
+    },
+    {
+      "name": "core-tests",
+      "path": "test"
+    },
+    {
+      "name": "plugin-neo-fatum-chatter",
+      "path": "plugins/neo_fatum_chatter"
+    },
+    {
+      "name": "plugin-roamer",
+      "path": "plugins/roamer"
+    },
+    {
+      "name": "plugin-neo-default-chatter",
+      "path": "plugins/neo_default_chatter"
+    },
+    {
+      "name": "plugin-onebot-adapter",
+      "path": "plugins/onebot_adapter"
+    },
+    {
+      "name": "plugin-engram-memory",
+      "path": "plugins/engram_memory"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/.git": true,
+      "**/.venv": true,
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/.ruff_cache": true,
+      "**/.agents": true,
+      "**/.claude": true,
+      "**/data": true,
+      "**/logs": true,
+      "**/node_modules": true,
+      "**/browser_profiles": true,
+      "**/media_cache": true,
+      "**/vector_db": true,
+      "**/*.db": true,
+      "**/*.sqlite": true,
+      "**/*.sqlite3": true,
+      "**/*.log": true
+    },
+    "search.exclude": {
+      "**/.git": true,
+      "**/.venv": true,
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/.ruff_cache": true,
+      "**/.agents": true,
+      "**/.claude": true,
+      "**/data": true,
+      "**/logs": true,
+      "**/node_modules": true,
+      "**/browser_profiles": true,
+      "**/media_cache": true,
+      "**/vector_db": true,
+      "**/*.db": true,
+      "**/*.sqlite": true,
+      "**/*.sqlite3": true,
+      "**/*.log": true
+    },
+    "files.watcherExclude": {
+      "**/.git/**": true,
+      "**/.venv/**": true,
+      "**/__pycache__/**": true,
+      "**/.pytest_cache/**": true,
+      "**/.ruff_cache/**": true,
+      "**/.agents/**": true,
+      "**/.claude/**": true,
+      "**/data/**": true,
+      "**/logs/**": true,
+      "**/node_modules/**": true,
+      "**/browser_profiles/**": true,
+      "**/media_cache/**": true,
+      "**/vector_db/**": true,
+      "**/*.db": true,
+      "**/*.sqlite": true,
+      "**/*.sqlite3": true,
+      "**/*.log": true
+    },
+    "python.analysis.diagnosticMode": "openFilesOnly",
+    "python.analysis.exclude": [
+      "**/.venv",
+      "**/.agents",
+      "**/.claude",
+      "**/data",
+      "**/logs",
+      "**/node_modules",
+      "**/__pycache__",
+      "**/.pytest_cache",
+      "**/.ruff_cache"
+    ],
+    "github.copilot.chat.codesearch.enabled": false,
+    "chat.useAgentsMdFile": false,
+    "chat.useNestedAgentsMdFiles": false,
+    "chat.useClaudeMdFile": false,
+    "chat.useAgentSkills": false,
+    "chat.includeApplyingInstructions": false,
+    "chat.includeReferencedInstructions": false,
+    "github.copilot.chat.codeGeneration.useInstructionFiles": false,
+    "git.autoRepositoryDetection": "openEditors",
+    "git.repositoryScanMaxDepth": 1
+  }
+}

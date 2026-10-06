@@ -58,7 +58,6 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.kernel.db import AggregateQuery, CRUDBase, QueryBuilder
@@ -71,6 +70,24 @@ API_VERSION = "1.0.0"
 logger = get_logger("plugin.storage", display="插件存储")
 
 T = TypeVar("T", bound=Any)
+
+
+async def _cleanup_session_cancel_safe(session: AsyncSession) -> None:
+    """完成 Session 清理后再恢复任务取消，避免池连接半回收。"""
+    task = asyncio.current_task()
+    cancellation_count = 0
+    while True:
+        try:
+            if session.is_active:
+                await session.rollback()
+            await session.close()
+            break
+        except asyncio.CancelledError:
+            cancellation_count += 1
+            if task is not None:
+                task.uncancel()
+    if cancellation_count:
+        raise asyncio.CancelledError
 
 
 # =============================================================================
@@ -315,16 +332,8 @@ class PluginDatabase:
                 yield s
                 if s.is_active:
                     await s.commit()
-            except SQLAlchemyError:
-                if s.is_active:
-                    await s.rollback()
-                raise
-            except Exception:
-                if s.is_active:
-                    await s.rollback()
-                raise
             finally:
-                await s.close()
+                await _cleanup_session_cancel_safe(s)
 
     async def close(self) -> None:
         """关闭数据库引擎，释放所有连接资源。

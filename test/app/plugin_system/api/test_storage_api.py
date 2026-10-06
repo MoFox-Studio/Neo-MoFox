@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from sqlalchemy import Integer, Text
 from sqlalchemy.ext.declarative import declarative_base
@@ -147,6 +149,33 @@ async def test_plugin_database_session_raw(tmp_path: pytest.TempdirFactory) -> N
             result = await s.execute(select(_Note).where(_Note.title == "raw"))
             row = result.scalars().first()
         assert row is not None and row.title == "raw"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_plugin_database_session_cancellation_cleans_up_connection(
+    tmp_path: pytest.TempdirFactory,
+) -> None:
+    """事务任务被取消后仍应归还连接，后续操作不能触发池 reset 异常。"""
+    db = PluginDatabase(str(tmp_path / "cancel.db"), [_Note])
+    await db.initialize()
+
+    async def cancelled_writer() -> None:
+        async with db.session() as session:
+            session.add(_Note(title="rolled-back"))
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(cancelled_writer())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    try:
+        assert await db.crud(_Note).count() == 0
+        await db.crud(_Note).create({"title": "after-cancel"})
+        assert await db.crud(_Note).count() == 1
     finally:
         await db.close()
 
