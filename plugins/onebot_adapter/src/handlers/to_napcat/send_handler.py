@@ -461,7 +461,15 @@ class SendHandler:
         }
 
     def handle_voice_message(self, encoded_voice: str) -> dict:
-        """处理语音消息"""
+        """处理语音消息。
+
+        Args:
+            encoded_voice: 语音数据。可以是：
+                - 原始 base64 字符串（不含前缀，自动补 base64://）
+                - MoFox 内部 base64| 格式（转换为 base64://）
+                - 已含 base64:// 前缀的字符串（直接透传，不重复添加前缀）
+                - HTTP/HTTPS URL（直接透传，onebot 会自行拉取）
+        """
         if not encoded_voice:
             logger.warning("接收到空的语音消息，跳过处理")
             return {}
