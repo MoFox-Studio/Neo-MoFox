@@ -399,6 +399,31 @@ def _should_backfill_reasoning_content(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+_REASONING_HISTORY_DISABLED = {"", "none", "false", "off", "no", "disabled", "disable"}
+
+
+def _resolve_reasoning_history_enabled(mode: Any) -> bool:
+    """把 ``reasoning_history_mode`` 归一化为「是否发送 reasoning_content 历史」。
+
+    支持两种写法：
+
+    - 旧的布尔写法：``True`` 发送、``False`` 不发送；
+    - 字符串模式：``"none"``（默认，不发送），以及 ``"deepseek"`` / ``"kimi"`` /
+      ``"auto"`` 等显式开启模式。无法识别的字符串按开启处理，避免静默改变既有部署。
+
+    Args:
+        mode: ``extra_params["reasoning_history_mode"]`` 的原始取值。
+
+    Returns:
+        bool: ``True`` 表示保留并在需要时回填 reasoning_content 历史。
+    """
+    if isinstance(mode, bool):
+        return mode
+    if mode is None:
+        return False
+    return str(mode).strip().lower() not in _REASONING_HISTORY_DISABLED
+
+
 def _thinking_enabled(model_set: dict[str, Any]) -> bool:
     """判断当前模型请求是否显式开启了 thinking / reasoning 模式。"""
     extra_params = model_set.get("extra_params")
@@ -859,8 +884,9 @@ class OpenAIChatClient:
         )
         # force_sync_http 已废弃，移除后不传给 API
         extra_params.pop("force_sync_http", None)
-        # 控制是否向兼容供应商发送 reasoning_content 历史字段
-        reasoning_history_mode = extra_params.pop("reasoning_history_mode", True)
+        # 控制是否向兼容供应商发送 reasoning_content 历史字段。
+        # 缺省为 "none"（不发送）；同时兼容旧的布尔写法。
+        reasoning_history_mode = extra_params.pop("reasoning_history_mode", "none")
 
         client = self._get_client(
             api_key=api_key,
@@ -872,7 +898,9 @@ class OpenAIChatClient:
         messages, openai_tools = _payloads_to_openai_messages(payloads)
         # 默认不向 OpenAI-compatible provider 发送非标准 reasoning_content 历史字段，
         # 避免污染请求结构；需要时通过 reasoning_history_mode 显式开启。
-        allow_reasoning_history = ( reasoning_history_mode == True )
+        allow_reasoning_history = _resolve_reasoning_history_enabled(
+            reasoning_history_mode
+        )
 
         if not allow_reasoning_history:
             for msg in messages:
@@ -902,6 +930,9 @@ class OpenAIChatClient:
         params.update(extra_params)
         if openai_tools and not tool_call_compat:
             params["tools"] = openai_tools
+            # 带工具时必须给出 tool_choice：默认 auto，避免上游把缺省值当作
+            # required 而触发 grammar 编译失败。用户显式注入的值优先。
+            params.setdefault("tool_choice", "auto")
         else:
             params.pop("tool_choice", None)
 
@@ -946,8 +977,12 @@ class OpenAIChatClient:
 
         # 仅在显式允许 reasoning 历史模式时，才为缺失字段的 assistant 历史回填
         # reasoning_content；默认模式下前面已经清理过该字段。
+        # 字符串模式（deepseek / kimi / auto 等）由用户显式声明，直接保留并回填；
+        # 旧的布尔写法维持原语义：仅在 thinking 开启或历史中已有 reasoning_content 时回填。
+        explicit_history_mode = not isinstance(reasoning_history_mode, bool)
         if allow_reasoning_history and (
-            _thinking_enabled(model_set)
+            explicit_history_mode
+            or _thinking_enabled(model_set)
             or _should_backfill_reasoning_content(messages)
         ):
             for msg in messages:
