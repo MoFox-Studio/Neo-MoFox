@@ -128,6 +128,9 @@ class TestHandleVoiceMessage:
         raw = _make_wav_base64()
         seg = handler.handle_voice_message(f"{given}{raw}")
         decoded = _decoded_payload(seg)
+        # 必须逐字节相等：只校验 RIFF 标记与 WAV 元数据的话，
+        # 采样帧被替换或截断仍会通过，而那正是 NapCat 解码出垃圾字节的形态。
+        assert decoded == base64.b64decode(raw), f"{label}: 语音字节与原始不一致"
         assert decoded[:4] == b"RIFF", f"{label}: not a RIFF container"
         with wave.open(io.BytesIO(decoded), "rb") as wav_file:
             assert wav_file.getframerate() == 24000
