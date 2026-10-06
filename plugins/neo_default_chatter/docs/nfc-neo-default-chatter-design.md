@@ -494,7 +494,7 @@ from .utils.prompt_builder import build_system_prompt, build_user_prompt
 ```json
 {
   "name": "neo_default_chatter",
-  "version": "0.1.0",
+    "version": "0.2.1",
   "description": "Neo-Default-Chatter：可复用的会话逻辑中台，事件驱动预处理 + 原生多模态",
   "author": "MoFox Team",
   "dependencies": {
@@ -514,7 +514,7 @@ from .utils.prompt_builder import build_system_prompt, build_user_prompt
     "llm_api": "1.0.0",
     "send_api": "1.0.0",
     "prompt_api": "1.0.0",
-    "stream_api": "1.0.0",
+    "stream_api": "2.0.0",
     "log_api": "1.0.0",
     "adapter_api": "1.0.0",
     "message_api": "1.0.0",
