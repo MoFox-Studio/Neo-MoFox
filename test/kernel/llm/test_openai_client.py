@@ -1341,6 +1341,30 @@ class TestThinkingEnabled:
 
         assert _thinking_enabled({}) is False
 
+    @pytest.mark.parametrize(
+        ("thinking", "expected"),
+        [
+            ({"type": "enabled"}, True),
+            ({"type": "ENABLED"}, True),
+            ({"type": " enabled "}, True),
+            ({"type": "disabled"}, False),
+            ({"type": "disable"}, False),
+            ({"type": "DISABLED"}, False),
+            ({"type": " disabled "}, False),
+            ({"type": "none"}, False),
+            ({"type": "off"}, False),
+            ({"enabled": False}, False),
+            ({"enabled": True}, True),
+            # 无法识别的 type 保持原行为（视为开启）
+            ({"type": "super-thinking"}, True),
+        ],
+    )
+    def test_thinking_type_dialects(self, thinking, expected):
+        """测试 thinking.type 方言被正确识别（DeepSeek 等用 type 表达开关）。"""
+        from src.kernel.llm.model_client.openai_client import _thinking_enabled
+
+        assert _thinking_enabled({"extra_params": {"thinking": thinking}}) is expected
+
 
 class TestReasoningHistoryMode:
     """测试 reasoning_history_mode 对 reasoning_content 历史字段的控制。"""
