@@ -1,0 +1,24 @@
+{
+  "name": "image_sender",
+  "version": "1.0.0",
+  "description": "发送图片消息的插件",
+  "author": "可可",
+  "categories": ["tool"],
+  "tags": ["image", "media", "send"],
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "action",
+      "component_name": "send_image",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "min_core_version": "1.0.0",
+  "python_dependencies": [],
+  "dependencies_required": true
+}

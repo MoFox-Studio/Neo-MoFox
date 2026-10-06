@@ -1,0 +1,30 @@
+{
+  "name": "sisp",
+  "version": "1.0.0",
+  "description": "性交互动模拟插件，通过数学模型驱动多阶段状态机并向 LLM 动态注入提示词",
+  "author": "",
+  "categories": ["chat"],
+  "tags": ["simulation", "state-machine", "llm"],
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "event_handler",
+      "component_name": "sisp_state_handler",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "event_handler",
+      "component_name": "sisp_prompt_injector",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "min_core_version": "1.0.0",
+  "python_dependencies": [],
+  "dependencies_required": false
+}

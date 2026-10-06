@@ -1,0 +1,57 @@
+{
+    "name": "web_search_tool",
+    "version": "1.0.0",
+    "description": "网络搜索工具插件，支持多种搜索引擎（Exa/Tavily/Metaso/DuckDuckGo/Bing/SearXNG/Serper）",
+    "author": "minecraft1024a",
+    "license": "GPL-3.0",
+    "categories": ["information"],
+    "tags": ["search", "web", "information"],
+    "homepage": "https://github.com/MoFox-Studio/Neo-MoFox",
+    "keywords": [
+        "search",
+        "web",
+        "tool",
+        "service",
+        "exa",
+        "tavily",
+        "duckduckgo",
+        "bing",
+        "searxng",
+        "serper",
+        "metaso"
+    ],
+    "dependencies": {
+        "plugins": [],
+        "components": []
+    },
+    "python_dependencies": [
+        "httpx",
+        "aiohttp",
+        "tavily-python",
+        "exa-py",
+        "asyncddgs",
+        "orjson",
+        "beautifulsoup4"
+    ],
+    "dependencies_required": true,
+    "include": [
+        {
+            "component_type": "tool",
+            "component_name": "web_search",
+            "description": "网络搜索工具，供 LLM 调用以获取实时信息",
+            "dependencies": []
+        },
+        {
+            "component_type": "service",
+            "component_name": "web_search",
+            "description": "网络搜索服务，供其他插件调用",
+            "dependencies": []
+        }
+    ],
+    "config": {
+        "config_file": "config.py",
+        "config_class": "WebSearchConfig"
+    },
+    "entry_point": "plugin.py",
+    "min_core_version": "1.0.0"
+}
