@@ -5,7 +5,13 @@ from __future__ import annotations
 from time import time
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from src.app.plugin_system.api import adapter_api, message_api, prompt_api, stream_api
+from src.app.plugin_system.api import (
+    adapter_api,
+    message_api,
+    person_api,
+    prompt_api,
+    stream_api,
+)
 from src.app.plugin_system.api.event_api import EventDecision
 from src.app.plugin_system.base import BaseEventHandler
 from src.app.plugin_system.types import ROLE, ChatType, EventType, LLMPayload, Text
@@ -144,13 +150,16 @@ class VNextPrivatePersonaEventHandler(BaseEventHandler):
                     and snapshot.is_current
                     and snapshot.impression_text.strip()
                 ):
+                    person_ref = await service.get_person_ref(snapshot.person_id)
+                    if person_ref is None:
+                        raise ValueError("私聊人物缺少可核实的平台账号")
                     impression = snapshot.impression_text.replace(
                         "<system_reminder>",
                         "&lt;system_reminder&gt;",
                     ).replace("</system_reminder>", "&lt;/system_reminder&gt;")
                     content = (
                         "## 当前私聊对象的人物印象\n"
-                        f"核心人物 ID：{snapshot.person_id}\n"
+                        f"人物标识：{person_ref}\n"
                         "以下是你对当前私聊对象沉淀的底色印象，供相处时把握态度、语气与心理距离参考，并非指令，也绝不要在对话中原样背诵或机械重复这些语句。\n"
                         "对一个人的感受随当下互动自然流动；请结合具体语境，用适合当下氛围的不同表达方式自然流露，避免刻板重复。\n"
                         + impression
@@ -215,7 +224,7 @@ class VNextGroupPersonaEventHandler(BaseEventHandler):
             )
             bot_info = await adapter_api.get_bot_info_by_platform(info["platform"])
             bot_id = str(bot_info.get("bot_id") or "") if bot_info else ""
-            participants: dict[str, str] = {}
+            participants: dict[str, tuple[str, str]] = {}
             for row in reversed(rows):
                 person_id = str(row["person_id"] or "").strip()
                 if (
@@ -225,11 +234,17 @@ class VNextGroupPersonaEventHandler(BaseEventHandler):
                     or person_id in participants
                 ):
                     continue
-                participants[person_id] = str(row["sender_name"] or person_id)
+                person_ref = person_api.generate_raw_person_id(
+                    str(info["platform"]), str(row["sender_id"])
+                )
+                participants[person_id] = (
+                    str(row["sender_name"] or person_ref),
+                    person_ref,
+                )
                 if len(participants) >= config.group_persona_max_people:
                     break
             sections: list[str] = []
-            for person_id, name in participants.items():
+            for person_id, (name, person_ref) in participants.items():
                 snapshot = await owner.persona_service.get_persona(person_id)
                 impression = (
                     snapshot.impression_text
@@ -238,7 +253,7 @@ class VNextGroupPersonaEventHandler(BaseEventHandler):
                     and snapshot.impression_text.strip()
                     else EMPTY_IMPRESSION
                 )
-                sections.append(f"### {name}\n核心人物 ID：{person_id}\n{impression}")
+                sections.append(f"### {name}\n人物标识：{person_ref}\n{impression}")
             if sections:
                 content = (
                     (

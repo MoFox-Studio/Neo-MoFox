@@ -9,7 +9,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from src.app.plugin_system.api import prompt_api
+from src.app.plugin_system.api import person_api, prompt_api
 from src.app.plugin_system.api.event_api import EventDecision
 from src.app.plugin_system.base import (
     BaseAction,
@@ -77,7 +77,7 @@ def _actor_context(component: BaseAction | BaseTool) -> ToolContext:
     sender_id = str(_value(message, "sender_id") or "").strip()
     return ToolContext(
         actor_type=ActorType.ACTOR,
-        actor_ref=f"{platform}:{sender_id}"
+        actor_ref=person_api.generate_raw_person_id(platform, sender_id)
         if platform and sender_id
         else sender_id or None,
         stream_id=stream_id or None,
@@ -148,7 +148,11 @@ async def _action_source(
         {
             "message_id": item.message_id,
             "time": item.time.isoformat(),
-            "person_id": item.snapshot.get("person_id"),
+            "person_id": person_api.generate_raw_person_id(
+                str(item.snapshot["platform"]), str(item.snapshot["sender_id"])
+            )
+            if item.snapshot.get("platform") and item.snapshot.get("sender_id")
+            else None,
             "speaker": item.speaker,
             "content": item.text,
         }
@@ -207,7 +211,7 @@ async def _people(
             raise ValueError(
                 "人物 ID 未对应到核心人物记录；请先查询人物，不能用昵称代替 ID"
             )
-        people.append(person.person_id)
+        people.append(person_api.generate_raw_person_id(person.platform, person.user_id))
     if len(set(people)) != len(people):
         raise ValueError("主次人物不能重复或指向同一人物")
     return SubjectInput(SubjectKind.PERSON, person_id=people[0]), tuple(
@@ -227,13 +231,13 @@ def _action_result(error: ValueError) -> tuple[bool, str]:
 _PERSON_FIELDS: dict[str, object] = {
     "primary_person_id": {
         "type": "string",
-        "description": "这条记忆主要关于谁，使用查询所得准确人物 ID；不一定是发言者。",
+        "description": "这条记忆主要关于谁，使用已核实的平台:ID 人物标识，例如 qq:123456；不一定是发言者，不填内部哈希或昵称。",
     },
     "secondary_person_ids": {
         "type": "array",
         "items": {"type": "string"},
         "uniqueItems": True,
-        "description": "其他相关人物的准确 ID；不能重复主要人物。",
+        "description": "其他相关人物的已核实平台:ID 标识，例如 qq:123456；不填内部哈希或昵称，不能重复主要人物。",
     },
     "source_message_ids": {
         "type": "array",
@@ -274,7 +278,7 @@ class VNextMemorySearchTool(BaseTool):
 
         Args:
             query: 要回想的具体人物、事实或经历。
-            person_ids: 查询所得准确人物 ID，可按主次人物筛选。
+            person_ids: 已核实的平台:ID 人物标识，例如 qq:123456，可按主次人物筛选。
             memory_kinds: 可选的正式记忆类型。
             limit: 可选的结果条数上限。
             start_time: 可选 ISO 8601 日期或时间，例如 2026-01-02、
@@ -498,7 +502,7 @@ class VNextPersonLookupTool(BaseTool):
         "按人物 ID 查询核心信息、当前或历史印象和近期相关记忆。"
         "需要了解某个人时，读取与当前问题相关的信息，供相处时参考，不是要把他的情况介绍给旁人。"
         "核对具体往事时，用正式记忆检索与回读读取对应正文和来源。"
-        "使用准确的核心人物 ID，不能用昵称代替。"
+        "使用已核实的平台:ID 人物标识，例如 qq:123456，不填内部哈希或昵称。"
         "view=current 读当前，history 列出历史目录，revision 配合 revision_no 读指定历史正文。"
         "结合记忆时间判断信息时效，印象更新时间不代表经历发生时间。"
         "历史只是当时的主观认识，不是当前事实或正式记忆依据。"
@@ -510,7 +514,13 @@ class VNextPersonLookupTool(BaseTool):
         view: str = "current",
         revision_no: int | None = None,
     ) -> tuple[bool, str | dict[str, object]]:
-        """按 view 返回当前印象、历史目录或 revision_no 对应的历史正文。"""
+        """按平台人物标识读取当前或历史印象。
+
+        Args:
+            person_id: 已核实的平台:ID 人物标识，例如 qq:123456。
+            view: current 读取当前，history 读取历史目录，revision 读取指定版本。
+            revision_no: revision 视图要读取的历史版本号。
+        """
         return True, await _owner(self.plugin).tools.person_lookup(
             person_id,
             _actor_context(self),

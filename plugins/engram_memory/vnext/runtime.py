@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import asyncio
 import inspect
 import math
@@ -114,7 +115,7 @@ def message_to_snapshot(message: MessageLike) -> MessageSnapshot:
     """转换消息为来源快照，校验身份、聊天流、时间与有效正文。
 
     正文优先使用处理后的纯文本，发言者优先使用名称、群名片和账号。
-    人物身份取自消息或附加字段；缺少身份时通过平台与账号生成核心人物 ID。
+    人物身份使用平台账号；核心哈希须与消息的平台和发送账号一致。
     """
     if message is None:
         raise ValueError("message 不能为空")
@@ -150,8 +151,12 @@ def message_to_snapshot(message: MessageLike) -> MessageSnapshot:
     sender_role = _normalize_text(_message_value(message, "sender_role")).casefold()
     if sender_role == "bot" or sender_id == "bot":
         person_id = "bot"
-    elif not person_id and platform and sender_id and sender_id != "system":
-        person_id = person_api.generate_person_id(platform, sender_id)
+    elif platform and sender_id and sender_id != "system":
+        if re.fullmatch(r"[0-9a-fA-F]{64}", person_id) and person_api.generate_person_id(platform, sender_id) != person_id:
+            raise ValueError("来源人物哈希与平台账号不一致")
+        person_id = person_api.generate_raw_person_id(platform, sender_id)
+    elif re.fullmatch(r"[0-9a-fA-F]{64}", person_id):
+        raise ValueError("来源人物哈希缺少平台账号")
     snapshot = {
         "message_id": message_id,
         "stream_id": stream_id,

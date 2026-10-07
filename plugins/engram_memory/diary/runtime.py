@@ -257,8 +257,11 @@ class DiaryRuntime:
                 .isoformat()
             )
             parts.append(
-                f"日期：{diary.day}；覆盖至：{cutoff}；消息位置：{diary.through_id}\n{_safe_material(diary.body)}"
+                f"---\n\n## {diary.day} 日记\n\n"
+                f"覆盖至：{cutoff}；消息位置：{diary.through_id}\n\n"
+                f"{_safe_material(diary.body)}"
             )
+        parts.append("---")
         if progress is not None:
             parts.append(
                 f"全流已处理消息位置：{progress.cursor_id}。各日正文截止分别见上文。"

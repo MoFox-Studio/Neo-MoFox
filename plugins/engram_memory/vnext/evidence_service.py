@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -97,7 +98,7 @@ class EvidenceService:
                 and payload.get("sender_id")
                 and payload.get("sender_id") not in {"bot", "system"}
             ):
-                payload["person_id"] = person_api.generate_person_id(
+                payload["person_id"] = person_api.generate_raw_person_id(
                     str(payload["platform"]),
                     str(payload["sender_id"]),
                 )
@@ -197,6 +198,15 @@ class EvidenceService:
                 for field in ("processed_plain_text", "content", "text")
             ):
                 raise ValueError("来源快照缺少理解记忆所需的消息内容")
+            if payload.get("platform") and payload.get("sender_id") and payload.get("person_id") not in {"bot", "system"}:
+                person_id = str(payload.get("person_id") or "")
+                if re.fullmatch(r"[0-9a-fA-F]{64}", person_id) and person_api.generate_person_id(str(payload["platform"]), str(payload["sender_id"])) != person_id:
+                    raise ValueError("来源人物哈希与平台账号不一致")
+                payload["person_id"] = person_api.generate_raw_person_id(
+                    str(payload["platform"]), str(payload["sender_id"])
+                )
+            elif re.fullmatch(r"[0-9a-fA-F]{64}", str(payload.get("person_id") or "")):
+                raise ValueError("来源人物哈希缺少平台账号")
             payloads[key] = _json_value(payload)
         return tuple(
             replace(

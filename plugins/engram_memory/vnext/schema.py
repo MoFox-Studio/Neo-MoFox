@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import sqlite3
 import tempfile
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from urllib.parse import quote
 from uuid import uuid4
 
 from sqlalchemy import select
 
+from src.app.plugin_system.api import database_api, person_api
+from src.app.plugin_system.api.message_api import PersonInfo
 from src.app.plugin_system.api.storage_api import PluginDatabase
 
 from .models import ALL_MODELS, SchemaVersionModel
@@ -225,6 +229,112 @@ class VNextSchema:
                     f"不支持的 Engram vNext Schema 版本: {current.version}，"
                     f"当前代码要求 {SCHEMA_VERSION}"
                 )
+        await self.normalize_person_ids()
+
+    async def normalize_person_ids(self) -> dict[str, int]:
+        """备份后原子转换人物哈希，未知身份或不一致账号拒绝转换。"""
+        person_tables = tuple(
+            model.__tablename__
+            for model in ALL_MODELS
+            if "person_id" in model.__table__.columns
+        )
+        uri = self._db_path.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as source:
+            source.execute("PRAGMA query_only=ON")
+            values = {
+                row[0]
+                for table in person_tables
+                for row in source.execute(f'SELECT DISTINCT person_id FROM "{table}"')
+            }
+            snapshots = source.execute(
+                "SELECT DISTINCT json_extract(payload, '$.person_id'), "
+                "json_extract(payload, '$.platform'), json_extract(payload, '$.sender_id') "
+                "FROM engram_vnext_evidence_message_snapshot WHERE redacted_at IS NULL"
+            ).fetchall()
+            values.update(row[0] for row in snapshots)
+        hashes = {
+            value for value in values
+            if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value)
+        }
+        if not hashes:
+            return {}
+        mapping: dict[str, str] = {}
+
+        def add_identity(person_id: str, platform: str, user_id: str) -> None:
+            """验证账号反算结果和映射唯一性。"""
+            if not platform or not user_id or person_api.generate_person_id(platform, user_id) != person_id:
+                raise ValueError("人物哈希与平台账号不一致，拒绝转换")
+            person_ref = person_api.generate_raw_person_id(platform, user_id)
+            if person_id in mapping and mapping[person_id] != person_ref:
+                raise ValueError("人物哈希对应多个平台账号，拒绝转换")
+            mapping[person_id] = person_ref
+
+        people = cast(
+            list[PersonInfo],
+            await database_api.query(PersonInfo)
+            .filter(person_id__in=sorted(hashes))
+            .all(as_dict=False),
+        )
+        for person in people:
+            add_identity(person.person_id, person.platform, person.user_id)
+        for person_id, platform, user_id in snapshots:
+            if person_id in hashes and isinstance(platform, str) and isinstance(user_id, str):
+                add_identity(person_id, platform, user_id)
+        if hashes - mapping.keys():
+            raise ValueError("人物哈希缺少可核实的平台账号，拒绝转换")
+        counts: dict[str, int] = {}
+        with closing(sqlite3.connect(self._db_path, timeout=10)) as connection:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA foreign_keys=ON")
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current_hashes = {
+                    row[0]
+                    for table in person_tables
+                    for row in connection.execute(f'SELECT DISTINCT person_id FROM "{table}"')
+                    if isinstance(row[0], str) and re.fullmatch(r"[0-9a-fA-F]{64}", row[0])
+                }
+                current_hashes.update(
+                    row[0] for row in connection.execute(
+                        "SELECT DISTINCT json_extract(payload, '$.person_id') "
+                        "FROM engram_vnext_evidence_message_snapshot WHERE redacted_at IS NULL"
+                    ) if isinstance(row[0], str) and re.fullmatch(r"[0-9a-fA-F]{64}", row[0])
+                )
+                if current_hashes - mapping.keys():
+                    raise ValueError("人物标识在转换前发生变化，拒绝转换")
+                if not current_hashes:
+                    return {}
+                backup_dir = self._db_path.parent / "backups"
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                backup_path = backup_dir / f"{self._db_path.stem}.person-ids.{uuid4().hex}.db"
+                try:
+                    with closing(sqlite3.connect(uri, uri=True)) as source:
+                        with closing(sqlite3.connect(backup_path)) as backup:
+                            source.backup(backup)
+                            if backup.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                                raise RuntimeError("人物标识转换备份完整性检查失败")
+                except BaseException:
+                    backup_path.unlink(missing_ok=True)
+                    raise
+                connection.execute("CREATE TEMP TABLE person_id_mapping (person_hash TEXT PRIMARY KEY, person_ref TEXT NOT NULL)")
+                connection.executemany("INSERT INTO person_id_mapping VALUES (?,?)", mapping.items())
+                for table in person_tables:
+                    result = connection.execute(
+                        f'UPDATE "{table}" SET person_id=(SELECT person_ref FROM person_id_mapping WHERE person_hash=person_id) '
+                        'WHERE person_id IN (SELECT person_hash FROM person_id_mapping)'
+                    )
+                    counts[table] = result.rowcount
+                result = connection.execute(
+                    "UPDATE engram_vnext_evidence_message_snapshot SET payload=json_set(payload, '$.person_id', "
+                    "(SELECT person_ref FROM person_id_mapping WHERE person_hash=json_extract(payload, '$.person_id'))) "
+                    "WHERE redacted_at IS NULL AND json_extract(payload, '$.person_id') IN (SELECT person_hash FROM person_id_mapping)"
+                )
+                counts["engram_vnext_evidence_message_snapshot"] = result.rowcount
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise RuntimeError("人物标识转换外键检查失败")
+                if connection.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                    raise RuntimeError("人物标识转换完整性检查失败")
+        return counts
 
     async def close(self) -> None:
         """关闭数据库连接。"""

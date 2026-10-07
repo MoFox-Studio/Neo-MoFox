@@ -79,6 +79,9 @@ class DiaryConfig(SectionBase):
     context_messages: int = Field(
         default=6, ge=0, description="用于理解指代的少量前文条数"
     )
+    body_char_budget: int = Field(
+        default=800, ge=1, description="整篇当天日记的写作字数预算，不硬截断正文"
+    )
     retry_limit: int = Field(
         default=2, ge=0, description="同一批次失败后的追加重试次数"
     )

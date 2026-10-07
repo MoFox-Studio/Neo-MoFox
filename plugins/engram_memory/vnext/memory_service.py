@@ -47,6 +47,7 @@ from .models import (
     VectorOutboxModel,
 )
 from .schema import VNextSchema
+from .repository import MemoryRepository
 
 RETRIEVAL_GENERATOR_VERSION = "vnext-2"
 
@@ -128,6 +129,24 @@ class MemoryService:
         """在写事务开始前读取缺少的来源快照。"""
         return await self._evidence_service.prepare_evidence(evidence)
 
+    async def _normalize_people(
+        self, data: CreateMemoryInput | ReviseMemoryInput
+    ) -> CreateMemoryInput | ReviseMemoryInput:
+        """在写入前将人物哈希转换为平台标识，不保存双格式关联。"""
+        repository = MemoryRepository(self._schema)
+        people = {
+            person_id: (await repository.resolve_person_aliases(person_id))[0]
+            for person_id in self._input_person_ids(data)
+        }
+        return replace(
+            data,
+            subject=replace(data.subject, person_id=people.get(data.subject.person_id)),
+            participants=tuple(
+                replace(participant, person_id=people.get(participant.person_id))
+                for participant in data.participants
+            ),
+        )
+
     @staticmethod
     async def _claim_domain_operation(
         session: AsyncSession,
@@ -178,6 +197,7 @@ class MemoryService:
     ) -> MemoryWriteResult:
         """在同一事务中创建正文、人物、来源和检索入口。"""
         data.validate()
+        data = await self._normalize_people(data)
         data = replace(data, evidence=await self.prepare_evidence(data.evidence))
         now = datetime.now(UTC)
         memory_id = _new_id()
@@ -394,6 +414,7 @@ class MemoryService:
     ) -> MemoryWriteResult:
         """基于当前版本创建线性 Revision N+1 并切换当前指针。"""
         data.validate()
+        data = await self._normalize_people(data)
         data = replace(data, evidence=await self.prepare_evidence(data.evidence))
         now = datetime.now(UTC)
         revision_id = _new_id()

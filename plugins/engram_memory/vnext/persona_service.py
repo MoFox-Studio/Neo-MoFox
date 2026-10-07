@@ -228,16 +228,32 @@ class PersonaService:
             return await person_api.get_person(platform, user_id)
         return await database_api.get_by(PersonInfo, person_id=person_id)
 
+    async def get_person_ref(self, person_id: str) -> str | None:
+        """保留平台人物标识，将可核实的核心哈希转换为平台账号。"""
+        normalized = person_id.strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*:[^\s:]+", normalized):
+            return normalized
+        person = await self.get_core_person(person_id)
+        if person is not None:
+            return person_api.generate_raw_person_id(person.platform, person.user_id)
+        metadata = await self._repository.get_person_metadata(person_id)
+        if metadata is None:
+            return None
+        return person_api.generate_raw_person_id(
+            str(metadata["platform"]), str(metadata["user_id"])
+        )
+
     async def get_persona(self, person_id: str) -> PersonaSnapshot | None:
         """读取通过生成方案与正文摘要认证的核心人物印象，不返回旧残留。"""
         person = await self.get_core_person(person_id)
         if person is None:
             return None
+        person_ref = person_api.generate_raw_person_id(person.platform, person.user_id)
         is_current = await self.is_current_impression(
-            person.person_id, person.impression or ""
+            person_ref, person.impression or ""
         )
         return PersonaSnapshot(
-            person_id=person.person_id,
+            person_id=person_ref,
             impression_text=(person.impression or "") if is_current else "",
             updated_at=(
                 datetime.fromtimestamp(person.updated_at, UTC)
@@ -266,6 +282,7 @@ class PersonaService:
         """返回与最新完整快照和核心正文一致的成功审查记录。"""
         if impression_text == EMPTY_IMPRESSION:
             return None
+        (person_id,) = await self._repository.resolve_person_aliases(person_id)
         latest = await session.scalar(
             select(PersonaUpdateLogModel)
             .where(PersonaUpdateLogModel.person_id == person_id)
@@ -310,11 +327,12 @@ class PersonaService:
             old_text = person.impression or ""
             if not old_text or old_text == EMPTY_IMPRESSION:
                 continue
-            if await self.is_current_impression(person.person_id, old_text):
+            person_ref = person_api.generate_raw_person_id(person.platform, person.user_id)
+            if await self.is_current_impression(person_ref, old_text):
                 continue
             old_hash = _content_hash(old_text)
             await self._append_review_log(
-                person.person_id,
+                person_ref,
                 "未匹配插件当前版本的核心印象归档",
                 (),
                 old_hash,
@@ -345,6 +363,7 @@ class PersonaService:
         """返回人物历史目录或指定不可变快照，不将历史判断当作当前事实。"""
         if revision_no is not None and revision_no < 1:
             raise ValueError("人物印象版本号必须为正整数")
+        (person_id,) = await self._repository.resolve_person_aliases(person_id)
         async with self._schema.database.session() as session:
             statement = select(PersonaUpdateLogModel).where(
                 PersonaUpdateLogModel.person_id == person_id,
@@ -398,17 +417,18 @@ class PersonaService:
         person = await self.get_core_person(person_id)
         if person is None:
             raise ValueError(f"核心人物记录不存在: {person_id}")
-        aliases = await self._repository.resolve_person_aliases(person.person_id)
+        person_ref = person_api.generate_raw_person_id(person.platform, person.user_id)
+        aliases = (person_ref,)
         memories = await self._load_active_memories(aliases)
         old_text = person.impression or ""
-        trusted = await self.is_current_impression(person.person_id, old_text)
+        trusted = await self.is_current_impression(person_ref, old_text)
         if not memories and (not trusted or not old_text):
             return PersonaUpdateResult(
-                person.person_id, False, None, _content_hash(old_text)
+                person_ref, False, None, _content_hash(old_text)
             )
         if memories:
             seen_revision_ids = (
-                set(await self._load_seen_revision_ids(person.person_id, old_text))
+                set(await self._load_seen_revision_ids(person_ref, old_text))
                 if trusted and old_text
                 else set()
             )
@@ -420,7 +440,9 @@ class PersonaService:
             )
             payload = json.dumps(
                 {
-                    "person_id": person.person_id,
+                    "person_id": person_api.generate_raw_person_id(
+                        person.platform, person.user_id
+                    ),
                     "current_impression": _inline_memory_references(old_text)
                     if trusted
                     else "",
@@ -470,7 +492,7 @@ class PersonaService:
             if reread is None or (reread.impression or "") != stored_text:
                 raise ValueError("核心人物印象回读与写入不一致")
         update_id = await self._append_review_log(
-            person.person_id,
+            person_ref,
             reason,
             memory_ids,
             old_hash,
@@ -479,7 +501,7 @@ class PersonaService:
             seen_revision_ids=tuple(str(memory["revision_id"]) for memory in memories),
         )
         return PersonaUpdateResult(
-            person.person_id, old_hash != new_hash, update_id, new_hash
+            person_ref, old_hash != new_hash, update_id, new_hash
         )
 
     async def _load_active_memories(
@@ -487,6 +509,7 @@ class PersonaService:
         person_ids: tuple[str, ...],
     ) -> tuple[dict[str, object], ...]:
         """读取目标人物作为主体或参与者的全部当前 ACTIVE 版本。"""
+        person_refs: dict[str, str | None] = {}
         async with self._schema.database.session() as session:
             statement = (
                 select(MemoryRevisionModel)
@@ -524,7 +547,7 @@ class PersonaService:
                         "content": item.content,
                         "observed_at": item.observed_at.isoformat(),
                         **await self._revision_people(
-                            session, item.revision_id, person_ids
+                            session, item.revision_id, person_ids, person_refs
                         ),
                     }
                     for item in revisions
@@ -542,7 +565,7 @@ class PersonaService:
         anchors = await message_api.get_messages_by_time_for_users(
             start_time,
             end_time,
-            list(person_ids),
+            [person_api.generate_person_id(person.platform, person.user_id)],
             limit=0,
         )
         windows: dict[str, list[tuple[float, float]]] = {}
@@ -616,7 +639,11 @@ class PersonaService:
                         "time": datetime.fromtimestamp(
                             float(row["time"]), UTC
                         ).isoformat(),
-                        "person_id": row.get("person_id"),
+                        "person_id": person_api.generate_raw_person_id(
+                            platform, sender_id
+                        )
+                        if platform and sender_id
+                        else None,
                         "sender_id": sender_id,
                         "speaker": row.get("sender_cardname")
                         or row.get("sender_name")
@@ -676,13 +703,14 @@ class PersonaService:
                 )
             )
 
-    @staticmethod
     async def _revision_people(
+        self,
         session: AsyncSession,
         revision_id: str,
         person_ids: tuple[str, ...],
+        person_refs: dict[str, str | None],
     ) -> dict[str, object]:
-        """读取版本主次人物及目标人物在其中的关联位置。"""
+        """按核心关联判定人物位置，以平台账号展示主次人物。"""
         subject = await session.get(MemoryRevisionSubjectModel, revision_id)
         secondary_ids = tuple(
             (
@@ -697,9 +725,16 @@ class PersonaService:
             ).all()
         )
         primary_id = subject.person_id if subject else None
+        for person_id in (primary_id, *secondary_ids):
+            if person_id and person_id not in person_refs:
+                person_refs[person_id] = await self.get_person_ref(person_id)
         return {
-            "primary_person_id": primary_id,
-            "secondary_person_ids": secondary_ids,
+            "primary_person_id": person_refs.get(primary_id) if primary_id else None,
+            "secondary_person_ids": tuple(
+                person_refs[person_id]
+                for person_id in secondary_ids
+                if person_id and person_refs[person_id] is not None
+            ),
             "target_role": "primary"
             if primary_id in person_ids
             else "secondary"
@@ -714,6 +749,7 @@ class PersonaService:
     ) -> tuple[dict[str, object], ...]:
         """读取变化前后仍有效的版本，撤回版本不作为依据。"""
         context: list[dict[str, object]] = []
+        person_refs: dict[str, str | None] = {}
         async with self._schema.database.session() as session:
             for change in changes:
                 memory = await session.get(MemoryModel, change.memory_id)
@@ -730,7 +766,7 @@ class PersonaService:
                     revision = await session.get(MemoryRevisionModel, revision_id)
                     if revision is not None:
                         people = await self._revision_people(
-                            session, revision_id, person_ids
+                            session, revision_id, person_ids, person_refs
                         )
                         is_current = (
                             memory is not None
@@ -747,6 +783,9 @@ class PersonaService:
                                 **people,
                             }
                         )
+                for person_id in (*change.before_person_ids, *change.after_person_ids):
+                    if person_id not in person_refs:
+                        person_refs[person_id] = await self.get_person_ref(person_id)
                 context.append(
                     {
                         "memory_id": change.memory_id,
@@ -754,8 +793,16 @@ class PersonaService:
                         "status": memory.status.value
                         if memory is not None
                         else "MISSING",
-                        "before_person_ids": change.before_person_ids,
-                        "after_person_ids": change.after_person_ids,
+                        "before_person_ids": tuple(
+                            person_refs[person_id]
+                            for person_id in change.before_person_ids
+                            if person_refs[person_id] is not None
+                        ),
+                        "after_person_ids": tuple(
+                            person_refs[person_id]
+                            for person_id in change.after_person_ids
+                            if person_refs[person_id] is not None
+                        ),
                         "revisions": revisions,
                     }
                 )
@@ -898,6 +945,7 @@ class PersonaService:
         generator_version: str | None = PERSONA_GENERATOR_VERSION,
     ) -> str:
         """记录审查或未认证旧稿；正文或生成方案变化时保存完整版本。"""
+        (person_id,) = await self._repository.resolve_person_aliases(person_id)
         update_id = str(uuid4())
         async with self._schema.database.session() as session:
             latest = await session.scalar(

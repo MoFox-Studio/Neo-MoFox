@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from sqlalchemy import or_, select
 
+from src.app.plugin_system.api import person_api
+
 from .domain import (
     CreateMemoryInput,
     EvidenceInput,
@@ -325,7 +327,7 @@ class VNextToolService:
         }
 
     async def _people_view(self, revision_id: str) -> dict[str, object]:
-        """读取指定版本的人物关联，保留非人物历史主体信息。"""
+        """以平台账号展示人物关联，保留非人物历史主体信息。"""
         async with self._schema.database.session() as session:
             subject = await session.get(MemoryRevisionSubjectModel, revision_id)
             participants = tuple(
@@ -337,15 +339,28 @@ class VNextToolService:
                     )
                 ).all()
             )
-        return {
-            "primary_person_id": subject.person_id if subject else None,
+        person_refs = {
+            person_id: await self._persona.get_person_ref(person_id)
+            if person_id
+            else None
+            for person_id in dict.fromkeys(
+                (
+                    subject.person_id if subject else None,
+                    *(item.person_id for item in participants),
+                )
+            )
+        }
+        result: dict[str, object] = {
+            "primary_person_id": person_refs[subject.person_id] if subject else None,
             "secondary_person_ids": [
-                item.person_id for item in participants if item.person_id
+                person_refs[item.person_id]
+                for item in participants
+                if person_refs[item.person_id] is not None
             ],
             "subject": (
                 {
                     "subject_kind": subject.subject_kind.value,
-                    "person_id": subject.person_id,
+                    "person_id": person_refs[subject.person_id],
                     "subject_key": subject.subject_key,
                     "subject_label": subject.subject_label,
                 }
@@ -355,12 +370,17 @@ class VNextToolService:
             "participants": [
                 {
                     "participant_kind": item.participant_kind.value,
-                    "person_id": item.person_id,
+                    "person_id": person_refs[item.person_id],
                     "label": item.label,
                 }
                 for item in participants
             ],
         }
+        if any(person_id and ref is None for person_id, ref in person_refs.items()):
+            result["person_identity_notice"] = (
+                "部分人物关联缺少可核实的平台账号，不能据此填写人物标识。"
+            )
+        return result
 
     @staticmethod
     def _revision_view(revision: MemoryRevisionModel) -> dict[str, object]:
@@ -457,7 +477,32 @@ class VNextToolService:
                     "source_status": status,
                 }
                 if status == "AVAILABLE":
-                    message["snapshot"] = snapshot
+                    public_snapshot = dict(snapshot)
+                    if "person_id" in public_snapshot:
+                        platform = public_snapshot.get("platform")
+                        user_id = public_snapshot.get("sender_id")
+                        if (
+                            isinstance(platform, str)
+                            and platform
+                            and isinstance(user_id, str)
+                            and user_id
+                        ):
+                            person_ref = person_api.generate_raw_person_id(
+                                platform, user_id
+                            )
+                        else:
+                            person_id = public_snapshot["person_id"]
+                            person_ref = (
+                                await self._persona.get_person_ref(person_id)
+                                if isinstance(person_id, str) and person_id
+                                else None
+                            )
+                        public_snapshot["person_id"] = person_ref
+                        if person_ref is None:
+                            public_snapshot["person_identity_notice"] = (
+                                "来源人物缺少可核实的平台账号。"
+                            )
+                    message["snapshot"] = public_snapshot
                 messages.append(message)
             records.append(
                 {
@@ -496,6 +541,10 @@ class VNextToolService:
             raise ValueError("读取历史人物印象必须提供正整数 revision_no")
         if view != "revision" and revision_no is not None:
             raise ValueError("revision_no 仅用于 revision 查询")
+        normalized = await self._persona.get_person_ref(person_id)
+        if normalized is None:
+            raise ValueError("人物缺少可核实的平台账号")
+        person_id = normalized
         person = await self._persona.get_core_person(person_id)
         persona = await self._persona.get_persona(person_id) if person else None
         aliases = await self._repository.resolve_person_aliases(person_id)
@@ -547,8 +596,11 @@ class VNextToolService:
         ]
         impression = persona.impression_text if persona and revisions else ""
         result: dict[str, object] = {
-            "person_id": person_id,
-            "core_person_id": person.person_id if person else None,
+            "person_id": person_api.generate_raw_person_id(
+                person.platform, person.user_id
+            )
+            if person
+            else await self._persona.get_person_ref(person_id),
             "basic_person_info": (
                 {
                     "platform": person.platform,
@@ -566,9 +618,11 @@ class VNextToolService:
             "recent_memories": recent,
             "view": view,
         }
+        if result["person_id"] is None:
+            result["person_identity_notice"] = "人物缺少可核实的平台账号。"
         if view != "current":
             history = await self._persona.get_history(
-                person.person_id if person else person_id,
+                person_id,
                 revision_no if view == "revision" else None,
             )
             result["history_notice"] = (

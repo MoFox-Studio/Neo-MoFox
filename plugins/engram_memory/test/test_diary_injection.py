@@ -222,10 +222,13 @@ async def test_private_persona_is_fixed_in_first_user_and_refreshes_without_dupl
         is_current=True,
     )
     read_persona = AsyncMock(return_value=persona)
+    read_person_ref = AsyncMock(return_value="qq:user-example")
     plugin.runtime_owner = cast(
         plugin_module.VNextRuntimeOwner,
         SimpleNamespace(
-            persona_service=SimpleNamespace(get_persona=read_persona),
+            persona_service=SimpleNamespace(
+                get_persona=read_persona, get_person_ref=read_person_ref
+            ),
         ),
     )
     get_stream = AsyncMock(
@@ -269,6 +272,16 @@ async def test_private_persona_is_fixed_in_first_user_and_refreshes_without_dupl
     )
     assert any(
         persona.impression_text in text for text in _text_parts(params["payloads"][0])
+    )
+    assert any(
+        "人物标识：qq:user-example" in text
+        for text in _text_parts(params["payloads"][0])
+    )
+    assert all(
+        "person-example" not in text for text in _text_parts(params["payloads"][0])
+    )
+    assert all(
+        call.args == ("person-example",) for call in read_person_ref.await_args_list
     )
     assert all(
         persona_injection.REMINDER_NAME not in text
@@ -550,10 +563,13 @@ async def test_group_persona_tail_refreshes_latest_window_and_versions(
     for implementation_note in ("自动刷新", "自动注入", "窗口", "先调用工具"):
         assert implementation_note not in latest[-1]
     assert persona.impression_text in latest[-1]
-    assert "核心人物 ID：person-b\n（暂无印象）" in latest[-1]
+    assert "人物标识：qq:user-b\n（暂无印象）" in latest[-1]
+    assert "人物标识：qq:user-a\n" in latest[-1]
+    assert "person-a" not in latest[-1]
+    assert "person-b" not in latest[-1]
     assert "person-outside" not in latest[-1]
     assert "person-bot" not in latest[-1]
-    assert latest[-1].index("person-a") < latest[-1].index("person-b")
+    assert latest[-1].index("qq:user-a") < latest[-1].index("qq:user-b")
     assert any("保留日记" in text for text in latest)
     assert all(group_name not in text for text in _text_parts(params["payloads"][0]))
     items = reminder_store.get_items(f"stream:{stream_id}:actor", names=[group_name])
@@ -564,8 +580,12 @@ async def test_group_persona_tail_refreshes_latest_window_and_versions(
 
     persona.impression_text = "完整已有印象第二版①"
     rows[:] = [
-        {"person_id": person_id, "sender_id": person_id, "sender_name": person_id}
-        for person_id in ("person-c", "person-a", "person-c")
+        {"person_id": person_id, "sender_id": user_id, "sender_name": "参与者"}
+        for person_id, user_id in (
+            ("person-c", "user-c"),
+            ("person-a", "user-a"),
+            ("person-c", "user-c"),
+        )
     ]
     resumed = _new_request(stream_id, reminder_store)
     for payload in params["payloads"]:
@@ -579,7 +599,7 @@ async def test_group_persona_tail_refreshes_latest_window_and_versions(
     assert "完整已有印象第二版①" in _text_parts(params["payloads"][-1])[-1]
     assert not any("第一版" in text or "person-b" in text for text in texts)
     assert (
-        "核心人物 ID：person-c\n（暂无印象）" in _text_parts(params["payloads"][-1])[-1]
+        "人物标识：qq:user-c\n（暂无印象）" in _text_parts(params["payloads"][-1])[-1]
     )
     other = _new_request("other-group", reminder_store)
     other.add_payload(LLMPayload(ROLE.USER, Text("另一个群")))
@@ -629,8 +649,11 @@ async def test_group_persona_missing_impression_counts_toward_people_limit(
     )
     query = AsyncMock(
         return_value=[
-            {"person_id": person_id, "sender_id": person_id, "sender_name": "参与者"}
-            for person_id in ("person-older", "person-latest")
+            {"person_id": person_id, "sender_id": user_id, "sender_name": "参与者"}
+            for person_id, user_id in (
+                ("person-older", "user-older"),
+                ("person-latest", "user-latest"),
+            )
         ]
     )
     monkeypatch.setattr(
@@ -651,7 +674,8 @@ async def test_group_persona_missing_impression_counts_toward_people_limit(
     assert query.call_args is not None
     assert query.call_args.kwargs["limit"] == 50
     block = _text_parts(params["payloads"][-1])[-1]
-    assert "核心人物 ID：person-latest\n（暂无印象）" in block
+    assert "人物标识：qq:user-latest\n（暂无印象）" in block
+    assert "person-latest" not in block
     assert "person-older" not in block
     assert "未经认证的旧稿" not in block
 

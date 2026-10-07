@@ -177,9 +177,9 @@ def test_snapshot_uses_content_and_extra_person_identity() -> None:
 def test_snapshot_generates_missing_core_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """人物身份缺失时仅按平台与发送账号生成核心 ID。"""
-    generate = Mock(return_value="person-generated")
-    monkeypatch.setattr(runtime.person_api, "generate_person_id", generate)
+    """人物身份缺失时仅按平台与发送账号生成平台标识。"""
+    generate = Mock(return_value="test:sender-test")
+    monkeypatch.setattr(runtime.person_api, "generate_raw_person_id", generate)
     snapshot = runtime.message_to_snapshot(
         _message(
             person_id=None,
@@ -188,7 +188,7 @@ def test_snapshot_generates_missing_core_identity(
         )
     )
     generate.assert_called_once_with("test", "sender-test")
-    assert snapshot.snapshot["person_id"] == "person-generated"
+    assert snapshot.snapshot["person_id"] == "test:sender-test"
 
 
 def test_snapshot_marks_bot_without_generating_account_identity(
@@ -655,6 +655,13 @@ def test_memory_query_schemas_distinguish_recall_from_disclosure() -> None:
     assert "同一人物或经历已有记忆时优先修订" not in search_description
     search_parameters = VNextMemorySearchTool.to_schema()["function"]["parameters"]
     time_properties = search_parameters["properties"]
+    assert "平台:ID" in time_properties["person_ids"]["description"]
+    person_schema = VNextPersonLookupTool.to_schema()["function"]
+    assert (
+        "平台:ID"
+        in person_schema["parameters"]["properties"]["person_id"]["description"]
+    )
+    assert "不填内部哈希" in person_schema["description"]
     assert time_properties["start_time"]["type"] == "string"
     assert "ISO 8601" in time_properties["start_time"]["description"]
     assert "2026-01-02T09:00:00+08:00" in time_properties["start_time"]["description"]
@@ -691,6 +698,9 @@ def test_memory_query_schemas_distinguish_recall_from_disclosure() -> None:
         for instruction in instructions:
             assert instruction in schema["description"]
         payload = schema["parameters"]["properties"]["payload"]
+        for field in ("primary_person_id", "secondary_person_ids"):
+            assert "平台:ID" in payload["properties"][field]["description"]
+            assert "不填内部哈希" in payload["properties"][field]["description"]
         assert {"content", "primary_person_id", "source_message_ids"}.issubset(
             payload["required"]
         )

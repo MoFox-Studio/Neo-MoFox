@@ -89,21 +89,19 @@ class MemoryRepository:
             return tuple((await session.scalars(statement)).all())
 
     async def resolve_person_aliases(self, person_id: str) -> tuple[str, ...]:
-        """解析确定的人物别名；无消息快照时使用框架的平台身份生成规则。"""
+        """将核心人物哈希归一为平台账号，仅返回单一人物标识。"""
         normalized = person_id.strip()
-        if not normalized or normalized == "bot":
-            return (person_id,)
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", normalized):
+            return (normalized,)
+        person = await person_api.get_person_by_id(normalized)
+        if person is not None:
+            if person_api.generate_person_id(person.platform, person.user_id) != normalized:
+                raise ValueError("人物哈希与平台账号不一致")
+            return (person_api.generate_raw_person_id(person.platform, person.user_id),)
         rows = await self._person_snapshot_rows(normalized)
-        if not rows and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*:[^\s:]+", normalized):
-            platform, user_id = normalized.split(":", 1)
-            return (person_api.generate_person_id(platform, user_id), normalized)
         aliases = self._person_aliases_from_rows(normalized, rows)
-        if len(aliases) != 2:
-            return aliases
-        core_id, legacy_id = aliases
-        legacy_rows = await self._person_snapshot_rows(legacy_id)
-        if self._person_aliases_from_rows(legacy_id, legacy_rows) != aliases:
-            return (person_id,)
+        if aliases == (normalized,):
+            raise ValueError("人物哈希缺少可核实的平台账号")
         return aliases
 
     async def get_person_metadata(self, person_id: str) -> dict[str, object] | None:
@@ -111,17 +109,20 @@ class MemoryRepository:
         normalized = person_id.strip()
         if not normalized or normalized == "bot":
             return None
-        aliases = await self.resolve_person_aliases(normalized)
-        if len(aliases) != 2:
+        if ":" not in normalized:
+            rows = await self._person_snapshot_rows(normalized)
+            aliases = self._person_aliases_from_rows(normalized, rows)
+            if aliases == (normalized,):
+                return None
+            normalized = aliases[0]
+        platform, _, sender_id = normalized.partition(":")
+        if not platform or not sender_id:
             return None
-        core_id, legacy_id = aliases
-        platform, _, sender_id = legacy_id.partition(":")
-        matching_rows = await self._person_snapshot_rows(legacy_id)
+        matching_rows = await self._person_snapshot_rows(normalized)
         matching = tuple(
             row
             for row in matching_rows
-            if row.get("person_id") == core_id
-            and row.get("platform") == platform
+            if row.get("platform") == platform
             and row.get("sender_id") == sender_id
         )
         if not matching:
@@ -177,31 +178,11 @@ class MemoryRepository:
         person_id: str,
         rows: tuple[dict[str, object], ...],
     ) -> tuple[str, ...]:
-        """仅在快照元数据唯一确定人物身份时返回别名。"""
+        """仅在账号唯一且哈希校验通过时返回平台标识。"""
         if not person_id or person_id == "bot":
             return (person_id,)
         if ":" in person_id:
-            core_ids = {
-                row["person_id"]
-                for row in rows
-                if isinstance(row.get("person_id"), str) and row["person_id"].strip()
-            }
-            if "bot" in core_ids or len(core_ids) != 1:
-                return (person_id,)
-            core_id = next(iter(core_ids))
-            if (
-                not isinstance(core_id, str)
-                or core_id == person_id
-                or not core_id.strip()
-            ):
-                return (person_id,)
-            if not any(
-                row.get("platform") == person_id.partition(":")[0]
-                and row.get("sender_id") == person_id.partition(":")[2]
-                for row in rows
-            ):
-                return (person_id,)
-            return (core_id, person_id)
+            return (person_id,)
         aliases = {
             (row["platform"], row["sender_id"])
             for row in rows
@@ -214,5 +195,6 @@ class MemoryRepository:
         if len(aliases) != 1:
             return (person_id,)
         platform, sender_id = next(iter(aliases))
-        alias = f"{platform}:{sender_id}"
-        return (person_id, alias) if alias != person_id else (person_id,)
+        if person_api.generate_person_id(platform, sender_id) != person_id:
+            return (person_id,)
+        return (person_api.generate_raw_person_id(platform, sender_id),)

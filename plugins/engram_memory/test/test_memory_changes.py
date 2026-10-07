@@ -1,6 +1,8 @@
 """正式记忆变化与人物关联测试。"""
 
 import json
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +11,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ..vnext import runtime_components
+from src.app.plugin_system.api import person_api
+
+from ..vnext import runtime_components, schema as schema_module
 from ..vnext.domain import (
     CreateMemoryInput,
     EvidenceInput,
@@ -31,7 +35,11 @@ from ..vnext.enums import (
 )
 from ..vnext.evidence_service import EvidenceService
 from ..vnext.memory_service import MemoryService
-from ..vnext.models import EvidenceMessageSnapshotModel
+from ..vnext.models import (
+    EvidenceMessageSnapshotModel,
+    MemoryRevisionSubjectModel,
+    PersonaUpdateLogModel,
+)
 from ..vnext.repository import MemoryRepository
 from ..vnext.schema import VNextSchema
 from ..vnext.tool_service import VNextToolService
@@ -172,35 +180,48 @@ async def test_actions_preserve_people_versions_sources_and_notifications(
     schema = VNextSchema(str(tmp_path / "actions.db"))
     await schema.initialize()
     changes: list[MemoryChanged] = []
+    person_ids = {
+        suffix: person_api.generate_person_id("test", f"account-{suffix}")
+        for suffix in ("a", "b", "c")
+    }
+    people = {}
+    for suffix, core_id in person_ids.items():
+        person = SimpleNamespace(
+            person_id=core_id,
+            platform="test",
+            user_id=f"account-{suffix}",
+            nickname="示例人物",
+            cardname=None,
+            impression="",
+            updated_at=0,
+        )
+        people[core_id] = people[f"test:account-{suffix}"] = person
 
     async def receive(change: MemoryChanged) -> None:
         """收集提交后通知。"""
         changes.append(change)
 
     async def get_person(person_id: str) -> SimpleNamespace | None:
-        """只接受示例中的准确人物标识。"""
-        return (
-            SimpleNamespace(person_id=person_id)
-            if person_id in {"person-a", "person-b", "person-c"}
-            else None
-        )
+        """平台账号与内部人物标识指向同一已核实的人物。"""
+        return people.get(person_id)
 
     tools = VNextToolService(
         schema,
-        cast(Any, SimpleNamespace(search=AsyncMock(return_value=()))),
+        cast(Any, SimpleNamespace(query_scored=AsyncMock(return_value=()))),
         on_memory_changed=receive,
     )
+    monkeypatch.setattr(tools._persona, "get_core_person", get_person)
     repository = MemoryRepository(schema)
     owner = SimpleNamespace(
         tools=tools,
         repository=repository,
-        persona_service=SimpleNamespace(get_core_person=get_person),
+        persona_service=tools._persona,
     )
     monkeypatch.setattr(runtime_components, "_owner", lambda plugin: owner)
     first_message = {
         "message_id": "source-1",
         "stream_id": "stream-example",
-        "person_id": "person-a",
+        "person_id": person_ids["a"],
         "sender_id": "account-a",
         "sender_name": "示例发言人",
         "platform": "test",
@@ -234,8 +255,8 @@ async def test_actions_preserve_people_versions_sources_and_notifications(
     payload: dict[str, object] = {
         "content": "据 A 转述，B 曾提出与 C 一起制作短片的计划，尚未实施。",
         "memory_kind": "COMMITMENT",
-        "primary_person_id": "person-b",
-        "secondary_person_ids": ["person-c"],
+        "primary_person_id": "test:account-b",
+        "secondary_person_ids": ["test:account-c"],
         "source_message_ids": ["source-1"],
     }
     try:
@@ -243,20 +264,66 @@ async def test_actions_preserve_people_versions_sources_and_notifications(
         assert successful, raw_result
         saved = json.loads(raw_result)
         memory_id = saved["memory_id"]
-        assert changes[0].affected_person_ids == ("person-b", "person-c")
-        current = await tools.memory_read(
-            memory_id, "full", runtime_components._actor_context(write)
+        assert changes[0].affected_person_ids == ("test:account-b", "test:account-c")
+        material = await tools._persona._load_active_memories(("test:account-b",))
+        assert material[0]["primary_person_id"] == "test:account-b"
+        assert material[0]["secondary_person_ids"] == ("test:account-c",)
+        assert material[0]["target_role"] == "primary"
+        changed = cast(
+            list[dict[str, Any]],
+            await tools._persona._load_change_context(
+                tuple(changes), ("test:account-b",)
+            ),
         )
-        assert current["primary_person_id"] == "person-b"
-        assert current["secondary_person_ids"] == ["person-c"]
+        assert changed[0]["after_person_ids"] == ("test:account-b", "test:account-c")
+        assert changed[0]["revisions"][0]["primary_person_id"] == "test:account-b"
+        async with schema.database.session() as session:
+            subject = await session.get(
+                MemoryRevisionSubjectModel, saved["revision_id"]
+            )
+            assert subject is not None and subject.person_id == "test:account-b"
+        current = cast(
+            dict[str, Any],
+            await tools.memory_read(
+                memory_id, "full", runtime_components._actor_context(write)
+            ),
+        )
+        assert current["primary_person_id"] == "test:account-b"
+        assert current["secondary_person_ids"] == ["test:account-c"]
+        assert current["subject"]["person_id"] == "test:account-b"
+        assert current["participants"][0]["person_id"] == "test:account-c"
+        assert current["current_subject"]["person_id"] == "test:account-b"
+        assert current["current_participants"][0]["person_id"] == "test:account-c"
         assert current["current_revision"]["content"] == payload["content"]
         assert current["current_revision"]["observed_at"] == datetime(
             2026, 1, 1, tzinfo=UTC
         )
         snapshot = current["evidence_metadata"][0]["messages"][0]["snapshot"]
-        assert snapshot["person_id"] == "person-a"
+        assert snapshot["person_id"] == "test:account-a"
         assert snapshot["chat_type"] == "group"
         assert snapshot["content"] == first_message["content"]
+        original = (
+            await EvidenceService(schema).read_messages(
+                (("stream-example", "source-1"),)
+            )
+        )[0]
+        assert original["person_id"] == "test:account-a"
+        context = runtime_components._actor_context(write)
+        found = cast(
+            list[dict[str, Any]],
+            await tools.memory_search(
+                "短片", context, person_ids=("test:account-b",)
+            ),
+        )
+        assert found[0]["memory_id"] == memory_id
+        assert found[0]["primary_person_id"] == "test:account-b"
+        assert found[0]["subject"]["person_id"] == "test:account-b"
+        assert found[0]["secondary_person_ids"] == ["test:account-c"]
+        for person_id in (person_ids["b"], "test:account-b"):
+            lookup = cast(dict[str, Any], await tools.person_lookup(person_id, context))
+            assert lookup["person_id"] == "test:account-b"
+            assert "core_person_id" not in lookup
+            assert lookup["recent_memories"][0]["primary_person_id"] == "test:account-b"
         assert (await write.execute(payload))[0]
         assert len(changes) == 1
 
@@ -265,20 +332,29 @@ async def test_actions_preserve_people_versions_sources_and_notifications(
                 "memory_id": memory_id,
                 "based_on_revision_id": saved["revision_id"],
                 "content": "A 澄清发起者是 C，A 参与其中；这一制作计划已取消。",
-                "primary_person_id": "person-c",
-                "secondary_person_ids": ["person-a"],
+                "primary_person_id": "test:account-c",
+                "secondary_person_ids": ["test:account-a"],
                 "source_message_ids": ["source-2"],
                 "reason": "发起者澄清与计划取消",
             }
         )
         assert successful, raw_result
-        assert changes[-1].affected_person_ids == ("person-b", "person-c", "person-a")
-        current = await tools.memory_read(
-            memory_id, "full", runtime_components._actor_context(revise)
+        assert changes[-1].affected_person_ids == (
+            "test:account-b",
+            "test:account-c",
+            "test:account-a",
+        )
+        current = cast(
+            dict[str, Any],
+            await tools.memory_read(
+                memory_id, "full", runtime_components._actor_context(revise)
+            ),
         )
         assert len(current["history"]) == 2
-        assert current["history"][0]["primary_person_id"] == "person-b"
-        assert current["history"][1]["primary_person_id"] == "person-c"
+        assert current["history"][0]["primary_person_id"] == "test:account-b"
+        assert current["history"][1]["primary_person_id"] == "test:account-c"
+        assert current["history"][0]["subject"]["person_id"] == "test:account-b"
+        assert current["history"][1]["participants"][0]["person_id"] == "test:account-a"
         assert current["current_revision"]["memory_kind"] == "COMMITMENT"
         assert {
             message["message_id"]
@@ -290,11 +366,14 @@ async def test_actions_preserve_people_versions_sources_and_notifications(
             memory_id, "该计划已撤销", ["source-2"]
         )
         assert successful, raw_result
-        assert changes[-1].affected_person_ids == ("person-c", "person-a")
+        assert changes[-1].affected_person_ids == ("test:account-c", "test:account-a")
         assert (await invalidate.execute(memory_id, "该计划已撤销", ["source-2"]))[0]
         assert len(changes) == 3
-        current = await tools.memory_read(
-            memory_id, "full", runtime_components._actor_context(invalidate)
+        current = cast(
+            dict[str, Any],
+            await tools.memory_read(
+                memory_id, "full", runtime_components._actor_context(invalidate)
+            ),
         )
         assert current["status"] == "TOMBSTONED"
         assert len(current["history"]) == 2
@@ -307,16 +386,29 @@ async def test_actions_preserve_people_versions_sources_and_notifications(
             0
         ]
         assert not (
-            await write.execute({**payload, "secondary_person_ids": ["person-b"]})
+            await write.execute({**payload, "secondary_person_ids": [person_ids["b"]]})
         )[0]
         successful, raw_result = await write.execute(
             {**payload, "source_message_ids": ["other-stream-source"]}
         )
         assert not successful
+        sources = json.loads(raw_result)["source_messages"]
+        assert all(item["person_id"] == "test:account-a" for item in sources)
         assert {
             item["message_id"] for item in json.loads(raw_result)["source_messages"]
         } == {"source-1", "source-2"}
         assert len(changes) == 3
+        monkeypatch.setattr(
+            tools._persona, "get_core_person", AsyncMock(return_value=None)
+        )
+        assert await tools._persona.get_person_ref("test:account-a") == "test:account-a"
+        assert await tools._persona.get_person_ref(person_ids["b"]) is None
+        unavailable = await tools.memory_read(memory_id, "current", context)
+        assert unavailable["primary_person_id"] == "test:account-c"
+        assert unavailable["secondary_person_ids"] == ["test:account-a"]
+        assert "person_identity_notice" not in unavailable
+        serialized = json.dumps(unavailable, default=str)
+        assert not any(core_id in serialized for core_id in person_ids.values())
     finally:
         await schema.close()
 
@@ -341,3 +433,143 @@ async def test_change_event_keeps_params_and_only_enqueues(
     assert decision is runtime_components.EventDecision.SUCCESS
     assert result is params and set(result) == {"change"}
     enqueue.assert_awaited_once_with(change)
+
+
+@pytest.mark.parametrize(
+    "failure", [None, "core-mismatch", "snapshot-mismatch", "missing", "collision"]
+)
+async def test_person_hash_normalization_is_atomic_and_preserves_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+) -> None:
+    """人物转换保留正文和索引摘要，失败回滚，成功备份且重复执行不写库。"""
+    path = tmp_path / "identities.db"
+    schema = VNextSchema(str(path))
+    await schema.initialize()
+    now = datetime.now(UTC)
+    hashes = {
+        suffix: person_api.generate_person_id("test", f"account-{suffix}")
+        for suffix in ("a", "b")
+    }
+    memory = await MemoryService(schema, "example-embedding").create_memory(
+        CreateMemoryInput(
+            title="示例记忆",
+            content="保持完整的原正文。",
+            memory_kind=MemoryKind.EVENT,
+            subject=SubjectInput(SubjectKind.PERSON, person_id="test:account-a"),
+            participants=(ParticipantInput(ParticipantKind.PERSON, person_id="test:account-b"),),
+            observed_at=now,
+            evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="示例来源"),),
+        ),
+        WriteContext(ActorType.ADMIN),
+    )
+    async with schema.database.session() as session:
+        session.add(
+            PersonaUpdateLogModel(
+                update_id="example-audit",
+                person_id=hashes["a"],
+                old_content_hash="old-content-digest",
+                new_content_hash="new-content-digest",
+                generator_version="memory-chat-v1",
+                revision_no=1,
+                impression_text="保留完整的印象正文。",
+                reason="示例来源",
+                created_at=now,
+            )
+        )
+        if failure == "collision":
+            session.add(
+                PersonaUpdateLogModel(
+                    update_id="conflicting-audit",
+                    person_id="test:account-a",
+                    old_content_hash="old-content-digest",
+                    new_content_hash="new-content-digest",
+                    generator_version="memory-chat-v1",
+                    revision_no=1,
+                    impression_text="另一个审查版本。",
+                    reason="示例来源",
+                    created_at=now,
+                )
+            )
+        session.add(
+            EvidenceMessageSnapshotModel(
+                stream_id="example-stream",
+                message_id="example-message",
+                payload={
+                    "person_id": hashes["a"],
+                    "platform": "test",
+                    "sender_id": "wrong-account" if failure == "snapshot-mismatch" else "account-a",
+                    "content": "保留完整的来源正文。",
+                },
+                captured_at=now,
+            )
+        )
+        session.add(
+            EvidenceMessageSnapshotModel(
+                stream_id="example-stream",
+                message_id="redacted-message",
+                payload={"redacted": True},
+                captured_at=now,
+                redacted_at=now,
+            )
+        )
+    await schema.close()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            "UPDATE engram_vnext_memory_revision_subject SET person_id=?", (hashes["a"],)
+        )
+        connection.execute(
+            "UPDATE engram_vnext_memory_revision_participant SET person_id=?", (hashes["b"],)
+        )
+        connection.commit()
+        before = tuple(connection.iterdump())
+        content = connection.execute("SELECT title,content FROM engram_vnext_memory_revision").fetchall()
+        digests = connection.execute("SELECT content_hash FROM engram_vnext_memory_retrieval_entry").fetchall()
+    people = [
+        SimpleNamespace(
+            person_id=core_id,
+            platform="test",
+            user_id="wrong-account" if failure == "core-mismatch" else f"account-{suffix}",
+        )
+        for suffix, core_id in hashes.items()
+        if not (failure == "missing" and suffix == "b")
+    ]
+    query = SimpleNamespace(all=AsyncMock(return_value=people))
+    query.filter = lambda **conditions: query
+    monkeypatch.setattr(schema_module.database_api, "query", lambda model: query)
+    try:
+        if failure:
+            with pytest.raises((ValueError, sqlite3.IntegrityError)):
+                await schema.initialize()
+            with closing(sqlite3.connect(path)) as connection:
+                assert tuple(connection.iterdump()) == before
+                assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        else:
+            await schema.initialize()
+            query.all.assert_awaited_once()
+            with closing(sqlite3.connect(path)) as connection:
+                assert connection.execute("SELECT person_id FROM engram_vnext_memory_revision_subject").fetchone() == ("test:account-a",)
+                assert connection.execute("SELECT person_id FROM engram_vnext_memory_revision_participant").fetchone() == ("test:account-b",)
+                assert connection.execute("SELECT person_id,old_content_hash,new_content_hash,impression_text FROM engram_vnext_persona_update_log").fetchone() == (
+                    "test:account-a", "old-content-digest", "new-content-digest", "保留完整的印象正文。"
+                )
+                snapshot = json.loads(connection.execute("SELECT payload FROM engram_vnext_evidence_message_snapshot WHERE message_id='example-message'").fetchone()[0])
+                assert snapshot == {
+                    "person_id": "test:account-a", "platform": "test", "sender_id": "account-a", "content": "保留完整的来源正文。"
+                }
+                assert json.loads(connection.execute("SELECT payload FROM engram_vnext_evidence_message_snapshot WHERE message_id='redacted-message'").fetchone()[0]) == {"redacted": True}
+                assert connection.execute("SELECT title,content FROM engram_vnext_memory_revision").fetchall() == content
+                assert connection.execute("SELECT content_hash FROM engram_vnext_memory_retrieval_entry").fetchall() == digests
+                assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+            backups = list((tmp_path / "backups").glob("*.person-ids.*.db"))
+            assert len(backups) == 1
+            with closing(sqlite3.connect(backups[0])) as backup:
+                assert tuple(backup.iterdump()) == before
+            assert await schema.normalize_person_ids() == {}
+            assert list((tmp_path / "backups").glob("*.person-ids.*.db")) == backups
+            query.all.assert_awaited_once()
+            revision = await MemoryRepository(schema).get_current_revision(memory.memory_id)
+            assert revision is not None and revision.content == "保持完整的原正文。"
+    finally:
+        await schema.close()

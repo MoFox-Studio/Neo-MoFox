@@ -23,7 +23,7 @@ logger = log_api.get_logger(
 
 
 class PersonaUpdater:
-    """以核心人物 ID 合并任务，共享并发名额且禁止同人并行。"""
+    """以平台人物账号合并任务，共享并发名额且禁止同人并行。"""
 
     def __init__(
         self,
@@ -32,7 +32,7 @@ class PersonaUpdater:
         *,
         max_concurrency: int,
     ) -> None:
-        """绑定共享 Persona 服务和人物别名仓储。"""
+        """绑定共享 Persona 服务和人物归一仓储。"""
         self._service = service
         self._repository = repository
         if max_concurrency < 1:
@@ -74,9 +74,9 @@ class PersonaUpdater:
         self._schedule()
 
     async def _canonical_person(self, person_id: str) -> str:
-        """在任务进入待处理集合之前归一到核心人物标识。"""
-        aliases = await self._repository.resolve_person_aliases(person_id)
-        return next((item for item in aliases if ":" not in item), person_id)
+        """在任务进入待处理集合之前归一到平台人物账号。"""
+        (canonical,) = await self._repository.resolve_person_aliases(person_id)
+        return canonical
 
     def _schedule(self) -> None:
         """唤醒唯一调度任务，处理等待中且未占用名额的人物。"""

@@ -210,6 +210,9 @@ async def test_seen_revisions_persist_without_citations_and_do_not_advance_on_fa
     person = SimpleNamespace(
         person_id="person-a", platform="test", user_id="a", impression=""
     )
+    monkeypatch.setattr(
+        persona_service.database_api, "get_by", AsyncMock(return_value=person)
+    )
     payloads: list[dict[str, Any]] = []
 
     async def write(platform: str, user_id: str, text: str) -> bool:
@@ -219,7 +222,7 @@ async def test_seen_revisions_persist_without_citations_and_do_not_advance_on_fa
 
     monkeypatch.setattr(persona_service.person_api, "update_user_impression", write)
     monkeypatch.setattr(
-        MemoryRepository, "resolve_person_aliases", _async_value(("person-a",))
+        MemoryRepository, "resolve_person_aliases", _async_value(("test:a",))
     )
     try:
         memories = MemoryService(schema, "example-embedding")
@@ -249,7 +252,7 @@ async def test_seen_revisions_persist_without_citations_and_do_not_advance_on_fa
             }
 
         service = PersonaService(schema, generator=generate)
-        service._repository = _Repository()  # type: ignore[assignment]
+        service._repository = MemoryRepository(schema)
         service.get_core_person = _async_value(person)  # type: ignore[method-assign]
         service._load_recent_chat = _async_value(())  # type: ignore[method-assign]
         first = await service.refresh("person-a")
@@ -280,7 +283,7 @@ async def test_seen_revisions_persist_without_citations_and_do_not_advance_on_fa
         schema = VNextSchema(str(path))
         await schema.initialize()
         service = PersonaService(schema, generator=generate)
-        service._repository = _Repository()  # type: ignore[assignment]
+        service._repository = MemoryRepository(schema)
         service.get_core_person = _async_value(person)  # type: ignore[method-assign]
         service._load_recent_chat = _async_value(())  # type: ignore[method-assign]
         second = await service.refresh("person-a")
@@ -310,11 +313,11 @@ async def test_seen_revisions_persist_without_citations_and_do_not_advance_on_fa
                     change_type=MemoryEventType.REVISED,
                     before_revision_id=saved[1].revision_id,
                     after_revision_id=revised.revision_id,
-                    before_person_ids=("person-a",),
-                    after_person_ids=("person-a",),
+                    before_person_ids=("test:a",),
+                    after_person_ids=("test:a",),
                 ),
             ),
-            ("person-a",),
+            ("test:a",),
         )
         assert all("content" not in item for item in changes[0]["revisions"])
         assert [item["is_current"] for item in changes[0]["revisions"]] == [False, True]
@@ -921,7 +924,7 @@ async def test_startup_archives_legacy_and_keeps_current_snapshot(
         monkeypatch.setattr(persona_service.database_api, "iter_all", iterate)
         for text in ("之前的认识", "当前认识"):
             await service._append_review_log(
-                "person-current",
+                "test:person-current",
                 "形成认识",
                 (),
                 "old",
@@ -929,7 +932,7 @@ async def test_startup_archives_legacy_and_keeps_current_snapshot(
                 impression_text=text,
             )
         await service._append_review_log(
-            "person-current",
+            "test:person-current",
             "认识未变",
             (),
             _content_hash("当前认识"),
@@ -937,7 +940,7 @@ async def test_startup_archives_legacy_and_keeps_current_snapshot(
             impression_text="当前认识",
         )
         await service._append_review_log(
-            "person-diverged",
+            "test:person-diverged",
             "形成认识",
             (),
             "old",
@@ -948,11 +951,11 @@ async def test_startup_archives_legacy_and_keeps_current_snapshot(
 
         async def write(platform: str, user_id: str, text: str) -> bool:
             """确认完整旧稿已提交到独立库后才替换核心正文。"""
-            history = await service.get_history(user_id)
+            history = await service.get_history(f"test:{user_id}")
             assert history
             revision_no = history[0]["revision_no"]
             assert isinstance(revision_no, int)
-            archived = (await service.get_history(user_id, revision_no))[0]
+            archived = (await service.get_history(f"test:{user_id}", revision_no))[0]
             assert archived["generator_version"] is None
             assert archived["impression_text"] == people[user_id].impression
             assert text == "（暂无印象）"
@@ -969,24 +972,24 @@ async def test_startup_archives_legacy_and_keeps_current_snapshot(
             "person-unbracketed",
         }
         assert people["person-current"].impression == "当前认识"
-        assert await service.is_current_impression("person-current", "当前认识")
-        assert not await service.is_current_impression("person-current", "之前的认识")
-        assert len(await service.get_history("person-current")) == 2
-        assert (await service.get_history("person-diverged", 1))[0][
+        assert await service.is_current_impression("test:person-current", "当前认识")
+        assert not await service.is_current_impression("test:person-current", "之前的认识")
+        assert len(await service.get_history("test:person-current")) == 2
+        assert (await service.get_history("test:person-diverged", 1))[0][
             "impression_text"
         ] == "插件原稿"
-        assert (await service.get_history("person-diverged", 2))[0][
+        assert (await service.get_history("test:person-diverged", 2))[0][
             "impression_text"
         ] == "外部写入的未认证正文"
         assert not await service.is_current_impression(
-            "person-diverged", "外部写入的未认证正文"
+            "test:person-diverged", "外部写入的未认证正文"
         )
         assert await service.clear_legacy_impressions() == 0
         assert len(writes) == 4
-        assert len(await service.get_history("person-diverged")) == 2
-        assert len(await service.get_history("person-legacy")) == 1
-        assert await service.get_history("person-placeholder") == ()
-        assert await service.get_history("person-empty") == ()
+        assert len(await service.get_history("test:person-diverged")) == 2
+        assert len(await service.get_history("test:person-legacy")) == 1
+        assert await service.get_history("test:person-placeholder") == ()
+        assert await service.get_history("test:person-empty") == ()
     finally:
         await schema.close()
 
@@ -1041,7 +1044,7 @@ async def test_startup_cleanup_preserves_old_text_on_failure_and_retries(
             assert await service.clear_legacy_impressions() == 0
             assert person.impression == "刚写入的新正文"
             failed_write.assert_not_awaited()
-            assert (await service.get_history("person-a", 1))[0][
+            assert (await service.get_history("test:a", 1))[0][
                 "impression_text"
             ] == original
             return
@@ -1050,7 +1053,7 @@ async def test_startup_cleanup_preserves_old_text_on_failure_and_retries(
         ):
             await service.clear_legacy_impressions()
         assert person.impression == original
-        assert len(await service.get_history("person-a")) == (
+        assert len(await service.get_history("test:a")) == (
             0 if failure == "archive" else 1
         )
         if failure == "archive":
@@ -1072,11 +1075,11 @@ async def test_startup_cleanup_preserves_old_text_on_failure_and_retries(
         monkeypatch.setattr(persona_service.person_api, "update_user_impression", write)
         assert await service.clear_legacy_impressions() == 1
         assert person.impression == EMPTY_IMPRESSION
-        assert len(await service.get_history("person-a")) == 1
-        assert (await service.get_history("person-a", 1))[0][
+        assert len(await service.get_history("test:a")) == 1
+        assert (await service.get_history("test:a", 1))[0][
             "impression_text"
         ] == original
-        assert not await service.is_current_impression("person-a", original)
+        assert not await service.is_current_impression("test:a", original)
     finally:
         await restarted.close()
 
@@ -1180,7 +1183,7 @@ async def test_placeholder_bootstrap_retries_after_restart(
 
     async def get_person(person_id: str) -> SimpleNamespace | None:
         """只读取隔离人物映射。"""
-        return people.get(person_id)
+        return people.get(person_id.removeprefix("test:"))
 
     async def write(platform: str, user_id: str, text: str) -> bool:
         """模拟公开核心写入，不触碰正式数据库。"""
@@ -1215,7 +1218,7 @@ async def test_placeholder_bootstrap_retries_after_restart(
             title="已确认的共同认识",
             content="双方确认会继续讨论项目。",
             memory_kind=MemoryKind.EVENT,
-            subject=SubjectInput(SubjectKind.PERSON, person_id="person-a"),
+            subject=SubjectInput(SubjectKind.PERSON, person_id="test:person-a"),
             observed_at=now,
             evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="示例来源"),),
         ),
@@ -1230,7 +1233,7 @@ async def test_placeholder_bootstrap_retries_after_restart(
     async def failed_generate(payload: str) -> dict[str, object]:
         """在空底稿首次生成时模拟供应商失败。"""
         data = json.loads(payload)
-        assert data["person_id"] == "person-a" and data["current_impression"] == ""
+        assert data["person_id"] == "test:person-a" and data["current_impression"] == ""
         calls.append(data["person_id"])
         raise ValueError("model-test")
 
@@ -1239,10 +1242,10 @@ async def test_placeholder_bootstrap_retries_after_restart(
     try:
         updater.start()
         await drain(updater)
-        assert calls == ["person-a"] * 3
+        assert calls == ["test:person-a"] * 3
         assert people["person-a"].impression == EMPTY_IMPRESSION
-        assert await service.get_history("person-a") == ()
-        assert "person-a" in updater.last_errors
+        assert await service.get_history("test:person-a") == ()
+        assert "test:person-a" in updater.last_errors
     finally:
         await updater.close()
         await schema.close()
@@ -1257,7 +1260,7 @@ async def test_placeholder_bootstrap_retries_after_restart(
     async def successful_generate(payload: str) -> dict[str, object]:
         """重启补建使用当前真实记忆 ID，并且不带入占位文字。"""
         data = json.loads(payload)
-        assert data["person_id"] == "person-a" and data["current_impression"] == ""
+        assert data["person_id"] == "test:person-a" and data["current_impression"] == ""
         calls.append(data["person_id"])
         return {
             "impression_text": f"交流很自然[Memory: {data['active_memories'][0]['memory_id']}]。",
@@ -1270,10 +1273,10 @@ async def test_placeholder_bootstrap_retries_after_restart(
     try:
         updater.start()
         await drain(updater)
-        assert calls == ["person-a"] * 4
+        assert calls == ["test:person-a"] * 4
         persona = await service.get_persona("person-a")
         assert persona is not None and persona.is_current and persona.impression_text
-        assert (await service.get_history("person-a", 1))[0][
+        assert (await service.get_history("test:person-a", 1))[0][
             "impression_text"
         ] == people["person-a"].impression
         assert people["person-no-memory"].impression == EMPTY_IMPRESSION
@@ -1282,8 +1285,8 @@ async def test_placeholder_bootstrap_retries_after_restart(
         subsequent = PersonaUpdater(service, _Repository(), max_concurrency=1)  # type: ignore[arg-type]
         subsequent.start()
         await drain(subsequent)
-        assert calls == ["person-a"] * 4
-        assert len(await service.get_history("person-a")) == 1
+        assert calls == ["test:person-a"] * 4
+        assert len(await service.get_history("test:person-a")) == 1
     finally:
         await updater.close()
         if subsequent is not None:
@@ -1958,12 +1961,12 @@ async def test_updater_shares_three_slots_and_deduplicates_aliases(
     calls: list[tuple[str, tuple[MemoryChanged, ...]]] = []
 
     class Repository(_Repository):
-        """将示例平台身份归一到同一个核心人物。"""
+        """将示例核心身份归一到同一个平台账号。"""
 
         async def resolve_person_aliases(self, person_id: str) -> tuple[str, ...]:
-            """返回稳定核心标识和平台别名。"""
+            """仅返回单一平台标识。"""
             return (
-                ("person-a", "test:a")
+                ("test:a",)
                 if person_id in {"person-a", "test:a"}
                 else (person_id,)
             )
@@ -2021,15 +2024,15 @@ async def test_updater_shares_three_slots_and_deduplicates_aliases(
         await updater._task.task
         assert maximum == 3
         assert {person_id for person_id, _ in calls} == {
-            "person-a",
+            "test:a",
             "person-b",
             "person-c",
             "person-d",
             "person-e",
         }
-        assert sum(person_id == "person-a" for person_id, _ in calls) == 2
+        assert sum(person_id == "test:a" for person_id, _ in calls) == 2
         assert any(
-            person_id == "person-a" and len(batch) == 1 for person_id, batch in calls
+            person_id == "test:a" and len(batch) == 1 for person_id, batch in calls
         )
     finally:
         await updater.close()
@@ -2650,7 +2653,7 @@ async def test_formal_memory_bootstrap_history_lookup_and_withdrawal(
                 title="共同安排",
                 content="双方已确认一起讨论项目。",
                 memory_kind=MemoryKind.EVENT,
-                subject=SubjectInput(SubjectKind.PERSON, person_id="person-a"),
+                subject=SubjectInput(SubjectKind.PERSON, person_id="test:a"),
                 observed_at=now,
                 evidence=(
                     EvidenceInput(EvidenceSourceType.ADMIN, now, note="示例来源"),
@@ -2658,7 +2661,7 @@ async def test_formal_memory_bootstrap_history_lookup_and_withdrawal(
             ),
             WriteContext(ActorType.ADMIN),
         )
-        assert await service.get_active_person_ids() == ("person-a",)
+        assert await service.get_active_person_ids() == ("test:a",)
         first = await service.refresh("person-a")
         assert first is not None and first.changed
         assert baselines == [""] and write.await_count == 1
@@ -2667,7 +2670,7 @@ async def test_formal_memory_bootstrap_history_lookup_and_withdrawal(
         unchanged = await service.refresh("person-a", (_change(saved.memory_id),))
         assert unchanged is not None and not unchanged.changed
         assert write.await_count == 1
-        assert len(await service.get_history("person-a")) == 1
+        assert len(await service.get_history("test:a")) == 1
         current = await tools.person_lookup("person-a", context)
         assert (
             current["persona_impression"] == first_text
@@ -2706,12 +2709,12 @@ async def test_formal_memory_bootstrap_history_lookup_and_withdrawal(
         )
         assert len(baselines) == before_lookup
         assert [
-            row["revision_no"] for row in await service.get_history("person-a")
+            row["revision_no"] for row in await service.get_history("test:a")
         ] == [2, 1]
         assert (await tools.person_lookup("person-a", context))[
             "persona_impression"
         ] == "暂无人物印象"
-        assert (await service.get_history("person-a", 1))[0][
+        assert (await service.get_history("test:a", 1))[0][
             "impression_text"
         ] == first_text
         assert await service.get_active_person_ids() == ()

@@ -26,6 +26,7 @@ async def run_example() -> None:
     plugin.runtime_owner = SimpleNamespace(
         persona_service=SimpleNamespace(
             get_persona=AsyncMock(return_value=snapshot),
+            get_person_ref=AsyncMock(return_value="test:user-example"),
         )
     )
     handler = VNextPrivatePersonaEventHandler(plugin)
@@ -63,6 +64,8 @@ async def run_example() -> None:
                 if isinstance(part, Text)
             ]
             assert sum(f"[{REMINDER_NAME}]" in text for text in texts) == 1
+            assert any("人物标识：test:user-example" in text for text in texts)
+            assert all("person-example" not in text for text in texts)
             assert any(
                 isinstance(part, Text) and impression in part.text
                 for part in request.payloads[0].content

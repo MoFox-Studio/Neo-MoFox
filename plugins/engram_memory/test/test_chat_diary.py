@@ -50,6 +50,15 @@ def test_diary_config_ignores_obsolete_recovery_messages() -> None:
         EngramMemoryConfig.from_dict({"diary": {"unsupported": 1}})
 
 
+def test_diary_config_body_char_budget() -> None:
+    """整篇日记预算具有默认值，允许正整数配置并拒绝零值。"""
+    assert DiaryConfig().body_char_budget == 800
+    config = EngramMemoryConfig.from_dict({"diary": {"body_char_budget": 400}})
+    assert config.diary.body_char_budget == 400
+    with pytest.raises(ValueError, match="body_char_budget"):
+        DiaryConfig(body_char_budget=0)
+
+
 @pytest.mark.asyncio
 async def test_diary_atomic_commit_and_stale_rejection(diary_path: str) -> None:
     """正文与位置同批保存，正文不变也前进，过期结果不覆盖。"""
@@ -549,7 +558,7 @@ async def test_diary_runtime_reminder_isolates_seven_days_without_uncovered_mess
             (
                 ("2026-09-26", "七日前正文"),
                 ("2026-09-27", "窗口边界正文"),
-                ("2026-10-03", "今天正文"),
+                ("2026-10-03", "今天正文\n\n后续安排还没确定。"),
             ),
             1,
         ):
@@ -570,6 +579,15 @@ async def test_diary_runtime_reminder_isolates_seven_days_without_uncovered_mess
         content = await runtime.reminder_content("s1")
         assert "当前日期：2026-10-03。" in content
         assert "覆盖至：2026-10-03T00:30:00；" in content
+        assert content.count("\n\n## ") == 2
+        assert content.count("---") == 3
+        assert "---\n\n## 2026-09-27 日记\n\n覆盖至：" in content
+        assert "消息位置：2\n\n窗口边界正文\n\n---\n\n## 2026-10-03 日记" in content
+        assert "消息位置：3\n\n今天正文\n\n后续安排还没确定。\n\n---" in content
+        assert "---\n\n全流已处理消息位置：3。" in content
+        saved_diary = await runtime.store.get_day("s1", "2026-10-03")
+        assert saved_diary is not None
+        assert saved_diary.body == "今天正文\n\n后续安排还没确定。"
         assert "时区" not in content
         assert config.timezone not in content
         assert "+08:00" not in content
@@ -1238,6 +1256,7 @@ async def test_diary_formats_actual_bot_and_placeholder_without_guessing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("body_char_budget", [8, 800])
 @pytest.mark.parametrize(
     ("response_text", "expected_error"),
     [
@@ -1266,8 +1285,9 @@ async def test_diary_request_is_clean_and_persona_is_complete(
     monkeypatch: pytest.MonkeyPatch,
     response_text: str,
     expected_error: str | None,
+    body_char_budget: int,
 ) -> None:
-    """独立请求保留完整人设与事实边界，仅接受合法 JSON 及完整围栏。"""
+    """独立请求保留人设、段落和整篇预算指令，合法正文不因超预算而截断。"""
     persona = {"name": "示例Bot", "personality": "自然说话", "safety": "遵守事实"}
     monkeypatch.setattr(
         diary_service.config_api,
@@ -1301,7 +1321,9 @@ async def test_diary_request_is_clean_and_persona_is_complete(
         return request
 
     monkeypatch.setattr(diary_service.llm_api, "create_llm_request", capture_request)
-    service = DiaryService(DiaryConfig(), DiaryStore(diary_path))
+    service = DiaryService(
+        DiaryConfig(body_char_budget=body_char_budget), DiaryStore(diary_path)
+    )
     payload: dict[str, object] = {
         "target_date": "2026-10-03",
         "timezone": "Asia/Shanghai",
@@ -1326,8 +1348,14 @@ async def test_diary_request_is_clean_and_persona_is_complete(
         + "\n\n"
     )
     assert system.endswith(diary_service.DIARY_INSTRUCTIONS)
+    assert f"当天整篇正文的写作预算为 {body_char_budget} 字" in system
+    assert "已有底稿与本批新增内容合计使用这一预算" in system
     for instruction in (
         "用你的第一人称和自然口吻",
+        "段落之间用空行分隔",
+        "每段通常两三句",
+        "整篇正文尽量控制在写作预算内",
+        "压缩时仍须保留取消、纠正、结果",
         "这篇日记写的是你在这个聊天里的经历",
         "不预设亲密",
         "留给自己以后接着相处时看",
