@@ -102,10 +102,10 @@ class EmojiSenderService(BaseService):
     _SHORT_ID_LENGTH = 12
 
     def __init__(self, plugin: Any) -> None:
-        """初始化服务的使用历史与拒绝哈希集合。"""
+        """初始化使用历史并共享插件的拒绝哈希集合。"""
         super().__init__(plugin)
         self._usage_history: dict[str, deque[str]] = {}
-        self._rejected_hashes: set[str] = set()
+        self._rejected_hashes: set[str] = plugin._rejected_hashes
 
     def _dedup_enabled(self) -> bool:
         """使用历史去重是否开启。"""

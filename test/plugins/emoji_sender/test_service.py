@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -11,15 +12,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from plugins.emoji_sender.config import EmojiSenderConfig
+from plugins.emoji_sender.plugin import EmojiSenderPlugin
 from plugins.emoji_sender.service import EmojiSenderService, MemeCandidate
+from src.core.managers.service_manager import ServiceManager
 
 
 def _make_service(*, temperature: float = 0.12) -> EmojiSenderService:
     """创建一个带最小配置的 EmojiSenderService。"""
     config = EmojiSenderConfig()
     config.vector.temperature = temperature
-    plugin = SimpleNamespace(config=config)
-    return EmojiSenderService(plugin=cast(Any, plugin))
+    return EmojiSenderService(plugin=EmojiSenderPlugin(config=config))
 
 
 def test_select_candidate_returns_best_when_temperature_disabled() -> None:
@@ -178,11 +180,14 @@ async def test_ingest_once_skips_alignment_when_storage_is_full(tmp_path: Any) -
 
 
 @pytest.mark.asyncio
-async def test_ingest_once_advances_past_rejected_meme(
+async def test_ingest_job_advances_past_rejected_meme(
     ingest_service: EmojiSenderService,
 ) -> None:
-    """当前服务应跳过被拒绝图片及其副本，重建服务后可重新评估。"""
+    """连续调度应跨服务跳过拒绝素材，重建插件后可重新评估。"""
     service = ingest_service
+    plugin = cast(EmojiSenderPlugin, service.plugin)
+    ingest_job = cast(Callable[[], Awaitable[None]], plugin._ingest_job)
+    manager = ServiceManager()
     manual_dir = service._manual_memes_dir()
     rejected_source = manual_dir / "a_rejected.png"
     duplicate_source = manual_dir / "b_rejected.png"
@@ -204,6 +209,12 @@ async def test_ingest_once_advances_past_rejected_meme(
     )
 
     with (
+        patch("src.app.plugin_system.api.service_api._get_service_manager", return_value=manager),
+        patch.object(manager, "get_service_class", return_value=EmojiSenderService),
+        patch(
+            "src.core.managers.get_plugin_manager",
+            return_value=SimpleNamespace(get_plugin=lambda plugin_name: plugin),
+        ),
         patch.object(EmojiSenderService, "_align_data_dir_with_db", new=AsyncMock()),
         patch.object(EmojiSenderService, "_vlm_decide_and_label", new=label_mock),
         patch.object(
@@ -218,10 +229,12 @@ async def test_ingest_once_advances_past_rejected_meme(
             return_value=_make_embedding_mocks(),
         ),
     ):
-        await service.ingest_once()
+        await ingest_job()
         mock_vdb.add.assert_not_awaited()
-        await service.ingest_once()
-        restarted_service = EmojiSenderService(plugin=cast(Any, SimpleNamespace(config=config)))
+        await ingest_job()
+        another_service = EmojiSenderService(plugin=plugin)
+        assert await another_service._pick_next_manual_meme_file() == accepted_source
+        restarted_service = EmojiSenderService(plugin=EmojiSenderPlugin(config=config))
         assert await restarted_service._pick_next_manual_meme_file() == rejected_source
 
     assert [call.args[0] for call in compress_mock.call_args_list] == [b"rejected", b"accepted"]
