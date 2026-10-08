@@ -29,6 +29,7 @@ from .enums import (
     OutboxObjectType,
     OutboxOperation,
     OutboxStatus,
+    RelationType,
     RetrievalEntryType,
     RevisionChangeReason,
 )
@@ -83,6 +84,12 @@ class MemoryService:
         """在数据库提交后通知记忆变化的订阅者。"""
         if self._on_memory_changed is not None:
             await self._on_memory_changed(change)
+
+    def rebind_embedding_model(self, embedding_model_id: str) -> None:
+        """在启动期向量恢复后更新后续 Outbox 使用的模型身份。"""
+        if not embedding_model_id.strip():
+            raise ValueError("embedding_model_id 不能为空")
+        self._embedding_model_id = embedding_model_id
 
     @staticmethod
     def _input_person_ids(

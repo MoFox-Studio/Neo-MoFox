@@ -32,6 +32,7 @@ from .feedforward_service import (
     CHANNEL_GROUP,
     CHANNEL_PRIVATE,
     ChannelSettings,
+    FeedForwardCue,
     FeedForwardRetrievalService,
     FeedForwardSettings,
 )
@@ -56,13 +57,17 @@ from .runtime import (
 )
 from .schema import VNextSchema
 from .tool_service import VNextToolService
-from .vector_service import VectorIndexService
+from .vector_service import (
+    UNAVAILABLE_EMBEDDING_MODEL_ID,
+    VectorIndexService,
+)
 
 logger = log_api.get_logger(
     "engram_memory.vnext.runtime_owner", display="Engram 记忆", color=log_api.COLOR.CYAN
 )
 
 _VECTOR_WORKER_BATCH_SIZE = 30
+_UNAVAILABLE_EMBEDDING_MODEL_ID = UNAVAILABLE_EMBEDDING_MODEL_ID
 
 
 class ChromaVectorSearchBackend(VectorSearchBackend):
@@ -157,7 +162,14 @@ class VNextRuntimeOwner:
             collection_name="engram_vnext_retrieval",
             embedding_task=DEFAULT_EMBEDDING_MODEL_TASK,
         )
-        self._embedding_model_identity = self.vector_sink.embedding_model_identity()
+        try:
+            self._embedding_model_identity = self.vector_sink.embedding_model_identity()
+        except Exception as error:  # noqa: BLE001
+            self._embedding_model_identity = _UNAVAILABLE_EMBEDDING_MODEL_ID
+            logger.warning(
+                "Embedding 模型身份不可用，先以无向量模式装配 Engram: "
+                f"{type(error).__name__}: {error}"
+            )
         self.vector_backend = ChromaVectorSearchBackend(self.vector_sink, self.schema)
         self.retrieval = RetrievalService(
             self.schema,
@@ -305,25 +317,24 @@ class VNextRuntimeOwner:
         self._sqlite_write_lock = asyncio.Lock()  # 插件级单写者锁
         self._working_memory_results: dict[str, dict[str, object]] = {}
         self._consolidation_task_id: str | None = None
+        self._vector_available = False
+        self._vector_error: str | None = None
+
+    @property
+    def vector_available(self) -> bool:
+        """返回派生向量索引当前是否可用。"""
+        return self._vector_available
+
+    @property
+    def vector_error(self) -> str | None:
+        """返回最近一次向量初始化失败的可定位原因。"""
+        return self._vector_error
 
     async def initialize(self) -> None:
         """初始化记忆数据库并启动派生向量后台任务。"""
         if self._initialized:
             return
         try:
-            (
-                embedding_identity,
-                embedding_dimension,
-            ) = await self.vector_sink.inspect_embedding_settings()
-            if embedding_identity != self._embedding_model_identity:
-                raise RuntimeError("Embedding task identity 在初始化期间发生变化")
-            self.doctor = DoctorService(
-                self.schema,
-                vector_service=self.vector_index,
-                embedding_model_id=embedding_identity,
-                embedding_dimension=embedding_dimension,
-                retrieval_schema_version="engram-vnext-2",
-            )
             self._schema_initialized = True
             await self.schema.initialize()
             if self.neo4j_graph is not None:
@@ -336,13 +347,48 @@ class VNextRuntimeOwner:
                     self.neo4j_graph = None
             cleared_personas = await self.persona_service.clear_legacy_impressions()
             logger.info(f"人物印象启动核对完成：归档并清理 {cleared_personas} 份旧稿")
-            await self.vector_index.ensure_active_manifest(
-                embedding_identity,
-                embedding_dimension,
-                "engram-vnext-2",
-            )
-            self._worker_started = True
-            self.vector_worker.start()
+            try:
+                (
+                    embedding_identity,
+                    embedding_dimension,
+                ) = await self.vector_sink.inspect_embedding_settings()
+                recovering_embedding = (
+                    self._embedding_model_identity == _UNAVAILABLE_EMBEDDING_MODEL_ID
+                )
+                if (
+                    embedding_identity != self._embedding_model_identity
+                    and not recovering_embedding
+                ):
+                    raise RuntimeError("Embedding task identity 在初始化期间发生变化")
+                if recovering_embedding:
+                    await self.vector_index.rebind_unavailable_outbox(embedding_identity)
+                    self._embedding_model_identity = embedding_identity
+                    self.tools.rebind_embedding_model(embedding_identity)
+                self.doctor = DoctorService(
+                    self.schema,
+                    vector_service=self.vector_index,
+                    embedding_model_id=embedding_identity,
+                    embedding_dimension=embedding_dimension,
+                    retrieval_schema_version="engram-vnext-2",
+                )
+                await self.vector_index.ensure_active_manifest(
+                    embedding_identity,
+                    embedding_dimension,
+                    "engram-vnext-2",
+                )
+            except Exception as error:  # noqa: BLE001
+                self.doctor = None
+                self._vector_available = False
+                self._vector_error = f"{type(error).__name__}: {error}"
+                logger.warning(
+                    "Embedding/Vector 派生索引不可用，继续使用词法和结构化记忆能力: "
+                    f"{self._vector_error}"
+                )
+            else:
+                self._vector_available = True
+                self._vector_error = None
+                self._worker_started = True
+                self.vector_worker.start()
             self._initialized = True
             await self.diary.initialize()
             self.persona_updater.start()
@@ -401,6 +447,8 @@ class VNextRuntimeOwner:
         self._working_memory_results.clear()
         self._consolidation_task_id = None
         self._recent_messages.clear()
+        self._vector_available = False
+        self._vector_error = None
         self.feedforward.layers.clear()
         if self.neo4j_graph is not None:
             try:
@@ -911,12 +959,27 @@ class VNextRuntimeOwner:
     async def _feedforward_for_stream(self, stream_id: str) -> tuple[object, ...]:
         """每轮必然执行前馈检索，并转换为闪回候选以复用注入链路。"""
         recent = self._recent_messages.get(stream_id, {})
-        chat_type = "private"
+        chat_type = ""
+        person_ids: list[str] = []
         for message in reversed(tuple(recent.values())):
-            message_type = str(self._message_value(message, "message_type") or "").casefold()
-            if message_type:
-                chat_type = "private" if message_type == "private" else "group"
-                break
+            observed_chat_type = str(
+                self._message_value(message, "chat_type") or ""
+            ).casefold()
+            if not chat_type and observed_chat_type in {"private", "group", "discuss"}:
+                chat_type = observed_chat_type
+            if observed_chat_type == "private":
+                try:
+                    snapshot = message_to_snapshot(message)  # type: ignore[arg-type]
+                except ValueError:
+                    snapshot = None
+                person_id = str(snapshot.snapshot.get("person_id") or "") if snapshot else ""
+                if person_id and person_id not in {"bot", "system"}:
+                    person_ids.append(person_id)
+        if not chat_type:
+            info = await stream_api.get_stream_info(stream_id)
+            chat_type = str(info.get("chat_type") or "") if info else ""
+        if chat_type not in {"private", "group", "discuss"}:
+            return ()
         fallback = (
             await self.recent_turns_for_flashback(stream_id)
             if not self.feedforward.layers.sensory(stream_id, datetime.now(UTC))
@@ -927,6 +990,14 @@ class VNextRuntimeOwner:
         )
         if cue is None:
             return ()
+        cue = FeedForwardCue(
+            stream_id=cue.stream_id,
+            text=cue.text,
+            person_ids=tuple(dict.fromkeys(person_ids)) or cue.person_ids,
+            chat_type=chat_type,
+            now=cue.now,
+            latest_text=cue.latest_text,
+        )
         result = await self.feedforward.feed_forward(cue)
         return tuple(
             FlashbackCandidate(

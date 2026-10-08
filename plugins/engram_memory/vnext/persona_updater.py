@@ -140,7 +140,10 @@ class PersonaUpdater:
                     ):
                         continue
                     persona = await self._service.get_persona(person_id)
-                    if persona is not None and not persona.impression_text:
+                    if persona is not None and (
+                        not persona.impression_text
+                        or await self._service.needs_refresh(person_id)
+                    ):
                         self._pending.setdefault(person_id, [])
                         self._schedule()
                 except Exception as error:  # noqa: BLE001

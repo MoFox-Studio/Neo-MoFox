@@ -279,7 +279,7 @@ class RetrievalService:
                     + tuple((entry.entry_id, entry.text) for entry in candidates),
                     min(len(candidates), max(24, query.top_k * 4)),
                 )
-            except NotImplementedError:
+            except (NotImplementedError, Exception):
                 vector_results = ()
             allowed_entry_ids = {entry.entry_id for entry in candidates}
             vector_similarities = {

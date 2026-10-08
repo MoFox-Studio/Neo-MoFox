@@ -4,7 +4,8 @@
   "version": "2.0.0",
   "description": "可追溯的正式记忆写入、修订与作废，支持检索、人物印象与自然闪回",
   "author": "MoFox Team",
-  "categories": "tool",
+  "categories": ["tool"],
+  "min_core_version": "1.2.0-rc.2",
   "tags": ["memory", "记忆", "人物", "自然闪回"],
   "dependencies": {
     "plugins": [],

@@ -163,6 +163,7 @@ def message_to_snapshot(message: MessageLike) -> MessageSnapshot:
         "sender_name": _snapshot_value(_message_value(message, "sender_name")),
         "sender_cardname": _snapshot_value(_message_value(message, "sender_cardname")),
         "platform": _snapshot_value(_message_value(message, "platform")),
+        "chat_type": _snapshot_value(_message_value(message, "chat_type")),
         "message_type": _snapshot_value(_message_value(message, "message_type")),
         "reply_to": _snapshot_value(_message_value(message, "reply_to")),
         "content": _snapshot_value(_message_value(message, "content")),

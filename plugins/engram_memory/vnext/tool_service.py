@@ -130,6 +130,10 @@ class VNextToolService:
         self._default_search_limit = default_search_limit
         self._max_search_limit = max_search_limit
 
+    def rebind_embedding_model(self, embedding_model_id: str) -> None:
+        """在启动期向量恢复后同步正式记忆写入服务的模型身份。"""
+        self._memory.rebind_embedding_model(embedding_model_id)
+
     def require_permission(self, operation: str, context: ToolContext) -> None:
         """只接受运行组件绑定的 Actor 或管理员身份。"""
         if (

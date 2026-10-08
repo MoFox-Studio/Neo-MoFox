@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -63,7 +62,7 @@ async def test_review_rejects_model_evidence_injection(schema: VNextSchema) -> N
         observed_at=datetime.now(UTC), source_ref="review:source", participants=("person-1",),
     )
     proposals = ProposalService(schema)
-    proposal = await proposals.propose(
+    await proposals.propose(
         stream_id="stream-1", claim=episode.raw_text, evidence_ids=(episode.episode_id,),
         operation="uncertain",
     )

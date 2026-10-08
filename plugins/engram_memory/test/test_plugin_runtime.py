@@ -27,6 +27,7 @@ from ..prompts import MEMORY_GUIDE_REMINDER
 from ..router import memory_admin_router as admin_router
 from ..router.memory_admin_router import VNextMemoryAdminRouter
 from ..vnext import runtime, runtime_owner
+from ..vnext.backends.layersplit_store import SensoryItem
 from ..vnext.domain import (
     CreateMemoryInput,
     EvidenceInput,
@@ -51,6 +52,7 @@ from ..vnext.persona_service import (
     _format_memory_footnotes,
 )
 from ..vnext.runtime import ChromaVectorSink, MessageLike, VectorOutboxWorker
+from ..vnext.feedforward_service import FeedForwardCue, FeedForwardResult
 from ..vnext.runtime_owner import VNextRuntimeOwner
 from ..vnext.schema import VNextSchema
 
@@ -439,6 +441,46 @@ def test_observe_message_keeps_bounded_context_before_prefetch(
         owner.observe_message(_message(message_id=f"message-{index}"))
     assert tuple(owner._recent_messages["stream-1"]) == ("message-1", "message-2")
     assert schedule.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_feedforward_uses_chat_type_and_private_person_scope(
+    owner: VNextRuntimeOwner,
+) -> None:
+    """前馈读取 chat_type 而非消息内容类型，并传递私聊人物范围。"""
+    now = datetime.now(UTC)
+    observed: list[FeedForwardCue] = []
+
+    async def run(cue: FeedForwardCue) -> FeedForwardResult:
+        """捕获实际交给前馈服务的线索。"""
+        observed.append(cue)
+        return FeedForwardResult((), 0, {})
+
+    owner.feedforward.layers.perceive(
+        "stream-private",
+        SensoryItem(
+            text="接着聊上次的计划",
+            person_id="person-private",
+            observed_at=now,
+        ),
+    )
+    owner.feedforward.feed_forward = run  # type: ignore[method-assign]
+    owner._recent_messages["stream-private"] = {
+        "message-1": _message(
+            stream_id="stream-private",
+            time=now,
+            processed_plain_text="接着聊上次的计划",
+            message_type="text",
+            chat_type="private",
+            person_id="person-private",
+            sender_role="user",
+        )
+    }
+
+    assert await owner._feedforward_for_stream("stream-private") == ()
+    assert len(observed) == 1
+    assert observed[0].chat_type == "private"
+    assert observed[0].person_ids == ("person-private",)
 
 
 @pytest.mark.asyncio

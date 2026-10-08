@@ -763,11 +763,12 @@ class VNextFlashbackEventHandler(BaseEventHandler):
             if message is not None:
                 owner.observe_output_message(message)
             return EventDecision.SUCCESS, params
-        if params.get("name") not in {
-            "default_chatter_user_prompt",
-            "neo_default_chatter_user_prompt",
-            "kfc_user_prompt",
-        }:
+        template_name = str(params.get("name") or "").casefold()
+        if (
+            "user_prompt" not in template_name
+            or "sub_agent" in template_name
+            or template_name.startswith("engram_")
+        ):
             return EventDecision.SUCCESS, params
         values = params.get("values")
         if not isinstance(values, dict):
@@ -937,9 +938,21 @@ class VNextDoctorRouter(BaseRouter):
         @self.app.get("/check")
         async def check() -> dict[str, object]:
             """返回健康状态与可定位的问题目录。"""
-            doctor = _owner(self.plugin).doctor
+            owner = _owner(self.plugin)
+            doctor = owner.doctor
             if doctor is None:
-                raise RuntimeError("Engram Doctor 尚未初始化")
+                return {
+                    "healthy": False,
+                    "issues": [
+                        {
+                            "code": "VECTOR_INDEX_UNAVAILABLE",
+                            "object_id": "engram-vnext-vector",
+                            "repairable": True,
+                            "details": owner.vector_error
+                            or "Embedding/Vector 派生索引尚未初始化",
+                        }
+                    ],
+                }
             report = await doctor.check()
             return {
                 "healthy": report.healthy,

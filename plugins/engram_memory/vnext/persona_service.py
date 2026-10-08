@@ -6,7 +6,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
@@ -404,6 +404,23 @@ class PersonaService:
                 .limit(1)
             )
             return tuple(latest.seen_revision_ids or ()) if latest is not None else ()
+
+    async def needs_refresh(self, person_id: str) -> bool:
+        """判断人物当前印象是否缺少对 ACTIVE 记忆版本的成功审查。"""
+        person = await self.get_core_person(person_id)
+        if person is None:
+            return False
+        aliases = await self._repository.resolve_person_aliases(person.person_id)
+        memories = await self._load_active_memories(aliases)
+        if not memories:
+            return False
+        impression = person.impression or ""
+        if not impression or not await self.is_current_impression(
+            person.person_id, impression
+        ):
+            return True
+        seen = set(await self._load_seen_revision_ids(person.person_id, impression))
+        return any(str(memory["revision_id"]) not in seen for memory in memories)
 
     async def refresh(
         self,
@@ -940,6 +957,9 @@ class PersonaService:
                 if save_snapshot
                 else None
             )
+            created_at = datetime.now(UTC)
+            if latest is not None and created_at <= latest.created_at:
+                created_at = latest.created_at + timedelta(microseconds=1)
             session.add(
                 PersonaUpdateLogModel(
                     update_id=update_id,
@@ -948,7 +968,7 @@ class PersonaService:
                     old_content_hash=old_hash,
                     new_content_hash=new_hash,
                     reason=reason,
-                    created_at=datetime.now(UTC),
+                    created_at=created_at,
                     generator_version=generator_version,
                     revision_no=revision_no,
                     impression_text=impression_text if save_snapshot else None,

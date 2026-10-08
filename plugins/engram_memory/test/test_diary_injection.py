@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -22,6 +23,9 @@ from src.kernel.llm.roles import ROLE
 from ..diary.events import ChatDiaryEventHandler
 from ..diary.injection import REMINDER_NAME, refresh_diary_payloads
 from ..diary.runtime import DiaryRuntime
+from ..config import EngramMemoryConfig
+from ..vnext.flashback_service import FlashbackCandidate
+from ..vnext.runtime_components import VNextFlashbackEventHandler
 
 
 class _DiaryRuntime(DiaryRuntime):
@@ -592,3 +596,99 @@ async def test_before_request_uses_stream_metadata_and_current_diary(
     )
     assert request.payloads is source_payloads
     assert any("旧版提醒" in text for text in _text_parts(source_payloads[-1]))
+
+
+@pytest.mark.asyncio
+async def test_feedforward_refreshes_active_neo_chatter_prompt_before_render(
+    reminder_store: SystemReminderStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """活跃 Neo Chatter user prompt 在渲染前注入前馈候选，且只作用于当前流。"""
+    from types import SimpleNamespace
+
+    from src.core.components.types import EventType
+
+    from .. import plugin as plugin_module
+    from ..vnext import runtime_components
+
+    stream_id = "stream-feedforward"
+    config = EngramMemoryConfig()
+    plugin = plugin_module.EngramMemoryPlugin(config)
+    candidate = FlashbackCandidate(
+        "memory-feedforward", "咖啡", "你提过咖啡会影响睡眠。", "咖啡"
+    )
+    owner = SimpleNamespace(
+        config=config,
+        consume_flashback_prefetch=AsyncMock(return_value=(candidate,)),
+        consume_working_memory=Mock(return_value=None),
+        flashback=SimpleNamespace(
+            formalized_episode_ids=AsyncMock(return_value=frozenset()),
+            current_reminder_candidates=AsyncMock(
+                return_value={candidate.memory_id: candidate}
+            ),
+        ),
+        record_flashback_injection=AsyncMock(),
+        _prompt_turns={stream_id: 4},
+    )
+    plugin.runtime_owner = cast(plugin_module.VNextRuntimeOwner, owner)
+    monkeypatch.setattr(runtime_components, "_owner", lambda _plugin: owner)
+    plugin._flashback_reminder_streams = {}
+    request = _new_request(stream_id, reminder_store)
+    request.add_payload(LLMPayload(ROLE.USER, Text("我今晚还喝咖啡吗？")))
+    params: dict[str, object] = {
+        "name": "neo_default_chatter_user_prompt",
+        "values": {"stream_id": stream_id},
+    }
+    handler = VNextFlashbackEventHandler(cast(BasePlugin, plugin))
+
+    decision, result = await handler.execute(EventType.ON_PROMPT_BUILD, params)
+    payloads = request.context_manager._apply_reminders(request.payloads)
+    flattened = [text for payload in payloads for text in _text_parts(payload)]
+
+    assert decision is runtime_components.EventDecision.SUCCESS
+    assert result is params
+    assert any(candidate.current_brief in text for text in flattened)
+    assert sum(candidate.memory_id in text for text in flattened) == 1
+    owner.consume_flashback_prefetch.assert_awaited_once_with(stream_id)
+    owner.record_flashback_injection.assert_awaited_once_with(
+        stream_id, (candidate,), 3
+    )
+    assert plugin._flashback_reminder_streams == {
+        stream_id: {f"engram_memory_flashback_{candidate.memory_id}"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_feedforward_skips_sub_agent_and_internal_prompts(
+    reminder_store: SystemReminderStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """前馈不污染 SubAgent、日记整理或人物印象内部生成请求。"""
+    from types import SimpleNamespace
+
+    from src.core.components.types import EventType
+
+    from .. import plugin as plugin_module
+    from ..vnext import runtime_components
+
+    config = EngramMemoryConfig()
+    plugin = plugin_module.EngramMemoryPlugin(config)
+    consume = AsyncMock(return_value=())
+    owner = SimpleNamespace(
+        config=config,
+        consume_flashback_prefetch=consume,
+        consume_working_memory=Mock(return_value=None),
+    )
+    plugin.runtime_owner = cast(plugin_module.VNextRuntimeOwner, owner)
+    monkeypatch.setattr(runtime_components, "_owner", lambda _plugin: owner)
+    handler = VNextFlashbackEventHandler(cast(BasePlugin, plugin))
+    for template_name in (
+        "neo_default_chatter_sub_agent_user_prompt",
+        "engram_chat_diary_update_user_prompt",
+        "engram_vnext_persona_update_user_prompt",
+    ):
+        await handler.execute(
+            EventType.ON_PROMPT_BUILD,
+            {"name": template_name, "values": {"stream_id": "stream-a"}},
+        )
+    consume.assert_not_awaited()

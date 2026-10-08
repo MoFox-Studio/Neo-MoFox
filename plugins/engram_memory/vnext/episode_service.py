@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .models import (

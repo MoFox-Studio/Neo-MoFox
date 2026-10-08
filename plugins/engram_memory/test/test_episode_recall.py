@@ -419,7 +419,7 @@ async def test_correction_candidate_targets_unique_matching_memory(schema: VNext
         ),
         WriteContext(ActorType.ADMIN, actor_ref="test", stream_id="stream-1"),
     )
-    episode = await EpisodeService(schema).record_external_episode(
+    await EpisodeService(schema).record_external_episode(
         title="咖啡习惯纠正",
         content="更正，我不再喝咖啡。",
         stream_id="stream-1",

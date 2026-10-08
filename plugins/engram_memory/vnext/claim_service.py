@@ -7,12 +7,9 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from hashlib import sha256
-from typing import Any
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import select, update
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src.app.plugin_system.api import llm_api
 from src.kernel.llm import LLMPayload, ROLE, Text

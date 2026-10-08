@@ -29,6 +29,7 @@ from .schema import VNextSchema
 MAX_OUTBOX_ATTEMPTS = 3
 PROCESSING_STALE_SECONDS = 300
 DEFAULT_VECTOR_UPSERT_BATCH_SIZE = 32
+UNAVAILABLE_EMBEDDING_MODEL_ID = "engram:embedding-unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,6 +572,31 @@ class VectorIndexService:
         return await self.process_pending_outbox(
             len(selected_outbox_ids), outbox_ids=tuple(selected_outbox_ids)
         )
+
+    async def rebind_unavailable_outbox(self, embedding_model_id: str) -> int:
+        """将启动期无模型占位项安全重绑到恢复后的真实模型。"""
+        if not embedding_model_id.strip():
+            raise ValueError("embedding_model_id 不能为空")
+        async with self._schema.database.session() as session:
+            result = await session.execute(
+                update(VectorOutboxModel)
+                .where(
+                    VectorOutboxModel.embedding_model_id
+                    == UNAVAILABLE_EMBEDDING_MODEL_ID,
+                    VectorOutboxModel.status.in_(
+                        (OutboxStatus.PENDING, OutboxStatus.FAILED)
+                    ),
+                )
+                .values(
+                    embedding_model_id=embedding_model_id,
+                    status=OutboxStatus.PENDING,
+                    attempt_count=0,
+                    claim_token=None,
+                    last_error=None,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+        return int(result.rowcount or 0)
 
     async def activate_manifest(
         self,

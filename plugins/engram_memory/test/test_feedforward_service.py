@@ -10,7 +10,9 @@ import pytest
 from ..vnext.domain import (
     CreateMemoryInput,
     EvidenceInput,
+    EvidenceMessageInput,
     MemoryLifecycleInput,
+    RetrievalQuery,
     SubjectInput,
     WriteContext,
 )
@@ -23,12 +25,26 @@ from ..vnext.feedforward_service import (
     FeedForwardSettings,
 )
 from ..vnext.memory_service import MemoryService
+from ..vnext.models import EvidenceMessageLinkModel, EvidenceMessageSnapshotModel
 from ..vnext.retrieval_service import RetrievalService, VectorSearchBackend
 from ..vnext.schema import VNextSchema
 
 
 class _NoVector(VectorSearchBackend):
     """测试中只走词法与结构化通道。"""
+
+
+class _BrokenVector(VectorSearchBackend):
+    """模拟运行时不可用的向量服务。"""
+
+    async def query_scored(
+        self,
+        texts: tuple[tuple[str, str], ...],
+        top_k: int,
+    ) -> tuple[tuple[str, float | None], ...]:
+        """抛出后端异常，验证词法通道继续工作。"""
+        del texts, top_k
+        raise RuntimeError("embedding service unavailable")
 
 
 @pytest.fixture
@@ -95,6 +111,187 @@ async def test_every_turn_feeds_forward_relevant_memory(schema: VNextSchema) -> 
         assert result.candidate_count >= 1
 
 
+async def test_vector_failure_keeps_lexical_recall(schema: VNextSchema) -> None:
+    """向量服务异常时，正式记忆仍可由词法通道检索。"""
+    memory_id = await _create(schema, "搬家计划", "下个月准备搬到新城市")
+    results = await RetrievalService(schema, _BrokenVector()).search(
+        RetrievalQuery(text="搬家计划 新城市", top_k=5)
+    )
+    assert [item.memory_id for item in results] == [memory_id]
+
+
+async def test_person_scoped_cue_does_not_recall_another_person(schema: VNextSchema) -> None:
+    """当前人物线索不能仅凭相同文本召回其他人物的记忆。"""
+    await _create(schema, "共同安排", "周末一起去咖啡馆。", person_id="person-a")
+    service = _service(schema)
+    result = await service.feed_forward(_cue("周末一起去咖啡馆", person="person-b"))
+    assert result.selected == ()
+
+
+async def test_source_less_person_memory_is_private_only(schema: VNextSchema) -> None:
+    """没有可验证来源流的人物记忆不进入群聊前馈。"""
+    memory_id = await _create(schema, "私下安排", "周末一起去咖啡馆。")
+    service = _service(schema)
+    group = await service.feed_forward(
+        FeedForwardCue(
+            stream_id="group-stream",
+            text="周末一起去咖啡馆",
+            person_ids=("person-1",),
+            chat_type="group",
+            now=datetime.now(UTC),
+            latest_text="周末一起去咖啡馆",
+        )
+    )
+    private = await service.feed_forward(_cue("周末一起去咖啡馆"))
+    assert group.selected == ()
+    assert memory_id in [item.memory_id for item in private.selected]
+
+
+async def test_private_source_is_not_recalled_in_group(schema: VNextSchema) -> None:
+    """私聊来源记忆不能进入群聊前馈提示。"""
+    now = datetime.now(UTC) - timedelta(days=1)
+    writer = MemoryService(schema, "example-embedding")
+    async def read_private_source(
+        references: tuple[tuple[str, str], ...],
+    ) -> tuple[dict[str, object], ...]:
+        """返回隔离的私聊消息来源快照。"""
+        return tuple(
+            {
+                "message_id": message_id,
+                "stream_id": stream_id,
+                "time": now.isoformat(),
+                "platform": "qq",
+                "chat_type": "private",
+                "person_id": "person-1",
+                "sender_id": "user-1",
+                "content": "周末去咖啡馆",
+                "reply_to": None,
+            }
+            for stream_id, message_id in references
+        )
+
+    writer._evidence_service._message_reader = read_private_source
+    result = await writer.create_memory(
+        CreateMemoryInput(
+            title="私聊计划",
+            content="用户计划周末去咖啡馆。",
+            memory_kind=MemoryKind.EVENT,
+            subject=SubjectInput(SubjectKind.PERSON, person_id="person-1"),
+            observed_at=now,
+            evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="隔离测试来源"),),
+        ),
+        WriteContext(ActorType.ADMIN),
+    )
+    async with schema.database.session() as session:
+        evidence_id = result.evidence_ids[0]
+        session.add(
+            EvidenceMessageLinkModel(
+                evidence_id=evidence_id,
+                stream_id="private-stream",
+                message_id="private-message",
+                ordinal=0,
+            )
+        )
+        session.add(
+            EvidenceMessageSnapshotModel(
+                stream_id="private-stream",
+                message_id="private-message",
+                captured_at=now,
+                payload={
+                    "message_id": "private-message",
+                    "stream_id": "private-stream",
+                    "time": now.isoformat(),
+                    "platform": "qq",
+                    "chat_type": "private",
+                    "person_id": "person-1",
+                    "sender_id": "user-1",
+                    "content": "周末去咖啡馆",
+                },
+            )
+        )
+    service = _service(schema)
+    result = await service.feed_forward(
+        FeedForwardCue(
+            stream_id="group-stream",
+            text="周末去咖啡馆",
+            person_ids=("person-1",),
+            chat_type="group",
+            now=datetime.now(UTC),
+            latest_text="周末去咖啡馆",
+        )
+    )
+    assert result.selected == ()
+
+
+async def test_group_memory_is_recalled_only_in_its_source_group(
+    schema: VNextSchema,
+) -> None:
+    """群聊记忆只进入同一来源流，不能跨群前馈。"""
+    now = datetime.now(UTC) - timedelta(days=1)
+    writer = MemoryService(schema, "example-embedding")
+
+    async def read_group_source(
+        references: tuple[tuple[str, str], ...],
+    ) -> tuple[dict[str, object], ...]:
+        """返回一个群聊的隔离来源快照。"""
+        return tuple(
+            {
+                "message_id": message_id,
+                "stream_id": stream_id,
+                "time": now.isoformat(),
+                "platform": "qq",
+                "chat_type": "group",
+                "person_id": "person-1",
+                "sender_id": "user-1",
+                "content": "周末去咖啡馆",
+                "reply_to": None,
+            }
+            for stream_id, message_id in references
+        )
+
+    writer._evidence_service._message_reader = read_group_source
+    await writer.create_memory(
+        CreateMemoryInput(
+            title="群里约定",
+            content="群里约好周末去咖啡馆。",
+            memory_kind=MemoryKind.EVENT,
+            subject=SubjectInput(SubjectKind.PERSON, person_id="person-1"),
+            observed_at=now,
+            evidence=(
+                EvidenceInput(
+                    EvidenceSourceType.MESSAGE_SET,
+                    now,
+                    messages=(EvidenceMessageInput("group-message", "group-a"),),
+                ),
+            ),
+        ),
+        WriteContext(ActorType.ADMIN),
+    )
+    service = _service(schema)
+    same_group = await service.feed_forward(
+        FeedForwardCue(
+            stream_id="group-a",
+            text="周末去咖啡馆",
+            person_ids=("person-1",),
+            chat_type="group",
+            now=datetime.now(UTC),
+            latest_text="周末去咖啡馆",
+        )
+    )
+    other_group = await service.feed_forward(
+        FeedForwardCue(
+            stream_id="group-b",
+            text="周末去咖啡馆",
+            person_ids=("person-1",),
+            chat_type="group",
+            now=datetime.now(UTC),
+            latest_text="周末去咖啡馆",
+        )
+    )
+    assert len(same_group.selected) == 1
+    assert other_group.selected == ()
+
+
 async def test_unrelated_cue_injects_nothing(schema: VNextSchema) -> None:
     """与线索无真实关联的记忆不会因为新近而被注入。"""
     await _create(schema, "咖啡失眠", "用户喝咖啡之后会失眠。")
@@ -140,6 +337,7 @@ async def test_emotional_memory_written_to_emotional_channel(schema: VNextSchema
         memory_kind="PREFERENCE",
         person_ids=("person-1",),
         chat_types=("private",),
+        source_scopes=(),
         source_types=("ACTOR_WRITE",),
         access_times=(now - timedelta(days=1),),
         experienced_at=now - timedelta(days=1),
