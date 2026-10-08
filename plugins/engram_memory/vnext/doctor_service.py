@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Callable, Iterable, TypeVar
+from typing import TypeVar
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -632,51 +633,11 @@ class DoctorService:
         self,
         selected_outbox_ids: list[str],
     ) -> tuple[str, ...]:
-        """通过现有 Vector 服务投递选中的 Outbox，同时隔离其他待处理行。"""
-        suspended: dict[str, tuple[int, str | None, datetime]] = {}
+        """仅投递选中的 Outbox，不修改其他工作项的处理状态。"""
         selected = tuple(dict.fromkeys(selected_outbox_ids))
-        async with self._schema.database.session() as session:
-            rows = tuple(
-                (
-                    await session.scalars(
-                        select(VectorOutboxModel).where(
-                            VectorOutboxModel.status == OutboxStatus.PENDING,
-                            VectorOutboxModel.outbox_id.not_in(selected),
-                        )
-                    )
-                ).all()
-            )
-            for row in rows:
-                suspended[row.outbox_id] = (
-                    row.attempt_count,
-                    row.last_error,
-                    row.updated_at,
-                )
-                row.status = OutboxStatus.PROCESSING
-
-        try:
-            succeeded = await self._vector_service.process_pending_outbox(len(selected))
-        finally:
-            if suspended:
-                async with self._schema.database.session() as session:
-                    rows = tuple(
-                        (
-                            await session.scalars(
-                                select(VectorOutboxModel).where(
-                                    VectorOutboxModel.outbox_id.in_(tuple(suspended))
-                                )
-                            )
-                        ).all()
-                    )
-                    for row in rows:
-                        if row.status is not OutboxStatus.PROCESSING:
-                            continue
-                        attempt_count, last_error, updated_at = suspended[row.outbox_id]
-                        row.status = OutboxStatus.PENDING
-                        row.attempt_count = attempt_count
-                        row.last_error = last_error
-                        row.updated_at = updated_at
-        return tuple(succeeded)
+        return await self._vector_service.process_pending_outbox(
+            len(selected), outbox_ids=selected
+        )
 
     async def _repair_manifest_drift(self) -> str | None:
         """发现清单漂移时从 Canonical 入口重新建立当前索引。"""

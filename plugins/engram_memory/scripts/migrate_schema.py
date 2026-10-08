@@ -18,8 +18,8 @@ if str(ROOT) not in sys.path:
 if not __package__:
     __package__ = ".".join(Path(__file__).resolve().relative_to(ROOT).parts[:-1])
 
-from ..vnext.schema import SCHEMA_VERSION  # noqa: E402
-from ..vnext.schema_migration import migrate_snapshot  # noqa: E402
+from ..vnext.schema import SCHEMA_VERSION
+from ..vnext.schema_migration import migrate_snapshot
 
 
 def _resolve_project_path(path: Path) -> Path:
@@ -44,7 +44,7 @@ def _configured_production_path() -> Path:
 
     storage = config.get("storage", {})
     if not isinstance(storage, dict):
-        raise ValueError("Engram 存储配置格式无效")
+        raise TypeError("Engram 存储配置格式无效")
     configured_path = storage.get("vnext_db_path")
     if configured_path is None:
         return default_path.resolve()

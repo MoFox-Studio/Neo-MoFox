@@ -35,14 +35,14 @@ if str(ROOT) not in sys.path:
 if not __package__:
     __package__ = ".".join(Path(__file__).resolve().relative_to(ROOT).parts[:-1])
 
-from sqlalchemy import select, text  # noqa: E402
+from sqlalchemy import select, text
 
-from src.app.plugin_system.api import llm_api, person_api  # noqa: E402
+from src.app.plugin_system.api import llm_api
 
-from ..config import EngramMemoryConfig  # noqa: E402
-from ..vnext.doctor_service import DoctorService  # noqa: E402
-from ..vnext.domain import RetrievalQuery  # noqa: E402
-from ..vnext.enums import (  # noqa: E402
+from ..config import EngramMemoryConfig
+from ..vnext.doctor_service import DoctorService
+from ..vnext.domain import RetrievalQuery
+from ..vnext.enums import (
     ActorType,
     EvidenceSourceType,
     MemoryEventType,
@@ -53,7 +53,7 @@ from ..vnext.enums import (  # noqa: E402
     RevisionChangeReason,
     SubjectKind,
 )
-from ..vnext.models import (  # noqa: E402
+from ..vnext.models import (
     EvidenceModel,
     MemoryEventModel,
     MemoryModel,
@@ -65,17 +65,15 @@ from ..vnext.models import (  # noqa: E402
     RevisionEvidenceModel,
     VectorOutboxModel,
 )
-from ..vnext.repository import MemoryRepository  # noqa: E402
-from ..vnext.retrieval_service import RetrievalService  # noqa: E402
-from ..vnext.runtime import ChromaVectorSink  # noqa: E402
-from ..vnext.runtime_owner import ChromaVectorSearchBackend  # noqa: E402
-from ..vnext.schema import VNextSchema  # noqa: E402
-from ..vnext.vector_service import VectorIndexService  # noqa: E402
+from ..vnext.repository import MemoryRepository
+from ..vnext.retrieval_service import RetrievalService
+from ..vnext.runtime import ChromaVectorSink
+from ..vnext.runtime_owner import ChromaVectorSearchBackend
+from ..vnext.schema import VNextSchema, normalize_person_reference
+from ..vnext.vector_service import VectorIndexService
 
 SCRIPT_VERSION = 2
 RETRIEVAL_SCHEMA_VERSION = "engram-vnext-2"
-PERSON_REF = re.compile(r"[A-Za-z][A-Za-z0-9_.-]*:[^\s:]+\Z")
-CORE_PERSON_ID = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class MigrationError(ValueError):
@@ -242,14 +240,34 @@ def stable_id(source_id: str, suffix: str = "") -> str:
 
 
 def person_id(value: object) -> str | None:
-    """只转换明确的平台用户标识；不从昵称猜人物身份。"""
-    reference = str(value or "").strip()
-    if PERSON_REF.fullmatch(reference):
-        platform, user_id = reference.split(":", 1)
-        if platform.casefold() in {"platform", "unknown", "none"}:
-            return None
-        return person_api.generate_person_id(platform, user_id)
-    return reference if CORE_PERSON_ID.fullmatch(reference) else None
+    """读取显式平台账号，未知引用保留在来源与标签中。"""
+    return normalize_person_reference(value)
+
+
+async def resolve_people(
+    schema: VNextSchema, records: list[dict[str, Any]]
+) -> dict[str, str]:
+    """核实导入记录中的人物哈希，只返回唯一的平台账号。"""
+    from ..vnext.repository import MemoryRepository, UnresolvedPersonError
+
+    references = {
+        value
+        for row in records
+        for value in (row.get("person_id"), *strings(row.get("related_people")))
+        if isinstance(value, str) and value.strip()
+    }
+    repository = MemoryRepository(schema)
+    resolved: dict[str, str] = {}
+    for reference in sorted(references):
+        canonical = person_id(reference)
+        if canonical is None and re.fullmatch(r"[0-9a-fA-F]{64}", reference):
+            try:
+                (canonical,) = await repository.resolve_person_aliases(reference)
+            except UnresolvedPersonError:
+                continue
+        if canonical is not None:
+            resolved[reference] = canonical
+    return resolved
 
 
 def content_for(row: dict[str, Any]) -> str:
@@ -309,10 +327,10 @@ def inventory(
         "target_statuses": dict(Counter(status_for(row).value for row in records)),
         "tags": sum(map(len, tags.values())),
         "temporary_memos_preserved_in_snapshot": memo_count,
-        "person_refs_converted": sum(
+        "person_refs_raw": sum(
             bool(person_id(row.get("person_id"))) for row in records
         ),
-        "person_refs_unresolved": sum(
+        "person_refs_need_verification": sum(
             bool(row.get("person_id")) and not person_id(row["person_id"])
             for row in records
         ),
@@ -333,6 +351,7 @@ async def import_records(
     statuses = {str(row["memory_id"]): status_for(row) for row in records}
     if len(set(ids.values())) != len(ids):
         raise MigrationError("旧标识映射发生冲突，拒绝迁移。")
+    people = await resolve_people(schema, records)
     relations: set[tuple[str, str]] = set()
     missing_relations = 0
     async with schema.database.session() as session:
@@ -346,7 +365,7 @@ async def import_records(
             )
             created_at = timestamp(row.get("created_at")) or now
             updated_at = timestamp(row.get("updated_at")) or created_at
-            primary_id = person_id(row.get("person_id"))
+            primary_id = people.get(str(row.get("person_id") or ""))
             legacy_kind = str(row.get("memory_type") or "").lower()
             kind = {"event": MemoryKind.EVENT, "preference": MemoryKind.PREFERENCE}.get(
                 legacy_kind, MemoryKind.FACT
@@ -443,7 +462,7 @@ async def import_records(
                     if isinstance(item, str)
                     else json.dumps(item, ensure_ascii=False)
                 )
-                participant_id = person_id(item) if isinstance(item, str) else None
+                participant_id = people.get(item) if isinstance(item, str) else None
                 key = participant_id or label
                 if not key or key in participants:
                     continue
@@ -464,7 +483,8 @@ async def import_records(
                 if target not in ids:
                     missing_relations += 1
                 elif ids[target] != memory_id:
-                    relations.add(tuple(sorted((memory_id, ids[target]))))
+                    source_id, target_id = sorted((memory_id, ids[target]))
+                    relations.add((source_id, target_id))
         await session.flush()
         status_by_id = {ids[key]: value for key, value in statuses.items()}
         for source_id, target_id in sorted(relations):
@@ -488,6 +508,8 @@ async def import_records(
     return {
         "relations": len(relations),
         "unresolved_relation_refs_preserved": missing_relations,
+        "person_refs_converted": sum(bool(people.get(str(row.get("person_id") or ""))) for row in records),
+        "person_refs_unresolved": sum(bool(row.get("person_id")) and str(row["person_id"]) not in people for row in records),
     }
 
 
@@ -497,6 +519,7 @@ async def verify_records(
     tags: dict[str, list[dict[str, Any]]],
 ) -> dict[str, int]:
     """逐条回读迁移结果，核对正文、旧来源、时间、状态及人物。"""
+    people = await resolve_people(schema, records)
     async with schema.database.session() as session:
         memories = {
             row.memory_id: row
@@ -529,7 +552,7 @@ async def verify_records(
             and memory.status is status_for(row)
             and memory.current_revision_id == revision.revision_id
             and subjects[revision.revision_id].person_id
-            == person_id(row.get("person_id"))
+            == people.get(str(row.get("person_id") or ""))
             and original.get("record") == row
             and original.get("tags") == tags.get(original_id, [])
             and (expected_created is None or memory.created_at == expected_created)
@@ -673,6 +696,7 @@ async def build_and_check(
                 schema, ChromaVectorSearchBackend(sink, schema)
             )
             repository = MemoryRepository(schema)
+            people = await resolve_people(schema, records)
             samples = [row for row in records if status_for(row) is MemoryStatus.ACTIVE]
             queries: list[dict[str, Any]] = []
             selected: list[dict[str, Any]] = []
@@ -689,7 +713,7 @@ async def build_and_check(
             if archived is not None and archived not in selected:
                 selected.append(archived)
             person_sample = next(
-                (row for row in samples if person_id(row.get("person_id"))), None
+                (row for row in samples if people.get(str(row.get("person_id") or ""))), None
             )
             if person_sample is not None and person_sample not in selected:
                 selected.append(person_sample)
@@ -697,7 +721,7 @@ async def build_and_check(
                 query_text = str(row.get("title") or row.get("content") or "").strip()[
                     :120
                 ]
-                pid = person_id(row.get("person_id"))
+                pid = people.get(str(row.get("person_id") or ""))
                 found = await retrieval.search(
                     RetrievalQuery(
                         text=query_text, top_k=20, person_ids=(pid,) if pid else ()
@@ -705,16 +729,6 @@ async def build_and_check(
                 )
                 expected = stable_id(str(row["memory_id"]))
                 hit = expected in {item.memory_id for item in found}
-                raw_alias_hit = None
-                if pid and PERSON_REF.fullmatch(str(row.get("person_id") or "")):
-                    alias_found = await retrieval.search(
-                        RetrievalQuery(
-                            text=query_text,
-                            top_k=20,
-                            person_ids=(str(row["person_id"]),),
-                        )
-                    )
-                    raw_alias_hit = expected in {item.memory_id for item in alias_found}
                 readback = await repository.get_current_revision(expected)
                 sources = await repository.list_evidence(expected)
                 queries.append(
@@ -725,7 +739,6 @@ async def build_and_check(
                         "hit_in_top_20": hit,
                         "result_count": len(found),
                         "evidence_count": len(sources),
-                        "legacy_person_filter_hit": raw_alias_hit,
                         "content_matches": readback is not None
                         and readback.content == content_for(row),
                     }
@@ -735,7 +748,6 @@ async def build_and_check(
                 not item["hit_in_top_20"]
                 or not item["content_matches"]
                 or not item["evidence_count"]
-                or item["legacy_person_filter_hit"] is False
                 for item in queries
             ):
                 raise MigrationError("真实检索或来源回读样本未通过，拒绝标记完成。")
@@ -839,7 +851,7 @@ async def main() -> int:
                 f"跳过知识文档：{stats['knowledge_records_skipped']} 条（Booku 知识库）"
             )
             print(
-                f"人物标识：{stats['person_refs_converted']} 条可关联；{stats['person_refs_unresolved']} 条待人工核对"
+                f"人物标识：{stats['person_refs_raw']} 条为平台账号；{stats['person_refs_need_verification']} 条在导入时核对历史引用"
             )
             print(
                 "保留正文、创建时间及旧记录来源；不补造聊天消息或旧版本。来源副本校验通过。"
@@ -995,7 +1007,7 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         raise SystemExit(1) from None
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
         # 第三方异常可能含 SQL 参数或请求内容，不在终端打印其完整堆栈。
         message = (
             str(error) if isinstance(error, MigrationError) else type(error).__name__

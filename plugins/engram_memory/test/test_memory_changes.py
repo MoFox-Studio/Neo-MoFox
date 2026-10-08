@@ -13,13 +13,16 @@ import pytest
 
 from src.app.plugin_system.api import person_api
 
-from ..vnext import runtime_components, schema as schema_module
+from ..scripts import migrate_booku
+from ..vnext import runtime_components
+from ..vnext import schema as schema_module
 from ..vnext.domain import (
     CreateMemoryInput,
     EvidenceInput,
     MemoryChanged,
     MemoryLifecycleInput,
     ParticipantInput,
+    ReinforceMemoryInput,
     ReviseMemoryInput,
     SubjectInput,
     WriteContext,
@@ -37,6 +40,7 @@ from ..vnext.evidence_service import EvidenceService
 from ..vnext.memory_service import MemoryService
 from ..vnext.models import (
     EvidenceMessageSnapshotModel,
+    EvidenceModel,
     MemoryRevisionSubjectModel,
     PersonaUpdateLogModel,
 )
@@ -436,14 +440,14 @@ async def test_change_event_keeps_params_and_only_enqueues(
 
 
 @pytest.mark.parametrize(
-    "failure", [None, "core-mismatch", "snapshot-mismatch", "missing", "collision"]
+    "failure", [None, "core-mismatch", "snapshot-mismatch", "missing", "collision", "legacy"]
 )
 async def test_person_hash_normalization_is_atomic_and_preserves_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str | None,
 ) -> None:
-    """人物转换保留正文和索引摘要，失败回滚，成功备份且重复执行不写库。"""
+    """转换保留正文和未知身份，矛盾或冲突回滚，重复执行不写库。"""
     path = tmp_path / "identities.db"
     schema = VNextSchema(str(path))
     await schema.initialize()
@@ -514,6 +518,22 @@ async def test_person_hash_normalization_is_atomic_and_preserves_content(
                 redacted_at=now,
             )
         )
+        if failure == "legacy":
+            session.add(
+                EvidenceModel(
+                    evidence_id="example-booku-source",
+                    source_type=EvidenceSourceType.LEGACY_RECORD,
+                    observed_at=now,
+                    created_at=now,
+                    note=json.dumps({
+                        "format": "booku-record-v1",
+                        "record": {
+                            "person_id": "test:account-a",
+                            "related_people": json.dumps(["test:account-b"]),
+                        },
+                    }),
+                )
+            )
     await schema.close()
     with closing(sqlite3.connect(path)) as connection:
         connection.execute(
@@ -533,13 +553,13 @@ async def test_person_hash_normalization_is_atomic_and_preserves_content(
             user_id="wrong-account" if failure == "core-mismatch" else f"account-{suffix}",
         )
         for suffix, core_id in hashes.items()
-        if not (failure == "missing" and suffix == "b")
+        if not (failure in {"missing", "legacy"} and suffix == "b")
     ]
     query = SimpleNamespace(all=AsyncMock(return_value=people))
     query.filter = lambda **conditions: query
     monkeypatch.setattr(schema_module.database_api, "query", lambda model: query)
     try:
-        if failure:
+        if failure and failure not in {"missing", "legacy"}:
             with pytest.raises((ValueError, sqlite3.IntegrityError)):
                 await schema.initialize()
             with closing(sqlite3.connect(path)) as connection:
@@ -550,7 +570,9 @@ async def test_person_hash_normalization_is_atomic_and_preserves_content(
             query.all.assert_awaited_once()
             with closing(sqlite3.connect(path)) as connection:
                 assert connection.execute("SELECT person_id FROM engram_vnext_memory_revision_subject").fetchone() == ("test:account-a",)
-                assert connection.execute("SELECT person_id FROM engram_vnext_memory_revision_participant").fetchone() == ("test:account-b",)
+                assert connection.execute("SELECT person_id FROM engram_vnext_memory_revision_participant").fetchone() == (
+                    hashes["b"] if failure == "missing" else "test:account-b",
+                )
                 assert connection.execute("SELECT person_id,old_content_hash,new_content_hash,impression_text FROM engram_vnext_persona_update_log").fetchone() == (
                     "test:account-a", "old-content-digest", "new-content-digest", "保留完整的印象正文。"
                 )
@@ -568,8 +590,253 @@ async def test_person_hash_normalization_is_atomic_and_preserves_content(
                 assert tuple(backup.iterdump()) == before
             assert await schema.normalize_person_ids() == {}
             assert list((tmp_path / "backups").glob("*.person-ids.*.db")) == backups
-            query.all.assert_awaited_once()
+            assert query.all.await_count == (2 if failure == "missing" else 1)
             revision = await MemoryRepository(schema).get_current_revision(memory.memory_id)
             assert revision is not None and revision.content == "保持完整的原正文。"
+    finally:
+        await schema.close()
+
+
+@pytest.mark.parametrize(
+    ("reference", "expected"),
+    [
+        ("qq:100001", "qq:100001"),
+        ("test:account-a", "test:account-a"),
+        (" q:100001 ", " q:100001 "),
+        ("q:account", "q:account"),
+        ("qq:100001;name", "qq:100001;name"),
+        ("qq:100001；name", "qq:100001；name"),
+        ("qq:name", "qq:name"),
+        ("qq:100001 name", "qq:100001 name"),
+        ("unknown:100001", "unknown:100001"),
+        ("matrix:@example:example.invalid", "matrix:@example:example.invalid"),
+        ("custom/path:account", "custom/path:account"),
+        ("平台:账号", "平台:账号"),
+        (":account", None),
+        ("custom: ", None),
+        (person_api.generate_person_id("qq", "100001"), None),
+    ],
+)
+def test_booku_person_references_use_platform_ids(
+    reference: str, expected: str | None
+) -> None:
+    """规范账号不依赖核心注册，异常引用与不可核实哈希不写为人物关联。"""
+    assert migrate_booku.person_id(reference) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference", [None, "q:", " :account", "qq: "])
+async def test_unresolved_person_hashes_preserve_database_without_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reference: str | None,
+) -> None:
+    """身份全部未知或仅有异常旧引用时，初始化不改原数据且不创建备份。"""
+    path = tmp_path / "unresolved.db"
+    schema = VNextSchema(str(path))
+    await schema.initialize()
+    now = datetime.now(UTC)
+    await MemoryService(schema, "example-embedding").create_memory(
+        CreateMemoryInput(
+            title="待核对记忆",
+            content="完整保留的历史正文。",
+            memory_kind=MemoryKind.FACT,
+            subject=SubjectInput(SubjectKind.PERSON, person_id="test:account-a"),
+            observed_at=now,
+            evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="示例来源"),),
+        ),
+        WriteContext(ActorType.ADMIN),
+    )
+    platform, account = ("test", "account-a")
+    core_id = person_api.generate_person_id(platform, account)
+    async with schema.database.session() as session:
+        session.add(
+            EvidenceMessageSnapshotModel(
+                stream_id="example-stream",
+                message_id="redacted-message",
+                payload={"person_id": core_id, "platform": platform, "sender_id": account},
+                captured_at=now,
+                redacted_at=now,
+            )
+        )
+        if reference:
+            session.add(
+                EvidenceModel(
+                    evidence_id="example-booku-source",
+                    source_type=EvidenceSourceType.LEGACY_RECORD,
+                    observed_at=now,
+                    created_at=now,
+                    note=json.dumps({"format": "booku-record-v1", "record": {"person_id": reference}}),
+                )
+            )
+    await schema.close()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE engram_vnext_memory_revision_subject SET person_id=?", (core_id,))
+        connection.commit()
+        before = tuple(connection.iterdump())
+    query = SimpleNamespace(all=AsyncMock(return_value=[]))
+    query.filter = lambda **conditions: query
+    monkeypatch.setattr(schema_module.database_api, "query", lambda model: query)
+    try:
+        await schema.initialize()
+        assert await schema.normalize_person_ids() == {}
+        assert query.all.await_count == 2
+        with closing(sqlite3.connect(path)) as connection:
+            assert tuple(connection.iterdump()) == before
+            assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+        assert not (tmp_path / "backups").exists()
+    finally:
+        await schema.close()
+
+
+def test_booku_inventory_does_not_claim_hashes_are_unresolved() -> None:
+    """离线预览区分平台格式与待核实引用，不冒充核心身份核验。"""
+    stats = migrate_booku.inventory([
+        {"person_id": "x:opaque:id;name", "content": "Example"},
+        {"person_id": person_api.generate_person_id("test", "example"), "content": "Example"},
+    ], {}, 0, {})
+    assert stats["person_refs_raw"] == 1
+    assert stats["person_refs_need_verification"] == 1
+    assert "person_refs_unresolved" not in stats
+    assert "person_refs_converted" not in stats
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference", ["qq:100001", "q:100001", "qq:100001;name", person_api.generate_person_id("qq", "100001")])
+async def test_booku_import_stores_platform_accounts_and_preserves_originals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reference: str,
+) -> None:
+    """真实导入只写规范人物关联，异常原引用与正文完整保留且可回读核对。"""
+    path = tmp_path / "import.db"
+    schema = VNextSchema(str(path))
+    records = [{
+        "memory_id": "example-booku-record",
+        "content": "完整的原始记忆正文。",
+        "person_id": reference,
+        "related_people": json.dumps(["qq:100002", "q:100002", "qq:100002;name"]),
+    }]
+    get_person = AsyncMock(return_value=None)
+    monkeypatch.setattr(person_api, "get_person_by_id", get_person)
+    await schema.initialize()
+    try:
+        stats = await migrate_booku.import_records(schema, records, {})
+        assert stats["person_refs_converted"] == (1 if ":" in reference else 0)
+        assert stats["person_refs_unresolved"] == (0 if ":" in reference else 1)
+        assert (await migrate_booku.verify_records(schema, records, {}))["records_verified"] == 1
+        with closing(sqlite3.connect(path)) as connection:
+            subject_kind, person_id, label = connection.execute(
+                "SELECT subject_kind,person_id,subject_label FROM engram_vnext_memory_revision_subject"
+            ).fetchone()
+            if ":" in reference:
+                assert (subject_kind, person_id, label) == (SubjectKind.PERSON.value, reference, None)
+            else:
+                assert (subject_kind, person_id, label) == (SubjectKind.TOPIC.value, None, reference)
+            participants = connection.execute(
+                "SELECT participant_kind,person_id,label FROM engram_vnext_memory_revision_participant ORDER BY participant_kind,label"
+            ).fetchall()
+            assert (ParticipantKind.PERSON.value, "qq:100002", None) in participants
+            assert (ParticipantKind.PERSON.value, "q:100002", None) in participants
+            assert (ParticipantKind.PERSON.value, "qq:100002;name", None) in participants
+            note = json.loads(connection.execute("SELECT note FROM engram_vnext_evidence").fetchone()[0])
+            assert note["record"] == records[0]
+            assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+        assert get_person.await_count == (0 if ":" in reference else 2)
+    finally:
+        await schema.close()
+
+
+@pytest.mark.asyncio
+async def test_booku_resolves_verified_hash_and_supports_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已核实哈希保存为平台账号，未知经历时间不阻断强化与修订。"""
+    from ..vnext.doctor_service import DoctorService
+    from ..vnext.vector_service import VectorIndexService, VectorSink
+
+    platform, account = "custom", "example-account "
+    core_id = person_api.generate_person_id(platform, account)
+    raw_id = person_api.generate_raw_person_id(platform, account)
+    monkeypatch.setattr(person_api, "get_person_by_id", AsyncMock(return_value=SimpleNamespace(
+        platform=platform, user_id=account, person_id=core_id,
+    )))
+    schema = VNextSchema(str(tmp_path / "booku.db"))
+    await schema.initialize()
+    records = [{"memory_id": "example-record", "person_id": core_id, "content": "原始正文"}]
+    try:
+        await migrate_booku.import_records(schema, records, {})
+        assert (await migrate_booku.verify_records(schema, records, {}))["records_verified"] == 1
+        repository = MemoryRepository(schema)
+        memory_id = migrate_booku.stable_id("example-record")
+        memory = await repository.get_memory(memory_id)
+        revision = await repository.get_current_revision(memory_id)
+        assert memory is not None and memory.last_experienced_at is None
+        assert revision is not None
+        async with schema.database.session() as session:
+            subject = await session.get(MemoryRevisionSubjectModel, revision.revision_id)
+            assert subject is not None and subject.person_id == raw_id
+        doctor = DoctorService(schema, vector_service=VectorIndexService(schema, VectorSink()),
+            embedding_model_id="example-model", embedding_dimension=2,
+            retrieval_schema_version="example-schema")
+        await doctor.rebuild_retrieval_entries()
+        now = datetime.now(UTC)
+        evidence = (EvidenceInput(EvidenceSourceType.ADMIN, now, note="新证据"),)
+        service = MemoryService(schema, "example-model")
+        await service.reinforce_memory(ReinforceMemoryInput(memory_id, revision.revision_id,
+            "确认经历", evidence=evidence), WriteContext(ActorType.ADMIN))
+        async with schema.database.session() as session:
+            saved = await session.get(type(memory), memory_id)
+            assert saved is not None
+            saved.last_experienced_at = None
+        result = await service.revise_memory(ReviseMemoryInput(memory_id, revision.revision_id,
+            "新标题", "新正文", MemoryKind.FACT, SubjectInput(SubjectKind.PERSON, person_id=raw_id),
+            now, RevisionChangeReason.CLARIFICATION, evidence=evidence), WriteContext(ActorType.ADMIN))
+        assert result.revision_id != revision.revision_id
+        saved = await repository.get_memory(memory_id)
+        assert saved is not None and saved.last_experienced_at == now
+    finally:
+        await schema.close()
+
+
+@pytest.mark.parametrize("account", ["example-account ", "bot", "system", "@example:server"])
+def test_source_preserves_opaque_account_identity(account: str) -> None:
+    """用户账号原文和角色保持一致，不以账号名推断机器人。"""
+    from ..vnext.runtime import message_to_snapshot
+
+    snapshot = message_to_snapshot({
+        "message_id": "example-message", "stream_id": "example-stream",
+        "time": datetime.now(UTC), "content": "示例消息", "platform": "custom",
+        "sender_id": account, "sender_role": "user",
+        "person_id": person_api.generate_person_id("custom", account),
+    })
+    assert snapshot.snapshot["person_id"] == person_api.generate_raw_person_id("custom", account)
+    assert snapshot.snapshot["speaker_is_bot"] is False
+
+
+@pytest.mark.asyncio
+async def test_notification_failure_keeps_durable_person_update(tmp_path: Path) -> None:
+    """通知失败不误报记忆保存失败，幂等重试保留唯一待完成人物操作。"""
+    schema = VNextSchema(str(tmp_path / "notify.db"))
+    await schema.initialize()
+    callback = AsyncMock(side_effect=RuntimeError("example enqueue failed"))
+    service = MemoryService(schema, "example-model", on_memory_changed=callback)
+    now = datetime.now(UTC)
+    data = CreateMemoryInput("标题", "正文", MemoryKind.FACT,
+        SubjectInput(SubjectKind.PERSON, person_id="custom:example-account"), now,
+        evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="来源"),))
+    context = WriteContext(ActorType.ADMIN, operation_key="example-create")
+    try:
+        result = await service.create_memory(data, context)
+        assert await service.create_memory(data, context) == result
+        repository = MemoryRepository(schema)
+        pending = await repository.pending_persona_operations()
+        assert len(pending) == 1
+        key, person_id, change = pending[0]
+        assert person_id == "custom:example-account" and change.memory_id == result.memory_id
+        await repository.complete_persona_operations((key,))
+        assert await repository.pending_persona_operations() == ()
+        callback.assert_awaited_once()
     finally:
         await schema.close()

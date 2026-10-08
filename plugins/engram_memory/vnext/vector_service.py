@@ -5,10 +5,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import uuid4
 
 from sqlalchemy import case, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
+
+from src.app.plugin_system.api import log_api
 
 from .domain import VectorUpsert
 from .enums import (
@@ -318,7 +322,7 @@ class VectorIndexService:
                     )
                     .execution_options(synchronize_session=False)
                 )
-                if claimed.rowcount != 1:
+                if cast(CursorResult[Any], claimed).rowcount != 1:
                     continue
             async with self._schema.database.session() as session:
                 outbox = await session.get(VectorOutboxModel, outbox_id)
@@ -750,15 +754,14 @@ class VectorIndexService:
     async def _finish_building_manifest(
         self,
         index_id: str,
-        outbox_ids: tuple[str, ...],
-    ) -> None:
+    ) -> bool:
         """校验本轮 Outbox 完成后激活 Manifest，否则标记 FAILED。"""
         async with self._schema.database.session() as session:
             manifest = await session.get(VectorIndexManifestModel, index_id)
             if manifest is None:
                 raise ValueError("BUILDING Manifest 不存在")
             if manifest.status is not VectorIndexStatus.BUILDING:
-                return
+                return manifest.status is VectorIndexStatus.ACTIVE
             target_rows = tuple(
                 (
                     await session.scalars(
@@ -773,7 +776,7 @@ class VectorIndexService:
                 for row in target_rows
             ):
                 manifest.status = VectorIndexStatus.FAILED
-                return
+                return False
             latest_by_entry: dict[str, VectorOutboxModel] = {}
             for row in sorted(
                 target_rows, key=lambda item: (item.created_at, item.outbox_id)
@@ -808,7 +811,7 @@ class VectorIndexService:
             )
             if not consistent:
                 manifest.status = VectorIndexStatus.FAILED
-                return
+                return False
             target_sink = self._sink.for_index(
                 manifest.index_id,
                 manifest.embedding_model_id,
@@ -816,14 +819,16 @@ class VectorIndexService:
             )
             try:
                 physical_entry_ids = await target_sink.entry_ids()
-            except Exception:
+            except Exception as error:  # noqa: BLE001
+                logger = log_api.get_logger("engram_memory.vector_index")
+                logger.error(f"无法核对新索引的物理入口，拒绝激活: {type(error).__name__}: {error}")
                 physical_entry_ids = None
             if physical_entry_ids is None or frozenset(physical_entry_ids) != frozenset(
                 active_entry_ids
             ):
                 # 物理入口不可查询或与正式检索入口不一致时，不能激活派生索引。
                 manifest.status = VectorIndexStatus.FAILED
-                return
+                return False
             active = list(
                 (
                     await session.scalars(
@@ -838,6 +843,7 @@ class VectorIndexService:
             await session.flush()
             manifest.status = VectorIndexStatus.ACTIVE
             manifest.activated_at = datetime.now(UTC)
+        return True
 
     async def list_manifests(self) -> tuple[VectorIndexManifestModel, ...]:
         """按创建时间列出全部向量索引清单。"""
@@ -922,7 +928,8 @@ class VectorIndexService:
             if not replay_ids:
                 break
             tracked_outbox_ids.extend(replay_ids)
-        await self._finish_building_manifest(index_id, tuple(tracked_outbox_ids))
+        if not await self._finish_building_manifest(index_id):
+            raise RuntimeError("向量索引构建或校验失败，原生效索引保持不变")
         return index_id, len(entries)
 
     async def _requeue_building_drift(self, index_id: str) -> list[str]:

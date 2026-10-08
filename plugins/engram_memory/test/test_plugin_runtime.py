@@ -17,9 +17,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from src.app.plugin_system.base import BaseAction, BasePlugin
+from src.app.plugin_system.api import person_api
 from src.app.plugin_system.api.message_api import PersonInfo
 from src.app.plugin_system.api.storage_api import PluginDatabase
+from src.app.plugin_system.base import BaseAction, BasePlugin
 
 from ..config import EngramMemoryConfig
 from ..diary.config import DiaryPolicy, TriggerMode
@@ -27,6 +28,7 @@ from ..prompts import MEMORY_GUIDE_REMINDER
 from ..router import memory_admin_router as admin_router
 from ..router.memory_admin_router import VNextMemoryAdminRouter
 from ..vnext import runtime, runtime_owner
+from ..vnext.doctor_service import DoctorService
 from ..vnext.domain import (
     CreateMemoryInput,
     EvidenceInput,
@@ -41,18 +43,22 @@ from ..vnext.enums import (
     MemoryEventType,
     MemoryKind,
     MemoryStatus,
+    OutboxStatus,
     SubjectKind,
+    VectorIndexStatus,
 )
 from ..vnext.memory_service import MemoryService
-from ..vnext.models import MemoryModel, PersonaUpdateLogModel
+from ..vnext.models import MemoryModel, PersonaUpdateLogModel, VectorOutboxModel
 from ..vnext.persona_service import (
     EMPTY_IMPRESSION,
     PersonaService,
     _format_memory_footnotes,
 )
 from ..vnext.runtime import ChromaVectorSink, MessageLike, VectorOutboxWorker
+from ..vnext.runtime_components import VNextDoctorRouter, VNextFlashbackEventHandler
 from ..vnext.runtime_owner import VNextRuntimeOwner
 from ..vnext.schema import VNextSchema
+from ..vnext.vector_service import VectorIndexService, VectorSink
 
 
 def _message(**values: object) -> dict[str, object]:
@@ -68,6 +74,109 @@ def _message(**values: object) -> dict[str, object]:
     }
     message.update(values)
     return message
+
+
+class RecordingVectorSink(VectorSink):
+    """记录隔离测试中的向量入口，并支持确定的写入失败。"""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        """初始化无外部服务的入口集合。"""
+        self.ids: set[str] = set()
+        self.fail = fail
+
+    async def upsert(self, item: VectorUpsert) -> None:
+        """写入入口或返回明确的后端错误。"""
+        if self.fail:
+            raise RuntimeError("example backend failed")
+        self.ids.add(item.entry_id)
+
+    async def delete(self, entry_id: str) -> None:
+        """删除测试入口。"""
+        self.ids.discard(entry_id)
+
+    async def entry_ids(self) -> frozenset[str]:
+        """返回可核对的全部物理入口。"""
+        return frozenset(self.ids)
+
+
+@pytest.mark.asyncio
+async def test_failed_index_is_not_reported_as_active(tmp_path: Path) -> None:
+    """失败的派生索引不返回成功结果，也不替换原生效清单。"""
+    schema = VNextSchema(str(tmp_path / "index.db"))
+    await schema.initialize()
+    sink = RecordingVectorSink(fail=True)
+    index = VectorIndexService(schema, sink)
+    try:
+        original = await index.activate_manifest("example-model", 2, "example-schema")
+        now = datetime.now(UTC)
+        await MemoryService(schema, "example-model").create_memory(CreateMemoryInput(
+            "标题", "正文", MemoryKind.FACT, SubjectInput(SubjectKind.TOPIC, subject_label="话题"),
+            now, evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="来源"),)
+        ), WriteContext(ActorType.ADMIN))
+        with pytest.raises(RuntimeError, match="构建或校验失败"):
+            await index.ensure_active_manifest("example-new-model", 2, "example-schema")
+        manifests = await index.list_manifests()
+        assert [item.index_id for item in manifests if item.status is VectorIndexStatus.ACTIVE] == [original]
+        assert manifests[-1].status is VectorIndexStatus.FAILED
+    finally:
+        await schema.close()
+
+
+@pytest.mark.asyncio
+async def test_vector_worker_logs_polling_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """外围轮询异常既保留状态又写日志，不被日志分支错误替代。"""
+    service = SimpleNamespace(process_pending_outbox=AsyncMock(), retry_failed_outbox=AsyncMock())
+    worker = VectorOutboxWorker(cast(runtime.VectorIndexServiceProtocol, service), poll_interval_seconds=0.01)
+    worker._stop_event = asyncio.Event()
+
+    async def fail(*, limit: int) -> tuple[str, ...]:
+        """停止本轮测试并返回真实的轮询错误。"""
+        assert worker._stop_event is not None
+        worker._stop_event.set()
+        raise RuntimeError("example polling failed")
+
+    service.process_pending_outbox.side_effect = fail
+    logger = Mock()
+    monkeypatch.setattr(runtime.log_api, "get_logger", Mock(return_value=logger))
+    await worker.run_forever()
+    assert isinstance(worker.last_error, RuntimeError)
+    logger.error.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_doctor_retries_only_selected_outbox(tmp_path: Path) -> None:
+    """旧的非选中队列不被误投递，选中的失败任务按 ID 重试。"""
+    schema = VNextSchema(str(tmp_path / "doctor.db"))
+    await schema.initialize()
+    sink = RecordingVectorSink()
+    index = VectorIndexService(schema, sink)
+    try:
+        await index.activate_manifest("example-model", 2, "example-schema")
+        now = datetime.now(UTC)
+        for number in (1, 2):
+            await MemoryService(schema, "example-model").create_memory(CreateMemoryInput(
+                f"标题{number}", f"正文{number}", MemoryKind.FACT,
+                SubjectInput(SubjectKind.TOPIC, subject_label="话题"), now,
+                evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="来源"),)
+            ), WriteContext(ActorType.ADMIN))
+        from sqlalchemy import select
+        async with schema.database.session() as session:
+            rows = list((await session.scalars(select(VectorOutboxModel).order_by(VectorOutboxModel.created_at))).all())
+            first, selected = rows
+            first.updated_at = now - timedelta(seconds=600)
+            selected.status = OutboxStatus.FAILED
+            selected.attempt_count = 3
+            first_id, selected_id = first.outbox_id, selected.outbox_id
+        doctor = DoctorService(schema, vector_service=index, embedding_model_id="example-model",
+            embedding_dimension=2, retrieval_schema_version="example-schema")
+        assert len(await doctor.retry_failed_outbox(1)) == 1
+        async with schema.database.session() as session:
+            first = await session.get(VectorOutboxModel, first_id)
+            selected = await session.get(VectorOutboxModel, selected_id)
+            assert first is not None and first.status is OutboxStatus.PENDING
+            assert selected is not None and selected.status is OutboxStatus.DONE
+    finally:
+        await schema.close()
 
 
 @pytest.fixture
@@ -131,7 +240,7 @@ def test_message_snapshot_has_six_fields_and_preserves_source(as_object: bool) -
 @pytest.mark.parametrize(
     "value",
     [
-        datetime(2026, 1, 1),
+        datetime(2026, 1, 1),  # noqa: DTZ001
         datetime(2026, 1, 1, 8, tzinfo=timezone(timedelta(hours=8))),
         "2026-01-01T08:00:00+08:00",
         datetime(2026, 1, 1, tzinfo=UTC).timestamp(),
@@ -288,8 +397,23 @@ async def test_owner_publishes_committed_change(
         after_person_ids=("person-b",),
     )
     await owner._on_memory_changed(change)
-    publish.assert_awaited_once_with("engram_memory:memory_changed", {"change": change})
-    owner.persona_updater.enqueue.assert_not_awaited()  # type: ignore[attr-defined]
+    publish.assert_awaited_once_with("engram_memory:memory_changed", {"change": change, "already_enqueued": True})
+    owner.persona_updater.enqueue.assert_awaited_once_with(change)  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["embedding", "index"])
+async def test_vector_failure_does_not_stop_diary(owner: VNextRuntimeOwner, failure: str) -> None:
+    """向量模型或索引失败会明确记录，但独立日记仍完成启动。"""
+    target = owner.vector_sink.inspect_embedding_settings if failure == "embedding" else owner.vector_index.ensure_active_manifest
+    assert isinstance(target, AsyncMock)
+    target.side_effect = RuntimeError("example vector failed")
+    await owner.initialize()
+    assert owner._initialized and owner.vector_error is not None
+    owner.diary.initialize.assert_awaited_once()  # type: ignore[attr-defined]
+    owner.persona_updater.start.assert_called_once()  # type: ignore[attr-defined]
+    owner.vector_worker.start.assert_not_called()  # type: ignore[attr-defined]
+    owner.schema.close.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -446,7 +570,7 @@ async def test_consumed_flashback_records_exposure_only_once(
 ) -> None:
     """被当前回复消费的闪回结果只记录一次曝光并推进轮次。"""
     owner._initialized = True
-    candidate = SimpleNamespace(memory_id="memory-1")
+    candidate = runtime_owner.FlashbackCandidate("memory-1", "Example", "Example memory", "Example cue")
     owner._flashback_generations["stream-1"] = 1
     owner._flashback_results["stream-1"] = ((candidate,), 4, 1)
     assert await owner.consume_flashback_prefetch("stream-1") == (candidate,)
@@ -467,7 +591,7 @@ async def test_stale_flashback_does_not_record_exposure(
     owner._initialized = True
     owner._flashback_generations["stream-1"] = 2
     owner._flashback_results["stream-1"] = (
-        (SimpleNamespace(memory_id="memory-1"),),
+        (runtime_owner.FlashbackCandidate("memory-1", "Example", "Example memory", "Example cue"),),
         4,
         1,
     )
@@ -767,7 +891,7 @@ async def test_memory_search_uses_configured_timezone_and_complete_dates(
     resource.config = config
     resource.tools = SimpleNamespace(memory_search=search)
     plugin = EngramMemoryPlugin(config)
-    setattr(plugin, "runtime_owner", resource)
+    plugin.runtime_owner = resource
     tool = VNextMemorySearchTool(plugin)
     assert await tool.execute("示例事件", start_time=start_time, end_time=end_time) == (
         True,
@@ -1245,7 +1369,7 @@ async def test_memory_admin_persona_references_and_distinct_timestamps(
             session.add(
                 PersonaUpdateLogModel(
                     update_id="update-example",
-                    person_id=person.person_id,
+                    person_id=person_api.generate_raw_person_id(person.platform, person.user_id),
                     old_content_hash="",
                     new_content_hash=sha256(impression.encode()).hexdigest(),
                     generator_version="memory-chat-v1",
@@ -1261,3 +1385,52 @@ async def test_memory_admin_persona_references_and_distinct_timestamps(
         assert item["impression_updated_at"] != item["profile_updated_at"]
         assert (await client.get("/api/personas/missing")).status_code == 404
         assert (await client.get("/assets/icons.js")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_admin_names_translate_only_at_core_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """平台关联查询核心哈希并按原平台键返回展示名称。"""
+    async with _admin_client(tmp_path, monkeypatch) as (client, schema, core):
+        person = _admin_person(1, "")
+        person.person_id = person_api.generate_person_id(person.platform, person.user_id)
+        reference = person_api.generate_raw_person_id(person.platform, person.user_id)
+        async with core.session() as session:
+            session.add(person)
+        now = datetime.now(UTC)
+        result = await MemoryService(schema, "example-model").create_memory(CreateMemoryInput(
+            "示例标题", "示例正文", MemoryKind.FACT, SubjectInput(SubjectKind.PERSON, person_id=reference), now,
+            evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="示例来源"),)
+        ), WriteContext(ActorType.ADMIN))
+        response = await client.get("/api/memories")
+        assert response.status_code == 200
+        item = response.json()["items"][0]
+        assert item["memory_id"] == result.memory_id
+        subject = item["subject"]
+        assert subject["person_id"] == reference and subject["display_name"] == person.nickname
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("client_host", "host", "expected"), [
+    ("203.0.113.10", "localhost", 403), ("127.0.0.1", "example.invalid", 403),
+    ("127.0.0.1", "localhost", 200),
+])
+async def test_doctor_requires_actual_loopback(owner: VNextRuntimeOwner, client_host: str, host: str, expected: int) -> None:
+    """诊断既检查真实客户端又检查 Host，不暴露给远程请求。"""
+    owner.doctor = cast(DoctorService, SimpleNamespace(check=AsyncMock(return_value=SimpleNamespace(healthy=True, issues=()))))
+    router = VNextDoctorRouter(cast(BasePlugin, SimpleNamespace(runtime_owner=owner)))
+    async with AsyncClient(transport=ASGITransport(app=router.app, client=(client_host, 1234)), base_url=f"http://{host}") as client:
+        response = await client.get("/check")
+        assert response.status_code == expected
+
+
+@pytest.mark.asyncio
+async def test_flashback_accepts_prompt_stream_context(owner: VNextRuntimeOwner, monkeypatch: pytest.MonkeyPatch) -> None:
+    """合法聊天流模板无需在 Chatter 名称白名单中。"""
+    from src.app.plugin_system.types import EventType
+
+    consume = AsyncMock(return_value=())
+    monkeypatch.setattr(owner, "consume_flashback_prefetch", consume)
+    plugin = SimpleNamespace(runtime_owner=owner, _flashback_reminder_streams={})
+    handler = VNextFlashbackEventHandler(cast(BasePlugin, plugin))
+    await handler.execute(EventType.ON_PROMPT_BUILD, {"name": "example_chat_prompt", "values": {"stream_id": "example-stream"}})
+    consume.assert_awaited_once_with("example-stream")

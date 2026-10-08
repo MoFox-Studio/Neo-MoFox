@@ -6,8 +6,10 @@ import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, time
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from zoneinfo import ZoneInfo
+
+from fastapi import HTTPException, Request
 
 from src.app.plugin_system.api import person_api, prompt_api
 from src.app.plugin_system.api.event_api import EventDecision
@@ -41,6 +43,7 @@ from .runtime import message_to_snapshot
 from .tool_service import ToolContext
 
 if TYPE_CHECKING:
+    from ..plugin import EngramMemoryPlugin
     from .runtime_owner import VNextRuntimeOwner
 
 
@@ -49,8 +52,10 @@ def _owner(plugin: Any) -> VNextRuntimeOwner:
     from .runtime_owner import VNextRuntimeOwner
 
     runtime = getattr(plugin, "runtime_owner", None)
-    if not isinstance(runtime, VNextRuntimeOwner):
+    if runtime is None:
         raise RuntimeError("Engram Memory 尚未初始化")
+    if not isinstance(runtime, VNextRuntimeOwner):
+        raise TypeError("Engram Memory 运行时类型无效")
     return runtime
 
 
@@ -73,8 +78,8 @@ def _actor_context(component: BaseAction | BaseTool) -> ToolContext:
     else:
         message = component.trigger_message
         stream_id = component.get_current_stream_id()
-    platform = str(_value(message, "platform") or "").strip()
-    sender_id = str(_value(message, "sender_id") or "").strip()
+    platform = str(_value(message, "platform") or "")
+    sender_id = str(_value(message, "sender_id") or "")
     return ToolContext(
         actor_type=ActorType.ACTOR,
         actor_ref=person_api.generate_raw_person_id(platform, sender_id)
@@ -88,7 +93,7 @@ def _text(value: object, field: str) -> str:
     """读取必填的非空文本。"""
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} 必须是非空字符串")
-    return value.strip()
+    return value
 
 
 def _ids(value: object, field: str, *, required: bool = False) -> tuple[str, ...]:
@@ -109,7 +114,7 @@ def _optional_datetime(
     """将 ISO 时间转为 UTC，无时区使用配置时区，结束日期包含整日。"""
     if value is None:
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=zone)
     if field == "end_time" and value == parsed.date().isoformat():
@@ -329,7 +334,7 @@ class VNextMemoryWriteAction(BaseAction):
         "重要的单次事实和独立经历也值得记，已有同一事实的补充或更正用 memory_revise。"
         "正文保留准确主次人物与真实聊天来源，只有工具成功才算保存；保存不是代对方公开。"
     )
-    associated_types: list[str] = ["text"]
+    associated_types: list[str] = ["text"]  # noqa: RUF012
 
     @classmethod
     def to_schema(cls) -> dict[str, Any]:
@@ -391,7 +396,7 @@ class VNextMemoryReviseAction(BaseAction):
         "发现当前聊天补充、更正或推进了已有事实或经历时，主动回读并基于当前 revision 修订正文和人物，不等提醒。"
         "保留真实聊天来源与原有准确内容；同一人物的新事实或独立经历仍应另建记忆。"
     )
-    associated_types: list[str] = ["text"]
+    associated_types: list[str] = ["text"]  # noqa: RUF012
 
     @classmethod
     def to_schema(cls) -> dict[str, Any]:
@@ -466,7 +471,7 @@ class VNextMemoryInvalidateAction(BaseAction):
 
     name = "memory_invalidate"
     description = "依据当前聊天来源作废错误或失效的记忆，不物理删除正文与历史。"
-    associated_types: list[str] = ["text"]
+    associated_types: list[str] = ["text"]  # noqa: RUF012
 
     async def execute(
         self, memory_id: str, reason: str, source_message_ids: list[str]
@@ -555,7 +560,7 @@ class VNextMemoryChangedEventHandler(BaseEventHandler):
 
     name = "memory_changed"
     description = "正式记忆变化后更新其前后关联人物的印象。"
-    init_subscribe = ["engram_memory:memory_changed"]
+    init_subscribe: list[EventType | str] = ["engram_memory:memory_changed"]  # noqa: RUF012
     timeout = 1.0
 
     async def execute(
@@ -564,8 +569,9 @@ class VNextMemoryChangedEventHandler(BaseEventHandler):
         """仅登记人物更新，不在事件处理时等待模型。"""
         change = params.get("change")
         if not isinstance(change, MemoryChanged):
-            raise ValueError("memory_changed 事件缺少有效的记忆变化")
-        await _owner(self.plugin).persona_updater.enqueue(change)
+            raise TypeError("memory_changed 事件缺少有效的记忆变化")
+        if not params.get("already_enqueued"):
+            await _owner(self.plugin).persona_updater.enqueue(change)
         return EventDecision.SUCCESS, params
 
 
@@ -574,7 +580,7 @@ class VNextFlashbackEventHandler(BaseEventHandler):
 
     name = "vnext_flashback_injector"
     description = "预取与当前话题相关的正式记忆，刷新当前流的闪回。"
-    init_subscribe = [EventType.ON_MESSAGE_RECEIVED, EventType.ON_PROMPT_BUILD]
+    init_subscribe: list[EventType | str] = [EventType.ON_MESSAGE_RECEIVED, EventType.ON_PROMPT_BUILD]  # noqa: RUF012
     timeout = 2.0
 
     async def execute(
@@ -586,12 +592,6 @@ class VNextFlashbackEventHandler(BaseEventHandler):
             message = params.get("message")
             if message is not None:
                 owner.observe_message(message)
-            return EventDecision.SUCCESS, params
-        if params.get("name") not in {
-            "default_chatter_user_prompt",
-            "neo_default_chatter_user_prompt",
-            "kfc_user_prompt",
-        }:
             return EventDecision.SUCCESS, params
         values = params.get("values")
         if not isinstance(values, dict):
@@ -608,7 +608,8 @@ class VNextFlashbackEventHandler(BaseEventHandler):
     ) -> None:
         """刷新当前版本，并移除作废或删除的聊天流闪回。"""
         prefix = "engram_memory_flashback_"
-        tracked_names = self.plugin._flashback_reminder_streams.setdefault(
+        plugin = cast("EngramMemoryPlugin", self.plugin)
+        tracked_names = plugin._flashback_reminder_streams.setdefault(
             stream_id, set()
         )
         memory_ids = [name.removeprefix(prefix) for name in tracked_names]
@@ -619,7 +620,7 @@ class VNextFlashbackEventHandler(BaseEventHandler):
             dict.fromkeys(memory_id for memory_id in memory_ids if memory_id)
         )
         if not normalized_ids:
-            self.plugin._flashback_reminder_streams.pop(stream_id, None)
+            plugin._flashback_reminder_streams.pop(stream_id, None)
             return
         current = await owner.flashback.current_reminder_candidates(normalized_ids)
         for name in tuple(tracked_names):
@@ -637,7 +638,7 @@ class VNextFlashbackEventHandler(BaseEventHandler):
                 self._upsert_stream_reminder(stream_id, name, item)
                 tracked_names.add(name)
         if not tracked_names:
-            self.plugin._flashback_reminder_streams.pop(stream_id, None)
+            plugin._flashback_reminder_streams.pop(stream_id, None)
 
     def _upsert_stream_reminder(
         self, stream_id: str, name: str, candidate: Any
@@ -677,14 +678,19 @@ class VNextDoctorRouter(BaseRouter):
         """注册只读健康检查端点。"""
 
         @self.app.get("/check")
-        async def check() -> dict[str, object]:
+        async def check(request: Request) -> dict[str, object]:
             """返回健康状态与可定位的问题目录。"""
-            doctor = _owner(self.plugin).doctor
+            from ..router.memory_admin_router import is_local_request
+
+            if not is_local_request(request):
+                raise HTTPException(status_code=403, detail="诊断 API 仅允许本机访问")
+            owner = _owner(self.plugin)
+            doctor = owner.doctor
             if doctor is None:
-                raise RuntimeError("Engram Doctor 尚未初始化")
+                raise HTTPException(status_code=503, detail="Engram 向量诊断尚未就绪")
             report = await doctor.check()
             return {
-                "healthy": report.healthy,
+                "healthy": report.healthy and owner.vector_error is None,
                 "issues": [
                     {
                         "code": issue.code,
@@ -693,7 +699,8 @@ class VNextDoctorRouter(BaseRouter):
                         "details": issue.details,
                     }
                     for issue in report.issues
-                ],
+                ] + ([{"code": "VECTOR_INITIALIZATION_FAILED", "object_id": "vector",
+                    "repairable": False, "details": str(owner.vector_error)}] if owner.vector_error is not None else []),
             }
 
 
@@ -701,11 +708,11 @@ __all__ = [
     "VNextDoctorRouter",
     "VNextFlashbackEventHandler",
     "VNextMemoryChangedEventHandler",
+    "VNextMemoryInvalidateAction",
     "VNextMemoryReadTool",
     "VNextMemoryReviseAction",
     "VNextMemorySearchTool",
     "VNextMemoryService",
     "VNextMemoryWriteAction",
-    "VNextMemoryInvalidateAction",
     "VNextPersonLookupTool",
 ]

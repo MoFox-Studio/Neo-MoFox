@@ -20,7 +20,7 @@ from ..diary.runtime import DiaryRuntime
 from .doctor_service import DoctorService
 from .domain import MemoryChanged
 from .enums import VectorIndexStatus
-from .flashback_service import FlashbackService
+from .flashback_service import FlashbackCandidate, FlashbackService
 from .framework_bridge import (
     TaskNotFoundError,
     cancel_managed_task,
@@ -184,6 +184,7 @@ class VNextRuntimeOwner:
             cooldown_turns=vnext.flashback.cooldown_turns,
         )
         self._initialized = False
+        self.vector_error: Exception | None = None
         self._prompt_turns: dict[str, int] = {}
         self._flashback_trigger_turns: dict[str, tuple[int, bool]] = {}
         self._task_ids: set[str] = set()
@@ -191,7 +192,7 @@ class VNextRuntimeOwner:
         self._worker_started = False
         self._recent_messages: dict[str, dict[str, object]] = {}
         self._flashback_task_ids: dict[str, str] = {}
-        self._flashback_results: dict[str, tuple[tuple[object, ...], int, int]] = {}
+        self._flashback_results: dict[str, tuple[tuple[FlashbackCandidate, ...], int, int]] = {}
         self._flashback_generations: dict[str, int] = {}
         self._task_ids_by_task: dict[asyncio.Task[Any], str] = {}
         self._flashback_locks: dict[str, asyncio.Lock] = {}
@@ -200,6 +201,16 @@ class VNextRuntimeOwner:
         """初始化记忆数据库并启动派生向量后台任务。"""
         if self._initialized:
             return
+        try:
+            self._schema_initialized = True
+            await self.schema.initialize()
+            cleared_personas = await self.persona_service.clear_legacy_impressions()
+            logger.info(f"人物印象启动核对完成：归档并清理 {cleared_personas} 份旧稿")
+            await self.diary.initialize()
+            self.persona_updater.start()
+        except BaseException:
+            await self._shutdown_resources()
+            raise
         try:
             (
                 embedding_identity,
@@ -214,10 +225,6 @@ class VNextRuntimeOwner:
                 embedding_dimension=embedding_dimension,
                 retrieval_schema_version="engram-vnext-2",
             )
-            self._schema_initialized = True
-            await self.schema.initialize()
-            cleared_personas = await self.persona_service.clear_legacy_impressions()
-            logger.info(f"人物印象启动核对完成：归档并清理 {cleared_personas} 份旧稿")
             await self.vector_index.ensure_active_manifest(
                 embedding_identity,
                 embedding_dimension,
@@ -225,22 +232,25 @@ class VNextRuntimeOwner:
             )
             self._worker_started = True
             self.vector_worker.start()
-            self._initialized = True
-            await self.diary.initialize()
-            self.persona_updater.start()
+            self.vector_error = None
+        except Exception as error:  # noqa: BLE001
+            self.vector_error = error
+            logger.error(f"向量功能初始化失败，独立日记继续运行，重启后可重新初始化: {error}")
         except BaseException:
             await self._shutdown_resources()
             raise
+        self._initialized = True
 
     async def close(self) -> None:
         """停止后台任务、取消当前实例的托管任务并关闭记忆数据库。"""
         await self._shutdown_resources()
 
     async def _on_memory_changed(self, change: MemoryChanged) -> None:
-        """发布已提交的正式记忆变化，向量投递由独立后台任务处理。"""
+        """直接登记人物更新后发布通知，避免事件总线吞掉内部入队失败。"""
+        await self.persona_updater.enqueue(change)
         await event_api.publish_event(
             "engram_memory:memory_changed",
-            {"change": change},
+            {"change": change, "already_enqueued": True},
         )
 
     async def _shutdown_resources(self) -> None:
@@ -345,7 +355,7 @@ class VNextRuntimeOwner:
         self,
         stream_id: str,
         generation: int,
-    ) -> tuple[object, ...]:
+    ) -> tuple[FlashbackCandidate, ...]:
         """执行当前流的回复前闪回检索并缓存当前请求的结果。"""
         try:
             turn_index = self._prompt_turns.get(stream_id)
@@ -360,16 +370,16 @@ class VNextRuntimeOwner:
             current_task = asyncio.current_task()
             if current_task is not None:
                 task_id = self._task_ids_by_task.get(current_task)
-                if task_id is not None:
-                    if (
-                        self._flashback_task_ids.get(stream_id) == task_id
-                        and self._flashback_generations.get(stream_id) == generation
-                    ):
-                        self._flashback_results[stream_id] = (
-                            candidates,
-                            turn_index,
-                            generation,
-                        )
+                if (
+                    task_id is not None
+                    and self._flashback_task_ids.get(stream_id) == task_id
+                    and self._flashback_generations.get(stream_id) == generation
+                ):
+                    self._flashback_results[stream_id] = (
+                        candidates,
+                        turn_index,
+                        generation,
+                    )
             return candidates
         finally:
             self._forget_current_task()
@@ -387,7 +397,7 @@ class VNextRuntimeOwner:
             if prefetch_task_id == task_id:
                 self._flashback_task_ids.pop(stream_id, None)
 
-    async def consume_flashback_prefetch(self, stream_id: str) -> tuple[object, ...]:
+    async def consume_flashback_prefetch(self, stream_id: str) -> tuple[FlashbackCandidate, ...]:
         """在延迟预算内等待并消费当前流的最新闪回预取结果。"""
         if not self._initialized or not stream_id.strip():
             return ()
@@ -459,9 +469,9 @@ class VNextRuntimeOwner:
     async def _commit_flashback_result(
         self,
         stream_id: str,
-        candidates: tuple[object, ...],
+        candidates: tuple[FlashbackCandidate, ...],
         turn_index: int,
-    ) -> tuple[object, ...]:
+    ) -> tuple[FlashbackCandidate, ...]:
         """仅为已接受注入的闪回结果记录曝光并推进回复轮次。"""
         self._prompt_turns[stream_id] = max(
             self._prompt_turns.get(stream_id, turn_index), turn_index + 1
@@ -470,7 +480,7 @@ class VNextRuntimeOwner:
             return ()
         try:
             await self.flashback.record_exposure(
-                tuple(str(getattr(candidate, "memory_id")) for candidate in candidates),
+                tuple(str(candidate.memory_id) for candidate in candidates),
                 stream_id,
                 turn_index,
             )
@@ -511,7 +521,7 @@ class VNextRuntimeOwner:
                 timestamp = datetime.fromtimestamp(float(value), tz=UTC)
             elif isinstance(value, str):
                 try:
-                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    parsed = datetime.fromisoformat(value)
                 except ValueError:
                     parsed = datetime.min.replace(tzinfo=UTC)
                 timestamp = (
@@ -544,7 +554,7 @@ class VNextRuntimeOwner:
             turns.append(f"{speaker}: {text}")
         return tuple(turns)
 
-    async def flashback_for_stream(self, stream_id: str) -> tuple[object, ...]:
+    async def flashback_for_stream(self, stream_id: str) -> tuple[FlashbackCandidate, ...]:
         """在当前回复前运行统一 vNext Flashback 检索。"""
         if not self._initialized or not stream_id.strip():
             return ()
@@ -564,7 +574,7 @@ class VNextRuntimeOwner:
         *,
         turn_index: int,
         record_exposure: bool,
-    ) -> tuple[object, ...]:
+    ) -> tuple[FlashbackCandidate, ...]:
         """按当前轮次的触发决定检索闪回，并显式控制曝光记录。"""
         settings = self.config.vnext.flashback
         if not settings.enabled or settings.max_memories == 0:

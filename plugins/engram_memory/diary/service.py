@@ -6,7 +6,7 @@ import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
-from typing import Any, Protocol, cast
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.app.plugin_system.api import (
@@ -14,7 +14,6 @@ from src.app.plugin_system.api import (
     config_api,
     llm_api,
     message_api,
-    person_api,
     stream_api,
 )
 from src.app.plugin_system.types import ROLE, LLMPayload, Text
@@ -65,22 +64,6 @@ Bot 建议尝试一个办法，不表示对方执行或成功；没有真实来�
 只返回 JSON 对象，唯一字段 body 为更新后的完整当天正文，不含前言、代码围栏或程序截止元数据。"""
 
 
-class CollectionFeatures(Protocol):
-    """公开配置查询返回的消息收集策略形状。"""
-
-    group_list_type: str
-    group_list: list[str | int]
-    private_list_type: str
-    private_list: list[str | int]
-    ban_user_id: list[str | int]
-
-
-class CollectionConfig(Protocol):
-    """仅读取采集策略，不依赖适配器的配置实现类。"""
-
-    features: CollectionFeatures
-
-
 @dataclass(frozen=True, slots=True)
 class StreamDetails:
     """日记需要的聊天流路由身份，与长期人物印象无关。"""
@@ -93,7 +76,7 @@ class StreamDetails:
 
 
 class DiarySource:
-    """只通过公开 API 读取持久化消息和当前采集许可。"""
+    """通过公开 API 读取框架已保存的聊天消息。"""
 
     def __init__(self) -> None:
         """缓存固定消息窗口，避免每一小批重复查询整个积压段。"""
@@ -101,86 +84,17 @@ class DiarySource:
         self._latest_messages: dict[str, str] = {}
 
     async def details(self, stream_id: str) -> StreamDetails | None:
-        """读取流身份，私聊对端以真实发言者和核心标识核对。"""
+        """读取日记使用的路由信息，不依赖人物档案或发言者核对。"""
         info = await stream_api.get_stream_info(stream_id)
         if info is None or info["chat_type"] not in {"group", "private"}:
             return None
-        user_id = ""
-        if info["chat_type"] == "private":
-            offset = 0
-            while not user_id:
-                messages = await stream_api.get_stream_messages(
-                    stream_id, limit=100, offset=offset
-                )
-                if not messages:
-                    break
-                for message in reversed(messages):
-                    sender_id = str(message.sender_id or "")
-                    if message.sender_role == "bot" or not sender_id:
-                        continue
-                    if (
-                        person_api.generate_person_id(str(info["platform"]), sender_id)
-                        == info["person_id"]
-                    ):
-                        user_id = sender_id
-                        break
-                offset += len(messages)
-            if not user_id:
-                return None
         return StreamDetails(
             stream_id,
             str(info["platform"]),
             str(info["chat_type"]),
             str(info.get("group_id") or ""),
-            user_id,
+            "",
         )
-
-    def collection_config(self, details: StreamDetails) -> CollectionConfig | None:
-        """读取当前采集配置，供一次消息检查共用。"""
-        if details.platform != "qq":
-            return None
-        return cast(CollectionConfig | None, config_api.get_config("snowluma_adapter"))
-
-    async def allowed(
-        self,
-        details: StreamDetails,
-        message: Mapping[str, Any] | None = None,
-        *,
-        collection: CollectionConfig | None,
-    ) -> bool:
-        """按传入配置判断许可；私聊始终以对话对象而非 Bot 账号判断。"""
-        if details.platform != "qq" or collection is None:
-            return False
-        features = collection.features
-        user_id = (
-            details.user_id
-            if details.chat_type == "private"
-            else str(message.get("sender_id") or "" if message is not None else "")
-        )
-        if user_id and user_id in {str(item) for item in features.ban_user_id}:
-            return False
-        if details.chat_type == "group":
-            if not details.group_id:
-                return False
-            mode, entries, target = (
-                features.group_list_type,
-                features.group_list,
-                details.group_id,
-            )
-        elif details.chat_type == "private":
-            if not user_id:
-                return False
-            mode, entries, target = (
-                features.private_list_type,
-                features.private_list,
-                user_id,
-            )
-        else:
-            return False
-        contained = target in {str(item) for item in entries}
-        if mode == "whitelist":
-            return contained
-        return mode == "blacklist" and not contained
 
     async def bootstrap_window(
         self,
@@ -312,7 +226,7 @@ class DiarySource:
         first: Mapping[str, Any],
         limit: int,
     ) -> list[dict[str, Any]]:
-        """读取少量前文，过滤当前禁止采集的发言。"""
+        """读取同一聊天中少量已保存的前文。"""
         if not limit:
             return []
         rows = await message_api.get_messages_before_time_in_chat(
@@ -331,13 +245,7 @@ class DiarySource:
         preceding = {
             int(row["id"]): row for row in rows if int(row["id"]) < int(first["id"])
         }
-        ordered = [preceding[row_id] for row_id in sorted(preceding)][-limit:]
-        collection = self.collection_config(details)
-        return [
-            row
-            for row in ordered
-            if await self.allowed(details, row, collection=collection)
-        ]
+        return [preceding[row_id] for row_id in sorted(preceding)][-limit:]
 
     async def formatted(
         self,
@@ -425,6 +333,8 @@ class DiaryService:
         now: float,
     ) -> bool:
         """处理固定水位内的最早连续同日批次，失败不修改正文和进度。"""
+        if not self.config.policy_for(details.chat_type).enabled:
+            return False
         progress = await self.store.progress(details.stream_id)
         if progress is None:
             raise RuntimeError("日记流尚未初始化")
@@ -443,67 +353,52 @@ class DiaryService:
             ):
                 break
             batch.append(row)
-        collection = self.source.collection_config(details)
-        allowed = [
-            row
-            for row in batch
-            if await self.source.allowed(details, row, collection=collection)
-        ]
         old = await self.store.get_day(details.stream_id, day)
         end_id = int(batch[-1]["id"])
         diary = None
-        if allowed:
-            first_day = target_date - timedelta(
-                days=self.config.policy_for(details.chat_type).context_days - 1
-            )
-            payload: dict[str, object] = {
-                "target_date": day,
-                "timezone": self.config.timezone,
-                "chat_type": details.chat_type,
-                "existing_diary": old.body if old else "",
-                "previous_diaries": [
-                    {"date": item.day, "body": item.body}
-                    for item in await self.store.diaries(
-                        details.stream_id, first_day.isoformat()
-                    )
-                    if item.day < day and item.body.strip()
-                ],
-                "preceding_context": await self.source.formatted(
-                    details,
-                    await self.source.context(
-                        details,
-                        allowed[0],
-                        self.config.context_messages,
-                    ),
-                    self.zone,
-                ),
-                "new_messages": await self.source.formatted(
-                    details, allowed, self.zone
-                ),
-            }
-            body = await self.generate(payload)
-            if old is not None and old.body and not body.strip():
-                raise ValueError("模型不能用空正文抹掉当天已有日记")
-            if body.strip():
-                diary = Diary(
-                    details.stream_id,
-                    day,
-                    body,
-                    end_id,
-                    max(
-                        [float(row["time"]) for row in allowed]
-                        + ([old.through_time] if old else [])
-                    ),
-                    now,
+        first_day = target_date - timedelta(
+            days=self.config.policy_for(details.chat_type).context_days - 1
+        )
+        payload: dict[str, object] = {
+            "target_date": day,
+            "timezone": self.config.timezone,
+            "chat_type": details.chat_type,
+            "existing_diary": old.body if old else "",
+            "previous_diaries": [
+                {"date": item.day, "body": item.body}
+                for item in await self.store.diaries(
+                    details.stream_id, first_day.isoformat()
                 )
-        collection = self.source.collection_config(details)
-        if not self.config.policy_for(
-            details.chat_type
-        ).enabled or not await self.source.allowed(details, collection=collection):
-            raise RuntimeError("生成期间聊天日记已关闭或采集许可已撤回")
-        for row in allowed:
-            if not await self.source.allowed(details, row, collection=collection):
-                raise RuntimeError("生成期间发言者的采集许可已变化")
+                if item.day < day and item.body.strip()
+            ],
+            "preceding_context": await self.source.formatted(
+                details,
+                await self.source.context(
+                    details,
+                    batch[0],
+                    self.config.context_messages,
+                ),
+                self.zone,
+            ),
+            "new_messages": await self.source.formatted(details, batch, self.zone),
+        }
+        body = await self.generate(payload)
+        if old is not None and old.body and not body.strip():
+            raise ValueError("模型不能用空正文抹掉当天已有日记")
+        if body.strip():
+            diary = Diary(
+                details.stream_id,
+                day,
+                body,
+                end_id,
+                max(
+                    [float(row["time"]) for row in batch]
+                    + ([old.through_time] if old else [])
+                ),
+                now,
+            )
+        if not self.config.policy_for(details.chat_type).enabled:
+            raise RuntimeError("生成期间聊天日记已关闭")
         await self.store.commit_batch(
             progress,
             through_id=end_id,

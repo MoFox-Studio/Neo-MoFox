@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from hashlib import sha256
+from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 from sqlalchemy import select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.app.plugin_system.api import log_api
 
 from .domain import (
     CreateMemoryInput,
@@ -46,10 +50,11 @@ from .models import (
     RevisionEvidenceModel,
     VectorOutboxModel,
 )
-from .schema import VNextSchema
 from .repository import MemoryRepository
+from .schema import VNextSchema
 
 RETRIEVAL_GENERATOR_VERSION = "vnext-2"
+MemoryInput = TypeVar("MemoryInput", CreateMemoryInput, ReviseMemoryInput)
 
 
 def _new_id() -> str:
@@ -80,9 +85,26 @@ class MemoryService:
         self._on_memory_changed = on_memory_changed
 
     async def _notify_change(self, change: MemoryChanged) -> None:
-        """在数据库提交后通知记忆变化的订阅者。"""
+        """通知已提交变化，投递失败保留人物更新意图并报告日志。"""
         if self._on_memory_changed is not None:
-            await self._on_memory_changed(change)
+            try:
+                await self._on_memory_changed(change)
+            except Exception as error:  # noqa: BLE001
+                logger = log_api.get_logger("engram_memory.memory_service")
+                logger.error(
+                    f"记忆已保存，人物更新登记失败，待完成记录已保留: {error}"
+                )
+
+    @staticmethod
+    def _queue_person_changes(session: AsyncSession, change: MemoryChanged) -> None:
+        """在记忆写事务中保存各人物尚未完成的更新操作。"""
+        for person_id in change.affected_person_ids:
+            session.add(DomainOperationModel(
+                operation_key=f"persona-update:{_new_id()}",
+                operation_type="PERSONA_UPDATE",
+                result_json={"person_id": person_id, "change": asdict(change)},
+                created_at=datetime.now(UTC), completed_at=None,
+            ))
 
     @staticmethod
     def _input_person_ids(
@@ -130,8 +152,8 @@ class MemoryService:
         return await self._evidence_service.prepare_evidence(evidence)
 
     async def _normalize_people(
-        self, data: CreateMemoryInput | ReviseMemoryInput
-    ) -> CreateMemoryInput | ReviseMemoryInput:
+        self, data: MemoryInput
+    ) -> MemoryInput:
         """在写入前将人物哈希转换为平台标识，不保存双格式关联。"""
         repository = MemoryRepository(self._schema)
         people = {
@@ -140,9 +162,9 @@ class MemoryService:
         }
         return replace(
             data,
-            subject=replace(data.subject, person_id=people.get(data.subject.person_id)),
+            subject=replace(data.subject, person_id=people.get(data.subject.person_id) if data.subject.person_id is not None else None),
             participants=tuple(
-                replace(participant, person_id=people.get(participant.person_id))
+                replace(participant, person_id=people.get(participant.person_id) if participant.person_id is not None else None)
                 for participant in data.participants
             ),
         )
@@ -152,7 +174,7 @@ class MemoryService:
         session: AsyncSession,
         operation_key: str | None,
         operation_type: str,
-    ) -> dict[str, object] | None:
+    ) -> dict[str, Any] | None:
         """在当前写事务中原子声明领域操作并读取既有结果。"""
         if operation_key is None:
             return None
@@ -247,6 +269,11 @@ class MemoryService:
                     ),
                 )
             session.add_all([memory, revision, subject])
+            self._queue_person_changes(session, MemoryChanged(
+                memory_id, MemoryEventType.CREATED,
+                after_person_ids=self._input_person_ids(data),
+                after_revision_id=revision_id, after_status=MemoryStatus.ACTIVE,
+            ))
             for participant in data.participants:
                 session.add(
                     MemoryRevisionParticipantModel(
@@ -341,6 +368,13 @@ class MemoryService:
             person_ids = await self._revision_person_ids(
                 session, memory.current_revision_id
             )
+            self._queue_person_changes(session, MemoryChanged(
+                data.memory_id, MemoryEventType.REINFORCED,
+                before_person_ids=person_ids, after_person_ids=person_ids,
+                before_revision_id=data.based_on_revision_id,
+                after_revision_id=data.based_on_revision_id,
+                before_status=MemoryStatus.ACTIVE, after_status=MemoryStatus.ACTIVE,
+            ))
             claim_result = await session.execute(
                 update(MemoryModel)
                 .where(
@@ -352,7 +386,7 @@ class MemoryService:
                 .values(updated_at=now)
                 .execution_options(synchronize_session=False)
             )
-            if claim_result.rowcount != 1:
+            if cast(CursorResult[Any], claim_result).rowcount != 1:
                 raise ValueError("Memory 在强化前已被并发更新")
             evidence_ids, experienced_at = await self._attach_evidence(
                 session=session,
@@ -361,7 +395,9 @@ class MemoryService:
                 existing_evidence_ids=data.evidence_ids,
                 now=now,
             )
-            memory.last_experienced_at = max(memory.last_experienced_at, experienced_at)
+            memory.last_experienced_at = max(
+                memory.last_experienced_at or experienced_at, experienced_at
+            )
             memory.updated_at = now
             session.add(
                 MemoryEventModel(
@@ -444,7 +480,7 @@ class MemoryService:
                 )
                 .execution_options(synchronize_session=False)
             )
-            if claim_result.rowcount != 1:
+            if cast(CursorResult[Any], claim_result).rowcount != 1:
                 memory = await self._get_writable_memory(session, data.memory_id)
                 self._validate_current_revision(memory, data.based_on_revision_id)
                 current_revision = await session.get(
@@ -469,6 +505,12 @@ class MemoryService:
                 session,
                 current_revision.revision_id,
             )
+            self._queue_person_changes(session, MemoryChanged(
+                data.memory_id, MemoryEventType.REVISED,
+                before_person_ids=before_person_ids, after_person_ids=self._input_person_ids(data),
+                before_revision_id=data.based_on_revision_id, after_revision_id=revision_id,
+                before_status=MemoryStatus.ACTIVE, after_status=MemoryStatus.ACTIVE,
+            ))
             session.add(
                 MemoryRevisionModel(
                     revision_id=revision_id,
@@ -527,7 +569,9 @@ class MemoryService:
                     MemoryModel.current_revision_id == revision_id,
                 )
                 .values(
-                    last_experienced_at=max(memory.last_experienced_at, experienced_at),
+                    last_experienced_at=max(
+                        memory.last_experienced_at or experienced_at, experienced_at
+                    ),
                     updated_at=now,
                 )
                 .execution_options(synchronize_session=False)
@@ -604,6 +648,11 @@ class MemoryService:
                 session, memory.current_revision_id
             )
             revision_id = memory.current_revision_id
+            self._queue_person_changes(session, MemoryChanged(
+                data.memory_id, MemoryEventType.TOMBSTONED, before_person_ids=person_ids,
+                before_revision_id=revision_id, after_revision_id=revision_id,
+                before_status=previous_status, after_status=MemoryStatus.TOMBSTONED,
+            ))
             evidence_ids: tuple[str, ...] = ()
             if evidence:
                 evidence_ids, _ = await self._attach_evidence(
@@ -709,6 +758,11 @@ class MemoryService:
                 session, memory.current_revision_id
             )
             revision_id = memory.current_revision_id
+            self._queue_person_changes(session, MemoryChanged(
+                data.memory_id, MemoryEventType.RESTORED, after_person_ids=person_ids,
+                before_revision_id=revision_id, after_revision_id=revision_id,
+                before_status=MemoryStatus.TOMBSTONED, after_status=previous_status,
+            ))
             memory.updated_at = now
             entries = list(
                 (

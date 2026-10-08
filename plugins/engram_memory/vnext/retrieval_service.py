@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import re
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from .repository import MemoryRepository
 from .schema import VNextSchema
 
 RRF_K = 60
+EmbeddingFunction = Callable[[tuple[str, ...]], tuple[tuple[float, ...], ...] | Awaitable[tuple[tuple[float, ...], ...]]]
 _CJK_PATTERN = re.compile(r"[\u4e00-\u9fff]")
 
 
@@ -132,7 +134,7 @@ class VectorSearchBackend:
 class EmbeddingVectorBackend(VectorSearchBackend):
     """基于注入的嵌入函数进行余弦相似度向量检索。"""
 
-    def __init__(self, embedder: object) -> None:
+    def __init__(self, embedder: EmbeddingFunction) -> None:
         """绑定接收文本序列、返回向量元组的同步或异步嵌入函数。"""
         self._embedder = embedder
 
@@ -164,7 +166,7 @@ class EmbeddingVectorBackend(VectorSearchBackend):
             else embeddings_result
         )
         if not isinstance(embeddings, tuple):
-            raise ValueError("embedder 必须返回 tuple")
+            raise TypeError("embedder 必须返回 tuple")
         if len(embeddings) != len(entry_texts) + 1:
             raise ValueError("embedder 返回维度与输入不一致")
         query_vector = embeddings[0]
@@ -485,16 +487,16 @@ class RetrievalService:
             vector_rank = vector_positions.get(entry_id)
             if entry.memory_id not in best_lexical:
                 best_lexical[entry.memory_id] = None
+            previous_lexical = best_lexical[entry.memory_id]
             if lexical_rank is not None and (
-                best_lexical[entry.memory_id] is None
-                or lexical_rank < best_lexical[entry.memory_id]
+                previous_lexical is None or lexical_rank < previous_lexical
             ):
                 best_lexical[entry.memory_id] = lexical_rank
             if entry.memory_id not in best_vector:
                 best_vector[entry.memory_id] = None
+            previous_vector = best_vector[entry.memory_id]
             if vector_rank is not None and (
-                best_vector[entry.memory_id] is None
-                or vector_rank < best_vector[entry.memory_id]
+                previous_vector is None or vector_rank < previous_vector
             ):
                 best_vector[entry.memory_id] = vector_rank
         for entry_id in structured_hits:

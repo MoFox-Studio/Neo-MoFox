@@ -6,10 +6,11 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select, tuple_, update
 from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.app.plugin_system.api import person_api
@@ -265,7 +266,7 @@ class EvidenceService:
                 )
                 .values(payload={"redacted": True}, redacted_at=datetime.now(UTC))
             )
-        return result.rowcount
+        return cast(CursorResult[Any], result).rowcount
 
     async def synchronize_redactions_from(self, source: EvidenceService) -> int:
         """从来源库同步隐私删除标记，防止备份恢复后重新暴露已删除来源。"""

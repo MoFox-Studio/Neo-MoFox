@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-import re
 import asyncio
 import inspect
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
-from src.app.plugin_system.api import llm_api, person_api
+from src.app.plugin_system.api import llm_api, log_api, person_api
 from src.app.plugin_system.types import Message, ModelSet
 
 from .domain import VectorUpsert
@@ -60,7 +60,7 @@ def _normalize_datetime(value: object) -> datetime:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         if isinstance(value, str):
             try:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                parsed = datetime.fromisoformat(value)
             except ValueError as error:
                 raise ValueError("message.time 不是有效的时间值") from error
             if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -120,10 +120,10 @@ def message_to_snapshot(message: MessageLike) -> MessageSnapshot:
     if message is None:
         raise ValueError("message 不能为空")
 
-    message_id = _normalize_text(
-        _message_value(message, "message_id") or _message_value(message, "id")
+    message_id = str(
+        _message_value(message, "message_id") or _message_value(message, "id") or ""
     )
-    stream_id = _normalize_text(_message_value(message, "stream_id"))
+    stream_id = str(_message_value(message, "stream_id") or "")
     text = _normalize_text(
         _message_value(message, "processed_plain_text")
     ) or _normalize_text(_message_value(message, "content"))
@@ -141,17 +141,17 @@ def message_to_snapshot(message: MessageLike) -> MessageSnapshot:
         or None
     )
     message_time = _normalize_datetime(_message_value(message, "time"))
-    person_id = _normalize_text(_message_value(message, "person_id"))
+    person_id = str(_message_value(message, "person_id") or "")
     if not person_id:
         extra = _message_value(message, "extra")
         if isinstance(extra, Mapping):
-            person_id = _normalize_text(extra.get("person_id"))
-    sender_id = _normalize_text(_message_value(message, "sender_id"))
-    platform = _normalize_text(_message_value(message, "platform"))
+            person_id = str(extra.get("person_id") or "")
+    sender_id = str(_message_value(message, "sender_id") or "")
+    platform = str(_message_value(message, "platform") or "")
     sender_role = _normalize_text(_message_value(message, "sender_role")).casefold()
-    if sender_role == "bot" or sender_id == "bot":
+    if sender_role == "bot" or (person_id == "bot" and sender_role != "user"):
         person_id = "bot"
-    elif platform and sender_id and sender_id != "system":
+    elif platform.strip() and sender_id.strip():
         if re.fullmatch(r"[0-9a-fA-F]{64}", person_id) and person_api.generate_person_id(platform, sender_id) != person_id:
             raise ValueError("来源人物哈希与平台账号不一致")
         person_id = person_api.generate_raw_person_id(platform, sender_id)
@@ -289,7 +289,9 @@ class ChromaVectorSink(VectorSink):
                 collection_name=self._collection_name,
                 include=["metadatas"],
             )
-        except Exception:
+        except Exception as error:  # noqa: BLE001
+            logger = log_api.get_logger("engram_memory.vector_sink")
+            logger.error(f"无法读取索引物理入口: {type(error).__name__}: {error}")
             return None
         ids = result.get("ids") if isinstance(result, Mapping) else None
         if not isinstance(ids, Sequence) or isinstance(ids, (str, bytes, bytearray)):
@@ -357,7 +359,7 @@ class ChromaVectorSink(VectorSink):
                 await send_result if inspect.isawaitable(send_result) else send_result
             )
             embeddings = getattr(response, "embeddings", None)
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             raise VectorSinkError("embedding 请求失败") from error
 
         if (
@@ -391,7 +393,7 @@ class ChromaVectorSink(VectorSink):
         return vectors
 
     async def query_entries(self, text: str, top_k: int) -> tuple[str, ...]:
-        """查询派生向量入口 ID，索引不可用时返回空结果。"""
+        """查询派生向量入口 ID，索引不可用时报告异常。"""
         if not isinstance(text, str) or not text.strip():
             raise ValueError("query text 不能为空")
         if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
@@ -404,8 +406,8 @@ class ChromaVectorSink(VectorSink):
                 n_results=top_k,
                 include=["metadatas"],
             )
-        except Exception:
-            return ()
+        except Exception as error:
+            raise VectorSinkError("派生向量查询失败") from error
         rows = result.get("ids") if isinstance(result, dict) else None
         if not isinstance(rows, list) or not rows or not isinstance(rows[0], list):
             return ()
@@ -463,7 +465,7 @@ class ChromaVectorSink(VectorSink):
                 metadatas=[self.derived_metadata(item) for item in items],
                 ids=[item.entry_id for item in items],
             )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             raise VectorSinkError("向量派生 upsert 失败") from error
 
     async def delete(self, entry_id: str) -> None:
@@ -475,7 +477,7 @@ class ChromaVectorSink(VectorSink):
                 collection_name=self._collection_name,
                 ids=[entry_id.strip()],
             )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             raise VectorSinkError("向量派生 delete 失败") from error
 
 
@@ -573,6 +575,9 @@ class VectorOutboxWorker:
                 raise
             except Exception as error:  # noqa: BLE001
                 self._last_error = error
+                log_api.get_logger("engram_memory.vector_worker").error(
+                    f"向量队列轮询失败: {type(error).__name__}: {error}"
+                )
             if stop_event.is_set():
                 break
             try:
@@ -585,9 +590,8 @@ class VectorOutboxWorker:
 
     def start(self) -> ManagedTaskHandle:
         """幂等启动托管后台投递任务。"""
-        if self._task_info is not None and self._task_info.task is not None:
-            if not self._task_info.task.done():
-                return self._task_info
+        if self._task_info is not None and self._task_info.task is not None and not self._task_info.task.done():
+            return self._task_info
         self._stop_event = asyncio.Event()
         self._task_info = create_managed_task(
             self.run_forever(),
@@ -611,13 +615,13 @@ class VectorOutboxWorker:
 
 __all__: list[str] = [
     "DEFAULT_EMBEDDING_MODEL_TASK",
-    "DEFAULT_VECTOR_COLLECTION",
     "DEFAULT_EMBEDDING_REQUEST_NAME",
+    "DEFAULT_VECTOR_COLLECTION",
     "DEFAULT_VECTOR_DB_PATH",
+    "ChromaVectorSink",
     "MessageSnapshot",
+    "VectorIndexServiceProtocol",
+    "VectorOutboxWorker",
     "VectorSinkError",
     "message_to_snapshot",
-    "ChromaVectorSink",
-    "VectorOutboxWorker",
-    "VectorIndexServiceProtocol",
 ]

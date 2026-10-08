@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, cast
 
 from sqlalchemy import Float, Integer, String, Text, select, update
 from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from src.app.plugin_system.api.storage_api import PluginDatabase
@@ -220,7 +222,7 @@ class DiaryStore:
                     last_success_at=now,
                 )
             )
-            if result.rowcount != 1:
+            if cast(CursorResult[Any], result).rowcount != 1:
                 raise RuntimeError("日记处理位置已变化，拒绝过期结果")
             if diary is not None:
                 values = {

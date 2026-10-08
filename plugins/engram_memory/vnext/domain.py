@@ -214,9 +214,8 @@ class RetrievalQuery:
             raise ValueError("top_k 必须大于 0")
         if len(set(self.person_ids)) != len(self.person_ids):
             raise ValueError("person_ids 不能重复")
-        if self.start_time is not None and self.end_time is not None:
-            if self.start_time > self.end_time:
-                raise ValueError("start_time 不能晚于 end_time")
+        if self.start_time is not None and self.end_time is not None and self.start_time > self.end_time:
+            raise ValueError("start_time 不能晚于 end_time")
 
 
 @dataclass(frozen=True, slots=True)

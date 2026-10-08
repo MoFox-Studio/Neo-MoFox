@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
+from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from src.app.plugin_system.api import person_api
 
+from .domain import MemoryChanged
+from .enums import MemoryEventType, MemoryStatus
 from .models import (
+    DomainOperationModel,
     EvidenceMessageSnapshotModel,
     EvidenceModel,
     MemoryEventModel,
@@ -17,6 +22,10 @@ from .models import (
     RevisionEvidenceModel,
 )
 from .schema import VNextSchema
+
+
+class UnresolvedPersonError(ValueError):
+    """人物哈希没有可核实的平台账号。"""
 
 
 class MemoryRepository:
@@ -90,7 +99,7 @@ class MemoryRepository:
 
     async def resolve_person_aliases(self, person_id: str) -> tuple[str, ...]:
         """将核心人物哈希归一为平台账号，仅返回单一人物标识。"""
-        normalized = person_id.strip()
+        normalized = person_id
         if not re.fullmatch(r"[0-9a-fA-F]{64}", normalized):
             return (normalized,)
         person = await person_api.get_person_by_id(normalized)
@@ -101,12 +110,50 @@ class MemoryRepository:
         rows = await self._person_snapshot_rows(normalized)
         aliases = self._person_aliases_from_rows(normalized, rows)
         if aliases == (normalized,):
-            raise ValueError("人物哈希缺少可核实的平台账号")
+            raise UnresolvedPersonError("人物哈希缺少可核实的平台账号")
         return aliases
+
+    async def pending_persona_operations(
+        self, person_id: str | None = None
+    ) -> tuple[tuple[str, str, MemoryChanged], ...]:
+        """读取尚未完成的人物更新操作及其原始变化上下文。"""
+        statement = select(DomainOperationModel).where(
+            DomainOperationModel.operation_type == "PERSONA_UPDATE",
+            DomainOperationModel.completed_at.is_(None),
+        )
+        if person_id is not None:
+            statement = statement.where(DomainOperationModel.result_json["person_id"].as_string() == person_id)
+        async with self._schema.database.session() as session:
+            rows = (await session.scalars(statement.order_by(DomainOperationModel.created_at))).all()
+        operations = []
+        for row in rows:
+            payload = cast(dict[str, Any], row.result_json)
+            data = payload["change"]
+            change = MemoryChanged(
+                memory_id=data["memory_id"], change_type=MemoryEventType(data["change_type"]),
+                before_person_ids=tuple(data["before_person_ids"]),
+                after_person_ids=tuple(data["after_person_ids"]),
+                before_revision_id=data["before_revision_id"], after_revision_id=data["after_revision_id"],
+                before_status=MemoryStatus(data["before_status"]) if data["before_status"] else None,
+                after_status=MemoryStatus(data["after_status"]) if data["after_status"] else None,
+            )
+            operations.append((row.operation_key, str(payload["person_id"]), change))
+        return tuple(operations)
+
+    async def complete_persona_operations(self, keys: tuple[str, ...]) -> None:
+        """仅完成本次人物审查开始前已经读取的操作，不清除后到变化。"""
+        if not keys:
+            return
+        async with self._schema.database.session() as session:
+            await session.execute(update(DomainOperationModel).where(
+                DomainOperationModel.operation_key.in_(keys),
+                DomainOperationModel.operation_type == "PERSONA_UPDATE",
+                DomainOperationModel.completed_at.is_(None),
+            ).values(completed_at=datetime.now(UTC)))
 
     async def get_person_metadata(self, person_id: str) -> dict[str, object] | None:
         """从未删除的消息快照中读取基本人物标识信息。"""
-        normalized = person_id.strip()
+        normalized = person_id
         if not normalized or normalized == "bot":
             return None
         if ":" not in normalized:
@@ -183,15 +230,15 @@ class MemoryRepository:
             return (person_id,)
         if ":" in person_id:
             return (person_id,)
-        aliases = {
-            (row["platform"], row["sender_id"])
-            for row in rows
-            if row.get("person_id") == person_id
-            and isinstance(row.get("platform"), str)
-            and row["platform"].strip()
-            and isinstance(row.get("sender_id"), str)
-            and row["sender_id"].strip()
-        }
+        aliases: set[tuple[str, str]] = set()
+        for row in rows:
+            platform, sender_id = row.get("platform"), row.get("sender_id")
+            if (
+                row.get("person_id") == person_id
+                and isinstance(platform, str) and platform.strip()
+                and isinstance(sender_id, str) and sender_id.strip()
+            ):
+                aliases.add((platform, sender_id))
         if len(aliases) != 1:
             return (person_id,)
         platform, sender_id = next(iter(aliases))

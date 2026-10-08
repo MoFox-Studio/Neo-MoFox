@@ -13,7 +13,7 @@ from .framework_bridge import (
     create_managed_task,
 )
 from .persona_service import PersonaService
-from .repository import MemoryRepository
+from .repository import MemoryRepository, UnresolvedPersonError
 
 logger = log_api.get_logger(
     "engram_memory.vnext.persona_updater",
@@ -64,8 +64,15 @@ class PersonaUpdater:
         if self._closed:
             raise RuntimeError("PersonaUpdater 已关闭")
         people = set()
+        unresolved = 0
         for source_id in change.affected_person_ids:
-            people.add(await self._canonical_person(source_id))
+            person_id = await self._canonical_person(source_id)
+            if person_id is None:
+                unresolved += 1
+            else:
+                people.add(person_id)
+        if unresolved:
+            logger.warning(f"跳过 {unresolved} 个无法核实的历史人物印象更新，原关联保留")
         if self._closed:
             raise RuntimeError("PersonaUpdater 已关闭")
         for person_id in people:
@@ -73,9 +80,12 @@ class PersonaUpdater:
             self._attempts.pop(person_id, None)
         self._schedule()
 
-    async def _canonical_person(self, person_id: str) -> str:
-        """在任务进入待处理集合之前归一到平台人物账号。"""
-        (canonical,) = await self._repository.resolve_person_aliases(person_id)
+    async def _canonical_person(self, person_id: str) -> str | None:
+        """归一到平台人物账号，未知历史哈希不进入生成队列。"""
+        try:
+            (canonical,) = await self._repository.resolve_person_aliases(person_id)
+        except UnresolvedPersonError:
+            return None
         return canonical
 
     def _schedule(self) -> None:
@@ -124,12 +134,24 @@ class PersonaUpdater:
         """对当前 ACTIVE 主次人物去重，仅排队未认证或空印象的人物。"""
         try:
             seen: set[str] = set()
+            unresolved = 0
+            for _, source_id, change in await self._repository.pending_persona_operations():
+                person_id = await self._canonical_person(source_id)
+                if person_id is None:
+                    unresolved += 1
+                else:
+                    self._pending.setdefault(person_id, []).append(change)
+            self._schedule()
             for source_id in await self._service.get_active_person_ids():
                 if self._closed:
                     return
                 person_id = source_id
                 try:
-                    person_id = await self._canonical_person(source_id)
+                    canonical = await self._canonical_person(source_id)
+                    if canonical is None:
+                        unresolved += 1
+                        continue
+                    person_id = canonical
                     if person_id in seen:
                         continue
                     seen.add(person_id)
@@ -146,6 +168,8 @@ class PersonaUpdater:
                 except Exception as error:  # noqa: BLE001
                     self.last_errors[person_id] = error
                     logger.error(f"Persona 补建检查失败 {person_id}: {error}")
+            if unresolved:
+                logger.warning(f"跳过 {unresolved} 个无法核实的历史人物印象补建，原关联保留")
         except Exception as error:  # noqa: BLE001
             self.last_errors["bootstrap"] = error
             logger.error(f"Persona 补建扫描失败: {error}")
@@ -181,9 +205,12 @@ class PersonaUpdater:
     ) -> None:
         """执行一个人物批次，失败或过期时合并回队列并安排有限重试。"""
         try:
+            pending = await self._repository.pending_persona_operations(person_id)
+            batch = tuple(dict.fromkeys((*batch, *(item[2] for item in pending))))
             result = await self._service.refresh(person_id, batch)
             if result is None:
                 raise RuntimeError("人物印象输入在生成期间变化，结果已丢弃")
+            await self._repository.complete_persona_operations(tuple(item[0] for item in pending))
             self.last_errors.pop(person_id, None)
             self._attempts.pop(person_id, None)
         except Exception as error:  # noqa: BLE001

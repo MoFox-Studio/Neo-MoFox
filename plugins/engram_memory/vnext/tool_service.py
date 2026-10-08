@@ -476,7 +476,7 @@ class VNextToolService:
                     "ordinal": link.ordinal,
                     "source_status": status,
                 }
-                if status == "AVAILABLE":
+                if snapshot is not None and status == "AVAILABLE":
                     public_snapshot = dict(snapshot)
                     if "person_id" in public_snapshot:
                         platform = public_snapshot.get("platform")

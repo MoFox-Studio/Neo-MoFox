@@ -59,12 +59,12 @@ class DiaryRuntime:
         self._exhausted: dict[str, int] = {}
 
     async def initialize(self) -> None:
-        """先初始化独立库，生成任务须等所有插件及许可服务就绪。"""
+        """先初始化独立库，生成任务在框架完成插件加载后启动。"""
         await self.store.initialize()
         self.ready = True
 
     def start(self) -> None:
-        """托管后台恢复提醒，再发现可采集的历史流和未完成消息。"""
+        """托管后台恢复提醒，再发现已保存的历史流和未完成消息。"""
         if not self.ready or self._closed or self._task is not None:
             return
         self._task = create_managed_task(
@@ -124,9 +124,7 @@ class DiaryRuntime:
                 if details is None:
                     continue
                 policy = self.config.policy_for(details.chat_type)
-                if not policy.enabled or not await self.service.source.allowed(
-                    details, collection=self.service.source.collection_config(details)
-                ):
+                if not policy.enabled:
                     self._delete_reminder(stream_id)
                     continue
                 progress = await self.service.prepare_stream(details, self._clock())
@@ -155,7 +153,7 @@ class DiaryRuntime:
                         else progress.initialized_at
                     )
                     if not bootstrapping and not policy.is_due(
-                        message_count=await self._count_allowed(
+                        message_count=await self._count_messages(
                             details, progress, through_id
                         ),
                         elapsed_seconds=elapsed,
@@ -169,26 +167,21 @@ class DiaryRuntime:
             except Exception as error:  # noqa: BLE001
                 logger.error(f"聊天日记触发检查失败: {type(error).__name__}: {error}")
 
-    async def _count_allowed(
+    async def _count_messages(
         self, details: StreamDetails, progress: Progress, through_id: int
     ) -> int:
-        """只统计当前许可的实际消息，达到阈值即可停止计数。"""
+        """统计框架已保存的实际消息，达到阈值即可停止计数。"""
         count = 0
         threshold = self.config.policy_for(details.chat_type).message_threshold
-        collection = self.service.source.collection_config(details)
         while progress.cursor_id < through_id:
             rows = await self.service.source.page(
                 progress, through_id, limit=self.config.batch_messages
             )
             if not rows:
                 break
-            for row in rows:
-                if await self.service.source.allowed(
-                    details, row, collection=collection
-                ):
-                    count += 1
-                    if count >= threshold:
-                        return count
+            count += len(rows)
+            if count >= threshold:
+                return threshold
             progress = replace(progress, cursor_id=int(rows[-1]["id"]))
         return count
 
@@ -231,9 +224,7 @@ class DiaryRuntime:
         if details is None:
             return ""
         policy = self.config.policy_for(details.chat_type)
-        if not policy.enabled or not await self.service.source.allowed(
-            details, collection=self.service.source.collection_config(details)
-        ):
+        if not policy.enabled:
             return ""
         today = datetime.fromtimestamp(self._clock(), self.service.zone).date()
         since = (today - timedelta(days=policy.context_days - 1)).isoformat()

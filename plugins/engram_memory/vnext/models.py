@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -73,10 +73,10 @@ class UTCDateTime(TypeDecorator[datetime]):
         del dialect
         if value is None:
             return None
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+        return datetime.fromisoformat(value).astimezone(UTC)
 
 
-def _enum(enum_type: type[Any], name: str) -> SqlEnum[Any]:
+def _enum(enum_type: type[Any], name: str) -> SqlEnum:
     """构造带数据库 CHECK 约束的字符串枚举列类型。"""
     return SqlEnum(
         enum_type,
@@ -801,7 +801,7 @@ class VectorIndexManifestModel(Base):
     )
 
 
-IMMUTABLE_MODELS: ClassVar[tuple[type[Base], ...]] = (
+IMMUTABLE_MODELS: tuple[type[Base], ...] = (
     MemoryRevisionModel,
     MemoryRevisionSubjectModel,
     MemoryRevisionParticipantModel,
@@ -827,7 +827,7 @@ for _model in IMMUTABLE_MODELS:
     event.listen(_model, "before_delete", _reject_immutable_change)
 
 
-ALL_MODELS: tuple[type[Base], ...] = tuple(Base.metadata.tables) and (
+ALL_MODELS: tuple[type[Base], ...] = (
     SchemaVersionModel,
     MemoryModel,
     MemoryRevisionModel,

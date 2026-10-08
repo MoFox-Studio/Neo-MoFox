@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -22,9 +22,17 @@ from ..diary import runtime as diary_runtime
 from ..diary import service as diary_service
 from ..diary.config import DiaryConfig
 from ..diary.events import ChatDiaryEventHandler
-from ..diary.service import CollectionConfig, DiaryService, DiarySource, StreamDetails
+from ..diary.service import DiaryService, DiarySource, StreamDetails
 from ..diary.store import Diary, DiaryStore, Progress
 from ..vnext.framework_bridge import ManagedTaskHandle
+
+StoredValue = TypeVar("StoredValue", Diary, Progress)
+
+
+def _required(value: StoredValue | None) -> StoredValue:
+    """断言存储读取结果存在，并保留日记或处理位置的类型。"""
+    assert value is not None
+    return value
 
 
 @pytest.fixture
@@ -32,6 +40,21 @@ def diary_path() -> Iterator[str]:
     """提供结束后自动清理的独立日记路径。"""
     with TemporaryDirectory(prefix="engram-diary-test-") as directory:
         yield str(Path(directory) / "diary.db")
+
+
+@pytest.mark.asyncio
+async def test_private_diary_does_not_require_person_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """私聊日记不扫描历史核对人物，路由信息存在即可整理聊天。"""
+    monkeypatch.setattr(diary_service.stream_api, "get_stream_info", AsyncMock(return_value={
+        "platform": "custom", "chat_type": "private", "person_id": "unresolved-profile",
+    }))
+    read_messages = AsyncMock(side_effect=AssertionError("不应核对人物"))
+    monkeypatch.setattr(diary_service.stream_api, "get_stream_messages", read_messages)
+    details = await DiarySource().details("example-stream")
+    assert details == StreamDetails("example-stream", "custom", "private", "", "")
+    read_messages.assert_not_called()
 
 
 def test_diary_config_ignores_obsolete_recovery_messages() -> None:
@@ -102,7 +125,7 @@ async def test_diary_atomic_commit_and_stale_rejection(diary_path: str) -> None:
                     12,
                 ),
             )
-        assert (await store.get_day("s1", "2026-01-01")).body == "当天回顾"
+        assert _required(await store.get_day("s1", "2026-01-01")).body == "当天回顾"
         await store.commit_batch(
             saved,
             through_id=2,
@@ -116,7 +139,7 @@ async def test_diary_atomic_commit_and_stale_rejection(diary_path: str) -> None:
                 13,
             ),
         )
-        assert (await store.progress("s1")).cursor_id == 2
+        assert _required(await store.progress("s1")).cursor_id == 2
         restored = await store.ensure_stream(
             "s1",
             "group",
@@ -136,7 +159,6 @@ class ChatSource(DiarySource):
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         """保存测试消息，不调用框架数据库或适配器。"""
         self.rows = rows
-        self.permitted = True
         self.stream_details = {
             "s1": StreamDetails("s1", "qq", "group", "example-group", ""),
         }
@@ -144,20 +166,6 @@ class ChatSource(DiarySource):
     async def details(self, stream_id: str) -> StreamDetails | None:
         """返回测试流的公开路由身份。"""
         return self.stream_details.get(stream_id)
-
-    def collection_config(self, details: StreamDetails) -> CollectionConfig | None:
-        """测试消息源不读取外部配置。"""
-        return None
-
-    async def allowed(
-        self,
-        details: StreamDetails,
-        message: object = None,
-        *,
-        collection: CollectionConfig | None,
-    ) -> bool:
-        """模拟当前采集许可。"""
-        return self.permitted
 
     async def page(
         self, progress: Any, through_id: int, *, limit: int
@@ -338,7 +346,8 @@ async def test_diary_runtime_serializes_streams_and_processes_fixed_watermark(
 
     async def generate(payload: dict[str, object]) -> str:
         """暂停首个生成并记录实际流。"""
-        generated.append(str(payload["new_messages"][0]["message_id"]))
+        messages = cast(list[dict[str, object]], payload["new_messages"])
+        generated.append(str(messages[0]["message_id"]))
         if len(generated) == 1:
             entered.set()
             await release.wait()
@@ -363,15 +372,15 @@ async def test_diary_runtime_serializes_streams_and_processes_fixed_watermark(
         assert len(harness.handles) == 1
         release.set()
         await harness.wait()
-        assert (await runtime.store.progress("s1")).cursor_id == 1
+        assert _required(await runtime.store.progress("s1")).cursor_id == 1
         await runtime.schedule_once()
         await harness.wait()
         assert generated == ["m1", "m2"]
-        assert (await runtime.store.progress("s1")).cursor_id == 2
+        assert _required(await runtime.store.progress("s1")).cursor_id == 2
         await runtime.schedule_once()
         await harness.wait()
         assert generated == ["m1", "m2", "m1"]
-        assert (await runtime.store.progress("s2")).cursor_id == 1
+        assert _required(await runtime.store.progress("s2")).cursor_id == 1
     finally:
         release.set()
         await runtime.close()
@@ -419,12 +428,12 @@ async def test_diary_runtime_retries_three_total_attempts_then_resumes_on_new_me
         assert calls == 3
         assert runtime._exhausted["s1"] == 1
         assert "s1" not in runtime._retry_at
-        assert (await runtime.store.progress("s1")).cursor_id == 0
+        assert _required(await runtime.store.progress("s1")).cursor_id == 0
         source.rows.append(chat_row(2, "2026-10-03T08:01:00+08:00"))
         await runtime.schedule_once()
         await harness.wait()
         assert calls == 4
-        assert (await runtime.store.progress("s1")).cursor_id == 2
+        assert _required(await runtime.store.progress("s1")).cursor_id == 2
     finally:
         await runtime.close()
 
@@ -563,7 +572,7 @@ async def test_diary_runtime_reminder_isolates_seven_days_without_uncovered_mess
             1,
         ):
             await runtime.store.commit_batch(
-                progress,
+                _required(progress),
                 through_id=cursor,
                 now=now,
                 diary=Diary(
@@ -701,8 +710,8 @@ async def test_diary_runtime_close_withdraws_reminders_and_keeps_database(
     store = DiaryStore(diary_path)
     await store.initialize()
     try:
-        assert (await store.progress("s1")).cursor_id == 1
-        assert (await store.get_day("s1", "2026-10-03")).body == "保留正文"
+        assert _required(await store.progress("s1")).cursor_id == 1
+        assert _required(await store.get_day("s1", "2026-10-03")).body == "保留正文"
     finally:
         await store.close()
 
@@ -762,9 +771,9 @@ async def test_diary_batches_keep_order_dates_and_full_replacement(
             {"date": "2026-01-01", "body": "完整正文1"}
         ]
         assert seen[2]["previous_diaries"] == seen[1]["previous_diaries"]
-        assert (await store.get_day("s1", "2026-01-01")).body == "完整正文1"
-        assert (await store.get_day("s1", "2026-01-02")).body == "完整正文3"
-        assert (await store.progress("s1")).cursor_id == 4
+        assert _required(await store.get_day("s1", "2026-01-01")).body == "完整正文1"
+        assert _required(await store.get_day("s1", "2026-01-02")).body == "完整正文3"
+        assert _required(await store.progress("s1")).cursor_id == 4
         assert not await service.process_batch(details, 4, now=3)
     finally:
         await store.close()
@@ -892,10 +901,10 @@ async def test_diary_failure_retains_state_and_new_arrivals(diary_path: str) -> 
         details = StreamDetails("s1", "qq", "private", "", "example-user")
         with pytest.raises(ValueError, match="模型失败"):
             await service.process_batch(details, 1, now=2)
-        assert (await store.progress("s1")).cursor_id == 0
+        assert _required(await store.progress("s1")).cursor_id == 0
         assert await store.get_day("s1", "2026-01-01") is None
         assert await service.process_batch(details, 1, now=3)
-        assert (await store.progress("s1")).cursor_id == 1
+        assert _required(await store.progress("s1")).cursor_id == 1
         assert source.rows[-1]["id"] == 2
     finally:
         await store.close()
@@ -917,7 +926,7 @@ async def test_diary_date_window_and_stream_isolation(diary_path: str) -> None:
             )
             for cursor, day in enumerate(("2026-01-01", "2026-01-03", "2026-01-08"), 1):
                 await store.commit_batch(
-                    progress,
+                    _required(progress),
                     through_id=cursor,
                     now=cursor + 1,
                     diary=Diary(
@@ -933,68 +942,70 @@ async def test_diary_date_window_and_stream_isolation(diary_path: str) -> None:
         window = await store.diaries("s1", "2026-01-02")
         assert [item.day for item in window] == ["2026-01-03", "2026-01-08"]
         assert all(item.body.startswith("s1-") for item in window)
-        assert (await store.get_day("s1", "2026-01-01")).body == "s1-2026-01-01"
+        assert _required(await store.get_day("s1", "2026-01-01")).body == "s1-2026-01-01"
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_diary_existing_collection_config_without_external_service(
+@pytest.mark.parametrize("platform", ["qq", "other"])
+@pytest.mark.parametrize("chat_type", ["group", "private"])
+async def test_diary_generation_and_reminder_without_adapter_config(
+    diary_path: str,
     monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    chat_type: str,
 ) -> None:
-    """仅用现有公开配置读取许可，群私聊名单和封禁不会相互混用。"""
-    features = SimpleNamespace(
-        group_list_type="whitelist",
-        group_list=[123],
-        private_list_type="blacklist",
-        private_list=[456],
-        ban_user_id=[789],
-    )
-    loaded = SimpleNamespace(features=features)
-    monkeypatch.setattr(diary_service.config_api, "get_config", lambda name: loaded)
-    source = DiarySource()
-    group = StreamDetails("group-stream", "qq", "group", "123", "")
-    private = StreamDetails("private-stream", "qq", "private", "", "101")
-    collection = source.collection_config(group)
-    assert await source.allowed(group, collection=collection)
-    assert not await source.allowed(group, {"sender_id": "789"}, collection=collection)
-    assert not await source.allowed(
-        StreamDetails("other-group", "qq", "group", "124", ""), collection=collection
-    )
-    assert await source.allowed(private, {"sender_id": "bot"}, collection=collection)
-    assert not await source.allowed(
-        StreamDetails("blocked-private", "qq", "private", "", "456"),
-        collection=collection,
-    )
-    features.private_list_type = "whitelist"
-    features.private_list = [101]
-    assert await source.allowed(private, collection=collection)
-    features.ban_user_id.append(101)
-    assert not await source.allowed(private, collection=collection)
-    monkeypatch.setattr(diary_service.config_api, "get_config", lambda name: None)
-    assert not await source.allowed(group, collection=source.collection_config(group))
-    assert not await source.allowed(
-        StreamDetails("unknown-platform", "other", "group", "123", ""),
-        collection=collection,
-    )
+    """各平台群私聊均能调度、生成和注入日记，不查询适配器配置。"""
+    get_config = Mock(side_effect=AssertionError("日记不应读取适配器配置"))
+    monkeypatch.setattr(diary_service.config_api, "get_config", get_config)
+    tasks = ManagedTasks()
+    monkeypatch.setattr(diary_runtime, "create_managed_task", tasks.create)
+    rows = [chat_row(1, "2026-01-01T08:00:00+08:00")]
+    now = float(rows[0]["time"]) + 1
+    details = StreamDetails("s1", platform, chat_type, "example-group", "example-user")
+    source = ChatSource(rows)
+    source.stream_details["s1"] = details
+    config = DiaryConfig()
+    config.database_path = diary_path
+    generator = AsyncMock(return_value="当天的聊天回顾")
+    service = DiaryService(config, DiaryStore(diary_path), source=source, generator=generator)
+    runtime = diary_runtime.DiaryRuntime(config, service=service, clock=lambda: now)
+    runtime.set_reminder = Mock()
+    await runtime.initialize()
+    try:
+        await runtime.store.ensure_stream("s1", chat_type, start_time=1, bootstrap_through=1, now=now)
+        runtime._known.add("s1")
+        await runtime.schedule_once()
+        assert tasks.handles and tasks.handles[0].task is not None
+        await tasks.handles[0].task
+        generator.assert_awaited_once()
+        assert generator.await_args is not None
+        assert cast(dict[str, Any], generator.await_args.args[0])["new_messages"] == rows
+        diary = await runtime.store.get_day("s1", "2026-01-01")
+        progress = await runtime.store.progress("s1")
+        assert diary is not None and diary.body == "当天的聊天回顾"
+        assert progress is not None and progress.cursor_id == 1
+        assert "当天的聊天回顾" in await runtime.reminder_content("s1")
+        config.policy_for(chat_type).enabled = False
+        assert await runtime.reminder_content("s1") == ""
+        assert not await service.process_batch(details, 1, now=now)
+        get_config.assert_not_called()
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio
-async def test_diary_count_reads_collection_config_once(
+async def test_diary_count_uses_all_saved_messages_without_adapter_config(
     diary_path: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """分页计数共用一次许可读取，下一次计数重新读取当前封禁名单。"""
-    features = SimpleNamespace(
-        group_list_type="whitelist",
-        group_list=[123],
-        private_list_type="blacklist",
-        private_list=[],
-        ban_user_id=[789],
-    )
-    get_config = Mock(return_value=SimpleNamespace(features=features))
+    """分页计数包含全部已保存消息，不读取名单，达到阈值即停止。"""
+    get_config = Mock(side_effect=AssertionError("日记不应读取适配器配置"))
     monkeypatch.setattr(diary_service.config_api, "get_config", get_config)
-    config = DiaryConfig(database_path=diary_path, batch_messages=40)
+    config = DiaryConfig()
+    config.database_path = diary_path
+    config.batch_messages = 40
     config.group.message_threshold = 100
     source = DiarySource()
     source._windows["s1"] = [
@@ -1008,13 +1019,45 @@ async def test_diary_count_reads_collection_config_once(
     runtime = diary_runtime.DiaryRuntime(config, service=service)
     details = StreamDetails("s1", "qq", "group", "123", "")
     progress = Progress("s1", "group", 0, 0, 0, 1, None, "")
-    assert await runtime._count_allowed(details, progress, 250) == 100
-    get_config.assert_called_once_with("snowluma_adapter")
+    assert await runtime._count_messages(details, progress, 250) == 100
+    config.group.message_threshold = 300
+    assert await runtime._count_messages(details, progress, 250) == 250
+    get_config.assert_not_called()
 
-    features.ban_user_id.append(101)
-    get_config.reset_mock()
-    assert await runtime._count_allowed(details, progress, 250) == 0
-    get_config.assert_called_once_with("snowluma_adapter")
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chat_type", ["group", "private"])
+async def test_diary_disabled_during_generation_preserves_body_and_cursor(
+    diary_path: str,
+    chat_type: str,
+) -> None:
+    """生成期间关闭本类型日记时，已有正文和处理游标均不改变。"""
+    rows = [chat_row(1, "2026-01-01T08:00:00+08:00"), chat_row(2, "2026-01-01T09:00:00+08:00")]
+    config = DiaryConfig()
+    source = ChatSource(rows)
+    source.stream_details["s1"] = StreamDetails("s1", "other", chat_type, "example-group", "example-user")
+    store = DiaryStore(diary_path)
+    await store.initialize()
+    progress = await store.ensure_stream("s1", chat_type, start_time=1, bootstrap_through=2, now=1)
+    original = Diary("s1", "2026-01-01", "保留的旧日记", 1, float(rows[0]["time"]), 2)
+    await store.commit_batch(progress, through_id=1, now=2, diary=original)
+
+    async def generate(payload: dict[str, object]) -> str:
+        """在生成结果返回前关闭当前类型的日记。"""
+        assert payload["existing_diary"] == original.body
+        config.policy_for(chat_type).enabled = False
+        return "不应提交的新正文"
+
+    service = DiaryService(config, store, source=source, generator=generate)
+    try:
+        before = await store.progress("s1")
+        assert before is not None
+        with pytest.raises(RuntimeError, match="生成期间聊天日记已关闭"):
+            await service.process_batch(source.stream_details["s1"], 2, now=3)
+        assert await store.progress("s1") == before
+        assert await store.get_day("s1", original.day) == original
+    finally:
+        await store.close()
 
 
 @pytest.mark.parametrize("datetime_messages", [False, True])
@@ -1190,7 +1233,7 @@ async def test_diary_commit_rolls_back_body_position_and_anchor(
         try:
             with pytest.raises(RuntimeError, match="事务中断"):
                 await store.commit_batch(
-                    progress,
+                    _required(progress),
                     through_id=2,
                     message_id="m2",
                     now=3,
@@ -1206,7 +1249,8 @@ async def test_diary_commit_rolls_back_body_position_and_anchor(
         finally:
             event.remove(engine, "before_cursor_execute", fail_body_write)
         assert await store.progress("s1") == progress
-        assert (await store.get_day("s1", "2026-10-03")).body == "原正文"
+        assert _required(await store.get_day("s1", "2026-10-03")).body == "原正文"
+        assert progress is not None
         assert progress.cursor_message_id == "m1"
     finally:
         await store.close()

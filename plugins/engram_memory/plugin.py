@@ -35,13 +35,12 @@ from .vnext.runtime_owner import VNextRuntimeOwner
 logger = log_api.get_logger("engram_memory.plugin")
 
 
-@register_plugin
 class EngramMemoryPlugin(BasePlugin):
     """装配 Engram Memory vNext 的唯一插件 Owner。"""
 
     plugin_name: str = "engram_memory"
-    configs: list[type] = [EngramMemoryConfig]
-    dependent_components: list[str] = []
+    configs: list[type] = [EngramMemoryConfig]  # noqa: RUF012
+    dependent_components: list[str] = []  # noqa: RUF012
 
     def __init__(self, config: EngramMemoryConfig | None = None) -> None:
         """初始化插件及其延迟创建的 Runtime Owner。"""
@@ -151,5 +150,7 @@ class EngramMemoryPlugin(BasePlugin):
             except Exception as error:  # noqa: BLE001
                 logger.debug(f"移除 vNext 记忆引导语失败: {error}")
 
+
+register_plugin(EngramMemoryPlugin)
 
 __all__ = ["EngramMemoryPlugin"]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from src.app.plugin_system.api.event_api import EventDecision
 from src.app.plugin_system.base import BaseEventHandler
@@ -24,7 +24,8 @@ class _DiaryRuntime(Protocol):
         """唤醒指定流的后台处理。"""
 
     async def reminder_content(self, stream_id: str) -> str:
-        """读取流当前允许注入的日记内容。"""
+        """读取当前流已启用的近期日记内容。"""
+        ...
 
     def set_reminder(self, stream_id: str, content: str) -> None:
         """更新流日记提醒并登记其生命周期。"""
@@ -46,8 +47,8 @@ class ChatDiaryEventHandler(BaseEventHandler):
     """启动聊天日记后台处理并维护 Actor 请求的流私有提醒。"""
 
     name = "chat_diary"
-    description = "唤醒聊天日记并将当前许可内容注入 Actor 请求"
-    init_subscribe: ClassVar[list[EventType]] = [
+    description = "唤醒聊天日记并将当前流的近期日记注入 Actor 请求"
+    init_subscribe: list[EventType | str] = [  # noqa: RUF012
         EventType.ON_ALL_PLUGIN_LOADED,
         EventType.ON_MESSAGE_RECEIVED,
         EventType.AFTER_MESSAGE_SENT,

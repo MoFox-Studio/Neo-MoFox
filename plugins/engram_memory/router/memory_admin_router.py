@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from hashlib import sha256
-from ipaddress import ip_address
+from ipaddress import IPv6Address, ip_address
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -12,7 +12,7 @@ from fastapi import HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from sqlalchemy import func, or_, select, tuple_
 
-from src.app.plugin_system.api import database_api
+from src.app.plugin_system.api import database_api, person_api
 from src.app.plugin_system.api.message_api import PersonInfo
 from src.app.plugin_system.base import BaseRouter
 
@@ -100,6 +100,23 @@ def _snapshot_text(payload: object) -> str | None:
     return None
 
 
+def is_local_request(request: Request) -> bool:
+    """同时校验真实连接地址与 Host，不信任转发头。"""
+    try:
+        address = ip_address(request.client.host if request.client is not None else "")
+    except ValueError:
+        return False
+    if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if not address.is_loopback:
+        return False
+    hostname = request.url.hostname or ""
+    try:
+        return ip_address(hostname).is_loopback
+    except ValueError:
+        return hostname == "localhost"
+
+
 class VNextMemoryAdminRouter(BaseRouter):
     """提供 loopback 限定的只读记忆档案页。"""
 
@@ -143,13 +160,22 @@ class VNextMemoryAdminRouter(BaseRouter):
         """批量读取当前页关联人物的展示名称，不生成或更新人物。"""
         if not person_ids:
             return {}
+        core_ids = {
+            person_api.generate_person_id(*reference.split(":", 1)): reference
+            for reference in person_ids if ":" in reference
+        }
         people = cast(
             list[PersonInfo],
             await database_api.query(PersonInfo)
-            .filter(person_id__in=tuple(person_ids))
+            .filter(person_id__in=tuple(core_ids))
             .all(),
         )
-        return {person.person_id: _person_view(person) for person in people}
+        return {
+            core_ids[person.person_id]: {
+                **_person_view(person), "person_id": core_ids[person.person_id]
+            }
+            for person in people
+        }
 
     async def _source_views(
         self,
@@ -284,28 +310,7 @@ class VNextMemoryAdminRouter(BaseRouter):
             """限制页面以外的请求只能来自本机回环地址。"""
             if request.scope.get("path") == "/":
                 return await call_next(request)
-            client_host = request.client.host if request.client is not None else ""
-            try:
-                address = ip_address(client_host)
-            except ValueError:
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "管理 API 仅允许本机访问"},
-                )
-            mapped_address = address.ipv4_mapped if address.version == 6 else None
-            if not address.is_loopback and not (
-                mapped_address is not None and mapped_address.is_loopback
-            ):
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "管理 API 仅允许本机访问"},
-                )
-            hostname = request.url.hostname or ""
-            try:
-                local_hostname = ip_address(hostname).is_loopback
-            except ValueError:
-                local_hostname = hostname == "localhost"
-            if not local_hostname:
+            if not is_local_request(request):
                 return JSONResponse(
                     status_code=403, content={"detail": "管理 API 仅接受本机地址"}
                 )
@@ -536,10 +541,8 @@ class VNextMemoryAdminRouter(BaseRouter):
                     await session.scalars(
                         select(MemoryRelationModel)
                         .where(
-                            (
-                                (MemoryRelationModel.source_memory_id == memory_id)
-                                | (MemoryRelationModel.target_memory_id == memory_id)
-                            )
+                            (MemoryRelationModel.source_memory_id == memory_id)
+                            | (MemoryRelationModel.target_memory_id == memory_id)
                         )
                         .order_by(
                             MemoryRelationModel.created_at,
@@ -690,7 +693,8 @@ class VNextMemoryAdminRouter(BaseRouter):
                 )
                 saved_at = await session.scalar(
                     select(func.max(PersonaUpdateLogModel.created_at)).where(
-                        PersonaUpdateLogModel.person_id == person.person_id,
+                        PersonaUpdateLogModel.person_id
+                        == person_api.generate_raw_person_id(person.platform, person.user_id),
                         PersonaUpdateLogModel.new_content_hash
                         == sha256(impression.encode()).hexdigest(),
                         PersonaUpdateLogModel.impression_text == impression,

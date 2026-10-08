@@ -36,7 +36,7 @@ from .models import (
     PersonaUpdateMemoryModel,
 )
 from .repository import MemoryRepository
-from .schema import VNextSchema
+from .schema import VNextSchema, normalize_person_reference
 
 PersonaGenerator = Callable[[str], Awaitable[Mapping[str, object]]]
 PERSONA_GENERATOR_VERSION = "memory-chat-v1"
@@ -88,7 +88,7 @@ def _inline_memory_references(text_value: str) -> str:
         marker, space, memory_references = line.partition(" ")
         if (
             not space
-            or marker != _footnote_marker(number)
+            or marker not in {_footnote_marker(number), f"〔{_footnote_marker(number)}〕"}
             or not MEMORY_REFERENCE_GROUP.fullmatch(memory_references)
         ):
             raise ValueError("人物印象记忆尾注格式不完整")
@@ -100,12 +100,11 @@ def _inline_memory_references(text_value: str) -> str:
     def replace_marker(match: re.Match[str]) -> str:
         """展开正文编号并记录实际使用的尾注。"""
         marker = match.group(0)
-        if marker not in footnotes:
-            raise ValueError("人物印象引用了不存在的记忆尾注")
         used_markers.add(marker)
         return footnotes[marker]
 
-    expanded = MEMORY_FOOTNOTE_MARKER.sub(replace_marker, body)
+    pattern = re.compile("|".join(re.escape(marker) for marker in sorted(footnotes, key=len, reverse=True)))
+    expanded = pattern.sub(replace_marker, body)
     if used_markers != set(footnotes):
         raise ValueError("人物印象包含正文未引用的记忆尾注")
     return expanded
@@ -115,12 +114,14 @@ def _format_memory_footnotes(text_value: str) -> str:
     """合并相邻记忆引用，以正文编号和末尾依据保存印象。"""
     inline_text = _inline_memory_references(text_value)
     footnotes: dict[tuple[str, ...], str] = {}
+    has_natural_numbers = MEMORY_FOOTNOTE_MARKER.search(inline_text) is not None
 
     def replace_references(match: re.Match[str]) -> str:
         """按首次出现顺序编号，相同依据组复用编号。"""
         memory_ids = tuple(dict.fromkeys(MEMORY_REFERENCE.findall(match.group(0))))
         if memory_ids not in footnotes:
-            footnotes[memory_ids] = _footnote_marker(len(footnotes) + 1)
+            marker = _footnote_marker(len(footnotes) + 1)
+            footnotes[memory_ids] = f"〔{marker}〕" if has_natural_numbers else marker
         return footnotes[memory_ids]
 
     body = MEMORY_REFERENCE_GROUP.sub(replace_references, inline_text)
@@ -230,8 +231,8 @@ class PersonaService:
 
     async def get_person_ref(self, person_id: str) -> str | None:
         """保留平台人物标识，将可核实的核心哈希转换为平台账号。"""
-        normalized = person_id.strip()
-        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*:[^\s:]+", normalized):
+        normalized = normalize_person_reference(person_id)
+        if normalized is not None:
             return normalized
         person = await self.get_core_person(person_id)
         if person is not None:
@@ -694,7 +695,7 @@ class PersonaService:
             return tuple(
                 sorted(
                     {
-                        person_id.strip()
+                        person_id
                         for person_id in (
                             await session.scalars(primary.union(secondary))
                         ).all()
@@ -916,7 +917,7 @@ class PersonaService:
         except json.JSONDecodeError as error:
             raise ValueError("Persona 模型返回无效 JSON") from error
         if not isinstance(decoded, dict):
-            raise ValueError("Persona 模型结果必须是 JSON 对象")
+            raise TypeError("Persona 模型结果必须是 JSON 对象")
         return decoded
 
     @staticmethod

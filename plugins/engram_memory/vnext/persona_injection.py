@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from time import time
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from src.app.plugin_system.api import (
     adapter_api,
@@ -93,7 +93,7 @@ class VNextPrivatePersonaEventHandler(BaseEventHandler):
 
     name = "private_persona"
     description = "将私聊对象的当前人物印象固定注入首个 User"
-    init_subscribe: ClassVar[list[EventType]] = [
+    init_subscribe: list[EventType | str] = [  # noqa: RUF012
         EventType.ON_CHATTER_STEP,
         EventType.BEFORE_LLM_REQUEST,
     ]
@@ -186,7 +186,7 @@ class VNextGroupPersonaEventHandler(BaseEventHandler):
     name = "group_persona"
     description = "将群聊近期参与者的当前人物印象实时注入最新 User 末尾"
     weight = -1
-    init_subscribe: ClassVar[list[EventType]] = [EventType.BEFORE_LLM_REQUEST]
+    init_subscribe: list[EventType | str] = [EventType.BEFORE_LLM_REQUEST]  # noqa: RUF012
 
     async def execute(
         self, event_name: str, params: dict[str, Any]
@@ -226,7 +226,7 @@ class VNextGroupPersonaEventHandler(BaseEventHandler):
             bot_id = str(bot_info.get("bot_id") or "") if bot_info else ""
             participants: dict[str, tuple[str, str]] = {}
             for row in reversed(rows):
-                person_id = str(row["person_id"] or "").strip()
+                person_id = str(row["person_id"] or "")
                 if (
                     not person_id
                     or person_id in {"bot", "system"}

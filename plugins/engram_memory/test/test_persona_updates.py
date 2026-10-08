@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -27,6 +27,7 @@ from ..vnext.persona_service import (
     _inline_memory_references,
 )
 from ..vnext.persona_updater import PersonaUpdater
+from ..vnext.repository import MemoryRepository, UnresolvedPersonError
 
 
 @pytest.fixture
@@ -58,6 +59,64 @@ class _Repository:
     async def resolve_person_aliases(self, person_id: str) -> tuple[str, ...]:
         """返回示例人物的单一别名。"""
         return (person_id,)
+
+    async def pending_persona_operations(
+        self, person_id: str | None = None
+    ) -> tuple[tuple[str, str, MemoryChanged], ...]:
+        """测试仓储没有尚未完成的持久变化。"""
+        return ()
+
+    async def complete_persona_operations(self, keys: tuple[str, ...]) -> None:
+        """完成测试仓储中的空操作集合。"""
+        return
+
+
+@pytest.mark.asyncio
+async def test_restart_recovers_update_for_existing_persona(
+    tmp_path: Any, managed_tasks: dict[str, asyncio.Task[Any]]
+) -> None:
+    """已有人物印象不阻止恢复失败通知，成功后只确认本轮读取的操作。"""
+    from datetime import UTC, datetime
+
+    from ..vnext.domain import (
+        CreateMemoryInput,
+        EvidenceInput,
+        SubjectInput,
+        WriteContext,
+    )
+    from ..vnext.enums import ActorType, EvidenceSourceType, MemoryKind, SubjectKind
+    from ..vnext.memory_service import MemoryService
+    from ..vnext.schema import VNextSchema
+
+    schema = VNextSchema(str(tmp_path / "recovery.db"))
+    await schema.initialize()
+    now = datetime.now(UTC)
+    writer = MemoryService(schema, "example-model", AsyncMock(side_effect=RuntimeError("example failed")))
+    person_id = "test:example-account"
+    data = CreateMemoryInput("标题", "正文", MemoryKind.FACT,
+        SubjectInput(SubjectKind.PERSON, person_id=person_id), now,
+        evidence=(EvidenceInput(EvidenceSourceType.ADMIN, now, note="来源"),))
+    try:
+        result = await writer.create_memory(data, WriteContext(ActorType.ADMIN))
+        repository = MemoryRepository(schema)
+        service = SimpleNamespace(
+            get_active_person_ids=AsyncMock(return_value=(person_id,)),
+            get_persona=AsyncMock(return_value=SimpleNamespace(impression_text="已存在的印象")),
+            refresh=AsyncMock(return_value=object()),
+        )
+        updater = PersonaUpdater(cast(PersonaService, service), repository, max_concurrency=1)
+        try:
+            await updater._scan_missing()
+            assert updater._task is not None and updater._task.task is not None
+            await updater._task.task
+            assert service.refresh.await_count == 1
+            refreshed_person, changes = service.refresh.await_args.args
+            assert refreshed_person == person_id and changes[0].memory_id == result.memory_id
+            assert await repository.pending_persona_operations() == ()
+        finally:
+            await updater.close()
+    finally:
+        await schema.close()
 
 
 def _change(
@@ -270,8 +329,9 @@ async def test_seen_revisions_persist_without_citations_and_do_not_advance_on_fa
         )
         selected_ids = [item.memory_id for item in saved]
         returned = await reader.read([*selected_ids, selected_ids[0]])
-        assert [item["memory_id"] for item in returned["memories"]] == selected_ids
-        assert [item["content"] for item in returned["memories"]] == [
+        returned_memories = cast(list[dict[str, object]], returned["memories"])
+        assert [item["memory_id"] for item in returned_memories] == selected_ids
+        assert [item["content"] for item in returned_memories] == [
             "完整正文0",
             "完整正文1",
         ]
@@ -319,8 +379,9 @@ async def test_seen_revisions_persist_without_citations_and_do_not_advance_on_fa
             ),
             ("test:a",),
         )
-        assert all("content" not in item for item in changes[0]["revisions"])
-        assert [item["is_current"] for item in changes[0]["revisions"]] == [False, True]
+        revisions = cast(list[dict[str, object]], changes[0]["revisions"])
+        assert all("content" not in item for item in revisions)
+        assert [item["is_current"] for item in revisions] == [False, True]
 
         async def fail(payload: str) -> dict[str, object]:
             """模拟生成阶段的格式校验失败。"""
@@ -527,6 +588,17 @@ def test_memory_footnotes_do_not_limit_reference_count() -> None:
     assert "认识50\u32bf" in formatted
     assert "认识51[51]" in formatted
     assert _inline_memory_references(formatted) == inline_text
+    assert _format_memory_footnotes(formatted) == formatted
+
+
+@pytest.mark.parametrize("natural", ["arr[1]", "① 第一项 ② 第二项", "自然编号①"])
+def test_memory_footnotes_preserve_natural_numbers(natural: str) -> None:
+    """自然编号不被改写或当作缺失引用，记忆依据仍可无损往返。"""
+    inline = f"{natural}。相关认识[Memory: example-memory]。"
+    formatted = _format_memory_footnotes(inline)
+    assert natural in formatted
+    assert "相关认识〔①〕" in formatted
+    assert _inline_memory_references(formatted) == inline
     assert _format_memory_footnotes(formatted) == formatted
 
 
@@ -1193,7 +1265,7 @@ async def test_placeholder_bootstrap_retries_after_restart(
 
     async def skip_backoff(delay: float) -> None:
         """测试中的有限重试无需真实时间等待。"""
-        return None
+        return
 
     async def drain(updater: PersonaUpdater) -> None:
         """等待本轮扫描与其派生的全部托管任务结束。"""
@@ -1775,7 +1847,7 @@ async def test_schema_migration_recovers_after_process_exit(
         "module.upgrade_persona_audit=interrupted\n"
         "asyncio.run(module.VNextSchema(sys.argv[2]).initialize())\n"
     )
-    result = subprocess.run(
+    result = await asyncio.to_thread(subprocess.run,
         [sys.executable, "-B", "-c", program, VNextSchema.__module__, str(path)],
         capture_output=True,
         check=False,
@@ -1939,13 +2011,15 @@ async def test_recent_chat_keeps_speakers_replies_and_total_limit(
     settings.recent_chat_max_messages = 3
     service = PersonaService(object(), persona_config=settings)  # type: ignore[arg-type]
     blocks = await service._load_recent_chat(
-        SimpleNamespace(platform="test", user_id="a"),
+        persona_service.PersonInfo(platform="test", user_id="a"),
         ("person-a",),  # type: ignore[arg-type]
     )
     assert len(blocks) == 1
-    assert [row["role"] for row in blocks[0]["messages"]] == ["target", "other", "bot"]
-    assert len(blocks[0]["messages"]) == 3
-    assert blocks[0]["messages"][2]["reply_to"] == "message-1"
+    block_messages = cast(list[dict[str, object]], blocks[0]["messages"])
+    assert [row["role"] for row in block_messages] == ["target", "other", "bot"]
+    assert len(block_messages) == 3
+    assert block_messages[2]["reply_to"] == "message-1"
+    assert load.await_args is not None
     assert load.await_args.kwargs["filter_bot"] is False
     assert load.await_args.kwargs["limit"] == 4
 
@@ -2019,8 +2093,10 @@ async def test_updater_shares_three_slots_and_deduplicates_aliases(
         assert len(updater._running) == 3
         release.set()
         if updater._bootstrap is not None:
+            assert updater._bootstrap.task is not None
             await updater._bootstrap.task
         assert updater._task is not None
+        assert updater._task.task is not None
         await updater._task.task
         assert maximum == 3
         assert {person_id for person_id, _ in calls} == {
@@ -2037,6 +2113,58 @@ async def test_updater_shares_three_slots_and_deduplicates_aliases(
     finally:
         await updater.close()
     assert managed_tasks
+    assert all(task.done() for task in managed_tasks.values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bootstrap", [False, True])
+@pytest.mark.parametrize("has_known_person", [False, True])
+async def test_updater_skips_unresolved_historical_people(
+    managed_tasks: dict[str, asyncio.Task[Any]],
+    bootstrap: bool,
+    has_known_person: bool,
+) -> None:
+    """未知历史身份不生成或重试，混合关联中的正常人物仍完成补建与更新。"""
+    unknown = persona_service.person_api.generate_person_id("test", "unregistered")
+    known = "test:account-a"
+    people = (unknown, known) if has_known_person else (unknown,)
+
+    class Repository(_Repository):
+        """只拒绝没有身份来源的历史哈希。"""
+
+        async def resolve_person_aliases(self, person_id: str) -> tuple[str, ...]:
+            """正常人物保持平台账号，未知人物明确标记为不可核实。"""
+            if person_id == unknown:
+                raise UnresolvedPersonError("人物哈希缺少可核实的平台账号")
+            return (person_id,)
+
+    service = SimpleNamespace(
+        get_active_person_ids=AsyncMock(return_value=people),
+        get_persona=AsyncMock(return_value=SimpleNamespace(impression_text="")),
+        refresh=AsyncMock(return_value=object()),
+    )
+    updater = PersonaUpdater(
+        cast(PersonaService, service),
+        cast(MemoryRepository, Repository()),
+        max_concurrency=1,
+    )
+    change = _change(after=people)
+    try:
+        if bootstrap:
+            await updater._scan_missing()
+        else:
+            await updater.enqueue(change)
+        if has_known_person:
+            assert updater._task is not None and updater._task.task is not None
+            await updater._task.task
+            service.refresh.assert_awaited_once_with(known, () if bootstrap else (change,))
+        else:
+            assert updater._task is None
+            service.refresh.assert_not_awaited()
+        assert not updater._pending and not updater._retries and not updater.last_errors
+        assert unknown not in updater._attempts
+    finally:
+        await updater.close()
     assert all(task.done() for task in managed_tasks.values())
 
 
@@ -2287,9 +2415,12 @@ async def test_persona_read_tool_executes_and_continues_real_response(
         if len(requests) == 1:
             tool_parts = [part for part in self.payloads if part.role == ROLE.TOOL]
             assert len(tool_parts) == 1
-            tool = tool_parts[0].content[0].to_schema()
-            assert tool["function"]["name"] == "persona_memory_read"
-            assert tool["function"]["parameters"]["required"] == ["memory_ids"]
+            content = tool_parts[0].content[0]
+            assert content is persona_service._PersonaMemoryReader
+            tool = persona_service._PersonaMemoryReader.to_schema()
+            function = cast(dict[str, Any], tool["function"])
+            assert function["name"] == "persona_memory_read"
+            assert function["parameters"]["required"] == ["memory_ids"]
             return LLMResponse(
                 _stream=None,
                 _upper=self,
@@ -2401,7 +2532,7 @@ async def test_persona_tool_loop_stops_after_bounded_rounds(
 
     monkeypatch.setattr(LLMRequest, "send", send)
     with pytest.raises(ValueError, match="补读超过允许轮数"):
-        await PersonaService(object())._generate(
+        await PersonaService(persona_service.VNextSchema(":memory:"))._generate(
             json.dumps({"person_id": "person-a", "active_memories": []})
         )  # type: ignore[arg-type]
     assert calls == persona_service.PERSONA_MAX_TOOL_ROUNDS + 1
@@ -2509,6 +2640,7 @@ async def test_persona_snapshots_reject_mutation(tmp_path: Any) -> None:
         with pytest.raises(ValueError, match="追加式历史记录"):
             async with schema.database.session() as session:
                 row = await session.get(PersonaUpdateLogModel, update_id)
+                assert row is not None
                 row.impression_text = "替换的正文"
                 await session.flush()
         with pytest.raises(ValueError, match="追加式历史记录"):
@@ -2573,13 +2705,14 @@ async def test_chat_samples_contiguous_blocks_across_time_with_shared_budget(
     settings = EngramMemoryConfig().vnext.persona
     settings.recent_chat_max_messages = 100
     blocks = await PersonaService(object(), persona_config=settings)._load_recent_chat(  # type: ignore[arg-type]
-        SimpleNamespace(platform="test", user_id="a"),
+        persona_service.PersonInfo(platform="test", user_id="a"),
         ("person-a",),  # type: ignore[arg-type]
     )
     assert [row["stream_id"] for row in blocks] == ["stream-0", "stream-2"]
-    assert sum(len(row["messages"]) for row in blocks) == 100
+    message_blocks = [cast(list[dict[str, object]], row["messages"]) for row in blocks]
+    assert sum(len(messages) for messages in message_blocks) == 100
     assert all(row["partial_start"] for row in blocks)
-    assert all(len(row["messages"]) == 50 for row in blocks)
+    assert all(len(messages) == 50 for messages in message_blocks)
 
 
 @pytest.mark.asyncio
@@ -2666,7 +2799,8 @@ async def test_formal_memory_bootstrap_history_lookup_and_withdrawal(
         assert first is not None and first.changed
         assert baselines == [""] and write.await_count == 1
         first_text = person.impression
-        assert (await service.get_persona("person-a")).is_current
+        snapshot = await service.get_persona("person-a")
+        assert snapshot is not None and snapshot.is_current
         unchanged = await service.refresh("person-a", (_change(saved.memory_id),))
         assert unchanged is not None and not unchanged.changed
         assert write.await_count == 1
@@ -2677,22 +2811,18 @@ async def test_formal_memory_bootstrap_history_lookup_and_withdrawal(
             and "persona_history" not in current
         )
         before_lookup = len(baselines)
-        assert (
-            len(
-                (await tools.person_lookup("person-a", context, view="history"))[
-                    "persona_history"
-                ]
-            )
-            == 1
-        )
+        history = await tools.person_lookup("person-a", context, view="history")
+        assert len(cast(list[dict[str, object]], history["persona_history"])) == 1
         revision = await tools.person_lookup(
             "person-a", context, view="revision", revision_no=1
         )
-        assert revision["persona_revision"]["impression_text"] == first_text
-        assert revision["persona_revision"]["historical"] is True
+        persona_revision = cast(dict[str, object], revision["persona_revision"])
+        assert persona_revision["impression_text"] == first_text
+        assert persona_revision["historical"] is True
         assert len(baselines) == before_lookup
         person.impression = "外部修改的残留"
-        assert not (await service.get_persona("person-a")).is_current
+        snapshot = await service.get_persona("person-a")
+        assert snapshot is not None and not snapshot.is_current
         assert (await tools.person_lookup("person-a", context))[
             "persona_impression"
         ] == "暂无人物印象"

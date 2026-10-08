@@ -22,14 +22,6 @@ class LocalDiarySource(DiarySource):
         """保存示例消息，不连接框架消息存储。"""
         self.messages = messages
 
-    async def allowed(
-        self,
-        details: StreamDetails,
-        message: Mapping[str, Any] | None = None,
-    ) -> bool:
-        """允许本地示例中的所有消息。"""
-        return True
-
     async def page(
         self,
         progress: Progress,

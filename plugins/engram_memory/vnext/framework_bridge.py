@@ -254,6 +254,7 @@ class VectorDatabase(Protocol):
         **kwargs: Any,
     ) -> dict[str, list[Any]]:
         """查询 Engram 专属 collection。"""
+        ...
 
     async def delete(
         self,
@@ -274,6 +275,7 @@ class VectorDatabase(Protocol):
         include: list[str] | None = None,
     ) -> dict[str, Any]:
         """读取 Engram 专属 collection 的派生入口。"""
+        ...
 
 
 def create_managed_task(
@@ -318,7 +320,7 @@ async def _message_snapshots_from_rows(
     """将只读消息行转换为包含原始人物元数据的快照。"""
     person_ids = tuple(
         dict.fromkeys(
-            str(row.get("person_id") or "").strip()
+            str(row.get("person_id") or "")
             for row in rows
             if str(row.get("person_id") or "").strip()
         )
@@ -346,13 +348,13 @@ async def _message_snapshots_from_rows(
 
     snapshots: list[MessageSnapshot] = []
     for row in rows:
-        message_id = str(row.get("message_id") or "").strip()
+        message_id = str(row.get("message_id") or "")
         if not message_id:
             continue
-        stream_id = str(row.get("stream_id") or "").strip()
-        person_id = str(row.get("person_id") or "").strip() or None
+        stream_id = str(row.get("stream_id") or "")
+        person_id = str(row.get("person_id") or "") or None
         person = people.get(person_id or "", {})
-        sender_id = str(person.get("user_id") or person_id or "").strip() or None
+        sender_id = str(person.get("user_id") or person_id or "") or None
         snapshots.append(
             MessageSnapshot(
                 message_id=message_id,
@@ -548,8 +550,8 @@ __all__ = [
     "delete_owned_reminder",
     "get_managed_task",
     "get_vector_database",
-    "read_message_snapshots",
     "read_message_context_snapshots",
+    "read_message_snapshots",
     "read_migration_message_candidates",
     "read_migration_person_candidates",
     "read_migration_stream_candidates",

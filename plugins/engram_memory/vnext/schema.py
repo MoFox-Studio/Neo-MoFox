@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sqlite3
@@ -15,14 +16,26 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from src.app.plugin_system.api import database_api, person_api
+from src.app.plugin_system.api import database_api, log_api, person_api
 from src.app.plugin_system.api.message_api import PersonInfo
 from src.app.plugin_system.api.storage_api import PluginDatabase
 
 from .models import ALL_MODELS, SchemaVersionModel
 
+logger = log_api.get_logger("engram_memory.vnext.schema")
+
 SCHEMA_KEY = "engram_memory_vnext"
 SCHEMA_VERSION = 5
+
+
+def normalize_person_reference(value: object) -> str | None:
+    """校验显式平台账号，保留平台和不透明账号的原始字符串。"""
+    if not isinstance(value, str):
+        return None
+    platform, separator, user_id = value.partition(":")
+    if not separator or not platform.strip() or not user_id.strip():
+        return None
+    return person_api.generate_raw_person_id(platform, user_id)
 
 
 def upgrade_persona_audit(connection: sqlite3.Connection, source_version: int) -> None:
@@ -139,14 +152,16 @@ class VNextSchema:
                 )
                 uri = f"file:{quote(self._db_path.absolute().as_posix(), safe='/:')}?mode=ro"
                 try:
-                    with closing(sqlite3.connect(uri, uri=True)) as source:
-                        with closing(sqlite3.connect(backup_path)) as backup:
-                            backup.execute("PRAGMA synchronous=FULL")
-                            source.backup(backup)
-                            if backup.execute("PRAGMA integrity_check").fetchone() != (
-                                "ok",
-                            ):
-                                raise RuntimeError("Engram 自动迁移备份完整性检查失败")
+                    with (
+                        closing(sqlite3.connect(uri, uri=True)) as source,
+                        closing(sqlite3.connect(backup_path)) as backup,
+                    ):
+                        backup.execute("PRAGMA synchronous=FULL")
+                        source.backup(backup)
+                        if backup.execute("PRAGMA integrity_check").fetchone() != (
+                            "ok",
+                        ):
+                            raise RuntimeError("Engram 自动迁移备份完整性检查失败")
                 except BaseException:
                     backup_path.unlink(missing_ok=True)
                     raise
@@ -232,7 +247,7 @@ class VNextSchema:
         await self.normalize_person_ids()
 
     async def normalize_person_ids(self) -> dict[str, int]:
-        """备份后原子转换人物哈希，未知身份或不一致账号拒绝转换。"""
+        """备份后原子转换可核实的人物哈希，未知身份保留原值并警告。"""
         person_tables = tuple(
             model.__tablename__
             for model in ALL_MODELS
@@ -252,6 +267,10 @@ class VNextSchema:
                 "FROM engram_vnext_evidence_message_snapshot WHERE redacted_at IS NULL"
             ).fetchall()
             values.update(row[0] for row in snapshots)
+            legacy_notes = source.execute(
+                "SELECT note FROM engram_vnext_evidence "
+                "WHERE source_type='LEGACY_RECORD' AND note IS NOT NULL"
+            ).fetchall()
         hashes = {
             value for value in values
             if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value)
@@ -280,8 +299,39 @@ class VNextSchema:
         for person_id, platform, user_id in snapshots:
             if person_id in hashes and isinstance(platform, str) and isinstance(user_id, str):
                 add_identity(person_id, platform, user_id)
-        if hashes - mapping.keys():
-            raise ValueError("人物哈希缺少可核实的平台账号，拒绝转换")
+        for (note,) in legacy_notes:
+            try:
+                legacy = json.loads(note)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(legacy, dict) or legacy.get("format") != "booku-record-v1":
+                continue
+            record = legacy.get("record")
+            if not isinstance(record, dict):
+                continue
+            references = [record.get("person_id")]
+            related = record.get("related_people")
+            if isinstance(related, str):
+                try:
+                    related = json.loads(related)
+                except json.JSONDecodeError:
+                    related = None
+            if isinstance(related, list):
+                references.extend(related)
+            for reference in references:
+                person_ref = normalize_person_reference(reference)
+                if person_ref is None:
+                    continue
+                platform, user_id = person_ref.split(":", 1)
+                person_hash = person_api.generate_person_id(platform, user_id)
+                if person_hash in hashes:
+                    add_identity(person_hash, platform, user_id)
+        unresolved = hashes - mapping.keys()
+        if unresolved:
+            logger.warning(
+                f"有 {len(unresolved)} 个历史人物哈希缺少可核实的平台账号，"
+                "保留原值供核对，不阻塞其他人物转换和插件初始化"
+            )
         counts: dict[str, int] = {}
         with closing(sqlite3.connect(self._db_path, timeout=10)) as connection:
             connection.execute("PRAGMA synchronous=FULL")
@@ -300,19 +350,21 @@ class VNextSchema:
                         "FROM engram_vnext_evidence_message_snapshot WHERE redacted_at IS NULL"
                     ) if isinstance(row[0], str) and re.fullmatch(r"[0-9a-fA-F]{64}", row[0])
                 )
-                if current_hashes - mapping.keys():
+                if current_hashes - hashes:
                     raise ValueError("人物标识在转换前发生变化，拒绝转换")
-                if not current_hashes:
+                if not current_hashes.intersection(mapping):
                     return {}
                 backup_dir = self._db_path.parent / "backups"
                 backup_dir.mkdir(parents=True, exist_ok=True)
                 backup_path = backup_dir / f"{self._db_path.stem}.person-ids.{uuid4().hex}.db"
                 try:
-                    with closing(sqlite3.connect(uri, uri=True)) as source:
-                        with closing(sqlite3.connect(backup_path)) as backup:
-                            source.backup(backup)
-                            if backup.execute("PRAGMA integrity_check").fetchone() != ("ok",):
-                                raise RuntimeError("人物标识转换备份完整性检查失败")
+                    with (
+                        closing(sqlite3.connect(uri, uri=True)) as source,
+                        closing(sqlite3.connect(backup_path)) as backup,
+                    ):
+                        source.backup(backup)
+                        if backup.execute("PRAGMA integrity_check").fetchone() != ("ok",):
+                            raise RuntimeError("人物标识转换备份完整性检查失败")
                 except BaseException:
                     backup_path.unlink(missing_ok=True)
                     raise
