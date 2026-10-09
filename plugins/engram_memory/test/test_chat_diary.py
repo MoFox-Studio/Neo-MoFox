@@ -82,6 +82,16 @@ def test_diary_config_body_char_budget() -> None:
         DiaryConfig(body_char_budget=0)
 
 
+def test_diary_config_model_task() -> None:
+    """旧配置默认使用 actor，允许选择其他模型任务并拒绝空任务名。"""
+    assert EngramMemoryConfig.from_dict({}).diary.model_task == "actor"
+    config = EngramMemoryConfig.from_dict({"diary": {"model_task": "diary_writer"}})
+    assert config.diary.model_task == "diary_writer"
+    assert config.model_dump()["diary"]["model_task"] == "diary_writer"
+    with pytest.raises(ValueError, match="model_task"):
+        DiaryConfig(model_task="")
+
+
 @pytest.mark.asyncio
 async def test_diary_atomic_commit_and_stale_rejection(diary_path: str) -> None:
     """正文与位置同批保存，正文不变也前进，过期结果不覆盖。"""
@@ -1301,6 +1311,7 @@ async def test_diary_formats_actual_bot_and_placeholder_without_guessing(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("body_char_budget", [8, 800])
+@pytest.mark.parametrize("model_task", ["actor", "diary_writer"])
 @pytest.mark.parametrize(
     ("response_text", "expected_error"),
     [
@@ -1330,6 +1341,7 @@ async def test_diary_request_is_clean_and_persona_is_complete(
     response_text: str,
     expected_error: str | None,
     body_char_budget: int,
+    model_task: str,
 ) -> None:
     """独立请求保留人设、段落和整篇预算指令，合法正文不因超预算而截断。"""
     persona = {"name": "示例Bot", "personality": "自然说话", "safety": "遵守事实"}
@@ -1341,12 +1353,12 @@ async def test_diary_request_is_clean_and_persona_is_complete(
         ),
     )
 
-    def actor_models(task: str) -> list[Any]:
-        """校验日记复用人设表达的 Actor 模型任务。"""
-        assert task == "actor"
+    def diary_models(task: str) -> list[Any]:
+        """校验日记使用配置指定的模型任务。"""
+        assert task == model_task
         return []
 
-    monkeypatch.setattr(diary_service.llm_api, "get_model_set_by_task", actor_models)
+    monkeypatch.setattr(diary_service.llm_api, "get_model_set_by_task", diary_models)
     create_request = diary_service.llm_api.create_llm_request
     requests: list[Any] = []
 
@@ -1366,7 +1378,8 @@ async def test_diary_request_is_clean_and_persona_is_complete(
 
     monkeypatch.setattr(diary_service.llm_api, "create_llm_request", capture_request)
     service = DiaryService(
-        DiaryConfig(body_char_budget=body_char_budget), DiaryStore(diary_path)
+        DiaryConfig(body_char_budget=body_char_budget, model_task=model_task),
+        DiaryStore(diary_path),
     )
     payload: dict[str, object] = {
         "target_date": "2026-10-03",
