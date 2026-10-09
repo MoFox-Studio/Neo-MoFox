@@ -289,6 +289,63 @@ async def test_ingest_once_skips_previously_rejected_media_cache(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["pending", "unreadable", "processed", "empty"])
+async def test_ingest_once_selects_pending_media_cache_file(
+    ingest_service: EmojiSenderService, tmp_path: Path, cache_state: str
+) -> None:
+    """缓存选图应跳过已处理内容，单轮只评估一张待处理图片。"""
+    service = ingest_service
+    service._cfg().ingest.sample_from_media_cache = True
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    rejected_source = cache_dir / "a_rejected.png"
+    ingested_source = cache_dir / "b_ingested.png"
+    pending_source = cache_dir / "c_pending.png"
+    candidates: list[Path] = []
+    if cache_state != "empty":
+        rejected_source.write_bytes(b"rejected")
+        ingested_source.write_bytes(b"ingested")
+        candidates.extend([rejected_source, ingested_source])
+        service._rejected_hashes.add(service._sha256_bytes(b"rejected"))
+    if cache_state in ("pending", "unreadable"):
+        pending_source.write_bytes(b"pending")
+        candidates.append(pending_source)
+        another_pending_source = cache_dir / "d_pending.png"
+        another_pending_source.write_bytes(b"another-pending")
+        candidates.append(another_pending_source)
+    if cache_state == "unreadable":
+        candidates.insert(0, cache_dir / "missing.png")
+
+    with (
+        patch.object(service, "_align_data_dir_with_db", new=AsyncMock()),
+        patch.object(service, "_pick_next_manual_meme_file", new=AsyncMock(return_value=None)),
+        patch.object(service, "_media_cache_dir", return_value=cache_dir),
+        patch.object(service, "_list_meme_files", return_value=candidates),
+        patch.object(
+            service,
+            "_already_ingested",
+            new=AsyncMock(side_effect=lambda source_hash: source_hash == service._sha256_bytes(b"ingested")),
+        ),
+        patch("plugins.emoji_sender.service.random.shuffle"),
+        patch("plugins.emoji_sender.service.random.choice", side_effect=lambda files: files[0]),
+        patch.object(
+            service, "_vlm_decide_and_label", new=AsyncMock(return_value={"keep": False})
+        ) as label_mock,
+        patch.object(
+            service, "_compress_image_for_vlm", return_value=(b"image", "image/png", False)
+        ) as compress_mock,
+    ):
+        await service.ingest_once()
+
+    if cache_state in ("pending", "unreadable"):
+        label_mock.assert_awaited_once()
+        compress_mock.assert_called_once_with(b"pending", "image/png")
+    else:
+        label_mock.assert_not_awaited()
+        compress_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("raw_response", "expected_attempts"),
     [

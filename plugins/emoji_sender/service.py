@@ -521,12 +521,25 @@ class EmojiSenderService(BaseService):
                 logger.warning(f"删除孤儿文件失败: {orphan_path} - {e}")
 
     async def _pick_random_media_cache_file(self) -> Path | None:
-        """从 media cache 的 emojis 目录随机挑选一个文件。"""
+        """按随机顺序从 media cache 选择未入库且未被拒绝的图片。"""
         root = self._media_cache_dir()
         candidates = await asyncio.to_thread(self._list_meme_files, root)
         if not candidates:
             return None
-        return random.choice(candidates)
+        random.shuffle(candidates)
+        for candidate in candidates:
+            try:
+                _, meme_id = await asyncio.to_thread(self._read_file_with_hash, candidate)
+            except OSError as error:
+                logger.warning(f"读取缓存表情包失败: {candidate} - {error}")
+                continue
+
+            if meme_id in self._rejected_hashes:
+                continue
+            if not await self._already_ingested(meme_id):
+                return candidate
+
+        return None
 
     async def _already_ingested(self, source_hash: str) -> bool:
         """检查某个表情包（按 hash）是否已入库。"""
