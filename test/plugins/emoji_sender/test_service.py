@@ -10,8 +10,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 import chromadb
+import pytest
 
 from plugins.emoji_sender.action import CollectEmojiMemeAction, RefreshEmojiMemeAction
 from plugins.emoji_sender.config import EmojiSenderConfig
@@ -19,10 +19,11 @@ from plugins.emoji_sender.plugin import EmojiSenderPlugin
 from plugins.emoji_sender.service import EmojiSenderService, MemeCandidate
 from src.app.plugin_system.api.storage_api import PluginDatabase
 from src.app.plugin_system.types import ChatStream, Message, StreamContext
-from src.core.managers.service_manager import ServiceManager
 from src.core.managers.media_manager.cache import MediaCache
 from src.core.managers.media_manager.utils import compute_media_hash
+from src.core.managers.service_manager import ServiceManager
 from src.core.models.sql_alchemy import ImageDescriptions, Images
+from src.kernel.concurrency import get_task_manager
 
 
 def _make_service(*, temperature: float = 0.12) -> EmojiSenderService:
@@ -481,6 +482,10 @@ async def media_database(tmp_path: Path) -> AsyncIterator[PluginDatabase]:
         """通过真实 CRUD 更新测试记录并失效查询缓存。"""
         return await database.crud(model).update(id=id, obj_in=obj_in)
 
+    async def delete(model: type[Any], id: int) -> bool:
+        """通过真实 CRUD 删除测试记录。"""
+        return await database.crud(model).delete(id=id)
+
     async def get_media_info(media_id: str) -> dict[str, Any] | None:
         """返回测试数据库中图片媒体记录的完整字段。"""
         media = await database.crud(Images).get_by(image_id=media_id)
@@ -493,6 +498,7 @@ async def media_database(tmp_path: Path) -> AsyncIterator[PluginDatabase]:
             patch("plugins.emoji_sender.service.database_api.get_by", new=get_by),
             patch("plugins.emoji_sender.service.database_api.create", new=create),
             patch("plugins.emoji_sender.service.database_api.update", new=update),
+            patch("plugins.emoji_sender.service.database_api.delete", new=delete),
             patch("plugins.emoji_sender.service.get_media_info", new=get_media_info),
         ):
             yield database
@@ -766,7 +772,7 @@ async def test_refresh_uncollected_media_failure_preserves_description(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source_state", ["legacy-record", "chat-cache-cleaned", "collection-copy-cleaned", "cache-write-fails"])
+@pytest.mark.parametrize("source_state", ["legacy-record", "legacy-record-copy-cleaned", "chat-cache-cleaned", "collection-copy-cleaned", "cache-write-fails"])
 async def test_refresh_chat_media_updates_existing_collection(
     ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any,
     media_database: PluginDatabase, source_state: str
@@ -787,14 +793,15 @@ async def test_refresh_chat_media_updates_existing_collection(
         "image_description_hash": media_id, "type": "emoji", "description": "旧描述", "timestamp": 1.0,
     })
     metadata = {"meme_id": meme_id, "path": str(stored), "description": "旧描述", "tag": "生气"}
-    if source_state != "legacy-record":
+    metadata["source_cache_path"] = str(source)
+    if source_state not in {"legacy-record", "legacy-record-copy-cleaned"}:
         metadata["media_id"] = media_id
     meme_collection.add(
         ids=[f"{meme_id}:生气"], embeddings=[[0.9, 0.8, 0.7]], documents=["旧描述"], metadatas=[metadata],
     )
     if source_state == "chat-cache-cleaned":
         source.unlink()
-    elif source_state == "collection-copy-cleaned":
+    elif source_state in {"collection-copy-cleaned", "legacy-record-copy-cleaned"}:
         stored.unlink()
     before = meme_collection.get(include=["metadatas", "documents", "embeddings"])
     vdb = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=meme_collection))
@@ -814,7 +821,8 @@ async def test_refresh_chat_media_updates_existing_collection(
         patch.object(service, "_embed_query", new=AsyncMock(return_value=[0.1, 0.2, 0.3])),
         patch("plugins.emoji_sender.service.database_api.update", new=update),
     ):
-        ok, result = await service.refresh_meme(meme_id=media_id, extra_prompt="请核对图中文字")
+        requested_id = meme_id if source_state == "legacy-record-copy-cleaned" else media_id
+        ok, result = await service.refresh_meme(meme_id=requested_id, extra_prompt="请核对图中文字")
 
     vlm.assert_awaited_once()
     cached = await media_database.crud(ImageDescriptions).get_by(image_description_hash=media_id, type="emoji")
@@ -878,6 +886,230 @@ async def test_refresh_action_only_updates_uncollected_media_in_current_chat(
         assert vlm.call_args.kwargs["extra_prompt"] == "请核对图中文字"
     embedding.assert_not_awaited()
     assert meme_collection.count() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collected", [False, True])
+@pytest.mark.parametrize("failure", ["unavailable", "open-error", "lookup-error"])
+async def test_refresh_without_vector_db_defers_existing_collection_sync(
+    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any,
+    media_database: PluginDatabase, collected: bool, failure: str,
+) -> None:
+    """收藏库故障不阻止聊天图片刷新，恢复后只同步已有收藏。"""
+    service = ingest_service
+    source = tmp_path / "source.png"
+    source.write_bytes(b"original-image")
+    media_id = compute_media_hash(base64.b64encode(b"original-image").decode("ascii"))
+    meme_id = service._sha256_bytes(b"original-image")
+    media = await media_database.crud(Images).create({
+        "image_id": media_id, "type": "emoji", "path": str(source),
+        "description": "旧描述", "timestamp": 1.0, "vlm_processed": True,
+    })
+    await media_database.crud(ImageDescriptions).create({
+        "image_description_hash": media_id, "type": "emoji", "description": "旧描述", "timestamp": 1.0,
+    })
+    if collected:
+        meme_collection.add(
+            ids=[f"{meme_id}:生气"], embeddings=[[0.9, 0.8, 0.7]], documents=["旧描述"],
+            metadatas=[{"meme_id": meme_id, "path": str(source), "tag": "生气", "description": "旧描述"}],
+        )
+    unavailable = SimpleNamespace(get_or_create_collection=AsyncMock(
+        return_value=meme_collection if failure == "lookup-error" else None,
+        side_effect=RuntimeError("test vector open failure") if failure == "open-error" else None,
+    ))
+    available = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=meme_collection))
+    label = {"description": "新描述", "emotion_tags": ["害羞"], "keep": True}
+    with (
+        patch.object(service, "_vector_db", return_value=unavailable),
+        patch.object(type(meme_collection), "get", side_effect=RuntimeError("test vector lookup failure")),
+        patch.object(service, "_recognize_requested_meme", new=AsyncMock(return_value=label)) as vlm,
+        patch.object(service, "_embed_query", new=AsyncMock()) as embedding,
+    ):
+        ok, result = await service.refresh_meme(meme_id=media_id, allow_chat_media=True)
+    assert ok and "恢复后" in result
+    vlm.assert_awaited_once()
+    embedding.assert_not_awaited()
+    updated = await media_database.crud(Images).get(id=media.id)
+    cached = await media_database.crud(ImageDescriptions).get_by(image_description_hash=media_id, type="emoji")
+    assert updated is not None and updated.description == "新描述"
+    assert cached is not None and cached.description == "新描述"
+    assert list(service._refresh_journal_dir().glob("*.json"))
+    resumed = EmojiSenderService(plugin=service.plugin)
+    with (
+        patch.object(resumed, "_vector_db", return_value=available),
+        patch.object(resumed, "_embed_query", new=AsyncMock(return_value=[0.1, 0.2, 0.3])) as embedding,
+        patch.object(resumed, "_align_data_dir_with_db", new=AsyncMock()),
+        patch.object(resumed, "_pick_next_manual_meme_file", new=AsyncMock(return_value=None)),
+    ):
+        await resumed.ingest_once()
+    assert not resumed._refresh_journal_dir().exists()
+    records = meme_collection.get(include=["documents"])
+    assert records["ids"] == ([f"{meme_id}:害羞"] if collected else [])
+    assert records["documents"] == (["新描述"] if collected else [])
+    assert embedding.await_count == int(collected)
+    assert source.read_bytes() == b"original-image"
+    assert not service._data_dir().exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow_chat_media,length", [(False, 64), (True, 12)])
+async def test_refresh_without_vector_db_rejects_unauthorized_or_short_ids(
+    ingest_service: EmojiSenderService, allow_chat_media: bool, length: int,
+) -> None:
+    """离线刷新不接受其他会话媒体或无法解析的收藏短 ID。"""
+    unavailable = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=None))
+    with (
+        patch.object(ingest_service, "_vector_db", return_value=unavailable),
+        patch("plugins.emoji_sender.service.get_media_info", new=AsyncMock()) as media,
+        patch.object(ingest_service, "_recognize_requested_meme", new=AsyncMock()) as vlm,
+    ):
+        ok, _ = await ingest_service.refresh_meme(meme_id="a" * length, allow_chat_media=allow_chat_media)
+    assert not ok
+    media.assert_not_awaited()
+    vlm.assert_not_awaited()
+    assert not ingest_service._refresh_journal_dir().exists()
+
+
+@pytest.mark.asyncio
+async def test_refresh_cancellation_waits_for_consistent_commit(
+    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any,
+    media_database: PluginDatabase,
+) -> None:
+    """调用方重复取消时等待保存完成，不留下半更新的媒体和收藏。"""
+    service = ingest_service
+    source = tmp_path / "source.png"
+    source.write_bytes(b"original-image")
+    media_id = compute_media_hash(base64.b64encode(b"original-image").decode("ascii"))
+    meme_id = service._sha256_bytes(b"original-image")
+    media = await media_database.crud(Images).create({
+        "image_id": media_id, "type": "emoji", "path": str(source),
+        "description": "旧描述", "timestamp": 1.0, "vlm_processed": True,
+    })
+    await media_database.crud(ImageDescriptions).create({
+        "image_description_hash": media_id, "type": "emoji", "description": "旧描述", "timestamp": 1.0,
+    })
+    metadata = {"meme_id": meme_id, "path": str(source), "description": "旧描述", "tag": "生气"}
+    meme_collection.add(
+        ids=[f"{meme_id}:生气"], embeddings=[[0.9, 0.8, 0.7]], documents=["旧描述"], metadatas=[metadata],
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    store = service._store_meme_labels
+
+    async def paused_store(*args: Any, **kwargs: Any) -> list[str]:
+        """收藏写入后暂停，让调用方在媒体写入前发出取消。"""
+        ids = await store(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return ids
+
+    available = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=meme_collection))
+    with (
+        patch.object(service, "_vector_db", return_value=available),
+        patch.object(service, "_label_requested_meme", new=AsyncMock(return_value=(
+            {"description": "新描述", "emotion_tags": ["害羞"]}, [0.1, 0.2, 0.3],
+        ))),
+        patch.object(service, "_store_meme_labels", new=paused_store),
+    ):
+        task = get_task_manager().create_task(service.refresh_meme(meme_id=meme_id)).task
+        assert task is not None
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+            task.cancel()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    updated = await media_database.crud(Images).get(id=media.id)
+    cached = await media_database.crud(ImageDescriptions).get_by(image_description_hash=media_id, type="emoji")
+    assert updated is not None and updated.description == "新描述"
+    assert cached is not None and cached.description == "新描述"
+    records = meme_collection.get(include=["documents"])
+    assert records["ids"] == [f"{meme_id}:害羞"] and records["documents"] == ["新描述"]
+    assert not service._refresh_journal_dir().exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_cache", [False, True])
+@pytest.mark.parametrize("interruption", ["after-vector", "after-images", "after-cache"])
+async def test_refresh_interrupted_commit_recovers_after_service_recreation(
+    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any,
+    media_database: PluginDatabase, interruption: str, has_cache: bool,
+) -> None:
+    """保存被中断后，新服务在入库前恢复真实 SQL 与 Chroma 的旧值。"""
+    service = ingest_service
+    source = tmp_path / "source.png"
+    source.write_bytes(b"original-image")
+    media_id = compute_media_hash(base64.b64encode(b"original-image").decode("ascii"))
+    meme_id = service._sha256_bytes(b"original-image")
+    media = await media_database.crud(Images).create({
+        "image_id": media_id, "type": "emoji", "path": str(source),
+        "description": "旧描述", "timestamp": 1.0, "vlm_processed": False,
+    })
+    if has_cache:
+        await media_database.crud(ImageDescriptions).create({
+            "image_description_hash": media_id, "type": "emoji", "description": "旧描述", "timestamp": 1.0,
+        })
+    metadata = {"meme_id": meme_id, "path": str(source), "description": "旧描述", "tag": "生气"}
+    meme_collection.add(
+        ids=[f"{meme_id}:生气"], embeddings=[[0.9, 0.8, 0.7]], documents=["旧描述"], metadatas=[metadata],
+    )
+    before = meme_collection.get(include=["metadatas", "documents", "embeddings"])
+    available = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=meme_collection))
+
+    async def interrupted_update(model: type[Any], id: int, obj_in: dict[str, Any]) -> Any:
+        """在指定提交边界中断保存，保留已经提交的真实数据。"""
+        if model is Images and interruption == "after-vector":
+            raise asyncio.CancelledError
+        if model is ImageDescriptions and interruption == "after-images":
+            raise asyncio.CancelledError
+        updated = await media_database.crud(model).update(id=id, obj_in=obj_in)
+        if model is ImageDescriptions and interruption == "after-cache":
+            raise asyncio.CancelledError
+        return updated
+
+    async def interrupted_create(model: type[Any], obj_in: dict[str, Any]) -> Any:
+        """中断原本没有识别缓存的创建操作。"""
+        if model is ImageDescriptions and interruption == "after-images":
+            raise asyncio.CancelledError
+        created = await media_database.crud(model).create(obj_in)
+        if model is ImageDescriptions and interruption == "after-cache":
+            raise asyncio.CancelledError
+        return created
+
+    with (
+        patch.object(service, "_vector_db", return_value=available),
+        patch.object(service, "_label_requested_meme", new=AsyncMock(return_value=(
+            {"description": "新描述", "emotion_tags": ["害羞"]}, [0.1, 0.2, 0.3],
+        ))),
+        patch("plugins.emoji_sender.service.database_api.update", new=interrupted_update),
+        patch("plugins.emoji_sender.service.database_api.create", new=interrupted_create),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await service.refresh_meme(meme_id=meme_id)
+    assert list(service._refresh_journal_dir().glob("*.json"))
+    resumed = EmojiSenderService(plugin=service.plugin)
+    with (
+        patch.object(resumed, "_vector_db", return_value=available),
+        patch.object(resumed, "_align_data_dir_with_db", new=AsyncMock()),
+        patch.object(resumed, "_pick_next_manual_meme_file", new=AsyncMock(return_value=None)),
+    ):
+        await resumed.ingest_once()
+    assert not resumed._refresh_journal_dir().exists()
+    updated = await media_database.crud(Images).get(id=media.id)
+    cached = await media_database.crud(ImageDescriptions).get_by(image_description_hash=media_id, type="emoji")
+    assert updated is not None and updated.description == "旧描述" and not updated.vlm_processed
+    if has_cache:
+        assert cached is not None and cached.description == "旧描述" and cached.timestamp == 1.0
+    else:
+        assert cached is None
+    records = meme_collection.get(include=["metadatas", "documents", "embeddings"])
+    assert records["ids"] == before["ids"] and records["metadatas"] == before["metadatas"]
+    assert records["documents"] == before["documents"]
+    assert records["embeddings"].tolist() == before["embeddings"].tolist()
 
 
 @pytest.mark.asyncio

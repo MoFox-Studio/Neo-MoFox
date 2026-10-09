@@ -17,15 +17,18 @@ import hashlib
 import io
 import json
 import math
+import os
 import random
 import shutil
 import time
 from collections import deque
+from collections.abc import Coroutine
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from chromadb.api.models.Collection import Collection
+from chromadb.errors import ChromaError
 
 from src.app.plugin_system.api import database_api
 from src.app.plugin_system.api.llm_api import (
@@ -39,6 +42,7 @@ from src.app.plugin_system.base import BaseService
 from src.core.config import get_core_config
 from src.core.models.sql_alchemy import ImageDescriptions, Images
 from src.core.utils.base64_helper import base64_encode_bytes
+from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
 from src.kernel.vector_db import get_vector_db_service
 
@@ -758,6 +762,187 @@ class EmojiSenderService(BaseService):
                 raise RuntimeError("图片媒体记录恢复失败")
             raise
 
+    def _refresh_journal_dir(self) -> Path:
+        """刷新恢复记录目录，与收藏文件目录分离。"""
+        directory = self._data_dir()
+        return directory.parent / f".{directory.name}_refresh"
+
+    def _save_refresh_journal(self, meme_id: str, record: dict[str, Any]) -> None:
+        """在修改数据库前原子保存刷新所需的新旧值。"""
+        directory = self._refresh_journal_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{meme_id}.json"
+        temporary = target.with_suffix(".tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as output:
+                json.dump(record, output, ensure_ascii=True)
+                output.flush()
+                os.fsync(output.fileno())
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _remove_refresh_journal(self, meme_id: str) -> None:
+        """删除已完成的恢复记录及空目录。"""
+        directory = self._refresh_journal_dir()
+        (directory / f"{meme_id}.json").unlink(missing_ok=True)
+        if directory.exists() and not any(directory.iterdir()):
+            directory.rmdir()
+
+    async def _restore_refresh(
+        self, record: dict[str, Any], collection: Collection | None
+    ) -> bool:
+        """恢复媒体和收藏的旧值；收藏库不可用时保留恢复记录。"""
+        media_info = record["media_info"]
+        if media_info is not None:
+            updated = await database_api.update(
+                Images, id=media_info["id"], obj_in={
+                    "description": media_info.get("description"),
+                    "vlm_processed": bool(media_info.get("vlm_processed")),
+                },
+            )
+            if updated is None:
+                raise RuntimeError("图片媒体记录恢复失败")
+            cached = await database_api.get_by(
+                ImageDescriptions,
+                image_description_hash=media_info["image_id"], type=media_info["type"],
+            )
+            previous_cache = record["cache"]
+            if previous_cache is None:
+                if cached is not None:
+                    await database_api.delete(ImageDescriptions, id=cached.id)
+            else:
+                values = {
+                    "description": previous_cache["description"],
+                    "timestamp": previous_cache["timestamp"],
+                }
+                if cached is None:
+                    await database_api.create(ImageDescriptions, {
+                        **values, "image_description_hash": media_info["image_id"],
+                        "type": media_info["type"],
+                    })
+                elif (
+                    cached.description != values["description"] or cached.timestamp != values["timestamp"]
+                ) and await database_api.update(ImageDescriptions, id=cached.id, obj_in=values) is None:
+                    raise RuntimeError("图片描述缓存恢复失败")
+        previous = record["previous"]
+        if previous is not None:
+            if collection is None:
+                return False
+            await asyncio.to_thread(collection.upsert, **previous)
+            current = await asyncio.to_thread(
+                collection.get, where={"meme_id": record["meme_id"]}, include=["metadatas"]
+            )
+            added_ids = [record_id for record_id in current["ids"] if record_id not in previous["ids"]]
+            if added_ids:
+                await asyncio.to_thread(collection.delete, ids=added_ids)
+        return True
+
+    async def _recover_refreshes(self, collection: Collection | None) -> bool:
+        """恢复中断的刷新；未完成的恢复阻止新的收藏库操作。"""
+        async def recover() -> bool:
+            """逐条恢复旧值或完成延期的收藏同步。"""
+            paths = await asyncio.to_thread(lambda: sorted(self._refresh_journal_dir().glob("*.json")))
+            complete = True
+            for path in paths:
+                record = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+                if record.get("deferred"):
+                    if collection is None:
+                        complete = False
+                        continue
+                    current = await asyncio.to_thread(
+                        collection.get, where={"meme_id": record["meme_id"]}, include=["metadatas"]
+                    )
+                    if current["ids"]:
+                        metadatas = current["metadatas"]
+                        if not metadatas or not metadatas[0]:
+                            raise RuntimeError("延期同步的收藏记录缺少元数据")
+                        labeled = record["labeled"]
+                        embedding = await self._embed_query(labeled["description"], "emoji_sender_label_embedding")
+                        if not embedding:
+                            raise RuntimeError("延期同步的检索向量生成失败")
+                        new_ids = await self._store_meme_labels(
+                            collection, record["meme_id"], labeled, embedding, dict(metadatas[0])
+                        )
+                        obsolete_ids = [record_id for record_id in current["ids"] if record_id not in new_ids]
+                        if obsolete_ids:
+                            await asyncio.to_thread(collection.delete, ids=obsolete_ids)
+                    await self._replace_media_description(record["media_info"], record["labeled"]["description"])
+                elif not await self._restore_refresh(record, collection):
+                    complete = False
+                    continue
+                await asyncio.to_thread(self._remove_refresh_journal, record["meme_id"])
+            return complete
+
+        if not self._refresh_journal_dir().exists():
+            return True
+        return bool(await self._run_refresh_task(recover()))
+
+    async def _run_refresh_task(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+        """等待受管理的保存或恢复任务完成，然后传播调用方取消。"""
+        task = get_task_manager().create_task(coroutine, name="emoji_sender_refresh_commit").task
+        assert task is not None
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+                cancelled = True
+            except Exception:
+                if cancelled:
+                    raise asyncio.CancelledError from None
+                raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _commit_refresh(
+        self, *, meme_id: str, media_info: dict[str, Any] | None,
+        labeled: dict[str, Any], collection: Collection | None = None,
+        embedding: list[float] | None = None, metadata: dict[str, Any] | None = None,
+        previous: dict[str, Any] | None = None, deferred: bool = False,
+    ) -> None:
+        """保存可恢复的刷新，调用方取消时等待保存完成再传播取消。"""
+        cached = await database_api.get_by(
+            ImageDescriptions, image_description_hash=media_info["image_id"], type=media_info["type"]
+        ) if media_info is not None else None
+        if previous is not None:
+            previous = {
+                "ids": previous["ids"], "metadatas": previous["metadatas"],
+                "documents": previous["documents"],
+                "embeddings": previous["embeddings"].tolist(),
+            }
+        record = {
+            "meme_id": meme_id, "media_info": media_info,
+            "cache": {"description": cached.description, "timestamp": cached.timestamp} if cached else None,
+            "previous": previous, "deferred": deferred, "labeled": labeled,
+        }
+
+        async def persist() -> None:
+            """保留恢复记录直到媒体和收藏均保存成功。"""
+            await asyncio.to_thread(self._save_refresh_journal, meme_id, record)
+            try:
+                if collection is not None and previous is not None:
+                    if embedding is None or metadata is None:
+                        raise RuntimeError("收藏刷新缺少标注数据")
+                    new_ids = await self._store_meme_labels(collection, meme_id, labeled, embedding, metadata)
+                    obsolete_ids = [record_id for record_id in previous["ids"] if record_id not in new_ids]
+                    if obsolete_ids:
+                        await asyncio.to_thread(collection.delete, ids=obsolete_ids)
+                if media_info is not None:
+                    await self._replace_media_description(media_info, labeled["description"])
+            except Exception:
+                if await self._restore_refresh(record, collection):
+                    await asyncio.to_thread(self._remove_refresh_journal, meme_id)
+                raise
+            if not deferred:
+                await asyncio.to_thread(self._remove_refresh_journal, meme_id)
+
+        await self._run_refresh_task(persist())
+
     async def _store_meme_labels(
         self,
         collection: Collection,
@@ -790,6 +975,8 @@ class EmojiSenderService(BaseService):
                 collection = await self._vector_db().get_or_create_collection(self._collection_name())
                 if collection is None:
                     return False, "表情包库暂时不可用"
+                if not await self._recover_refreshes(collection):
+                    return False, "表情包库仍有待恢复的刷新，请稍后重试"
                 existing = await asyncio.to_thread(
                     collection.get, where={"media_id": requested_id}, include=["metadatas"]
                 )
@@ -860,11 +1047,23 @@ class EmojiSenderService(BaseService):
 
         async with _INGEST_LOCK:
             try:
-                collection = await self._vector_db().get_or_create_collection(self._collection_name())
-                if collection is None:
-                    return False, "表情包库暂时不可用"
-                query = {"$or": [{"meme_id": prefix}, {"media_id": prefix}]} if len(prefix) == 64 else None
-                records = await asyncio.to_thread(collection.get, where=query, include=["metadatas"])
+                collection = None
+                records: dict[str, Any] = {"ids": [], "metadatas": []}
+                try:
+                    collection = await self._vector_db().get_or_create_collection(self._collection_name())
+                except (ChromaError, OSError, RuntimeError) as error:
+                    logger.warning(f"访问表情包库失败，聊天图片刷新将延期同步收藏: {error}")
+                if collection is not None:
+                    if not await self._recover_refreshes(collection):
+                        return False, "表情包库仍有待恢复的刷新，请稍后重试"
+                    try:
+                        query = {"$or": [{"meme_id": prefix}, {"media_id": prefix}]} if len(prefix) == 64 else None
+                        records = await asyncio.to_thread(collection.get, where=query, include=["metadatas"])
+                    except (ChromaError, OSError, RuntimeError) as error:
+                        logger.warning(f"查询表情包库失败，聊天图片刷新将延期同步收藏: {error}")
+                        collection = None
+                if collection is None and (len(prefix) != 64 or not allow_chat_media):
+                    return False, "表情包库暂时不可用，请使用当前聊天图片的完整 media_id"
                 matched = [
                     (record_id, metadata)
                     for record_id, metadata in zip(records["ids"], records["metadatas"] or [])
@@ -889,9 +1088,12 @@ class EmojiSenderService(BaseService):
                     payload, full_id = await asyncio.to_thread(self._read_file_with_hash, source)
                     if self._chat_media_hash(payload) != prefix:
                         return False, "图片文件与 media_id 不一致，未修改旧识别结果"
-                    records = await asyncio.to_thread(
-                        collection.get, where={"meme_id": full_id}, include=["metadatas"]
-                    )
+                    if (self._refresh_journal_dir() / f"{full_id}.json").exists():
+                        return False, "这张图片仍有待恢复的刷新，请在表情包库恢复后重试"
+                    if collection is not None:
+                        records = await asyncio.to_thread(
+                            collection.get, where={"meme_id": full_id}, include=["metadatas"]
+                        )
                     matched = [
                         (record_id, metadata)
                         for record_id, metadata in zip(records["ids"], records["metadatas"] or [])
@@ -905,6 +1107,9 @@ class EmojiSenderService(BaseService):
                     metadata = dict(matched[0][1])
                     path_value = metadata.get("path")
                     source = Path(path_value) if path_value else None
+                    if source is None or not source.is_file():
+                        cache_path = metadata.get("source_cache_path")
+                        source = Path(cache_path) if cache_path else None
                     if source is None or not source.is_file():
                         media_id = str(metadata.get("media_id") or "")
                         media_info = await get_media_info(media_id) if media_id else None
@@ -925,12 +1130,16 @@ class EmojiSenderService(BaseService):
                         return False, "重新识别失败，已保留旧识别结果"
                     if media_info is None:
                         return False, "图片媒体记录已不可用，未修改旧识别结果"
-                    await self._replace_media_description(media_info, labeled["description"])
+                    await self._commit_refresh(
+                        meme_id=full_id, media_info=media_info, labeled=labeled, deferred=collection is None
+                    )
                     return True, (
                         f"已重新识别图片，media_id={prefix}\n"
                         f"标签：{'、'.join(labeled['emotion_tags'])}\n描述：{labeled['description']}"
+                        + ("\n表情包库暂时不可用，已有收藏的同步将在恢复后完成" if collection is None else "")
                     )
 
+                assert collection is not None
                 metadata = dict(matched[0][1])
                 prepared = await self._label_requested_meme(
                     payload, self._guess_mime(source.suffix), extra_prompt
@@ -942,30 +1151,11 @@ class EmojiSenderService(BaseService):
                 previous = await asyncio.to_thread(
                     collection.get, ids=old_ids, include=["metadatas", "documents", "embeddings"]
                 )
-                new_ids = [f"{full_id}:{tag}" for tag in labeled["emotion_tags"]]
-                try:
-                    await self._store_meme_labels(collection, full_id, labeled, embedding, metadata)
-                    obsolete_ids = [record_id for record_id in old_ids if record_id not in new_ids]
-                    if obsolete_ids:
-                        await asyncio.to_thread(collection.delete, ids=obsolete_ids)
-                    if media_info and media_info.get("type") in ("image", "emoji"):
-                        await self._replace_media_description(media_info, labeled["description"])
-                except Exception:
-                    try:
-                        await asyncio.to_thread(
-                            collection.upsert,
-                            ids=previous["ids"],
-                            embeddings=previous["embeddings"],
-                            documents=previous["documents"],
-                            metadatas=previous["metadatas"],
-                        )
-                        added_ids = [record_id for record_id in new_ids if record_id not in old_ids]
-                        if added_ids:
-                            await asyncio.to_thread(collection.delete, ids=added_ids)
-                    except Exception as restore_error:
-                        logger.error(f"恢复表情包旧记录失败: {restore_error}")
-                        return False, "保存和恢复旧记录均失败，原图仍在，请检查表情包库"
-                    raise
+                await self._commit_refresh(
+                    meme_id=full_id, media_info=media_info if media_info and media_info.get("type") in ("image", "emoji") else None,
+                    labeled=labeled, collection=collection, embedding=embedding,
+                    metadata=metadata, previous=previous,
+                )
                 return True, (
                     f"已重新识别表情包，id={full_id}\n"
                     f"标签：{'、'.join(labeled['emotion_tags'])}\n描述：{labeled['description']}"
@@ -986,6 +1176,11 @@ class EmojiSenderService(BaseService):
             return
 
         async with _INGEST_LOCK:
+            if self._refresh_journal_dir().exists():
+                collection = await self._vector_db().get_or_create_collection(self._collection_name())
+                if collection is None or not await self._recover_refreshes(collection):
+                    logger.warning("表情包刷新尚未恢复，暂停入库")
+                    return
             max_memes = int(self._cfg().storage.max_memes)
             if max_memes > 0:
                 data_dir = self._data_dir()
@@ -1162,6 +1357,11 @@ class EmojiSenderService(BaseService):
         vdb = self._vector_db()
         collection = self._collection_name()
         await vdb.get_or_create_collection(collection)
+        if self._refresh_journal_dir().exists():
+            async with _INGEST_LOCK:
+                raw_collection = await vdb.get_or_create_collection(collection)
+                if raw_collection is None or not await self._recover_refreshes(raw_collection):
+                    raise RuntimeError("表情包刷新尚未恢复，暂不可检索")
 
         where: dict[str, Any] | None = None
         if tags:
@@ -1336,6 +1536,11 @@ class EmojiSenderService(BaseService):
         vdb = self._vector_db()
         collection = self._collection_name()
         await vdb.get_or_create_collection(collection)
+        if self._refresh_journal_dir().exists():
+            async with _INGEST_LOCK:
+                raw_collection = await vdb.get_or_create_collection(collection)
+                if raw_collection is None or not await self._recover_refreshes(raw_collection):
+                    return False, None, "表情包刷新尚未恢复，暂不可发送"
 
         matched: dict[str, Any] | None = None
         offset = 0
