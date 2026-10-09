@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 
 from ..vnext.domain import CreateMemoryInput, EvidenceInput, SubjectInput, WriteContext
 from ..vnext.enums import ActorType, EvidenceSourceType, MemoryEventType, MemoryKind, MemoryStatus, SubjectKind
-from ..vnext.episode_service import EpisodeService
+from ..vnext.episode_service import DIARY_SUMMARY_SOURCE, DIARY_SUPERSEDES, EpisodeService
 from ..vnext.models import (
     CueSetModel,
     EpisodeModel,
@@ -21,6 +21,7 @@ from ..vnext.models import (
     MemoryEventModel,
     MemoryModel,
     MemoryRelationModel,
+    MemoryUpdateProposalModel,
 )
 from ..vnext.proposal_service import ProposalService
 from ..vnext.schema import VNextSchema
@@ -514,3 +515,72 @@ async def test_proposal_rejects_cross_stream_evidence(schema: VNextSchema) -> No
             evidence_ids=(episode.episode_id,),
             operation="support",
         )
+
+
+@pytest.mark.parametrize("watermarks", [(1, 2, 3), (3, 1, 2)])
+async def test_diary_summary_recalls_latest_without_mutating_history(
+    schema: VNextSchema, watermarks: tuple[int, ...],
+) -> None:
+    """乱序或重复投递只召回最新摘要，旧正文及线索仍是不可变记录。"""
+    service = EpisodeService(schema, reconstruction_noise=0)
+    recorded = {}
+    for watermark in watermarks:
+        recorded[watermark] = await service.record_external_episode(
+            title="当天回顾", content=f"咖啡经历版本 {watermark}",
+            stream_id="platform:stream_1", observed_at=datetime.now(UTC),
+            source_ref=f"chat_diary:platform:stream_1:2026-10-10:{watermark}",
+            source_type=DIARY_SUMMARY_SOURCE, certainty=0.35,
+            participants=("person-1",), source_messages=({"message_id": f"m{watermark}"},),
+        )
+    repeat = await service.record_external_episode(
+        title="不应覆盖", content="不应覆盖历史正文", stream_id="platform:stream_1",
+        observed_at=datetime.now(UTC), source_ref="chat_diary:platform:stream_1:2026-10-10:3",
+        source_type=DIARY_SUMMARY_SOURCE,
+    )
+    assert repeat.episode_id == recorded[3].episode_id
+    recalled = await service.recall_association(stream_id="platform:stream_1", cue_text="咖啡")
+    assert [item["episode_id"] for item in recalled] == [recorded[3].episode_id]
+    assert recalled[0]["source_messages"] == [{"message_id": "m3"}]
+    assert recalled[0]["evidence_eligible"] is False
+    assert "不可作为正式事实证据" in service.render_working_memory({"selected_episodes": list(recalled)})
+    async with schema.database.session() as session:
+        assert await session.scalar(select(func.count()).select_from(EpisodeModel)) == 3
+        relations = (await session.scalars(select(EpisodeRelationModel).where(
+            EpisodeRelationModel.relation_type == DIARY_SUPERSEDES
+        ))).all()
+        assert {item.target_episode_id for item in relations} == {recorded[1].episode_id, recorded[2].episode_id}
+        old = await session.get(EpisodeModel, recorded[1].episode_id)
+        assert old is not None and old.compressed_text == "咖啡经历版本 1"
+
+
+async def test_diary_summary_cannot_become_fact_or_cross_stream_recall(schema: VNextSchema) -> None:
+    """日记摘要可以在同流召回，但高显著性也不进入事实候选和确认。"""
+    service = EpisodeService(schema)
+    summary = await service.record_external_episode(
+        title="更正记录", content="更正，我不再喝咖啡！", stream_id="stream-1",
+        observed_at=datetime.now(UTC), source_ref="chat_diary:stream-1:2026-10-10:1",
+        source_type=DIARY_SUMMARY_SOURCE, participants=("person-1",), certainty=0.35,
+    )
+    proposals = ProposalService(schema)
+    assert await proposals.collect_consolidation_candidates("stream-1") == ()
+    with pytest.raises(ValueError, match="摘要不能"):
+        await proposals.propose(stream_id="stream-1", claim="咖啡事实",
+                                evidence_ids=(summary.episode_id,), operation="support")
+    incoming = await service.record_episode({
+        "message_id": "input-other", "stream_id": "stream-2", "time": datetime.now(UTC),
+        "content": "咖啡", "person_id": "person-1", "sender_name": "用户",
+    })
+    assert not (await service.recall_working_memory(incoming))["selected_episodes"]
+    async with schema.database.session() as session:
+        session.add(MemoryUpdateProposalModel(
+            proposal_id="injected-proposal", stream_id="stream-1", claim="咖啡事实",
+            evidence_ids=[summary.episode_id], operation="support", confidence=0.5,
+            status="PENDING", created_at=datetime.now(UTC),
+        ))
+    tools = VNextToolService(schema, cast(Any, SimpleNamespace(search=AsyncMock(return_value=()))))
+    with pytest.raises(ValueError, match="摘要不能"):
+        await tools.confirm_memory_update(
+            "injected-proposal", ToolContext(ActorType.ADMIN, actor_ref="test", stream_id="stream-1")
+        )
+    async with schema.database.session() as session:
+        assert await session.scalar(select(func.count()).select_from(MemoryModel)) == 0

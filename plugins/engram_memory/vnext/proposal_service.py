@@ -10,6 +10,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from .episode_service import DIARY_SUMMARY_SOURCE
 from .models import (
     CueSetModel,
     EpisodeModel,
@@ -111,6 +112,8 @@ class ProposalService:
                 raise ValueError("提案 Evidence 必须是当前聊天流中的 Episode")
             if any(item.episode_kind in {"CUE", "OUTPUT"} for item in episodes):
                 raise ValueError("查询线索和机器人输出不能作为事实提案 Evidence")
+            if any(item.source_type == DIARY_SUMMARY_SOURCE for item in episodes):
+                raise ValueError("聊天日记模型摘要不能作为事实提案 Evidence，请引用原始消息")
             if target_memory_id is not None:
                 memory = await session.get(MemoryModel, target_memory_id)
                 if memory is None:
@@ -138,6 +141,7 @@ class ProposalService:
             episodes = (await session.scalars(select(EpisodeModel).where(
                 EpisodeModel.stream_id == stream_id,
                 EpisodeModel.episode_kind.in_(("INPUT", "SUMMARY")),
+                EpisodeModel.source_type != DIARY_SUMMARY_SOURCE,
             ).order_by(EpisodeModel.observed_at.desc()).limit(100))).all()
             workings = (await session.scalars(select(WorkingMemoryModel).where(
                 WorkingMemoryModel.stream_id == stream_id,

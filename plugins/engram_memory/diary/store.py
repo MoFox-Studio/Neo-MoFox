@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import Float, Integer, String, Text, select, update
+from sqlalchemy import JSON, Float, Integer, String, Text, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -41,6 +41,24 @@ class DailyDiary(DiaryBase):
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 
 
+class DiaryEpisodeExport(DiaryBase):
+    """等待写入 Episode 的聊天日记摘要。"""
+
+    __tablename__ = "chat_diary_episode_exports"
+    source_ref: Mapped[str] = mapped_column(String, primary_key=True)
+    stream_id: Mapped[str] = mapped_column(String, nullable=False)
+    day: Mapped[str] = mapped_column(String, nullable=False)
+    through_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    through_time: Mapped[float] = mapped_column(Float, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    participants: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    source_messages: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON, nullable=True
+    )
+    created_at: Mapped[float] = mapped_column(Float, nullable=False)
+    exported_at: Mapped[float | None] = mapped_column(Float)
+
+
 @dataclass(frozen=True, slots=True)
 class Progress:
     """不持有数据库会话的流进度快照。"""
@@ -67,12 +85,28 @@ class Diary:
     updated_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class DiaryEpisodeExportSnapshot:
+    """不持有数据库会话的待投递摘要快照。"""
+
+    source_ref: str
+    stream_id: str
+    day: str
+    through_id: int
+    through_time: float
+    body: str
+    participants: tuple[str, ...]
+    source_messages: tuple[dict[str, object], ...] = ()
+
+
 class DiaryStore:
     """将日记替换与成功位置推进绑定到同一个事务。"""
 
     def __init__(self, database_path: str) -> None:
         """使用公开插件存储 API 创建独立数据库。"""
-        self.database = PluginDatabase(database_path, [StreamProgress, DailyDiary])
+        self.database = PluginDatabase(
+            database_path, [StreamProgress, DailyDiary, DiaryEpisodeExport]
+        )
 
     async def initialize(self) -> None:
         """初始化日记库，不连接正式记忆库。"""
@@ -199,6 +233,9 @@ class DiaryStore:
         now: float,
         diary: Diary | None,
         message_id: str = "",
+        participants: tuple[str, ...] = (),
+        export_episode: bool = True,
+        source_messages: tuple[dict[str, object], ...] = (),
     ) -> None:
         """比较原位置后同时替换正文和推进游标，异常会整批回滚。"""
         if through_id <= progress.cursor_id:
@@ -239,3 +276,79 @@ class DiaryStore:
                         set_=values,
                     )
                 )
+                previous = await session.scalar(
+                    select(DiaryEpisodeExport)
+                    .where(
+                        DiaryEpisodeExport.stream_id == diary.stream_id,
+                        DiaryEpisodeExport.day == diary.day,
+                    )
+                    .order_by(DiaryEpisodeExport.through_id.desc())
+                    .limit(1)
+                )
+                previous_people = (previous.participants or []) if previous else []
+                previous_sources = (previous.source_messages or []) if previous else []
+                people = tuple(dict.fromkeys((*previous_people, *participants)))
+                sources = {
+                    str(item["message_id"]): dict(item)
+                    for item in (*previous_sources, *source_messages)
+                }
+                await session.execute(
+                    insert(DiaryEpisodeExport)
+                    .values(
+                        source_ref=f"chat_diary:{diary.stream_id}:{diary.day}:{diary.through_id}",
+                        stream_id=diary.stream_id,
+                        day=diary.day,
+                        through_id=diary.through_id,
+                        through_time=diary.through_time,
+                        body=diary.body,
+                        participants=list(people),
+                        source_messages=list(sources.values()),
+                        created_at=now,
+                        exported_at=None if export_episode else now,
+                    )
+                    .on_conflict_do_nothing(index_elements=["source_ref"])
+                )
+
+    async def pending_episode_exports(
+        self, stream_id: str, limit: int = 10
+    ) -> tuple[DiaryEpisodeExportSnapshot, ...]:
+        """读取尚未成功写入 Episode 的摘要，按处理水位稳定排序。"""
+        if limit <= 0:
+            raise ValueError("limit 必须大于 0")
+        async with self.database.session() as session:
+            rows = (
+                await session.scalars(
+                    select(DiaryEpisodeExport)
+                    .where(
+                        DiaryEpisodeExport.stream_id == stream_id,
+                        DiaryEpisodeExport.exported_at.is_(None),
+                    )
+                    .order_by(DiaryEpisodeExport.through_id)
+                    .limit(limit)
+                )
+            ).all()
+            return tuple(
+                DiaryEpisodeExportSnapshot(
+                    row.source_ref,
+                    row.stream_id,
+                    row.day,
+                    row.through_id,
+                    row.through_time,
+                    row.body,
+                    tuple(str(item) for item in (row.participants or [])),
+                    tuple(dict(item) for item in (row.source_messages or [])),
+                )
+                for row in rows
+            )
+
+    async def mark_episode_exported(self, source_ref: str, now: float) -> None:
+        """仅将仍待投递的摘要标记为已成功写入 Episode。"""
+        async with self.database.session() as session:
+            await session.execute(
+                update(DiaryEpisodeExport)
+                .where(
+                    DiaryEpisodeExport.source_ref == source_ref,
+                    DiaryEpisodeExport.exported_at.is_(None),
+                )
+                .values(exported_at=now)
+            )

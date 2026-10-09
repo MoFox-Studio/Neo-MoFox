@@ -12,7 +12,7 @@
 
 ## Cue-Driven Reconstructive Memory
 
-当前版本将在线回忆与后台候选收集分开：消息先进入 Episode 经历层，由规则线索、人物/主题关联和有限多跳扩散形成短期 Working Memory；正式 Memory/Revision 仍须经过明确提案确认或既有正式写入接口。当前尚未实现自动模型审核巩固，也未将 Episode 与正式 Memory 闪回统一为同一竞争器。
+当前版本将在线回忆与后台候选收集分开：消息先进入 Episode 经历层，由规则线索、人物/主题关联和有限多跳扩散形成短期 Working Memory；正式 Memory/Revision 仍须经过明确提案确认或既有正式写入接口。后台可以审核候选，但不会自动确认正式记忆，也未将 Episode 与正式 Memory 闪回统一为同一竞争器。
 
 - `ingest_episode`：跨插件写入 Episode，不直接创建正式事实。
 - `read_working_memory`：读取当前流的短期、有来源回忆片段。
@@ -24,13 +24,26 @@
 
 回复后追加 OUTPUT Episode 及 Observation，区分激活片段与正文中明确出现的 Episode ID；没有 ID 的自然语言引用不做推测识别。观察记录关联发送时间之前、同流且仍有效的最近 Working Memory，表示候选激活上下文，不证明模型实际使用。重复输出事件不覆盖首次观察。
 
-后台每次最多从最近 100 条 INPUT/SUMMARY 和 100 次工作记忆中收集 5 条巩固候选：出现纠正线索、显著性达到 0.6，或被至少 3 个不同输入经历激活。主动查询不计入重复激活。候选以幂等 `uncertain` 提案保留原文和触发原因，不调用模型、不自动创建正式事实。`read_working_memory` 的 `pending_proposals` 提供当前流待审目录；审核后应以来源为依据创建明确提案，`uncertain` 本身不能直接确认。
+后台每次最多从最近 100 条 INPUT/外部 SUMMARY 和 100 次工作记忆中收集 5 条巩固候选：出现纠正线索、显著性达到 0.6，或被至少 3 个不同输入经历激活。聊天日记的模型摘要不进入事实候选池。主动查询不计入重复激活。候选以幂等 `uncertain` 提案保留原文和触发原因，收集阶段不调用模型、不自动创建正式事实。`read_working_memory` 的 `pending_proposals` 提供当前流待审目录；审核后应以来源为依据创建明确提案，`uncertain` 本身不能直接确认。
 
 启用后台巩固后，Runtime Owner 会以 `vnext.claim_review.background_interval_seconds` 为间隔扫描已经观测到的聊天流，依次执行候选收集、Claim/Hypothesis 同步和有限审核。后台任务由框架统一托管，插件卸载时取消并等待；它不会调用 `confirm_memory_update`，因此审核通过仍只会留下可核对的明确提案。
 
 主动关联查询不再写入 Episode；历史 CUE 与 OUTPUT 不进入事实回忆候选，也不能用作事实提案证据。重构扰动由查询/经历 ID 与候选 ID 确定，参与排序；重复惩罚在每次选入后重新排名，同一输入可复查选择依据。
 
-随机扰动只影响已有 Episode 候选的选择，不改变 Episode 正文、不生成无来源事实，也不覆盖明确纠正。Shameimaru Memory 负责后台摘要和巩固素材，Engram Recall Engine 负责在线前馈与工作记忆。
+随机扰动只影响已有 Episode 候选的选择，不改变 Episode 正文、不生成无来源事实，也不覆盖明确纠正。内置聊天日记负责后台回顾，Episode 服务负责经历索引；外部摘要必须显式通过服务接口摄入，并非内置 Shameimaru 摘要器。
+
+### 开发版：可追溯日记经历索引
+
+`-dev` 的新增强将日记作为回忆索引，而不是把模型摘要直接升级成事实。原有消息 Episode 和正式 Memory 保持不变，日记生成也不增加第二次模型调用。
+
+- 默认 `diary.episode_export_enabled=true`。日记正文、处理游标和摘要待投递记录在独立日记库的同一事务中提交。
+- 后台从待投递队列写入 `SUMMARY` Episode，来源类型为 `CHAT_DIARY_SUMMARY`、置信度为 `0.35`。来源键包含聊天流、日期和处理水位，保留实际参与者以及原消息 ID、发送者、时间引用；这些引用用于追溯整日日记的覆盖范围，不证明摘要每句话都有对应证据。
+- Episode 写入或投递确认失败后保留队列；重启后继续投递，不重新调用模型，同一来源重放不会覆盖原记录或重复创建经历。
+- 同流同日的新摘要以追加的 `DIARY_SUPERSEDES` 关系替代旧摘要参与召回；旧正文和线索仍保留，不修改或删除。摘要不会跨聊天流召回。
+- 投递前重新检查聊天类型开关和流/发送者采集许可。关闭导出开关时不投递，日记照常保存；重新开启从新增日记批次开始，不自动回填增强前的历史日记。
+- 日记摘要可以进入 Working Memory，但会标记为模型回顾索引，不能用于 `propose_memory_update` 或 `confirm_memory_update` 的事实证据，也不参与后台事实候选收集。正式事实仍须引用真实经历并显式确认。
+
+隔离示例：在框架根目录运行 `uv run python -m plugins.engram_memory.examples.chat_diary`。示例不连接模型或生产数据库，覆盖日记续读、待投递恢复和同日摘要替代。
 
 Engram Memory 保存可追溯、可检索、可修订的正式记忆，并根据正式记忆变化更新核心人物印象。
 

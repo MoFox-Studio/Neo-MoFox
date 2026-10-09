@@ -474,12 +474,34 @@ class DiaryService:
         for row in allowed:
             if not await self.source.allowed(details, row):
                 raise RuntimeError("生成期间发言者的采集许可已变化")
+        participants: list[str] = []
+        for row in allowed:
+            person_id = str(row.get("person_id") or "").strip()
+            if person_id == "bot" or row.get("sender_role") == "bot":
+                continue
+            if not person_id and row.get("sender_id"):
+                person_id = person_api.generate_person_id(
+                    details.platform, str(row["sender_id"])
+                )
+            if person_id:
+                participants.append(person_id)
         await self.store.commit_batch(
             progress,
             through_id=end_id,
             message_id=str(batch[-1]["message_id"]),
             now=now,
             diary=diary,
+            participants=tuple(dict.fromkeys(participants)),
+            export_episode=self.config.episode_export_enabled,
+            source_messages=tuple(
+                {
+                    "message_id": str(row["message_id"]),
+                    "sender_id": str(row.get("sender_id") or ""),
+                    "person_id": str(row.get("person_id") or ""),
+                    "time": float(row["time"]),
+                }
+                for row in allowed
+            ),
         )
         return True
 

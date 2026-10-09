@@ -13,8 +13,9 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, func, select
 
+from src.app.plugin_system.api.storage_api import PluginDatabase
 from src.app.plugin_system.types import ROLE, EventType, LLMPayload, Text
 
 from ..config import EngramMemoryConfig
@@ -23,8 +24,12 @@ from ..diary import service as diary_service
 from ..diary.config import DiaryConfig
 from ..diary.events import ChatDiaryEventHandler
 from ..diary.service import DiaryService, DiarySource, StreamDetails
-from ..diary.store import Diary, DiaryStore, Progress
+from ..diary.store import (
+    DailyDiary, Diary, DiaryEpisodeExportSnapshot, DiaryStore, Progress, StreamProgress,
+)
 from ..vnext.framework_bridge import ManagedTaskHandle
+from ..vnext.models import CueSetModel, EpisodeModel, MemoryModel
+from ..vnext.runtime_owner import VNextRuntimeOwner
 
 
 @pytest.fixture
@@ -118,6 +123,281 @@ async def test_diary_atomic_commit_and_stale_rejection(diary_path: str) -> None:
         assert restored.start_time == 1 and restored.bootstrap_through == 2
         assert restored.cursor_id == 2
     finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_diary_episode_export_retries_without_rewriting_diary(
+    diary_path: str,
+) -> None:
+    """摘要投递失败可重试，且不会回滚或重复改写已保存日记。"""
+    config = DiaryConfig(database_path=diary_path, episode_export_enabled=True)
+    source = ChatSource([chat_row(1, "2026-10-03T08:00:00+08:00")])
+
+    async def generate(payload: dict[str, object]) -> str:
+        """返回固定日记，不调用外部模型。"""
+        return "今天聊了咖啡"
+
+    service = DiaryService(
+        config,
+        DiaryStore(diary_path),
+        source=source,
+        generator=generate,
+    )
+    runtime = diary_runtime.DiaryRuntime(
+        config,
+        service=service,
+        clock=lambda: 100.0,
+    )
+    attempts = 0
+
+    async def export(snapshot: DiaryEpisodeExportSnapshot) -> None:
+        """首次投递失败，随后成功。"""
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("episode database unavailable")
+
+    runtime._episode_exporter = export
+    await runtime.initialize()
+    await runtime.store.ensure_stream(
+        "s1", "group", start_time=0, bootstrap_through=0, now=1
+    )
+    try:
+        assert await service.process_batch(source.stream_details["s1"], 1, now=100)
+        assert (await runtime.store.get_day("s1", "2026-10-03")).body == "今天聊了咖啡"
+        assert len(await runtime.store.pending_episode_exports("s1")) == 1
+        await runtime.export_pending_episodes("s1")
+        assert attempts == 1
+        assert len(await runtime.store.pending_episode_exports("s1")) == 1
+        await runtime.export_pending_episodes("s1")
+        assert attempts == 2
+        assert await runtime.store.pending_episode_exports("s1") == ()
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_diary_episode_export_survives_restart_and_ack_failure(
+    diary_path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """日记提交后重启仍可投递；确认丢失重放不重复保存经历。"""
+    config = EngramMemoryConfig()
+    config.diary.database_path = diary_path
+    config.storage.vnext_db_path = str(tmp_path / "diary-episodes.db")
+    config.vnext.neo4j.enabled = False
+    source = ChatSource([chat_row(1, "2026-10-03T08:00:00+08:00")])
+    source.rows[0].update(person_id="person-a", sender_id="account-a")
+    generator = AsyncMock(return_value="我们聊了咖啡。")
+    service = DiaryService(
+        config.diary, DiaryStore(diary_path), source=source, generator=generator
+    )
+    await service.store.initialize()
+    await service.store.ensure_stream(
+        "s1", "group", start_time=0, bootstrap_through=0, now=1
+    )
+    assert await service.process_batch(source.stream_details["s1"], 1, now=100)
+    await service.store.close()
+
+    owner = VNextRuntimeOwner(SimpleNamespace(config=config))
+    await owner.schema.initialize()
+    owner._initialized = True
+    monkeypatch.setattr(owner, "mirror_episode_to_graph", AsyncMock())
+    restored = DiaryService(
+        config.diary, DiaryStore(diary_path), source=source, generator=generator
+    )
+    runtime = diary_runtime.DiaryRuntime(
+        config.diary, service=restored, episode_exporter=owner._export_diary_episode
+    )
+    await runtime.initialize()
+    runtime._known.update(item.stream_id for item in await runtime.store.list_streams())
+    acknowledge = runtime.store.mark_episode_exported
+    monkeypatch.setattr(runtime.store, "mark_episode_exported", AsyncMock(
+        side_effect=RuntimeError("ack interrupted")
+    ))
+    try:
+        await runtime.export_pending_episodes()
+        assert len(await runtime.store.pending_episode_exports("s1")) == 1
+        monkeypatch.setattr(runtime.store, "mark_episode_exported", acknowledge)
+        await runtime.export_pending_episodes()
+        assert await runtime.store.pending_episode_exports("s1") == ()
+        assert generator.await_count == 1
+        async with owner.schema.database.session() as session:
+            assert await session.scalar(select(func.count()).select_from(EpisodeModel)) == 1
+            assert await session.scalar(select(func.count()).select_from(MemoryModel)) == 0
+            episode = await session.scalar(select(EpisodeModel))
+            assert episode is not None
+            assert episode.source_type == "CHAT_DIARY_SUMMARY"
+            assert episode.episode_kind == "SUMMARY" and episode.certainty == 0.35
+            assert episode.source_ref == "chat_diary:s1:2026-10-03:1"
+            assert episode.participants == ["person-a"]
+            cue = await session.scalar(select(CueSetModel))
+            assert cue is not None
+            assert cue.soft_cues["source_messages"][0]["message_id"] == "m1"
+    finally:
+        await runtime.close()
+        await owner.schema.close()
+
+
+@pytest.mark.asyncio
+async def test_diary_episode_export_accumulates_real_sources(diary_path: str) -> None:
+    """整日日记的后续版本保留前面批次的真实人物和消息引用。"""
+    config = DiaryConfig(database_path=diary_path, batch_messages=1)
+    source = ChatSource([
+        chat_row(1, "2026-10-03T08:00:00+08:00"),
+        chat_row(2, "2026-10-03T09:00:00+08:00"),
+        chat_row(3, "2026-10-03T10:00:00+08:00"),
+    ])
+    source.rows[0].update(person_id="person-a", sender_id="account-a")
+    source.rows[1].update(person_id="", sender_id="account-b")
+    source.rows[2].update(person_id="bot", sender_role="bot")
+    service = DiaryService(config, DiaryStore(diary_path), source=source,
+                           generator=AsyncMock(return_value="整日的回顾"))
+    await service.store.initialize()
+    await service.store.ensure_stream("s1", "group", start_time=0, bootstrap_through=0, now=1)
+    try:
+        for through_id in (1, 2, 3):
+            assert await service.process_batch(source.stream_details["s1"], through_id, now=100)
+        pending = await service.store.pending_episode_exports("s1")
+        assert [item.through_id for item in pending] == [1, 2, 3]
+        assert pending[-1].participants == (
+            "person-a", diary_service.person_api.generate_person_id("qq", "account-b")
+        )
+        assert [item["message_id"] for item in pending[-1].source_messages] == ["m1", "m2", "m3"]
+        assert await service.store.pending_episode_exports("other-stream") == ()
+    finally:
+        await service.store.close()
+
+
+@pytest.mark.asyncio
+async def test_diary_episode_export_obeys_switches_and_current_permissions(
+    diary_path: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """关闭开关或撤回流/人物采集许可时不投递，并保留待处理项。"""
+    config = DiaryConfig(database_path=diary_path)
+    source = ChatSource([chat_row(1, "2026-10-03T08:00:00+08:00")])
+    source.rows[0].update(person_id="person-a", sender_id="account-a")
+    service = DiaryService(config, DiaryStore(diary_path), source=source,
+                           generator=AsyncMock(return_value="回顾"))
+    exporter = AsyncMock()
+    runtime = diary_runtime.DiaryRuntime(config, service=service, episode_exporter=exporter)
+    await runtime.initialize()
+    await runtime.store.ensure_stream("s1", "group", start_time=0, bootstrap_through=0, now=1)
+    assert await service.process_batch(source.stream_details["s1"], 1, now=100)
+    try:
+        config.episode_export_enabled = False
+        await runtime.export_pending_episodes("s1")
+        config.episode_export_enabled = True
+        config.group.enabled = False
+        await runtime.export_pending_episodes("s1")
+        config.group.enabled = True
+        source.permitted = False
+        await runtime.export_pending_episodes("s1")
+        source.permitted = True
+        monkeypatch.setattr(source, "allowed", AsyncMock(side_effect=[True, False]))
+        await runtime.export_pending_episodes("s1")
+        exporter.assert_not_awaited()
+        assert len(await runtime.store.pending_episode_exports("s1")) == 1
+        monkeypatch.setattr(source, "allowed", AsyncMock(return_value=True))
+        await runtime.export_pending_episodes("s1")
+        exporter.assert_awaited_once()
+        assert await runtime.store.pending_episode_exports("s1") == ()
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_diary_episode_export_disabled_does_not_enqueue(diary_path: str) -> None:
+    """关闭摘要投递不影响日记保存，重新开启只从新增批次开始投递。"""
+    config = DiaryConfig(database_path=diary_path, episode_export_enabled=False)
+    source = ChatSource([chat_row(1, "2026-10-03T08:00:00+08:00")])
+    source.rows[0].update(person_id="person-a")
+    service = DiaryService(config, DiaryStore(diary_path), source=source,
+                           generator=AsyncMock(return_value="回顾"))
+    await service.store.initialize()
+    await service.store.ensure_stream("s1", "group", start_time=0, bootstrap_through=0, now=1)
+    try:
+        assert await service.process_batch(source.stream_details["s1"], 1, now=100)
+        assert await service.store.pending_episode_exports("s1") == ()
+        assert (await service.store.progress("s1")).cursor_id == 1
+        config.episode_export_enabled = True
+        source.rows.append(chat_row(2, "2026-10-03T09:00:00+08:00"))
+        assert await service.process_batch(source.stream_details["s1"], 2, now=101)
+        pending = await service.store.pending_episode_exports("s1")
+        assert len(pending) == 1 and pending[0].through_id == 2
+        assert pending[0].participants == ("person-a",)
+        assert [item["message_id"] for item in pending[0].source_messages] == ["m1", "m2"]
+    finally:
+        await service.store.close()
+
+
+@pytest.mark.asyncio
+async def test_diary_episode_export_upgrade_preserves_existing_diaries(diary_path: str) -> None:
+    """旧库只增加摘要队列表，不丢失正文或游标，不自动回填旧日记。"""
+    legacy = PluginDatabase(diary_path, [StreamProgress, DailyDiary])
+    await legacy.initialize()
+    try:
+        async with legacy.session() as session:
+            session.add(StreamProgress(
+                stream_id="s1", chat_type="group", cursor_id=1, start_time=0,
+                bootstrap_through=1, initialized_at=1, last_success_at=2,
+                cursor_message_id="m1",
+            ))
+            session.add(DailyDiary(
+                stream_id="s1", day="2026-10-03", body="旧日记",
+                through_id=1, through_time=1, updated_at=2,
+            ))
+    finally:
+        await legacy.close()
+    store = DiaryStore(diary_path)
+    await store.initialize()
+    try:
+        original = await store.get_day("s1", "2026-10-03")
+        assert original is not None and original.body == "旧日记"
+        progress = await store.progress("s1")
+        assert progress is not None and progress.cursor_message_id == "m1"
+        assert await store.pending_episode_exports("s1") == ()
+        await store.commit_batch(
+            progress, through_id=2, message_id="m2", now=3,
+            diary=Diary("s1", "2026-10-03", "新日记", 2, 2, 3),
+        )
+        pending = await store.pending_episode_exports("s1")
+        assert len(pending) == 1 and pending[0].body == "新日记"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_diary_episode_export_failure_rolls_back_entire_batch(diary_path: str) -> None:
+    """队列写入失败不能留下没有待投递记录的已保存日记或新游标。"""
+    store = DiaryStore(diary_path)
+    await store.initialize()
+    progress = await store.ensure_stream(
+        "s1", "group", start_time=0, bootstrap_through=1, now=1
+    )
+
+    def fail_export_write(
+        connection: Any, cursor: Any, statement: str,
+        parameters: Any, context: Any, executemany: bool,
+    ) -> None:
+        """模拟队列表写入失败。"""
+        if statement.startswith("INSERT INTO chat_diary_episode_exports"):
+            raise RuntimeError("export transaction interrupted")
+
+    async with store.database.session() as session:
+        engine = session.get_bind()
+    event.listen(engine, "before_cursor_execute", fail_export_write)
+    try:
+        with pytest.raises(RuntimeError, match="export transaction interrupted"):
+            await store.commit_batch(
+                progress, through_id=1, message_id="m1", now=2,
+                diary=Diary("s1", "2026-10-03", "不能部分保存", 1, 1, 2),
+            )
+        assert await store.progress("s1") == progress
+        assert await store.get_day("s1", "2026-10-03") is None
+        assert await store.pending_episode_exports("s1") == ()
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_export_write)
         await store.close()
 
 

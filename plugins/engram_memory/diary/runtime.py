@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
 
@@ -18,10 +18,11 @@ from ..vnext.framework_bridge import (
 from .config import DiaryConfig
 from .injection import REMINDER_NAME
 from .service import DiaryService, StreamDetails
-from .store import DiaryStore, Progress
+from .store import DiaryEpisodeExportSnapshot, DiaryStore, Progress
 
 logger = log_api.get_logger("engram_memory.diary", display="聊天日记")
 _POLL_SECONDS = 15.0
+EpisodeExporter = Callable[[DiaryEpisodeExportSnapshot], Awaitable[None]]
 
 
 def _safe_material(content: str) -> str:
@@ -38,6 +39,7 @@ class DiaryRuntime:
         *,
         service: DiaryService | None = None,
         clock: Callable[[], float] = time.time,
+        episode_exporter: EpisodeExporter | None = None,
     ) -> None:
         """绑定独立日记服务，不在构造阶段读取历史或发起模型请求。"""
         self.config = config
@@ -46,6 +48,7 @@ class DiaryRuntime:
         )
         self.service = service or DiaryService(config, self.store)
         self._clock = clock
+        self._episode_exporter = episode_exporter
         self.ready = False
         self._closed = False
         self._task: ManagedTaskHandle | None = None
@@ -57,6 +60,7 @@ class DiaryRuntime:
         self._retry_at: dict[str, float] = {}
         self._retry_through: dict[str, int] = {}
         self._exhausted: dict[str, int] = {}
+        self._exporting: set[str] = set()
 
     async def initialize(self) -> None:
         """先初始化独立库，生成任务须等所有插件及许可服务就绪。"""
@@ -96,6 +100,7 @@ class DiaryRuntime:
                                 )
                         restored = True
                     await self.schedule_once()
+                    await self.export_pending_episodes()
                 except Exception as error:  # noqa: BLE001
                     logger.error(f"聊天日记调度失败: {type(error).__name__}: {error}")
                 delay = min(
@@ -217,6 +222,52 @@ class DiaryRuntime:
         finally:
             self._running.pop(stream_id, None)
             self._wake.set()
+
+    async def export_pending_episodes(self, stream_id: str | None = None) -> None:
+        """将已保存的聊天日记摘要旁路投递为低置信度 SUMMARY Episode。"""
+        if (
+            not self.ready or self._closed
+            or not self.config.episode_export_enabled
+            or self._episode_exporter is None
+        ):
+            return
+        stream_ids = (stream_id,) if stream_id else tuple(sorted(self._known))
+        for current_stream_id in stream_ids:
+            if current_stream_id in self._exporting:
+                continue
+            self._exporting.add(current_stream_id)
+            try:
+                details = await self.service.source.details(current_stream_id)
+                if (
+                    details is None
+                    or not self.config.policy_for(details.chat_type).enabled
+                    or not await self.service.source.allowed(details)
+                ):
+                    continue
+                pending = await self.store.pending_episode_exports(current_stream_id)
+                for export in pending:
+                    if self._closed or not self.config.episode_export_enabled:
+                        break
+                    permitted = True
+                    for source in export.source_messages:
+                        if not await self.service.source.allowed(details, source):
+                            permitted = False
+                            break
+                    if not permitted:
+                        continue
+                    try:
+                        await self._episode_exporter(export)
+                        await self.store.mark_episode_exported(
+                            export.source_ref, self._clock()
+                        )
+                    except Exception as error:  # noqa: BLE001
+                        logger.warning(
+                            f"聊天日记摘要投递失败 source={export.source_ref}: "
+                            f"{type(error).__name__}: {error}"
+                        )
+                        break
+            finally:
+                self._exporting.discard(current_stream_id)
 
     async def reminder_content(self, stream_id: str) -> str:
         """仅组合当前流最近自然日内的非空日记，没有日记时返回空内容。"""

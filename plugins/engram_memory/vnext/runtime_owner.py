@@ -18,12 +18,13 @@ from sqlalchemy import select
 from src.app.plugin_system.api import event_api, log_api, stream_api
 
 from ..diary.runtime import DiaryRuntime
+from ..diary.store import DiaryEpisodeExportSnapshot
 from .doctor_service import DoctorService
 from .claim_service import ClaimHypothesisService
 from .decay_service import MemoryDecayService
 from .backends.neo4j import Neo4jEpisodeGraph
 from .domain import MemoryChanged
-from .episode_service import EpisodeService
+from .episode_service import DIARY_SUMMARY_SOURCE, EpisodeService
 from .backends.layersplit_store import LayerSplitStore
 from .enums import VectorIndexStatus
 from .feedforward_service import (
@@ -152,7 +153,6 @@ class VNextRuntimeOwner:
         if not isinstance(plugin.config, EngramMemoryConfig):
             raise TypeError("Engram Runtime 必须使用已加载的插件配置")
         self.config: EngramMemoryConfig = plugin.config
-        self.diary = DiaryRuntime(self.config.diary)
         config = self.config
         vnext = config.vnext
         self.schema = VNextSchema(config.storage.vnext_db_path)
@@ -281,6 +281,10 @@ class VNextRuntimeOwner:
             semantic_candidate_limit=vnext.flashback.semantic_candidate_limit,
             semantic_min_similarity=vnext.flashback.semantic_min_similarity,
         )
+        self.diary = DiaryRuntime(
+            self.config.diary,
+            episode_exporter=self._export_diary_episode,
+        )
         self.proposal_service = ProposalService(self.schema)
         self.claim_service = ClaimHypothesisService(
             self.schema,
@@ -319,6 +323,25 @@ class VNextRuntimeOwner:
         self._consolidation_task_id: str | None = None
         self._vector_available = False
         self._vector_error: str | None = None
+
+    async def _export_diary_episode(self, export: DiaryEpisodeExportSnapshot) -> None:
+        """将聊天日记作为低置信度 SUMMARY Episode 幂等保存。"""
+        if not self._initialized:
+            raise RuntimeError("Engram Runtime 尚未就绪，保留摘要待投递")
+        async with self._sqlite_write_lock:
+            episode = await self.episode_service.record_external_episode(
+                title=f"聊天日记：{export.day}",
+                content=export.body,
+                stream_id=export.stream_id,
+                observed_at=datetime.fromtimestamp(export.through_time, UTC),
+                source_ref=export.source_ref,
+                participants=export.participants,
+                source_type=DIARY_SUMMARY_SOURCE,
+                episode_kind="SUMMARY",
+                certainty=0.35,
+                source_messages=export.source_messages,
+            )
+            await self.mirror_episode_to_graph(episode.episode_id)
 
     @property
     def vector_available(self) -> bool:

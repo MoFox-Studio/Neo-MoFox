@@ -65,6 +65,8 @@ _STOPWORDS = frozenset(
 EmbeddingFunction = Callable[
     [Sequence[str]], Awaitable[Sequence[Sequence[float]]]
 ]
+DIARY_SUMMARY_SOURCE = "CHAT_DIARY_SUMMARY"
+DIARY_SUPERSEDES = "DIARY_SUPERSEDES"
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +162,20 @@ class EpisodeService:
         self._cognitive_engine = cognitive_engine or CognitiveRecallEngine(
             reconstruction_budget=max_working_memory
         )
+
+    @staticmethod
+    def _diary_summary_key(source_ref: str | None) -> tuple[str, str, int] | None:
+        """解析聊天日记摘要来源键，供同日摘要去重。"""
+        if not source_ref or not source_ref.startswith("chat_diary:"):
+            return None
+        parts = source_ref[len("chat_diary:"):].rsplit(":", 2)
+        if len(parts) != 3:
+            return None
+        stream_id, day, through_id = parts
+        try:
+            return stream_id, day, int(through_id)
+        except ValueError:
+            return None
 
     @staticmethod
     def _cue_values(text: str, participants: tuple[str, ...]) -> tuple[dict[str, object], dict[str, object]]:
@@ -260,6 +276,7 @@ class EpisodeService:
         source_type: str = "SYSTEM_SUMMARY",
         episode_kind: str = "SUMMARY",
         certainty: float = 0.55,
+        source_messages: tuple[dict[str, object], ...] = (),
     ) -> EpisodeView:
         """保存没有当前消息快照的后台经历素材，不创建正式 Memory。"""
         if not title.strip() or not content.strip():
@@ -302,10 +319,39 @@ class EpisodeService:
                     episode_id=episode.episode_id,
                     stream_id=episode.stream_id,
                     hard_cues=hard,
-                    soft_cues=soft,
+                    soft_cues={**soft, "source_messages": list(source_messages)},
                     created_at=now,
                 )
             )
+            summary_key = self._diary_summary_key(source_ref)
+            if source_type == DIARY_SUMMARY_SOURCE and summary_key is not None:
+                _, day, through_id = summary_key
+                previous_summaries = (await session.scalars(
+                    select(EpisodeModel).where(
+                        EpisodeModel.stream_id == episode.stream_id,
+                        EpisodeModel.source_type == DIARY_SUMMARY_SOURCE,
+                        EpisodeModel.source_ref.startswith(
+                            f"chat_diary:{episode.stream_id}:{day}:", autoescape=True
+                        ),
+                        EpisodeModel.episode_id != episode.episode_id,
+                    )
+                )).all()
+                for previous in previous_summaries:
+                    previous_key = self._diary_summary_key(previous.source_ref)
+                    if previous_key is None or previous_key[2] == through_id:
+                        continue
+                    newer, older = (
+                        (episode, previous) if through_id > previous_key[2]
+                        else (previous, episode)
+                    )
+                    await session.execute(sqlite_insert(EpisodeRelationModel).values(
+                        relation_id=str(uuid5(NAMESPACE_URL, f"diary:{newer.episode_id}:{older.episode_id}")),
+                        source_episode_id=newer.episode_id,
+                        target_episode_id=older.episode_id,
+                        relation_type=DIARY_SUPERSEDES,
+                        weight=0.0,
+                        created_at=now,
+                    ).on_conflict_do_nothing())
             await self._relate_to_recent(session, episode, now)
             return _view(episode)
 
@@ -331,6 +377,11 @@ class EpisodeService:
         people = set(episode.participants)
         topics = set(episode.topics)
         for other in recent:
+            if (
+                episode.stream_id != other.stream_id
+                and DIARY_SUMMARY_SOURCE in (episode.source_type, other.source_type)
+            ):
+                continue
             shared_people = people & set(other.participants)
             shared_topics = topics & set(other.topics)
             if not shared_people and not shared_topics:
@@ -378,6 +429,9 @@ class EpisodeService:
             raise ValueError("max_items 必须大于 0，relation_hops 必须为 1/2")
         now = datetime.now(UTC)
         async with self._schema.database.session() as session:
+            superseded_ids = select(EpisodeRelationModel.target_episode_id).where(
+                EpisodeRelationModel.relation_type == DIARY_SUPERSEDES
+            )
             direct = list(
                 (
                     await session.scalars(
@@ -386,6 +440,7 @@ class EpisodeService:
                             EpisodeModel.episode_id != episode.episode_id,
                             EpisodeModel.stream_id == episode.stream_id,
                             EpisodeModel.episode_kind.notin_(("CUE", "OUTPUT")),
+                            EpisodeModel.episode_id.notin_(superseded_ids),
                         )
                         .order_by(EpisodeModel.observed_at.desc())
                         .limit(200)
@@ -396,7 +451,8 @@ class EpisodeService:
                 (
                     await session.scalars(
                         select(EpisodeRelationModel).where(
-                            EpisodeRelationModel.source_episode_id == episode.episode_id
+                            EpisodeRelationModel.source_episode_id == episode.episode_id,
+                            EpisodeRelationModel.relation_type != DIARY_SUPERSEDES,
                         )
                     )
                 ).all()
@@ -410,6 +466,9 @@ class EpisodeService:
                             select(EpisodeModel).where(
                                 EpisodeModel.episode_id.in_(tuple(relation_ids)),
                                 EpisodeModel.episode_kind.notin_(("CUE", "OUTPUT")),
+                                EpisodeModel.episode_id.notin_(superseded_ids),
+                                (EpisodeModel.source_type != DIARY_SUMMARY_SOURCE)
+                                | (EpisodeModel.stream_id == episode.stream_id),
                             )
                         )
                     ).all()
@@ -434,7 +493,8 @@ class EpisodeService:
                     (
                         await session.scalars(
                             select(EpisodeRelationModel).where(
-                                EpisodeRelationModel.source_episode_id.in_(first_hop_ids)
+                                EpisodeRelationModel.source_episode_id.in_(first_hop_ids),
+                                EpisodeRelationModel.relation_type != DIARY_SUPERSEDES,
                             )
                         )
                     ).all()
@@ -516,12 +576,25 @@ class EpisodeService:
                 effective = score - duplicate_penalty
                 if selected and effective < 0:
                     continue
+                source_messages: list[dict[str, object]] = []
+                if item.source_type == DIARY_SUMMARY_SOURCE:
+                    source_cue = await session.scalar(
+                        select(CueSetModel).where(
+                            CueSetModel.episode_id == item.episode_id
+                        ).order_by(CueSetModel.created_at).limit(1)
+                    )
+                    if source_cue is not None:
+                        source_messages = list(source_cue.soft_cues.get("source_messages", []))
+                    reason += "；模型回顾索引，须核对原始消息"
                 selected.append(
                     {
                         "episode_id": item.episode_id,
                         "content": item.compressed_text,
                         "observed_at": item.observed_at.isoformat(),
                         "source_type": item.source_type,
+                        "source_ref": item.source_ref,
+                        "source_messages": source_messages,
+                        "evidence_eligible": item.source_type != DIARY_SUMMARY_SOURCE,
                         "certainty": item.certainty,
                         "reason": reason,
                         "activation_score": round(max(0.0, effective), 6),
@@ -775,5 +848,7 @@ class EpisodeService:
             content = str(item.get("content") or "").strip()
             reason = str(item.get("reason") or "相关经历").strip()
             if episode_id and content:
+                if item.get("evidence_eligible") is False:
+                    reason += "；不可作为正式事实证据"
                 lines.append(f"- [{episode_id}]（{reason}）{content}")
         return "\n".join(lines) if len(lines) > 2 else ""

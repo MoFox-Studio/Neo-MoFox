@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 from ..diary.config import DiaryConfig
 from ..diary.service import DiaryService, DiarySource, StreamDetails
 from ..diary.store import DiaryStore, Progress
+from ..vnext.episode_service import DIARY_SUMMARY_SOURCE, EpisodeService
+from ..vnext.schema import VNextSchema
 
 
 class LocalDiarySource(DiarySource):
@@ -76,7 +78,7 @@ class LocalDiarySource(DiarySource):
 
 
 async def run_example() -> None:
-    """验证同日正文替换、跨日归属与游标持久化。"""
+    """验证按日日记续读与摘要索引的可恢复投递，不创建正式记忆。"""
     day_one = datetime(2026, 1, 1, 23, 50, tzinfo=UTC).timestamp()
     messages = [
         {
@@ -144,14 +146,37 @@ async def run_example() -> None:
 
         restored_store = DiaryStore(database_path)
         await restored_store.initialize()
+        schema = VNextSchema(str(Path(directory) / "episodes.sqlite"))
+        await schema.initialize()
         try:
             restored = await restored_store.progress(details.stream_id)
             assert restored is not None and restored.cursor_id == 3
             assert restored.cursor_message_id == "local-message-3"
+            episodes = EpisodeService(schema, reconstruction_noise=0)
+            pending = await restored_store.pending_episode_exports(details.stream_id)
+            assert len(pending) == 3
+            for export in pending:
+                await episodes.record_external_episode(
+                    title=f"聊天日记：{export.day}", content=export.body,
+                    stream_id=export.stream_id,
+                    observed_at=datetime.fromtimestamp(export.through_time, UTC),
+                    source_ref=export.source_ref, source_type=DIARY_SUMMARY_SOURCE,
+                    certainty=0.35, participants=export.participants,
+                    source_messages=export.source_messages,
+                )
+                await restored_store.mark_episode_exported(export.source_ref, day_one + 1800)
+            assert await restored_store.pending_episode_exports(details.stream_id) == ()
+            recalled = await episodes.recall_association(
+                stream_id=details.stream_id, cue_text="周末出发"
+            )
+            assert recalled and recalled[0]["source_ref"].endswith("2026-01-01:2")
+            assert recalled[0]["evidence_eligible"] is False
+            assert not any(item["source_ref"].endswith("2026-01-01:1") for item in recalled)
         finally:
+            await schema.close()
             await restored_store.close()
 
-    print("聊天日记示例通过：同日正文已更新，跨日消息分日保存，重开后游标恢复。")
+    print("聊天日记示例通过：游标已恢复，摘要队列已投递，同日只召回最新回顾索引。")
 
 
 if __name__ == "__main__":

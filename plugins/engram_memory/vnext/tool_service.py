@@ -304,6 +304,10 @@ class VNextToolService:
             raise ValueError("提案 Evidence 已不存在或不属于当前流")
         if any(episode.episode_kind in {"CUE", "OUTPUT"} for episode in episodes):
             raise ValueError("查询线索和机器人输出不能作为事实提案 Evidence")
+        from .episode_service import DIARY_SUMMARY_SOURCE
+
+        if any(episode.source_type == DIARY_SUMMARY_SOURCE for episode in episodes):
+            raise ValueError("聊天日记模型摘要不能作为事实提案 Evidence，请引用原始消息")
         participants = tuple(
             dict.fromkeys(
                 person_id
