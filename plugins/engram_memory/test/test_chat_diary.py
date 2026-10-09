@@ -1085,9 +1085,11 @@ async def test_diary_formats_actual_bot_and_placeholder_without_guessing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_task", ["actor", "diary_writer"])
 async def test_diary_request_is_clean_and_persona_is_complete(
     diary_path: str,
     monkeypatch: pytest.MonkeyPatch,
+    model_task: str,
 ) -> None:
     """独立请求使用完整人设与自然回顾口吻，保留事实边界且不带旧提醒。"""
     persona = {"name": "示例Bot", "personality": "自然说话", "safety": "遵守事实"}
@@ -1100,8 +1102,8 @@ async def test_diary_request_is_clean_and_persona_is_complete(
     )
 
     def actor_models(task: str) -> list[Any]:
-        """校验日记复用人设表达的 Actor 模型任务。"""
-        assert task == "actor"
+        """校验日记使用配置指定的模型任务。"""
+        assert task == model_task
         return []
 
     monkeypatch.setattr(diary_service.llm_api, "get_model_set_by_task", actor_models)
@@ -1123,7 +1125,10 @@ async def test_diary_request_is_clean_and_persona_is_complete(
         return request
 
     monkeypatch.setattr(diary_service.llm_api, "create_llm_request", capture_request)
-    service = DiaryService(DiaryConfig(), DiaryStore(diary_path))
+    assert DiaryConfig().model_task == "actor"
+    with pytest.raises(ValueError, match="model_task"):
+        DiaryConfig(model_task="")
+    service = DiaryService(DiaryConfig(model_task=model_task), DiaryStore(diary_path))
     payload: dict[str, object] = {
         "target_date": "2026-10-03",
         "timezone": "Asia/Shanghai",

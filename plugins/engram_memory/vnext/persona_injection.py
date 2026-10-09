@@ -1,13 +1,16 @@
-"""将私聊对象的当前人物印象作为固定 SystemReminder 注入 Actor 上下文。"""
+"""将私聊对象与群聊近期参与者的当前人物印象注入 Actor 上下文。"""
 
 from __future__ import annotations
 
+from time import time
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from src.app.plugin_system.api import prompt_api, stream_api
+from src.app.plugin_system.api import adapter_api, message_api, person_api, prompt_api, stream_api
 from src.app.plugin_system.api.event_api import EventDecision
 from src.app.plugin_system.base import BaseEventHandler
 from src.app.plugin_system.types import ROLE, ChatType, EventType, LLMPayload, Text
+
+from .persona_service import EMPTY_IMPRESSION
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -17,6 +20,7 @@ if TYPE_CHECKING:
 
 
 REMINDER_NAME = "engram_memory_private_persona"
+GROUP_REMINDER_NAME = "engram_memory_group_persona"
 _INTERNAL_REQUEST_NAMES = {"engram_chat_diary_update", "engram_vnext_persona_update"}
 
 
@@ -32,20 +36,27 @@ def _is_named_reminder(part: object, name: str) -> bool:
 
 
 def _uses_memory_reminders(payloads: Sequence[LLMPayload]) -> bool:
-    """仅接入已使用记忆指引或私聊印象提醒的 Actor 请求。"""
+    """仅接入已使用记忆指引或人物印象提醒的 Actor 请求。"""
     return any(
         payload.role == ROLE.USER
         and any(
             _is_named_reminder(part, "engram_memory_guide")
             or _is_named_reminder(part, REMINDER_NAME)
+            or _is_named_reminder(part, GROUP_REMINDER_NAME)
             for part in payload.content
         )
         for payload in payloads
     )
 
 
-def _refresh_persona_payloads(payloads: list[LLMPayload], content: str) -> None:
-    """移除自身旧印象块，并将完整当前印象放在首个 User。"""
+def _refresh_persona_payloads(
+    payloads: list[LLMPayload],
+    content: str,
+    *,
+    reminder_name: str = REMINDER_NAME,
+    at_end: bool = False,
+) -> None:
+    """移除自身旧印象块，私聊放首个 User，群聊放末尾 User。"""
     user_indices = [
         index for index, payload in enumerate(payloads) if payload.role == ROLE.USER
     ]
@@ -54,16 +65,17 @@ def _refresh_persona_payloads(payloads: list[LLMPayload], content: str) -> None:
         kept = [
             part
             for part in payload.content
-            if not _is_named_reminder(part, REMINDER_NAME)
+            if not _is_named_reminder(part, reminder_name)
         ]
         if len(kept) != len(payload.content):
             payloads[index] = LLMPayload(ROLE.USER, kept)
     if content and user_indices:
-        index = user_indices[0]
+        index = user_indices[-1] if at_end else user_indices[0]
         block = Text(
-            f"<system_reminder>\n[{REMINDER_NAME}]\n{content}\n</system_reminder>"
+            f"<system_reminder>\n[{reminder_name}]\n{content}\n</system_reminder>"
         )
-        payloads[index] = LLMPayload(ROLE.USER, [block, *payloads[index].content])
+        parts = payloads[index].content
+        payloads[index] = LLMPayload(ROLE.USER, [*parts, block] if at_end else [block, *parts])
 
 
 class VNextPrivatePersonaEventHandler(BaseEventHandler):
@@ -155,4 +167,104 @@ class VNextPrivatePersonaEventHandler(BaseEventHandler):
         return content
 
 
-__all__ = ["REMINDER_NAME", "VNextPrivatePersonaEventHandler"]
+class VNextGroupPersonaEventHandler(BaseEventHandler):
+    """仅为同一群聊的近期参与者注入当前已认证的印象。"""
+
+    name = "group_persona"
+    description = "将群聊近期参与者的当前人物印象注入最新 User"
+    weight = -1
+    init_subscribe: ClassVar[list[EventType]] = [EventType.BEFORE_LLM_REQUEST]
+
+    async def execute(
+        self, event_name: str, params: dict[str, Any]
+    ) -> tuple[EventDecision, dict[str, Any]]:
+        """刷新当前群聊的参与者印象，不触发人物生成。"""
+        plugin = cast("EngramMemoryPlugin", self.plugin)
+        owner = plugin.runtime_owner
+        if (
+            owner is None
+            or plugin._unloading
+            or event_name != EventType.BEFORE_LLM_REQUEST
+            or params.get("request_name") in _INTERNAL_REQUEST_NAMES
+        ):
+            return EventDecision.SUCCESS, params
+        meta_data = params.get("meta_data")
+        payloads = params.get("payloads")
+        if not isinstance(meta_data, dict) or not isinstance(payloads, list):
+            return EventDecision.SUCCESS, params
+        stream_id = meta_data.get("stream_id")
+        if (
+            not isinstance(stream_id, str)
+            or not stream_id.strip()
+            or not _uses_memory_reminders(payloads)
+        ):
+            return EventDecision.SUCCESS, params
+        info = await stream_api.get_stream_info(stream_id)
+        content = ""
+        if (
+            info is not None and info.get("chat_type") == ChatType.GROUP.value
+            and str(info.get("platform") or "").strip()
+        ):
+            config = owner.config.vnext.prompt_injection
+            rows = await message_api.get_messages_before_time_in_chat(
+                stream_id, time(), limit=config.group_persona_message_limit,
+            )
+            platform = str(info.get("platform") or "")
+            bot_info = await adapter_api.get_bot_info_by_platform(platform) if platform else None
+            bot_id = str(bot_info.get("bot_id") or "") if bot_info else ""
+            participants: dict[str, tuple[str, str]] = {}
+            for row in reversed(rows):
+                person_id = str(row.get("person_id") or "")
+                sender_id = str(row.get("sender_id") or "")
+                if (
+                    not person_id or person_id in {"bot", "system"}
+                    or not sender_id or (bot_id and sender_id == bot_id)
+                    or person_id in participants
+                    or (row.get("stream_id") and row["stream_id"] != stream_id)
+                ):
+                    continue
+                person_ref = person_api.generate_raw_person_id(platform, sender_id)
+                participants[person_id] = (
+                    str(row.get("sender_name") or person_ref), person_ref,
+                )
+                if len(participants) >= config.group_persona_max_people:
+                    break
+            sections: list[str] = []
+            for person_id, (name, person_ref) in participants.items():
+                snapshot = await owner.persona_service.get_persona(person_id)
+                impression = (
+                    snapshot.impression_text
+                    if snapshot is not None and snapshot.is_current
+                    and snapshot.impression_text.strip()
+                    else EMPTY_IMPRESSION
+                )
+                sections.append(f"### {name}\n人物标识：{person_ref}\n{impression}")
+            if sections:
+                content = (
+                    "## 人物印象\n以下是你对当前群聊参与者的已有印象，仅供相处时参考；"
+                    "不要在群里背诵、介绍或暗示私人内容。\n\n"
+                    + "\n\n".join(sections)
+                ).replace("<system_reminder>", "&lt;system_reminder&gt;").replace(
+                    "</system_reminder>", "&lt;/system_reminder&gt;"
+                )
+        if content:
+            prompt_api.add_stream_reminder(
+                stream_id, "actor", GROUP_REMINDER_NAME, content,
+                insert_type=prompt_api.SystemReminderInsertType.DYNAMIC,
+                consume=prompt_api.SystemReminderConsumeType.FOREVER,
+            )
+            plugin._group_persona_reminder_streams.add(stream_id)
+        else:
+            prompt_api.delete_stream_reminder(stream_id, "actor", GROUP_REMINDER_NAME)
+            plugin._group_persona_reminder_streams.discard(stream_id)
+        _refresh_persona_payloads(
+            payloads, content, reminder_name=GROUP_REMINDER_NAME, at_end=True
+        )
+        params["payloads"] = payloads
+        return EventDecision.SUCCESS, params
+
+
+__all__ = [
+    "GROUP_REMINDER_NAME", "REMINDER_NAME",
+    "VNextGroupPersonaEventHandler", "VNextPrivatePersonaEventHandler",
+]

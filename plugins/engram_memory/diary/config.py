@@ -68,6 +68,10 @@ class DiaryConfig(SectionBase):
         description="独立日记数据库路径",
     )
     timezone: str = Field(default="Asia/Shanghai", description="日记自然日所属时区")
+    model_task: str = Field(
+        default="actor", min_length=1,
+        description="日记生成使用的模型任务名，对应核心模型配置中的任务",
+    )
     max_concurrency: int = Field(
         default=3, ge=1, description="不同聊天流的生成并发上限"
     )

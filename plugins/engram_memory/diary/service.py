@@ -489,7 +489,7 @@ class DiaryService:
             return await self._generator(payload)
         persona = config_api.get_core_config().personality.model_dump(mode="json")
         request = llm_api.create_llm_request(
-            llm_api.get_model_set_by_task("actor"),
+            llm_api.get_model_set_by_task(self.config.model_task),
             request_name=DIARY_REQUEST_NAME,
         )
         request.add_payload(

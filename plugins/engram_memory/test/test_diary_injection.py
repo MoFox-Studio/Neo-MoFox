@@ -314,6 +314,135 @@ async def test_private_persona_is_fixed_in_first_user_and_refreshes_without_dupl
     )
 
 
+@pytest.mark.asyncio
+async def test_group_persona_uses_recent_participants_and_replaces_old_block(
+    reminder_store: SystemReminderStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """群聊只读取本流近期人物，过滤 Bot 并更新末尾的唯一提醒。"""
+    from types import SimpleNamespace
+
+    from src.app.plugin_system.types import EventType
+
+    from .. import plugin as plugin_module
+    from ..vnext import persona_injection
+
+    plugin = plugin_module.EngramMemoryPlugin(EngramMemoryConfig())
+    plugin.config.vnext.prompt_injection.group_persona_max_people = 2
+    lookup = AsyncMock(side_effect=lambda person_id: {
+        "person-a": SimpleNamespace(
+            impression_text="喜欢茶", is_current=True,
+        ),
+        "person-b": SimpleNamespace(
+            impression_text="过期旧稿", is_current=False,
+        ),
+    }[person_id])
+    plugin.runtime_owner = cast(
+        plugin_module.VNextRuntimeOwner,
+        SimpleNamespace(config=plugin.config, persona_service=SimpleNamespace(get_persona=lookup)),
+    )
+    monkeypatch.setattr(persona_injection.stream_api, "get_stream_info", AsyncMock(
+        return_value={"chat_type": "group", "platform": "qq"},
+    ))
+    rows = [
+        {"person_id": "person-other", "sender_id": "300", "sender_name": "其他群", "stream_id": "group-b"},
+        {"person_id": "person-b", "sender_id": "200", "sender_name": "乙"},
+        {"person_id": "person-a", "sender_id": "100", "sender_name": "甲"},
+        {"person_id": "bot", "sender_id": "999", "sender_name": "Bot"},
+        {"person_id": "person-a", "sender_id": "100", "sender_name": "甲"},
+    ]
+    query = AsyncMock(return_value=rows)
+    monkeypatch.setattr(persona_injection.message_api, "get_messages_before_time_in_chat", query)
+    monkeypatch.setattr(persona_injection.adapter_api, "get_bot_info_by_platform", AsyncMock(
+        return_value={"bot_id": "999"},
+    ))
+    monkeypatch.setattr(persona_injection.person_api, "generate_raw_person_id",
+                        lambda platform, sender: f"{platform}:{sender}")
+    stream_id = "group-a"
+    reminder_store.set(f"stream:{stream_id}:actor", "engram_memory_guide", "指引", insert_type="dynamic")
+    reminder_store.set(f"stream:{stream_id}:actor", REMINDER_NAME, "日记", insert_type="dynamic")
+    reminder_store.set(f"stream:{stream_id}:actor", persona_injection.GROUP_REMINDER_NAME,
+                       "旧人物印象", insert_type="dynamic")
+    request = _new_request(stream_id, reminder_store)
+    request.add_payload(LLMPayload(ROLE.USER, Text("第一轮")))
+    request.add_payload(LLMPayload(ROLE.ASSISTANT, Text("回复")))
+    request.add_payload(LLMPayload(ROLE.USER, Text("最新输入")))
+    params = {"request_name": "chat", "meta_data": {"stream_id": stream_id},
+              "payloads": request.payloads}
+    handler = persona_injection.VNextGroupPersonaEventHandler(plugin)
+    await handler.execute(EventType.BEFORE_LLM_REQUEST, params)
+    texts = [text for payload in params["payloads"] for text in _text_parts(payload)]
+    assert sum(f"[{persona_injection.GROUP_REMINDER_NAME}]" in text for text in texts) == 1
+    assert "旧人物印象" not in "".join(texts)
+    assert "喜欢茶" in "".join(_text_parts(params["payloads"][-1]))
+    assert "过期旧稿" not in "".join(texts)
+    assert "（暂无印象）" in "".join(texts)
+    assert lookup.await_count == 2
+    assert stream_id in plugin._group_persona_reminder_streams
+    assert not reminder_store.get_items(
+        "stream:group-b:actor", names=[persona_injection.GROUP_REMINDER_NAME]
+    )
+    assert query.call_args.args[0] == stream_id
+    assert query.call_args.kwargs["limit"] == 50
+
+    monkeypatch.setattr(persona_injection.stream_api, "get_stream_info", AsyncMock(
+        return_value={"chat_type": "private", "person_id": "person-a"},
+    ))
+    await handler.execute(EventType.BEFORE_LLM_REQUEST, params)
+    assert stream_id not in plugin._group_persona_reminder_streams
+    assert not reminder_store.get_items(
+        f"stream:{stream_id}:actor", names=[persona_injection.GROUP_REMINDER_NAME]
+    )
+    assert not any(
+        persona_injection.GROUP_REMINDER_NAME in text
+        for payload in params["payloads"] for text in _text_parts(payload)
+    )
+
+
+@pytest.mark.parametrize("reason", [
+    "engram_chat_diary_update", "engram_vnext_persona_update", "background_task",
+    "unloading", "no_owner", "no_stream", "bad_payloads", "other_event",
+])
+@pytest.mark.asyncio
+async def test_group_persona_skips_ineligible_requests(
+    reminder_store: SystemReminderStore, monkeypatch: pytest.MonkeyPatch, reason: str,
+) -> None:
+    """内部请求、卸载或缺失上下文时不访问人物和消息数据。"""
+    from types import SimpleNamespace
+    from src.app.plugin_system.types import EventType
+    from .. import plugin as plugin_module
+    from ..vnext import persona_injection
+
+    plugin = plugin_module.EngramMemoryPlugin(EngramMemoryConfig())
+    plugin._unloading = reason == "unloading"
+    lookup = AsyncMock()
+    if reason != "no_owner":
+        plugin.runtime_owner = cast(plugin_module.VNextRuntimeOwner, SimpleNamespace(
+            config=plugin.config, persona_service=SimpleNamespace(get_persona=lookup),
+        ))
+    stream = AsyncMock()
+    query = AsyncMock()
+    monkeypatch.setattr(persona_injection.stream_api, "get_stream_info", stream)
+    monkeypatch.setattr(persona_injection.message_api, "get_messages_before_time_in_chat", query)
+    payloads = [LLMPayload(ROLE.USER, Text("聊天正文"))]
+    if reason != "background_task":
+        payloads[0].content.append(Text("<system_reminder>\n[engram_memory_guide]\n指引\n</system_reminder>"))
+    original = _text_parts(payloads[0])
+    params = {
+        "request_name": reason,
+        "meta_data": {"stream_id": "" if reason == "no_stream" else "group-a"},
+        "payloads": None if reason == "bad_payloads" else payloads,
+    }
+    await persona_injection.VNextGroupPersonaEventHandler(plugin).execute(
+        EventType.ON_CHATTER_STEP if reason == "other_event" else EventType.BEFORE_LLM_REQUEST,
+        params,
+    )
+    stream.assert_not_awaited()
+    query.assert_not_awaited()
+    lookup.assert_not_awaited()
+    assert _text_parts(payloads[0]) == original
+
+
 @pytest.mark.parametrize(
     "missing", ["group", "stream", "identity", "snapshot", "uncertified", "empty"]
 )

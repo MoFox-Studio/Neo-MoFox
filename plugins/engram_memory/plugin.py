@@ -12,8 +12,8 @@ from .router.memory_admin_router import VNextMemoryAdminRouter
 from .vnext.framework_bridge import (
     delete_owned_reminder,
 )
-from .vnext.persona_injection import REMINDER_NAME as PERSONA_REMINDER_NAME
-from .vnext.persona_injection import VNextPrivatePersonaEventHandler
+from .vnext.persona_injection import GROUP_REMINDER_NAME, REMINDER_NAME as PERSONA_REMINDER_NAME
+from .vnext.persona_injection import VNextGroupPersonaEventHandler, VNextPrivatePersonaEventHandler
 from .vnext.runtime_components import (
     VNextDoctorRouter,
     VNextFlashbackEventHandler,
@@ -53,6 +53,7 @@ class EngramMemoryPlugin(BasePlugin):
         self._unloading = False
         self._flashback_reminder_streams: dict[str, set[str]] = {}
         self._persona_reminder_streams: set[str] = set()
+        self._group_persona_reminder_streams: set[str] = set()
 
     def get_components(self) -> list[type]:
         """返回正式记忆查询工具、写操作、事件处理器、服务与管理路由。"""
@@ -76,6 +77,7 @@ class EngramMemoryPlugin(BasePlugin):
             VNextMemoryChangedEventHandler,
             VNextFlashbackEventHandler,
             VNextPrivatePersonaEventHandler,
+            VNextGroupPersonaEventHandler,
             ChatDiaryEventHandler,
             VNextDoctorRouter,
             VNextMemoryAdminRouter,
@@ -139,6 +141,12 @@ class EngramMemoryPlugin(BasePlugin):
             except Exception as error:  # noqa: BLE001
                 logger.warning(f"移除私聊人物印象 reminder 失败: {error}")
         self._persona_reminder_streams.clear()
+        for stream_id in self._group_persona_reminder_streams:
+            try:
+                prompt_api.delete_stream_reminder(stream_id, "actor", GROUP_REMINDER_NAME)
+            except Exception as error:  # noqa: BLE001
+                logger.warning(f"移除群聊人物印象 reminder 失败: {error}")
+        self._group_persona_reminder_streams.clear()
         try:
             if self.runtime_owner is not None:
                 try:

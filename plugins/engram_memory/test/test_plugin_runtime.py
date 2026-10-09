@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
+import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import fields
@@ -641,6 +645,92 @@ async def test_vector_worker_only_processes_pending_outbox() -> None:
     service.retry_failed_outbox.assert_not_awaited()
 
 
+@pytest.mark.parametrize("source_kind", ["folder", "mfp"])
+def test_host_discovers_and_initializes_plugin(
+    tmp_path: Path, source_kind: str,
+) -> None:
+    """真实宿主在隔离进程中发现、初始化和卸载文件夹及压缩包插件。"""
+    from src.core.components import loader
+
+    plugin_dir = Path(__file__).resolve().parents[1]
+    source = plugin_dir
+    if source_kind == "mfp":
+        source = tmp_path / "engram_memory-1.1.0.mfp"
+        with zipfile.ZipFile(source, "w") as archive:
+            for path in plugin_dir.rglob("*"):
+                relative = path.relative_to(plugin_dir)
+                if path.is_file() and not set(relative.parts).intersection(
+                    {"__pycache__", "dist", "test", ".git", ".pytest_cache"}
+                ):
+                    archive.write(path, relative.as_posix())
+    script = """
+import asyncio
+import sys
+from pathlib import Path
+from src.core.components.loader import PluginLoader, load_manifest
+from src.core.managers.plugin_manager import PluginManager
+from src.core.models.sql_alchemy import Base
+from src.kernel.db import configure_engine, get_engine
+from src.kernel.db.core.engine import reset_engine_state
+
+async def main():
+    source = Path(sys.argv[1])
+    loader = PluginLoader()
+    assert str(source) in await loader.discover_plugins(str(source.parent))
+    manifest = await load_manifest(str(source))
+    assert manifest is not None
+    assert manifest.version == "1.1.0"
+    assert loader._check_version_compatibility(manifest)[0]
+    configure_engine("sqlite+aiosqlite:///core.db", apply_optimizations=False)
+    engine = await get_engine()
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    manager = PluginManager()
+    try:
+        assert await manager.load_plugin_from_manifest(str(source), manifest)
+        plugin = manager.get_plugin("engram_memory")
+        assert plugin is not None and plugin.plugin_version == "1.1.0"
+        owner = plugin.runtime_owner
+        assert owner is not None and owner._initialized and owner.diary.ready
+        assert "group_persona" in {item.name for item in plugin.get_components()}
+        assert owner.schema.database._engine is not None
+        assert await manager.unload_plugin("engram_memory")
+        assert plugin.runtime_owner is None
+        assert owner.schema.database._engine is None
+    finally:
+        if manager.get_plugin("engram_memory") is not None:
+            await manager.unload_plugin("engram_memory")
+        await reset_engine_state()
+
+asyncio.run(main())
+"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(Path(loader.__file__).resolve().parents[3])
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment.pop("ENGRAM_NEO4J_PASSWORD", None)
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source)], cwd=tmp_path,
+        env=environment, capture_output=True, text=True, encoding="utf-8", timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_manifest_matches_runtime_components_and_current_api() -> None:
+    """发布版本、组件清单与宿主版本约束保持一致。"""
+    from src.app.plugin_system.api import PLUGIN_API_VERSIONS
+    from ..plugin import EngramMemoryPlugin
+
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == "1.1.0"
+    assert manifest["categories"] == ["tool"]
+    assert manifest["min_core_version"] == "1.2.0-rc.2"
+    assert all(PLUGIN_API_VERSIONS[name] == version for name, version in manifest["api_version"].items())
+    components = EngramMemoryPlugin(EngramMemoryConfig()).get_components()
+    assert {(item["component_type"], item["component_name"]) for item in manifest["include"]} == {
+        (str(component.component_type), component.name) for component in components
+    }
+
+
 def test_plugin_registers_exact_component_graph() -> None:
     """入口仅注册预期组件，记忆 Action 满足框架文本能力声明校验。"""
     from ..plugin import EngramMemoryPlugin
@@ -662,11 +752,12 @@ def test_plugin_registers_exact_component_graph() -> None:
         "VNextFlashbackEventHandler",
         "VNextMemoryService",
         "VNextPrivatePersonaEventHandler",
+        "VNextGroupPersonaEventHandler",
         "ChatDiaryEventHandler",
         "VNextDoctorRouter",
         "VNextMemoryAdminRouter",
     }
-    assert len(components) == 17
+    assert len(components) == 18
     for component in components:
         if issubclass(component, BaseAction):
             assert component.validate_associated_types() == ["text"]
@@ -674,6 +765,7 @@ def test_plugin_registers_exact_component_graph() -> None:
     assert names["VNextMemoryChangedEventHandler"] == "memory_changed"
     assert names["VNextFlashbackEventHandler"] == "vnext_flashback_injector"
     assert names["VNextPrivatePersonaEventHandler"] == "private_persona"
+    assert names["VNextGroupPersonaEventHandler"] == "group_persona"
     assert isinstance(plugin.config, EngramMemoryConfig)
     plugin.config.plugin.enabled = False
     assert plugin.get_components() == []
@@ -833,6 +925,7 @@ async def test_plugin_unload_cleans_guide_when_owner_close_fails(
     plugin.runtime_owner = cast(VNextRuntimeOwner, resource)
     plugin._flashback_reminder_streams["stream-1"] = {"flashback-test"}
     plugin._persona_reminder_streams.add("stream-private")
+    plugin._group_persona_reminder_streams.add("stream-group")
     delete_stream = Mock()
     delete_guide = Mock()
     monkeypatch.setattr(
@@ -841,14 +934,16 @@ async def test_plugin_unload_cleans_guide_when_owner_close_fails(
     monkeypatch.setattr(plugin_module, "delete_owned_reminder", delete_guide)
     with pytest.raises(RuntimeError, match="owner-test"):
         await plugin.on_plugin_unloaded()
-    assert delete_stream.call_count == 2
+    assert delete_stream.call_count == 3
     delete_stream.assert_any_call("stream-1", "actor", "flashback-test")
     delete_stream.assert_any_call(
         "stream-private", "actor", plugin_module.PERSONA_REMINDER_NAME
     )
+    delete_stream.assert_any_call("stream-group", "actor", plugin_module.GROUP_REMINDER_NAME)
     delete_guide.assert_called_once_with("actor", "engram_memory_guide")
     assert not plugin._flashback_reminder_streams
     assert not plugin._persona_reminder_streams
+    assert not plugin._group_persona_reminder_streams
     assert plugin.runtime_owner is None
 
 

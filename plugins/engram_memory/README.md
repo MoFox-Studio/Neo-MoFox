@@ -1,5 +1,13 @@
 # Engram Memory
 
+当前市场版本为 **1.1.0**，基于 `feat/engram-memory-trial-dev`。此版本按新的发布序列编号，低于历史试用包 `2.0.1`，从旧包切换时需显式选择 `1.1.0`，不能依赖语义版本自动升级。版本编号不改变数据库 Schema，也不会降级已保存的数据。
+
+## 安装与加载
+
+需要 Neo-MoFox `1.2.0-rc.2` 或更新版本，且 `stream_api=2.0.0`、`message_api/person_api>=1.1.0`。将发布的 `.mfp` 放在主程序 `plugins/` 根目录，或将源码文件夹放为 `plugins/engram_memory/`。同一插件只保留一个安装来源，避免文件夹和旧包重复发现。不要把整个 Neo-MoFox 仓库或包含多层目录的压缩包作为插件安装。
+
+主程序先初始化核心数据库、模型配置及插件依赖，再加载插件。Embedding 未配置或 Neo4j 不可用不会阻断 SQLite 记忆、日记与人物能力；插件独立数据库初始化失败则会明确报错。验收必须检查 Runtime Owner 已初始化，不能仅依据主程序输出“插件加载成功”。测试包含文件夹与 `.mfp` 的隔离发现、完整初始化和卸载，均不连接生产账号或修改生产记忆库。
+
 ## Cue-Driven Reconstructive Memory
 
 当前版本将在线回忆与后台候选收集分开：消息先进入 Episode 经历层，由规则线索、人物/主题关联和有限多跳扩散形成短期 Working Memory；正式 Memory/Revision 仍须经过明确提案确认或既有正式写入接口。当前尚未实现自动模型审核巩固，也未将 Episode 与正式 Memory 闪回统一为同一竞争器。
@@ -101,6 +109,8 @@ L0 感知、L1 工作集、L2 热缓存、ACT-R/KDA 读出和 Transformer 排序
 
 群聊通过常驻指引和工具描述要求模型：跟某个人开始聊天，或有人新参与时，先调用 `person_lookup` 的当前视图读取其印象，再回应；同一段对话已经读过的印象不必每句话重复查询。这是模型行为要求，不是程序强制的回复拦截。
 
+群聊同时自动读取当前流最近 50 条消息的参与者，按最近发言顺序去重、过滤 Bot，最多将 10 人的已认证当前印象作为流私有动态 SystemReminder 放在最新 User 末尾。无可信印象时显示“（暂无印象）”，不触发生成或回退旧稿。每轮清除历史旧块，参与者变化或切换聊天类型时撤回过期提醒；内部日记和人物生成请求不注入。印象只供 Bot 理解相处方式，不表示允许向群成员披露私人内容。
+
 私聊默认按聊天流的准确核心人物 ID 读取对端已认证的当前印象，以流私有的 `FIXED + FOREVER` SystemReminder 注入首个 User，不要求模型开始聊天前再调用工具。首轮无需预载事件也可注入；后续印象改变时替换同名旧块，不保留多份稿件。不存在可信当前印象时移除旧提醒，不回退旧残留或触发模型生成。没有聊天流、未使用记忆提醒或日记与印象内部生成请求不注入。
 
 可在项目根目录运行不连接数据库或模型的离线示例：
@@ -147,6 +157,8 @@ Doctor 提供正式记忆、版本证据、检索入口和向量索引的检查�
 | `vnext.retrieval.max_limit` | `20` | 检索返回条数上限 |
 | `vnext.retrieval.rrf_k` | `60` | 多路召回的排名融合参数 |
 | `vnext.prompt_injection.reminder_at_end` | `true` | 将记忆使用指引动态放在最新一轮输入；关闭后固定在首轮输入 |
+| `vnext.prompt_injection.group_persona_message_limit` | `50` | 群聊近期参与者的消息窗口 |
+| `vnext.prompt_injection.group_persona_max_people` | `10` | 群聊每轮人物印象人数上限 |
 | `vnext.flashback.enabled` | `true` | 开启自然闪回 |
 | `vnext.flashback.trigger_probability` | `0.25` | 每轮回复尝试闪回的概率；`0` 关闭，`1` 每轮尝试 |
 | `vnext.flashback.context_turns` | `6` | 闪回检索使用的上下文轮数 |
@@ -157,7 +169,7 @@ Doctor 提供正式记忆、版本证据、检索入口和向量索引的检查�
 
 正式记忆数据库默认位于 `data/engram_memory/vnext.db`，向量索引默认位于 `data/engram_memory/chroma`。可通过 `storage.vnext_db_path` 和 `storage.vector_db_path` 调整位置。
 
-启用后，插件注册三个正式记忆 Action、三个查询 Tool、记忆变化、闪回、私聊印象与聊天日记 EventHandler、记忆 Service、Doctor 与管理 Router，并维护派生向量索引。配置的 vnext 节仅包含 `persona`、`retrieval`、`flashback`、`prompt_injection`、`vector`；独立聊天日记使用 `diary` 节。自然闪回可通过 `vnext.flashback.enabled` 关闭。
+启用后，插件注册四个 Action、六个 Tool、记忆变化、闪回、私聊印象、群聊印象与聊天日记 EventHandler、记忆 Service、Doctor 与管理 Router，并维护派生向量索引。vnext 包含 `persona`、`retrieval`、`flashback`、`feedforward`、`claim_review`、`neo4j`、`prompt_injection`、`vector`；独立聊天日记使用 `diary` 节。前馈开启时替代自然闪回，关闭自动回忆须同时关闭 `vnext.feedforward.enabled` 与 `vnext.flashback.enabled`。
 
 记忆使用指引和闪回通过框架原生 `SystemReminder` 注入，不修改模型权重。指引默认随最新输入刷新；前馈开启时每轮主聊天 prompt 构建前都会尝试一次检索，选中的记忆在当前 User payload 中只保留一份；同一记忆不会反复累加。正式记忆更正或作废时，已有提醒随之更新或移除；来源隐私删除也会撤回对应提醒。提醒源在插件卸载时清理，不保证跨 Bot 重启保留；正式记忆库不受影响。向量模型或向量索引不可用时，插件仍启动并保留 SQLite 正式记忆、词法/结构化检索、Episode、日记和人物更新，前馈自动跳过向量通道；可通过 Doctor 检查定位 `VECTOR_INDEX_UNAVAILABLE`，恢复模型后重新启动插件即可重建或继续投递派生索引。前馈仍受相关性、人物/聊天流范围和耗时预算限制。
 
@@ -181,6 +193,7 @@ Doctor 提供正式记忆、版本证据、检索入口和向量索引的检查�
 | `diary.group.message_threshold` / `diary.private.message_threshold` | `200` / `100` | 消息数条件的未处理消息阈值 |
 | `diary.group.context_days` / `diary.private.context_days` | `7` / `7` | 含今天的注入自然日窗口 |
 | `diary.max_concurrency` | `3` | 跨聊天流的后台并发上限，同流串行 |
+| `diary.model_task` | `actor` | 日记生成的核心模型任务名，群私聊共用，不是具体模型名称 |
 | `diary.batch_messages` / `diary.context_messages` | `100` / `6` | 连续新消息批大小与额外前文条数 |
 | `diary.retry_limit` | `2` | 首次失败后的额外重试次数 |
 
@@ -198,7 +211,7 @@ uv run --no-sync python -m plugins.engram_memory.examples.chat_diary
 
 ## 迁移已有 Engram 数据结构
 
-当前 Schema 为 v5，将当前人物印象保存在核心数据库，并在成功审查中记录生成方案、已读版本及历史快照。升级插件后正常启动即可：初始化会自动将已知的 Schema v1、v2、v3、v4 升级至当前版本，无须手动运行脚本或切换数据库路径。迁移在运行时数据库打开、后台任务启动前完成；已经是当前版本时不重复迁移，也不创建升级备份。
+当前 Schema 为 v7，保存正式记忆、经历、候选审核与人物印象历史。升级插件后正常启动即可：初始化会自动将已知的 Schema v1 至 v6 升级至当前版本，无须手动运行脚本或切换数据库路径。迁移在运行时数据库打开、后台任务启动前完成；已经是当前版本时不重复迁移，也不创建升级备份。
 
 自动迁移先锁定写入，并用 SQLite Backup API 保存包含已提交 WAL 数据的一致快照。备份保存在数据库同级的 `backups/` 目录，文件名包含旧 Schema 版本及唯一标识。随后在同一个 SQLite 事务内完成结构转换和版本更新，检查完整性及外键后提交。备份失败或迁移失败会停止插件加载；未提交的结构和版本更新会回滚，下一次启动仍可重试，不把半升级的数据库交给后台任务。未知版本、缺少版本记录或比当前代码更新的数据库明确拒绝，不猜测结构、不自动降级。进程退出后未提交事务由 SQLite 恢复；备份不替代正常的数据备份策略，不能保证磁盘故障或硬件损坏时绝对无损。
 

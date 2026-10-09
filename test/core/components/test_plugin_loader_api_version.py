@@ -187,17 +187,17 @@ def test_dict_api_version_core_too_low(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "低于" in reason
 
 
-def test_dict_api_version_core_higher_warns_but_loads(
+def test_dict_api_version_core_higher_is_compatible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """dict 形式，核心版本高于插件要求，应警告但允许加载。"""
+    """dict 形式，核心版本高于插件要求，应兼容且无需警告。"""
     _patch_api_version(monkeypatch, "llm_api", "1.5.0")
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(
         _manifest(api_version={"llm_api": "1.0.0"})
     )
     assert ok is True
-    assert "llm_api" in reason
+    assert reason == "兼容"
 
 
 def test_dict_api_version_unknown_key_rejected() -> None:
