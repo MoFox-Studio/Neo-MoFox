@@ -108,9 +108,11 @@ class EmojiSenderPlugin(BasePlugin):
     dependent_components: list[str] = []
 
     def __init__(self, config: EmojiSenderConfig | None = None) -> None:
+        """初始化插件的调度状态与运行期拒绝哈希集合。"""
         super().__init__(config)
         self._schedule_ids: list[str] = []
         self._register_task_id: str | None = None
+        self._rejected_hashes: set[str] = set()
 
     def get_components(self) -> list[type]:
         """返回本插件提供的组件类（按 interaction_mode 分模式注册）。"""
