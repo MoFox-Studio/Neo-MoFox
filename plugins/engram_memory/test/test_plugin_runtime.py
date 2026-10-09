@@ -655,19 +655,25 @@ def test_host_discovers_and_initializes_plugin(
     plugin_dir = Path(__file__).resolve().parents[1]
     source = plugin_dir
     if source_kind == "mfp":
-        source = tmp_path / "engram_memory-2.0.2.mfp"
-        with zipfile.ZipFile(source, "w") as archive:
-            for path in plugin_dir.rglob("*"):
-                relative = path.relative_to(plugin_dir)
-                if path.is_file() and not set(relative.parts).intersection(
-                    {"__pycache__", "dist", "test", ".git", ".pytest_cache"}
-                ):
-                    archive.write(path, relative.as_posix())
+        release_package = os.environ.get("ENGRAM_RELEASE_PACKAGE")
+        if release_package:
+            source = Path(release_package).resolve()
+            assert source.is_file(), f"Release package missing: {source}"
+        else:
+            source = tmp_path / "engram_memory-2.0.3.mfp"
+            with zipfile.ZipFile(source, "w") as archive:
+                for path in plugin_dir.rglob("*"):
+                    relative = path.relative_to(plugin_dir)
+                    if path.is_file() and not set(relative.parts).intersection(
+                        {"__pycache__", "dist", "test", ".git", ".pytest_cache"}
+                    ):
+                        archive.write(path, relative.as_posix())
     script = """
 import asyncio
 import sys
 from pathlib import Path
 from src.core.components.loader import PluginLoader, load_manifest
+from src.core.components.registry import get_global_registry
 from src.core.managers.plugin_manager import PluginManager
 from src.core.models.sql_alchemy import Base
 from src.kernel.db import configure_engine, get_engine
@@ -679,7 +685,7 @@ async def main():
     assert str(source) in await loader.discover_plugins(str(source.parent))
     manifest = await load_manifest(str(source))
     assert manifest is not None
-    assert manifest.version == "2.0.2"
+    assert manifest.version == "2.0.3"
     assert loader._check_version_compatibility(manifest)[0]
     configure_engine("sqlite+aiosqlite:///core.db", apply_optimizations=False)
     engine = await get_engine()
@@ -689,12 +695,19 @@ async def main():
     try:
         assert await manager.load_plugin_from_manifest(str(source), manifest)
         plugin = manager.get_plugin("engram_memory")
-        assert plugin is not None and plugin.plugin_version == "2.0.2"
+        assert plugin is not None and plugin.plugin_version == "2.0.3"
         owner = plugin.runtime_owner
         assert owner is not None and owner._initialized and owner.diary.ready
         assert "group_persona" in {item.name for item in plugin.get_components()}
+        registry = get_global_registry()
+        signatures = {
+            f"engram_memory:{item.component_type}:{item.component_name}"
+            for item in manifest.include
+        }
+        assert all(signature in registry for signature in signatures)
         assert owner.schema.database._engine is not None
         assert await manager.unload_plugin("engram_memory")
+        assert not any(signature in registry for signature in signatures)
         assert plugin.runtime_owner is None
         assert owner.schema.database._engine is None
     finally:
@@ -721,7 +734,7 @@ def test_manifest_matches_runtime_components_and_current_api() -> None:
     from ..plugin import EngramMemoryPlugin
 
     manifest = json.loads((Path(__file__).resolve().parents[1] / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "2.0.2"
+    assert manifest["version"] == "2.0.3"
     assert manifest["categories"] == ["tool"]
     assert manifest["min_core_version"] == "1.2.0-rc.2"
     assert all(PLUGIN_API_VERSIONS[name] == version for name, version in manifest["api_version"].items())

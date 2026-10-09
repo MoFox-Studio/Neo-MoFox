@@ -122,6 +122,9 @@ class EngramMemoryPlugin(BasePlugin):
             logger.warning(f"注册 vNext 记忆引导语失败: {error}")
         if not reminder_registered:
             logger.debug("Engram Memory 引导语未注册")
+        logger.info(
+            f"Engram Memory 已初始化，组件={len(self.get_components())}，日记已就绪"
+        )
 
     async def on_plugin_unloaded(self) -> None:
         """停止共享资源并移除流闪回、私聊印象与全局记忆引导语。"""
