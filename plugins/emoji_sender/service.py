@@ -25,14 +25,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from chromadb.api.models.Collection import Collection
+
+from src.app.plugin_system.api import database_api
 from src.app.plugin_system.api.llm_api import (
     create_embedding_request,
     create_llm_request,
     get_model_set_by_task,
 )
+from src.app.plugin_system.api.media_api import get_media_info
 from src.app.plugin_system.api.send_api import send_emoji
-from src.core.components.base.service import BaseService
+from src.app.plugin_system.base import BaseService
 from src.core.config import get_core_config
+from src.core.models.sql_alchemy import ImageDescriptions, Images
 from src.core.utils.base64_helper import base64_encode_bytes
 from src.kernel.logger import get_logger
 from src.kernel.vector_db import get_vector_db_service
@@ -93,6 +98,8 @@ class EmojiSenderService(BaseService):
     - send_best：发送检索到的表情包
     - search_candidates：按 tag + 向量检索，返回去重分页后的候选列表（picker 模式）
     - send_by_id：按 meme id 前缀精确发送指定表情包（picker 模式）
+    - collect_meme：按聊天媒体哈希收藏指定图片
+    - refresh_meme：重新调用 VLM 更新聊天图片描述及已有收藏的标注和向量
     - ingest_once：执行一次入库任务（对齐→抽取→VLM 决策→写入）
     """
 
@@ -280,6 +287,11 @@ class EmojiSenderService(BaseService):
     def _sha256_bytes(data: bytes) -> str:
         """计算 bytes 的 sha256 十六进制值。"""
         return hashlib.sha256(data).hexdigest()
+
+    @staticmethod
+    def _chat_media_hash(data: bytes) -> str:
+        """计算聊天媒体 ID：对原始文件的纯 base64 文本取 SHA-256。"""
+        return hashlib.sha256(base64_encode_bytes(data).encode("ascii")).hexdigest()
 
     @staticmethod
     def _guess_mime(suffix: str) -> str:
@@ -561,8 +573,10 @@ class EmojiSenderService(BaseService):
         image_base64: str,
         mime: str,
         is_gif_collage: bool = False,
+        decide_collection: bool = True,
+        extra_prompt: str = "",
     ) -> dict[str, Any] | None:
-        """调用 VLM 做收藏决策与标注，失败或标注不完整时返回 None。"""
+        """调用 VLM 标注图片，可选执行收藏决策或附加识别提示。"""
         try:
             model_set = get_model_set_by_task("vlm")
         except Exception:
@@ -576,13 +590,30 @@ class EmojiSenderService(BaseService):
             "注意：这是一个 GIF 动图表情包的关键帧截图（网格排列），请综合所有帧的内容进行描述。\n"
             if is_gif_collage else ""
         )
+        task = (
+            "你将看到一张表情包图片。你的任务：根据人设，决定你是否愿意把它收藏起来以后自己使用。\n"
+            if decide_collection
+            else "你将看到一张图片或表情包。请重新查看图片并生成标注，不判断是否收藏。\n"
+        )
+        output_schema = (
+            '{"keep": true/false, "description": "描述内容，文字：\'图中文字\'", "emotion_tags": ["标签1", "标签2"]}\n\n'
+            if decide_collection
+            else '{"description": "描述内容，文字：\'图中文字\'", "emotion_tags": ["标签1", "标签2"]}\n\n'
+        )
+        decision_hint = "- keep：根据人设决定是否收藏\n" if decide_collection else ""
+        collection_rules = (
+            "收藏标准：\n"
+            "- 质量高且表达生动的表情包\n"
+            "- 避免收藏低质、冒犯、违规或与人设不符的\n\n"
+            if decide_collection else ""
+        )
 
         prompt = (
-            "你将看到一张表情包图片。你的任务：根据人设，决定你是否愿意把它收藏起来以后自己使用。\n"
+            task
             + gif_hint
             + "你必须输出严格 JSON（不要输出任何额外文字），格式如下：\n"
-            '{"keep": true/false, "description": "描述内容，文字：\'图中文字\'", "emotion_tags": ["标签1", "标签2"]}\n\n'
-            "description 要求（文字部分不计入字数限制）：\n"
+            + output_schema
+            + "description 要求（文字部分不计入字数限制）：\n"
             "- 概括表情包传达的核心情绪、氛围和画面主要特征\n"
             "- 准确复述图中所有文字，格式为：文字：'逐字抄录'，放在末尾\n"
             "- 如果确保认出表情包的具体来源（作品名、角色名等），请补充说明\n"
@@ -590,17 +621,21 @@ class EmojiSenderService(BaseService):
             "- 总体 40 字以内（不计图中文字）\n"
             "- 无文字则省略文字部分\n\n"
             "JSON 字段说明：\n"
-            "- keep：根据人设决定是否收藏\n"
-            "- emotion_tags：必须从预设标签中选择（可多选，keep=false 时可为空）\n"
+            + decision_hint
+            + "- emotion_tags：必须从预设标签中选择（可多选）；仅拒绝收藏时可为空\n"
             "- 预设标签："
             + tag_list
             + "\n\n"
-            "收藏标准：\n"
-            "- 质量高且表达生动的表情包\n"
-            "- 避免收藏低质、冒犯、违规或与人设不符的\n\n"
-            "人设（来自主配置）：\n"
+            + collection_rules
+            + "人设（来自主配置）：\n"
             + persona
         )
+        if extra_prompt.strip():
+            prompt += (
+                "\n\n识别时需要重点复核的提示：\n"
+                + extra_prompt.strip()
+                + "\n请以原图为依据核对提示，不要把提示中的猜测当作事实；仍按上述 JSON 格式输出。"
+            )
 
         from src.kernel.llm import Image, LLMContextManager, LLMPayload, ROLE, Text
 
@@ -627,7 +662,7 @@ class EmojiSenderService(BaseService):
             logger.warning("VLM 输出无法解析为 JSON，跳过")
             return None
 
-        keep = obj.get("keep")
+        keep = obj.get("keep") if decide_collection else True
         if not isinstance(keep, bool):
             logger.warning("VLM 收藏决策必须为布尔值，跳过")
             return None
@@ -637,9 +672,9 @@ class EmojiSenderService(BaseService):
         if not isinstance(tags, list):
             tags = []
 
-        filtered_tags = [
+        filtered_tags = list(dict.fromkeys(
             str(t).strip() for t in tags if isinstance(t, (str, int, float)) and str(t).strip() in EMOTION_TAG_PRESET
-        ]
+        ))
 
         if keep and (not description or not filtered_tags):
             logger.warning("VLM 收藏标注缺少有效描述或情感标签，跳过")
@@ -653,6 +688,293 @@ class EmojiSenderService(BaseService):
             "description": description,
             "emotion_tags": filtered_tags,
         }
+
+    async def _recognize_requested_meme(
+        self, payload: bytes, mime: str, extra_prompt: str = ""
+    ) -> dict[str, Any] | None:
+        """重新查看指定图片并生成标注，不决定是否收藏。"""
+        vlm_bytes, vlm_mime, is_gif_collage = await asyncio.to_thread(
+            self._compress_image_for_vlm, payload, mime
+        )
+        image_base64 = await asyncio.to_thread(base64_encode_bytes, vlm_bytes)
+        labeled = await self._vlm_decide_and_label(
+            image_base64=image_base64,
+            mime=vlm_mime,
+            is_gif_collage=is_gif_collage,
+            decide_collection=False,
+            extra_prompt=extra_prompt,
+        )
+        if not labeled or not labeled["description"] or not labeled["emotion_tags"]:
+            return None
+        return labeled
+
+    async def _label_requested_meme(
+        self, payload: bytes, mime: str, extra_prompt: str = ""
+    ) -> tuple[dict[str, Any], list[float]] | None:
+        """为指定图片生成标注和收藏库检索向量。"""
+        labeled = await self._recognize_requested_meme(payload, mime, extra_prompt)
+        if labeled is None:
+            return None
+        embedding = await self._embed_query(labeled["description"], "emoji_sender_label_embedding")
+        if not embedding:
+            return None
+        return labeled, embedding
+
+    async def _replace_media_description(
+        self, media_info: dict[str, Any], description: str
+    ) -> None:
+        """覆盖媒体描述和识别缓存，缓存写入失败时恢复媒体记录。"""
+        media_id = str(media_info["image_id"])
+        media_type = str(media_info["type"])
+        cached = await database_api.get_by(
+            ImageDescriptions, image_description_hash=media_id, type=media_type
+        )
+        updated = await database_api.update(
+            Images, id=media_info["id"], obj_in={"description": description, "vlm_processed": True}
+        )
+        if updated is None:
+            raise RuntimeError("图片媒体记录已不可用")
+        values = {"description": description, "timestamp": time.time()}
+        try:
+            if cached is None:
+                await database_api.create(
+                    ImageDescriptions,
+                    {**values, "image_description_hash": media_id, "type": media_type},
+                )
+            else:
+                updated = await database_api.update(ImageDescriptions, id=cached.id, obj_in=values)
+                if updated is None:
+                    raise RuntimeError("图片描述缓存已不可用")
+        except Exception:
+            restored = await database_api.update(
+                Images,
+                id=media_info["id"],
+                obj_in={
+                    "description": media_info.get("description"),
+                    "vlm_processed": bool(media_info.get("vlm_processed")),
+                },
+            )
+            if restored is None:
+                raise RuntimeError("图片媒体记录恢复失败")
+            raise
+
+    async def _store_meme_labels(
+        self,
+        collection: Collection,
+        meme_id: str,
+        labeled: dict[str, Any],
+        embedding: list[float],
+        metadata: dict[str, Any],
+    ) -> list[str]:
+        """一次写入指定图片的全部标签记录，返回写入的记录 ID。"""
+        tags: list[str] = labeled["emotion_tags"]
+        description: str = labeled["description"]
+        ids = [f"{meme_id}:{tag}" for tag in tags]
+        await asyncio.to_thread(
+            collection.upsert,
+            ids=ids,
+            embeddings=[list(embedding) for _ in tags],
+            documents=[description for _ in tags],
+            metadatas=[{**metadata, "tag": tag, "description": description} for tag in tags],
+        )
+        return ids
+
+    async def collect_meme(self, *, media_id: str) -> tuple[bool, str]:
+        """按媒体哈希收藏图片；调用方须验证媒体来自当前聊天上下文。"""
+        requested_id = media_id.strip().lower()
+        if len(requested_id) != 64 or any(char not in "0123456789abcdef" for char in requested_id):
+            return False, "请使用聊天中图片或表情包括号里的完整 media_id"
+
+        async with _INGEST_LOCK:
+            try:
+                collection = await self._vector_db().get_or_create_collection(self._collection_name())
+                if collection is None:
+                    return False, "表情包库暂时不可用"
+                existing = await asyncio.to_thread(
+                    collection.get, where={"media_id": requested_id}, include=["metadatas"]
+                )
+                if existing["ids"]:
+                    meme_id = existing["metadatas"][0]["meme_id"]
+                    return True, f"这张表情包已经收藏过了，id={meme_id}"
+
+                media_info = await get_media_info(requested_id)
+                if not media_info or media_info.get("type") not in ("image", "emoji"):
+                    return False, "没有找到这张图片或表情包的原文件"
+                source_value = media_info.get("path")
+                if not source_value:
+                    return False, "这张图片的原文件已不可用"
+                source = Path(source_value)
+                if source.suffix.lower() not in _ALLOWED_SUFFIXES:
+                    return False, "这张图片的文件格式不支持收藏"
+                payload, meme_id = await asyncio.to_thread(self._read_file_with_hash, source)
+                if self._chat_media_hash(payload) != requested_id:
+                    return False, "图片文件与 media_id 不一致，未收藏"
+                existing = await asyncio.to_thread(
+                    collection.get, where={"meme_id": meme_id}, include=["metadatas"]
+                )
+                if existing["ids"]:
+                    return True, f"这张表情包已经收藏过了，id={meme_id}"
+                max_memes = int(self._cfg().storage.max_memes)
+                count = await asyncio.to_thread(self._count_meme_files, self._data_dir())
+                if max_memes > 0 and count >= max_memes:
+                    return False, "表情包收藏数量已达上限"
+
+                prepared = await self._label_requested_meme(payload, self._guess_mime(source.suffix))
+                if prepared is None:
+                    return False, "图片识别或检索向量生成失败，未收藏，请稍后重试"
+                labeled, embedding = prepared
+                target = self._data_dir() / f"{meme_id}{source.suffix.lower()}"
+                await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+                target_existed = target.exists()
+                await asyncio.to_thread(self._copy_file, source, target)
+                metadata = {
+                    "meme_id": meme_id,
+                    "media_id": requested_id,
+                    "path": self._path_to_store_value(target),
+                    "source_hash": meme_id,
+                    "source_cache_path": self._path_to_store_value(source),
+                    "created_at": time.time(),
+                }
+                try:
+                    await self._store_meme_labels(collection, meme_id, labeled, embedding, metadata)
+                except Exception:
+                    if not target_existed:
+                        await asyncio.to_thread(target.unlink, missing_ok=True)
+                    raise
+                self._rejected_hashes.discard(meme_id)
+                return True, (
+                    f"已收藏表情包，id={meme_id}\n"
+                    f"标签：{'、'.join(labeled['emotion_tags'])}\n描述：{labeled['description']}"
+                )
+            except Exception as error:
+                logger.warning(f"主动收藏表情包失败: {error}")
+                return False, "收藏失败，原图未删除，请稍后重试"
+
+    async def refresh_meme(
+        self, *, meme_id: str, extra_prompt: str = "", allow_chat_media: bool = True
+    ) -> tuple[bool, str]:
+        """重新识别图片；调用方通过 allow_chat_media 授权访问当前聊天媒体。"""
+        prefix = meme_id.strip().lower()
+        if not 12 <= len(prefix) <= 64 or any(char not in "0123456789abcdef" for char in prefix):
+            return False, "请使用聊天中的完整 media_id、收藏返回的完整 id 或检索结果中的 12 位 id"
+
+        async with _INGEST_LOCK:
+            try:
+                collection = await self._vector_db().get_or_create_collection(self._collection_name())
+                if collection is None:
+                    return False, "表情包库暂时不可用"
+                query = {"$or": [{"meme_id": prefix}, {"media_id": prefix}]} if len(prefix) == 64 else None
+                records = await asyncio.to_thread(collection.get, where=query, include=["metadatas"])
+                matched = [
+                    (record_id, metadata)
+                    for record_id, metadata in zip(records["ids"], records["metadatas"] or [])
+                    if metadata and (
+                        str(metadata.get("meme_id", "")).startswith(prefix)
+                        or metadata.get("media_id") == prefix
+                    )
+                ]
+                media_info: dict[str, Any] | None = None
+                if not matched:
+                    if len(prefix) != 64:
+                        return False, "没有找到对应表情包，请使用聊天中的完整 media_id 或收藏库 id"
+                    if not allow_chat_media:
+                        return False, "当前聊天上下文中没有这张图片，请使用当前聊天中的完整 media_id"
+                    media_info = await get_media_info(prefix)
+                    if not media_info or media_info.get("type") not in ("image", "emoji"):
+                        return False, "没有找到这张图片，请使用聊天中的完整 media_id 或收藏库 id"
+                    path_value = media_info.get("path")
+                    if not path_value:
+                        return False, "图片原文件已不可用，无法重新识别，请重新发送图片；已保留旧识别结果"
+                    source = Path(path_value)
+                    payload, full_id = await asyncio.to_thread(self._read_file_with_hash, source)
+                    if self._chat_media_hash(payload) != prefix:
+                        return False, "图片文件与 media_id 不一致，未修改旧识别结果"
+                    records = await asyncio.to_thread(
+                        collection.get, where={"meme_id": full_id}, include=["metadatas"]
+                    )
+                    matched = [
+                        (record_id, metadata)
+                        for record_id, metadata in zip(records["ids"], records["metadatas"] or [])
+                        if metadata
+                    ]
+                else:
+                    full_ids = {str(metadata["meme_id"]) for _, metadata in matched}
+                    if len(full_ids) != 1:
+                        return False, "这个 id 对应多张表情包，请使用完整 id"
+                    full_id = full_ids.pop()
+                    metadata = dict(matched[0][1])
+                    path_value = metadata.get("path")
+                    source = Path(path_value) if path_value else None
+                    if source is None or not source.is_file():
+                        media_id = str(metadata.get("media_id") or "")
+                        media_info = await get_media_info(media_id) if media_id else None
+                        path_value = media_info.get("path") if media_info else None
+                        if not path_value:
+                            return False, "图片原文件已不可用，无法重新识别，请重新发送图片；已保留旧识别结果"
+                        source = Path(path_value)
+                    payload, source_hash = await asyncio.to_thread(self._read_file_with_hash, source)
+                    if source_hash != full_id:
+                        return False, "收藏文件与 id 不一致，未修改旧记录"
+                    media_info = await get_media_info(self._chat_media_hash(payload))
+
+                if not matched:
+                    labeled = await self._recognize_requested_meme(
+                        payload, self._guess_mime(source.suffix), extra_prompt
+                    )
+                    if labeled is None:
+                        return False, "重新识别失败，已保留旧识别结果"
+                    if media_info is None:
+                        return False, "图片媒体记录已不可用，未修改旧识别结果"
+                    await self._replace_media_description(media_info, labeled["description"])
+                    return True, (
+                        f"已重新识别图片，media_id={prefix}\n"
+                        f"标签：{'、'.join(labeled['emotion_tags'])}\n描述：{labeled['description']}"
+                    )
+
+                metadata = dict(matched[0][1])
+                prepared = await self._label_requested_meme(
+                    payload, self._guess_mime(source.suffix), extra_prompt
+                )
+                if prepared is None:
+                    return False, "重新识别或检索向量生成失败，已保留旧记录"
+                labeled, embedding = prepared
+                old_ids = [record_id for record_id, _ in matched]
+                previous = await asyncio.to_thread(
+                    collection.get, ids=old_ids, include=["metadatas", "documents", "embeddings"]
+                )
+                new_ids = [f"{full_id}:{tag}" for tag in labeled["emotion_tags"]]
+                try:
+                    await self._store_meme_labels(collection, full_id, labeled, embedding, metadata)
+                    obsolete_ids = [record_id for record_id in old_ids if record_id not in new_ids]
+                    if obsolete_ids:
+                        await asyncio.to_thread(collection.delete, ids=obsolete_ids)
+                    if media_info and media_info.get("type") in ("image", "emoji"):
+                        await self._replace_media_description(media_info, labeled["description"])
+                except Exception:
+                    try:
+                        await asyncio.to_thread(
+                            collection.upsert,
+                            ids=previous["ids"],
+                            embeddings=previous["embeddings"],
+                            documents=previous["documents"],
+                            metadatas=previous["metadatas"],
+                        )
+                        added_ids = [record_id for record_id in new_ids if record_id not in old_ids]
+                        if added_ids:
+                            await asyncio.to_thread(collection.delete, ids=added_ids)
+                    except Exception as restore_error:
+                        logger.error(f"恢复表情包旧记录失败: {restore_error}")
+                        return False, "保存和恢复旧记录均失败，原图仍在，请检查表情包库"
+                    raise
+                return True, (
+                    f"已重新识别表情包，id={full_id}\n"
+                    f"标签：{'、'.join(labeled['emotion_tags'])}\n描述：{labeled['description']}"
+                )
+            except FileNotFoundError:
+                return False, "图片原文件已不可用，无法重新识别，请重新发送图片；已保留旧识别结果"
+            except Exception as error:
+                logger.warning(f"重新识别表情包失败: {error}")
+                return False, "重新识别或保存失败，请稍后重试"
 
     async def ingest_once(self) -> None:
         """执行一次入库任务。
@@ -781,6 +1103,7 @@ class EmojiSenderService(BaseService):
                         "path": stored_path,
                         "description": description,
                         "source_hash": meme_id,
+                        "media_id": self._chat_media_hash(payload),
                         "source_cache_path": self._path_to_store_value(source),
                         "created_at": float(now_ts),
                     }
