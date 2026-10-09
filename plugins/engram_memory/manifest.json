@@ -1,7 +1,7 @@
 {
   "name": "engram_memory",
   "display_name": "Engram Memory",
-  "version": "1.1.0",
+  "version": "2.0.2",
   "description": "可追溯的正式记忆写入、修订与作废，支持检索、人物印象与自然闪回",
   "author": "MoFox Team",
   "license": "AGPL-3.0-only",
