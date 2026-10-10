@@ -92,6 +92,7 @@ class MemeCandidate:
     path: str
     description: str
     distance: float
+    note: str = ""
 
 
 class EmojiSenderService(BaseService):
@@ -280,6 +281,7 @@ class EmojiSenderService(BaseService):
             path=path_value,
             description=description,
             distance=distance,
+            note=str(metadata.get("note") or "").strip(),
         )
 
     @staticmethod
@@ -964,8 +966,8 @@ class EmojiSenderService(BaseService):
         )
         return ids
 
-    async def collect_meme(self, *, media_id: str) -> tuple[bool, str]:
-        """按媒体哈希收藏图片；调用方须验证媒体来自当前聊天上下文。"""
+    async def collect_meme(self, *, media_id: str, note: str = "") -> tuple[bool, str]:
+        """按媒体哈希收藏图片并保存可选备注；调用方须验证当前聊天上下文。"""
         requested_id = media_id.strip().lower()
         if len(requested_id) != 64 or any(char not in "0123456789abcdef" for char in requested_id):
             return False, "请使用聊天中图片或表情包括号里的完整 media_id"
@@ -1022,6 +1024,8 @@ class EmojiSenderService(BaseService):
                     "source_cache_path": self._path_to_store_value(source),
                     "created_at": time.time(),
                 }
+                if note.strip():
+                    metadata["note"] = note.strip()
                 try:
                     await self._store_meme_labels(collection, meme_id, labeled, embedding, metadata)
                 except Exception:
@@ -1038,12 +1042,17 @@ class EmojiSenderService(BaseService):
                 return False, "收藏失败，原图未删除，请稍后重试"
 
     async def refresh_meme(
-        self, *, meme_id: str, extra_prompt: str = "", allow_chat_media: bool = True
+        self, *, meme_id: str, extra_prompt: str = "", allow_chat_media: bool = True,
+        note: str | None = None, note_only: bool = False,
     ) -> tuple[bool, str]:
-        """重新识别图片；调用方通过 allow_chat_media 授权访问当前聊天媒体。"""
+        """重新识别图片或仅修改收藏备注；未传备注时保留原值，空字符串清除。"""
         prefix = meme_id.strip().lower()
         if not 12 <= len(prefix) <= 64 or any(char not in "0123456789abcdef" for char in prefix):
             return False, "请使用聊天中的完整 media_id、收藏返回的完整 id 或检索结果中的 12 位 id"
+        if note_only and note is None:
+            return False, "只改备注时请提供 note；清除备注请传空字符串"
+        if note_only and extra_prompt.strip():
+            return False, "只改备注时不使用 extra_prompt；需要重新识别请将 note_only 设为 false"
 
         async with _INGEST_LOCK:
             try:
@@ -1062,6 +1071,8 @@ class EmojiSenderService(BaseService):
                     except (ChromaError, OSError, RuntimeError) as error:
                         logger.warning(f"查询表情包库失败，聊天图片刷新将延期同步收藏: {error}")
                         collection = None
+                if collection is None and (note_only or note is not None):
+                    return False, "表情包库暂时不可用，无法保存备注，未修改识别结果"
                 if collection is None and (len(prefix) != 64 or not allow_chat_media):
                     return False, "表情包库暂时不可用，请使用当前聊天图片的完整 media_id"
                 matched = [
@@ -1074,6 +1085,8 @@ class EmojiSenderService(BaseService):
                 ]
                 media_info: dict[str, Any] | None = None
                 if not matched:
+                    if note_only:
+                        return False, "没有找到对应收藏，备注只能写在已收藏图片上，请使用收藏库 id"
                     if len(prefix) != 64:
                         return False, "没有找到对应表情包，请使用聊天中的完整 media_id 或收藏库 id"
                     if not allow_chat_media:
@@ -1104,6 +1117,14 @@ class EmojiSenderService(BaseService):
                     if len(full_ids) != 1:
                         return False, "这个 id 对应多张表情包，请使用完整 id"
                     full_id = full_ids.pop()
+                    if note_only:
+                        assert collection is not None and note is not None
+                        await self._run_refresh_task(asyncio.to_thread(
+                            collection.update,
+                            ids=[record_id for record_id, _ in matched],
+                            metadatas=[{**record_metadata, "note": note.strip()} for _, record_metadata in matched],
+                        ))
+                        return True, f"已{'更新' if note.strip() else '清除'}表情包备注，id={full_id}"
                     metadata = dict(matched[0][1])
                     path_value = metadata.get("path")
                     source = Path(path_value) if path_value else None
@@ -1123,6 +1144,8 @@ class EmojiSenderService(BaseService):
                     media_info = await get_media_info(self._chat_media_hash(payload))
 
                 if not matched:
+                    if note is not None:
+                        return False, "备注只能写在已收藏图片上，请先收藏；未修改识别结果"
                     labeled = await self._recognize_requested_meme(
                         payload, self._guess_mime(source.suffix), extra_prompt
                     )
@@ -1141,6 +1164,8 @@ class EmojiSenderService(BaseService):
 
                 assert collection is not None
                 metadata = dict(matched[0][1])
+                if note is not None:
+                    metadata["note"] = note.strip()
                 prepared = await self._label_requested_meme(
                     payload, self._guess_mime(source.suffix), extra_prompt
                 )
@@ -1510,6 +1535,7 @@ class EmojiSenderService(BaseService):
                     "tag": cand.tag,
                     "description": cand.description,
                     "distance": cand.distance,
+                    **({"note": cand.note} if cand.note else {}),
                 }
                 for cand in page_items
             ],

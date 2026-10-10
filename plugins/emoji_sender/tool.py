@@ -31,6 +31,7 @@ class SearchEmojiMemesTool(BaseTool):
     name: str = "search_emoji_memes"
     description: str = (
         "根据目标描述与情感标签检索表情包库，返回候选列表（每项含 id、标签、描述与距离，距离越小与你想要的越贴切）。"
+        "有备注的候选会带上完整备注，帮助你理解它的特别之处和使用语境；备注不参与检索排序。"
         "当你想发表情包时，先用本工具查看有哪些候选，挑选最契合当前语境的一张，"
         "再用它的 id 调用 send_emoji_meme_by_id 发送。对候选不满意时可换更具体的描述重新查询，或翻页查看更多。"
     )
@@ -81,6 +82,9 @@ class SearchEmojiMemesTool(BaseTool):
             distance = item.get("distance")
             dist_text = f"{float(distance):.2f}" if isinstance(distance, (int, float)) else "?"
             lines.append(f"- id={short_id} | 标签: {tag} | 描述: {desc} | 距离: {dist_text}")
+            note = str(item.get("note") or "")
+            if note:
+                lines.append(f"  备注: {note}")
 
         lines.append(
             "用 send_emoji_meme_by_id(id) 发送选中的表情包；"

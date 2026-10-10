@@ -17,6 +17,7 @@ from plugins.emoji_sender.action import CollectEmojiMemeAction, RefreshEmojiMeme
 from plugins.emoji_sender.config import EmojiSenderConfig
 from plugins.emoji_sender.plugin import EmojiSenderPlugin
 from plugins.emoji_sender.service import EmojiSenderService, MemeCandidate
+from plugins.emoji_sender.tool import SearchEmojiMemesTool
 from src.app.plugin_system.api.storage_api import PluginDatabase
 from src.app.plugin_system.types import ChatStream, Message, StreamContext
 from src.core.managers.media_manager.cache import MediaCache
@@ -507,17 +508,27 @@ async def media_database(tmp_path: Path) -> AsyncIterator[PluginDatabase]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "note", ["", "这是把认真工作和放空的反差做成的梗。\n" + "适合表达已经走神但还在装作专注，不是在指责别人不认真。" * 20],
+    ids=["without-note", "long-note"],
+)
 async def test_collect_meme_stores_original_and_skips_duplicate(
-    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any
+    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any, note: str
 ) -> None:
-    """主动收藏可覆盖运行期拒绝，重复调用不再识别且保留原图。"""
+    """收藏保留原图和完整备注，重复调用不再识别或覆盖备注。"""
     service = ingest_service
     source = tmp_path / "source.gif"
     source.write_bytes(b"original-gif")
     meme_id = service._sha256_bytes(b"original-gif")
     media_id = compute_media_hash(base64.b64encode(b"original-gif").decode("ascii"))
     service._rejected_hashes.add(meme_id)
-    vdb = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=meme_collection))
+    vdb = SimpleNamespace(
+        get_or_create_collection=AsyncMock(return_value=meme_collection),
+        query=AsyncMock(side_effect=lambda **params: meme_collection.query(
+            query_embeddings=params["query_embeddings"],
+            n_results=min(params["n_results"], meme_collection.count()), where=params["where"],
+        )),
+    )
     label = {"keep": True, "description": "假装乖巧", "emotion_tags": ["害羞", "开心"]}
     with (
         patch.object(service, "_vector_db", return_value=vdb),
@@ -529,8 +540,9 @@ async def test_collect_meme_stores_original_and_skips_duplicate(
         patch.object(service, "_vlm_decide_and_label", new=AsyncMock(return_value=label)) as vlm,
         patch.object(service, "_embed_query", new=AsyncMock(return_value=[0.1, 0.2, 0.3])),
     ):
-        ok, result = await service.collect_meme(media_id=media_id)
-        duplicate_ok, duplicate_result = await service.collect_meme(media_id=media_id)
+        ok, result = await service.collect_meme(media_id=media_id, note=note)
+        duplicate_ok, duplicate_result = await service.collect_meme(media_id=media_id, note="不应覆盖的备注")
+        candidates = await service.search_candidates(description_query="假装乖巧")
 
     assert ok and duplicate_ok
     assert meme_id in result and "已经收藏" in duplicate_result
@@ -543,6 +555,12 @@ async def test_collect_meme_stores_original_and_skips_duplicate(
     assert set(records["ids"]) == {f"{meme_id}:害羞", f"{meme_id}:开心"}
     assert records["documents"] == ["假装乖巧", "假装乖巧"]
     assert all(metadata["media_id"] == media_id for metadata in records["metadatas"])
+    assert all(metadata.get("note", "") == note for metadata in records["metadatas"])
+    assert all("note" in metadata for metadata in records["metadatas"]) == bool(note)
+    assert all(embedding == pytest.approx([0.1, 0.2, 0.3]) for embedding in records["embeddings"].tolist())
+    assert candidates is not None and candidates["total"] == 1
+    assert candidates["candidates"][0].get("note", "") == note
+    assert ("note" in candidates["candidates"][0]) == bool(note)
 
 
 @pytest.mark.asyncio
@@ -627,17 +645,21 @@ async def test_collection_actions_complete_real_media_id_workflow(
                 {"keep": True, "description": "假装生气撒娇", "emotion_tags": ["害羞"]},
             ])
         ) as vlm,
-        patch.object(service, "_embed_query", new=AsyncMock(return_value=[0.1, 0.2, 0.3])),
+        patch.object(service, "_embed_query", new=AsyncMock(return_value=[0.1, 0.2, 0.3])) as embedding,
     ):
-        collected, receipt = await collect.execute(media_id=media_id)
+        collected, receipt = await collect.execute(media_id=media_id, note="用于轻松语境中的自嘲，不是指责对方。")
         refreshed, _ = await refresh.execute(meme_id=meme_id, extra_prompt="请核对是否在撒娇")
+        assert meme_collection.get(include=["metadatas"])["metadatas"][0]["note"] == "用于轻松语境中的自嘲，不是指责对方。"
+        edited, _ = await refresh.execute(meme_id=meme_id[:12], note="补充理解：这种假装生气的表情适合熟人之间开玩笑。", note_only=True)
 
-    assert collected and refreshed and meme_id in receipt
+    assert collected and refreshed and edited and meme_id in receipt
     assert vlm.await_count == 2
+    assert embedding.await_count == 2
     assert vlm.call_args.kwargs["extra_prompt"] == "请核对是否在撒娇"
-    records = meme_collection.get(include=["documents"])
+    records = meme_collection.get(include=["documents", "metadatas"])
     assert records["ids"] == [f"{meme_id}:害羞"]
     assert records["documents"] == ["假装生气撒娇"]
+    assert records["metadatas"][0]["note"] == "补充理解：这种假装生气的表情适合熟人之间开玩笑。"
     assert source.read_bytes() == b"original-image"
     cached = await media_database.crud(ImageDescriptions).get_by(image_description_hash=media_id, type="emoji")
     assert cached is not None and cached.description == "假装生气撒娇"
@@ -663,11 +685,135 @@ async def test_collect_meme_detects_existing_background_collection(
         patch("plugins.emoji_sender.service.get_media_info", new=AsyncMock(return_value={"type": "emoji", "path": str(source)})),
         patch.object(service, "_vlm_decide_and_label", new=AsyncMock()) as vlm,
     ):
-        ok, result = await service.collect_meme(media_id=media_id)
+        ok, result = await service.collect_meme(media_id=media_id, note="重复收藏不应添加备注")
 
     assert ok and "已经收藏" in result and meme_id in result
     assert meme_collection.count() == 1
+    assert "note" not in meme_collection.get(include=["metadatas"])["metadatas"][0]
     vlm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("note", ["这是一个需要记住前因后果的梗。\n" + "认真和走神的反差才是笑点，可以用来自嘲，不是在批评对方。" * 20, ""], ids=["long-note", "clear"])
+@pytest.mark.parametrize("has_note", [True, False], ids=["existing-note", "legacy"])
+@pytest.mark.parametrize("identifier", ["full", "short", "media"])
+async def test_refresh_note_only_preserves_labels_vectors_and_media(
+    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any,
+    note: str, has_note: bool, identifier: str,
+) -> None:
+    """原图缺失时仍可修改全部标签的备注，不调用模型、媒体接口或改向量。"""
+    service = ingest_service
+    meme_id = service._sha256_bytes(b"missing-original")
+    media_id = compute_media_hash(base64.b64encode(b"missing-original").decode("ascii"))
+    tags = ["开心", "害羞"]
+    meme_collection.add(
+        ids=[f"{meme_id}:{tag}" for tag in tags], embeddings=[[0.1, 0.2, 0.3]] * 2,
+        documents=["原描述"] * 2,
+        metadatas=[{
+            "meme_id": meme_id, "media_id": media_id, "tag": tag,
+            "path": str(tmp_path / "missing.png"), "description": "原描述", "created_at": 1.0,
+            **({"note": "旧备注"} if has_note else {}),
+        } for tag in tags],
+    )
+    before = meme_collection.get(include=["metadatas", "documents", "embeddings"])
+    requested_id = {"full": meme_id, "short": meme_id[:12], "media": media_id}[identifier]
+    vdb = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=meme_collection))
+    with (
+        patch.object(service, "_vector_db", return_value=vdb),
+        patch.object(service, "_read_file_with_hash") as read_file,
+        patch("plugins.emoji_sender.service.get_media_info", new=AsyncMock()) as media,
+        patch("plugins.emoji_sender.service.database_api.get_by", new=AsyncMock()) as database,
+        patch.object(service, "_vlm_decide_and_label", new=AsyncMock()) as vlm,
+        patch.object(service, "_embed_query", new=AsyncMock()) as embedding,
+    ):
+        ok, result = await service.refresh_meme(meme_id=requested_id, note=note, note_only=True)
+
+    assert ok and "备注" in result and meme_id in result
+    read_file.assert_not_called()
+    media.assert_not_awaited()
+    database.assert_not_awaited()
+    vlm.assert_not_awaited()
+    embedding.assert_not_awaited()
+    after = meme_collection.get(include=["metadatas", "documents", "embeddings"])
+    assert after["ids"] == before["ids"]
+    assert after["documents"] == before["documents"]
+    assert after["embeddings"].tolist() == before["embeddings"].tolist()
+    assert after["metadatas"] == [{**metadata, "note": note} for metadata in before["metadatas"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing-note", "extra-prompt", "unknown", "ambiguous", "unavailable", "write"])
+async def test_refresh_note_only_rejects_invalid_requests_without_side_effects(
+    ingest_service: EmojiSenderService, meme_collection: Any, failure: str,
+) -> None:
+    """缺少备注、参数冲突、收藏缺失或不唯一及库不可用时不修改数据。"""
+    service = ingest_service
+    meme_id = "a" * 64
+    meme_collection.add(
+        ids=[f"{meme_id}:开心"], embeddings=[[0.1, 0.2, 0.3]], documents=["原描述"],
+        metadatas=[{"meme_id": meme_id, "tag": "开心", "path": "missing.png", "note": "原备注"}],
+    )
+    if failure == "ambiguous":
+        other_id = "a" * 63 + "b"
+        meme_collection.add(
+            ids=[f"{other_id}:开心"], embeddings=[[0.1, 0.2, 0.3]], documents=["另一张"],
+            metadatas=[{"meme_id": other_id, "tag": "开心", "path": "missing.png", "note": "另一条"}],
+        )
+    before = meme_collection.get(include=["metadatas", "documents", "embeddings"])
+    vdb = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=None if failure == "unavailable" else meme_collection))
+    with (
+        patch.object(service, "_vector_db", return_value=vdb),
+        patch("plugins.emoji_sender.service.get_media_info", new=AsyncMock()) as media,
+        patch.object(service, "_vlm_decide_and_label", new=AsyncMock()) as vlm,
+        patch.object(service, "_embed_query", new=AsyncMock()) as embedding,
+        patch.object(type(meme_collection), "update", side_effect=RuntimeError("test note write failure") if failure == "write" else meme_collection.update),
+    ):
+        ok, _ = await service.refresh_meme(
+            meme_id="b" * 64 if failure == "unknown" else meme_id[:12] if failure == "ambiguous" else meme_id,
+            note=None if failure == "missing-note" else "新备注", note_only=True,
+            extra_prompt="重新识别" if failure == "extra-prompt" else "",
+        )
+
+    assert not ok
+    media.assert_not_awaited()
+    vlm.assert_not_awaited()
+    embedding.assert_not_awaited()
+    after = meme_collection.get(include=["metadatas", "documents", "embeddings"])
+    assert after["ids"] == before["ids"]
+    assert after["metadatas"] == before["metadatas"]
+    assert after["documents"] == before["documents"]
+    assert after["embeddings"].tolist() == before["embeddings"].tolist()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("note_only", [True, False])
+@pytest.mark.parametrize("available", [True, False], ids=["uncollected", "unavailable"])
+async def test_refresh_rejects_note_without_available_collection(
+    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any,
+    note_only: bool, available: bool,
+) -> None:
+    """未收藏或图库不可用时明确拒绝备注，不丢弃输入后继续识别或自动收藏。"""
+    service = ingest_service
+    source = tmp_path / "source.png"
+    source.write_bytes(b"uncollected-image")
+    media_id = compute_media_hash(base64.b64encode(b"uncollected-image").decode("ascii"))
+    vdb = SimpleNamespace(get_or_create_collection=AsyncMock(return_value=meme_collection if available else None))
+    with (
+        patch.object(service, "_vector_db", return_value=vdb),
+        patch("plugins.emoji_sender.service.get_media_info", new=AsyncMock(return_value={"type": "image", "path": str(source)})),
+        patch.object(service, "_vlm_decide_and_label", new=AsyncMock()) as vlm,
+        patch.object(service, "_embed_query", new=AsyncMock()) as embedding,
+        patch.object(service, "_commit_refresh", new=AsyncMock()) as commit,
+    ):
+        ok, result = await service.refresh_meme(meme_id=media_id, note="不要丢弃这段备注", note_only=note_only)
+
+    assert not ok and "备注" in result
+    vlm.assert_not_awaited()
+    embedding.assert_not_awaited()
+    commit.assert_not_awaited()
+    assert meme_collection.count() == 0
+    assert source.read_bytes() == b"uncollected-image"
+    assert not service._data_dir().exists()
 
 
 @pytest.mark.asyncio
@@ -1114,16 +1260,19 @@ async def test_refresh_interrupted_commit_recovers_after_service_recreation(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_succeeds", [True, False])
+@pytest.mark.parametrize("note", [None, "新的理解与背景。\n" + "这一段需要保留完整前因后果，未来才知道怎么用这张图。" * 20, ""], ids=["retain", "replace", "clear"])
 async def test_refresh_meme_replaces_labels_or_preserves_old_records(
-    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any, model_succeeds: bool
+    ingest_service: EmojiSenderService, tmp_path: Path, meme_collection: Any, model_succeeds: bool,
+    note: str | None,
 ) -> None:
-    """重新识别传递提示、更新全部标签，模型失败则保留原记录。"""
+    """重新识别更新标签及可选备注，未传备注或模型失败时保留原备注。"""
     service = ingest_service
     source = tmp_path / "stored.png"
     source.write_bytes(b"original-image")
     meme_id = service._sha256_bytes(b"original-image")
     old_metadata = {
         "meme_id": meme_id, "path": str(source), "source_hash": meme_id, "created_at": 1.0,
+        "note": "原备注",
     }
     meme_collection.add(
         ids=[f"{meme_id}:生气", f"{meme_id}:开心"],
@@ -1145,13 +1294,15 @@ async def test_refresh_meme_replaces_labels_or_preserves_old_records(
         ) as vlm,
         patch.object(service, "_embed_query", new=AsyncMock(return_value=[0.1, 0.2, 0.3])) as embedding,
     ):
-        ok, result = await service.refresh_meme(meme_id=meme_id[:12], extra_prompt="请核对是否在撒娇")
+        ok, result = await service.refresh_meme(meme_id=meme_id[:12], extra_prompt="请核对是否在撒娇", note=note)
 
     assert ok is model_succeeds
     assert vlm.call_args.kwargs["extra_prompt"] == "请核对是否在撒娇"
     assert vlm.call_args.kwargs["decide_collection"] is False
     assert source.read_bytes() == b"original-image"
     records = meme_collection.get(include=["metadatas", "documents", "embeddings"])
+    expected_note = note if model_succeeds and note is not None else "原备注"
+    assert all(metadata["note"] == expected_note for metadata in records["metadatas"])
     if model_succeeds:
         assert set(records["ids"]) == {f"{meme_id}:害羞", f"{meme_id}:开心"}
         assert records["documents"] == ["撒娇而不是生气", "撒娇而不是生气"]
@@ -1176,7 +1327,7 @@ async def test_refresh_meme_failure_keeps_collection_records(
     source.write_bytes(b"original-image")
     full_id = service._sha256_bytes(b"original-image")
     requested_id = full_id[:12]
-    metadata = {"meme_id": full_id, "path": str(source), "description": "旧描述", "tag": "生气"}
+    metadata = {"meme_id": full_id, "path": str(source), "description": "旧描述", "tag": "生气", "note": "原备注"}
     if failure == "missing-path":
         metadata.pop("path")
     meme_collection.add(
@@ -1222,7 +1373,7 @@ async def test_refresh_meme_failure_keeps_collection_records(
     ):
         if failure == "write":
             store.side_effect = RuntimeError("test storage failure")
-        ok, result = await service.refresh_meme(meme_id=requested_id)
+        ok, result = await service.refresh_meme(meme_id=requested_id, note="不应保存的备注")
 
     assert not ok
     if failure in {"missing-file", "missing-path"}:
@@ -1234,7 +1385,8 @@ async def test_refresh_meme_failure_keeps_collection_records(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("location", ["unread", "history", "current", "other-chat"])
-async def test_collect_action_only_accepts_current_chat_media(location: str) -> None:
+@pytest.mark.parametrize("note", ["", "保留这个梗的特别含义。\n以后适合用来自嘲，不要用来指责别人。"])
+async def test_collect_action_only_accepts_current_chat_media(location: str, note: str) -> None:
     """收藏动作可引用当前与历史消息中的媒体，但不能操作其他会话。"""
     media_id = "a" * 64
     message = Message(content={"media": [{"type": "emoji", "image_id": media_id}]})
@@ -1249,30 +1401,37 @@ async def test_collect_action_only_accepts_current_chat_media(location: str) -> 
     action = CollectEmojiMemeAction(stream, EmojiSenderPlugin(EmojiSenderConfig()))
     service = SimpleNamespace(collect_meme=AsyncMock(return_value=(True, "已收藏")))
     with patch("plugins.emoji_sender.action.get_service", return_value=service):
-        ok, _ = await action.execute(media_id=media_id)
+        ok, _ = await action.execute(media_id=media_id, note=note)
 
     assert ok is (location != "other-chat")
     if location != "other-chat":
-        service.collect_meme.assert_awaited_once_with(media_id=media_id)
+        service.collect_meme.assert_awaited_once_with(media_id=media_id, note=note)
     else:
         service.collect_meme.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_refresh_action_forwards_extra_prompt() -> None:
-    """重新识别动作把表情包 ID 和额外提示完整传给服务。"""
+@pytest.mark.parametrize("note, note_only", [(None, False), ("新的理解。\n附上来龙去脉。", False), ("仅修改备注", True), ("", True)])
+async def test_refresh_action_forwards_extra_prompt(note: str | None, note_only: bool) -> None:
+    """刷新动作完整传递识别提示、备注和模式，备注参数不必填。"""
     action = RefreshEmojiMemeAction(cast(ChatStream, SimpleNamespace()), EmojiSenderPlugin(EmojiSenderConfig()))
     service = SimpleNamespace(refresh_meme=AsyncMock(return_value=(True, "已重新识别")))
     with patch("plugins.emoji_sender.action.get_service", return_value=service):
-        ok, result = await action.execute(meme_id="a" * 12, extra_prompt="请核对图中文字")
+        ok, result = await action.execute(
+            meme_id="a" * 12, extra_prompt="" if note_only else "请核对图中文字", note=note, note_only=note_only,
+        )
 
     assert ok and result == "已重新识别"
     service.refresh_meme.assert_awaited_once_with(
-        meme_id="a" * 12, extra_prompt="请核对图中文字", allow_chat_media=False
+        meme_id="a" * 12, extra_prompt="" if note_only else "请核对图中文字",
+        allow_chat_media=False, note=note, note_only=note_only,
     )
     schema = RefreshEmojiMemeAction.to_schema()["function"]["parameters"]
     assert "extra_prompt" in schema["properties"]
     assert "extra_prompt" not in schema["required"]
+    assert {"note", "note_only"} <= schema["properties"].keys()
+    assert not {"note", "note_only"} & set(schema["required"])
+    assert schema["properties"]["note_only"]["type"] == "boolean"
 
 
 @pytest.mark.parametrize("action", [CollectEmojiMemeAction, RefreshEmojiMemeAction])
@@ -1295,9 +1454,14 @@ def test_collection_guidance_encourages_personal_selection(mode: str, inject_rem
     description = CollectEmojiMemeAction.to_schema()["function"]["description"]
     guidance = ("自己喜欢", "人设和表达习惯", "以后用得上", "不必等用户要求", "有选择地收藏", "不是看到图片就收", "发送频率限制")
     assert all(phrase in description for phrase in guidance)
+    schema = CollectEmojiMemeAction.to_schema()["function"]["parameters"]
+    assert "note" in schema["properties"] and "note" not in schema["required"]
+    assert "不是每张图片都需要备注" in schema["properties"]["note"]["description"]
+    assert "不限制句数" in schema["properties"]["note"]["description"]
     reminder = build_emoji_sender_actor_reminder(plugin)
     if inject_reminder:
         assert all(phrase in reminder for phrase in guidance)
+        assert "不用每张图" in reminder and "不限一两句话" in reminder and "note_only=true" in reminder
     else:
         assert reminder == ""
 
@@ -1325,6 +1489,25 @@ def test_manifest_and_reminder_include_collection_actions() -> None:
 
 
 # ── picker 模式：search_candidates / send_by_id ──────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("note", [None, "", "这张图有一段值得记住的来龙去脉。\n" + "可以用它表达故作镇定的情绪，不一定局限于图上的文字。" * 20], ids=["legacy", "empty", "long-note"])
+async def test_search_tool_displays_complete_optional_note(note: str | None) -> None:
+    """候选有备注时完整显示长文本与换行，无备注时不输出占位行。"""
+    tool = SearchEmojiMemesTool(EmojiSenderPlugin(EmojiSenderConfig()))
+    candidate = {"short_id": "a" * 12, "tag": "开心", "description": "故作镇定", "distance": 0.1}
+    if note is not None:
+        candidate["note"] = note
+    service = SimpleNamespace(search_candidates=AsyncMock(return_value={"candidates": [candidate], "page": 1, "total": 1}))
+    with patch("plugins.emoji_sender.tool.get_service", return_value=service):
+        ok, result = await tool.execute(description="故作镇定")
+
+    assert ok and "a" * 12 in result
+    if note:
+        assert note in result and "备注:" in result
+    else:
+        assert "备注" not in result
 
 
 def _make_vdb_query_mock(records: list[tuple[str, float, dict[str, Any]]]) -> MagicMock:
