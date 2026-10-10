@@ -411,6 +411,7 @@ def _resolve_reasoning_history_enabled(mode: Any) -> bool:
     - 数字写法：``0`` 不发送、非 0 发送（TOML 里 ``= false`` 与 ``= 0`` 都常见）；
     - 字符串模式：``"none"``（默认，不发送），以及 ``"deepseek"`` / ``"kimi"`` /
       ``"auto"`` 等显式开启模式。无法识别的字符串按开启处理，避免静默改变既有部署。
+    - 其他类型（list / dict 等）视为配置错误，按不发送处理。
 
     Args:
         mode: ``extra_params["reasoning_history_mode"]`` 的原始取值。
@@ -424,7 +425,11 @@ def _resolve_reasoning_history_enabled(mode: Any) -> bool:
         return False
     if isinstance(mode, (int, float)):
         return mode != 0
-    return str(mode).strip().lower() not in _REASONING_HISTORY_DISABLED
+    if not isinstance(mode, str):
+        # list / dict 之类的写法是配置错误。不要 str() 之后当成未知模式放行，
+        # 否则会把 reasoning_content 历史发给 provider。
+        return False
+    return mode.strip().lower() not in _REASONING_HISTORY_DISABLED
 
 
 def _thinking_enabled(model_set: dict[str, Any]) -> bool:
@@ -933,6 +938,10 @@ class OpenAIChatClient:
         params.update(extra_params)
         if openai_tools and not tool_call_compat:
             params["tools"] = openai_tools
+        # 按最终请求体里是否真的有工具来决定 tool_choice：extra_params 也能直接注入
+        # tools，那种情况下同样要补上 auto，否则 provider 会收到 tools 却没有
+        # tool_choice，撞上上游把缺省值当作 required 的行为。
+        if params.get("tools"):
             # 带工具时必须给出 tool_choice：默认 auto，避免上游把缺省值当作
             # required 而触发 grammar 编译失败。用户显式注入的值优先。
             params.setdefault("tool_choice", "auto")
