@@ -399,7 +399,7 @@ def _should_backfill_reasoning_content(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
-_REASONING_HISTORY_DISABLED = {"", "none", "false", "off", "no", "disabled", "disable"}
+_REASONING_HISTORY_DISABLED = {"", "0", "none", "false", "off", "no", "disabled", "disable"}
 
 
 def _resolve_reasoning_history_enabled(mode: Any) -> bool:
@@ -408,6 +408,7 @@ def _resolve_reasoning_history_enabled(mode: Any) -> bool:
     支持两种写法：
 
     - 旧的布尔写法：``True`` 发送、``False`` 不发送；
+    - 数字写法：``0`` 不发送、非 0 发送（TOML 里 ``= false`` 与 ``= 0`` 都常见）；
     - 字符串模式：``"none"``（默认，不发送），以及 ``"deepseek"`` / ``"kimi"`` /
       ``"auto"`` 等显式开启模式。无法识别的字符串按开启处理，避免静默改变既有部署。
 
@@ -421,6 +422,8 @@ def _resolve_reasoning_history_enabled(mode: Any) -> bool:
         return mode
     if mode is None:
         return False
+    if isinstance(mode, (int, float)):
+        return mode != 0
     return str(mode).strip().lower() not in _REASONING_HISTORY_DISABLED
 
 
@@ -979,7 +982,9 @@ class OpenAIChatClient:
         # reasoning_content；默认模式下前面已经清理过该字段。
         # 字符串模式（deepseek / kimi / auto 等）由用户显式声明，直接保留并回填；
         # 旧的布尔写法维持原语义：仅在 thinking 开启或历史中已有 reasoning_content 时回填。
-        explicit_history_mode = not isinstance(reasoning_history_mode, bool)
+        # 只有字符串模式算「用户显式声明的供应商方言」；布尔与数字写法都走下面的旧语义，
+        # 否则 `reasoning_history_mode = 0`（数字零）会被误判成显式开启并强制回填。
+        explicit_history_mode = isinstance(reasoning_history_mode, str)
         if allow_reasoning_history and (
             explicit_history_mode
             or _thinking_enabled(model_set)
