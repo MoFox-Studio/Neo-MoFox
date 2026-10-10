@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from plugins.booku_memory.agent.tools import _parse_segment, _tokenize
+from plugins.booku_memory.agent.tools import _parse_bool, _parse_segment, _tokenize
 
 
 @pytest.mark.parametrize(
@@ -93,3 +93,50 @@ def test_tokenize_keeps_empty_quoted_token() -> None:
     tokens = _tokenize('add -content ""')
     assert tokens[-1][0] == ""
     assert tokens[-1][3] is True
+
+
+@pytest.mark.parametrize(
+    ("value", "default", "expected"),
+    [
+        (None, True, True),
+        (None, False, False),
+        # 空字符串回落到 default，绝不能被当成真
+        ("", False, False),
+        ("", True, True),
+        ("1", False, True),
+        ("0", True, False),
+        ("true", False, True),
+        ("false", True, False),
+        ("ON", False, True),
+        (" off ", True, False),
+        # 无法识别的值同样回落 default
+        ("随便写的", False, False),
+        ("随便写的", True, True),
+    ],
+)
+def test_parse_bool_falls_back_to_default(
+    value: str | None, default: bool, expected: bool
+) -> None:
+    """布尔解析只认明确的真假写法，其余一律回落 default。"""
+
+    assert _parse_bool(value, default) is expected
+
+
+def test_delete_hard_with_empty_value_is_not_hard() -> None:
+    """``delete -hard ""`` 不能启用硬删除。
+
+    解析层会得到一个空字符串值，布尔层再把它回落到 default（False）。
+    这条链是“空值是否会被误判成真”的关键路径。
+    """
+
+    _, options = _parse_segment('delete -hard ""')
+    assert options["hard"] == [""]
+    assert _parse_bool(options["hard"][-1], False) is False
+
+
+def test_delete_hard_bare_flag_is_hard() -> None:
+    """``delete -hard``（裸标志）按设计启用硬删除，与显式空引号区分开。"""
+
+    _, options = _parse_segment("delete -hard")
+    assert options["hard"] == ["true"]
+    assert _parse_bool(options["hard"][-1], False) is True
