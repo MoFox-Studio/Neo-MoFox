@@ -106,3 +106,14 @@ def test_close_swallows_restore_terminal_errors() -> None:
         parser.close()
 
     assert parser._input_stop_event.is_set()
+
+
+def test_read_and_execute_stops_after_keyboard_interrupt() -> None:
+    """输入线程传递 Ctrl+C 后，命令循环应请求关闭主程序。"""
+    parser = CommandParser.__new__(CommandParser)
+    parser._input_queue = queue.Queue()
+    parser._input_queue.put(KeyboardInterrupt())
+
+    import asyncio
+
+    assert asyncio.run(parser.read_and_execute()) is False

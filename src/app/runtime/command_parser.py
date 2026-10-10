@@ -111,7 +111,11 @@ class CommandParser:
             app = getattr(self._console_input._session, "app", None)
             if app is not None and getattr(app, "is_running", False):
                 loop = getattr(app, "loop", None)
-                exit_fn = lambda: app.exit(exception=EOFError())
+
+                def exit_fn() -> None:
+                    """向当前 prompt 注入 EOF，使输入线程退出。"""
+                    app.exit(exception=EOFError())
+
                 if loop is not None:
                     loop.call_soon_threadsafe(exit_fn)
                 else:

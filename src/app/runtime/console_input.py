@@ -77,7 +77,10 @@ def restore_terminal() -> None:
     静默忽略，避免在异常退出路径上再抛异常掩盖原始错误。
     """
     attrs = _saved_term_attrs[0]
-    if attrs is None or termios is None:
+    if attrs is None:
+        return
+    if termios is None:
+        _saved_term_attrs[0] = None
         return
     if not _is_tty():
         return
@@ -118,17 +121,3 @@ class ConsoleInput:
         """代理会话期间的标准输出，使其显示在当前输入行上方。"""
         with patch_stdout(raw=True):
             yield
-
-
-def prompt_console_input(message: str = "") -> str:
-    """使用一次性交互会话读取终端输入。
-
-    Args:
-        message: 显示在输入行前的提示文本
-
-    Returns:
-        str: 用户提交的输入内容
-    """
-    console_input = ConsoleInput()
-    with console_input.patch_output():
-        return console_input.prompt(message)
