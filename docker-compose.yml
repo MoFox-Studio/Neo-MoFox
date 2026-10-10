@@ -49,8 +49,8 @@ services:
     environment:
       TZ: Asia/Shanghai
       MOFOX_ACCEPT_STARTUP_AGREEMENTS: "1"
-      ENGRAM_NEO4J_URI: bolt://neo4j:7687
-      ENGRAM_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD to a strong password}
+      MNEMOSYNE_NEO4J_URI: bolt://neo4j:7687
+      MNEMOSYNE_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?Set NEO4J_PASSWORD to a strong password}
     depends_on:
       neo4j:
         condition: service_healthy
@@ -62,7 +62,7 @@ services:
   # ===== Neo4j - Engram Memory Episode 关系图 =====
   neo4j:
     image: neo4j:5-community
-    container_name: engram-neo4j
+    container_name: mnemosyne-neo4j
     restart: unless-stopped
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?Set NEO4J_PASSWORD to a strong password}
