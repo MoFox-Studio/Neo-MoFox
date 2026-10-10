@@ -344,7 +344,7 @@ async def test_url_media_send_uses_cached_bytes_in_onebot_payload(
     adapter_manager = SimpleNamespace(get_adapter=lambda _signature: adapter)
     stream_manager = SimpleNamespace(
         get_stream_info=AsyncMock(return_value={"chat_type": "group", "group_id": "123"}),
-        get_or_create_stream=AsyncMock(), add_sent_message_to_history=AsyncMock(),
+        get_or_create_stream=AsyncMock(), add_message_to_history=AsyncMock(),
     )
     media_manager = SimpleNamespace(store_media=AsyncMock(return_value=stored))
     event_manager = SimpleNamespace(
@@ -380,12 +380,12 @@ async def test_url_media_send_uses_cached_bytes_in_onebot_payload(
             }]},
         )
         if confirmed:
-            stream_manager.add_sent_message_to_history.assert_awaited_once()
-            message = stream_manager.add_sent_message_to_history.call_args.args[0]
+            stream_manager.add_message_to_history.assert_awaited_once()
+            message = stream_manager.add_message_to_history.call_args.args[0]
             media_id = MediaManager.compute_media_hash(f"base64|{encoded_media}")
             assert message.processed_plain_text == f"[{label}({media_id}):晚安]"
         else:
-            stream_manager.add_sent_message_to_history.assert_not_awaited()
+            stream_manager.add_message_to_history.assert_not_awaited()
     else:
         send_to_onebot.assert_not_awaited()
-        stream_manager.add_sent_message_to_history.assert_not_awaited()
+        stream_manager.add_message_to_history.assert_not_awaited()

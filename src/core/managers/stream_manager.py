@@ -448,7 +448,7 @@ class StreamManager:
         query = QueryBuilder(self._Messages).filter(stream_id=stream_id)
         if stream_record.context_cleared_at is not None:
             query = query.filter(time__gt=stream_record.context_cleared_at)
-        query = query.order_by("-id")
+        query = query.order_by("-time", "-id")
         if max_messages is not None:
             query = query.limit(max_messages)
         messages_records = await query.all()
@@ -538,11 +538,14 @@ class StreamManager:
 
             return db_message
 
-    async def add_sent_message_to_history(
+    async def add_message_to_history(
         self,
         message: "Message",
+        direction: str = "outgoing",
+        *,
+        silent: bool = False,
     ) -> "Messages":
-        """添加“已发送消息”到流历史消息。
+        """添加进站/出站历史消息到流。
 
         与 ``add_message`` 不同：
         - 该方法会将消息直接写入 ``history_messages``
@@ -550,6 +553,11 @@ class StreamManager:
 
         Args:
             message: 运行时消息对象
+            direction: 消息方向，``"outgoing"`` 表示出站消息（bot 发送，
+                person_id 固定记为 ``"bot"``），``"incoming"`` 表示进站消息
+                （按消息发送者解析 person_id）
+            silent: 静默补录，不改变未读或活跃时间；按原时间维护历史，
+                清空边界之前的消息只持久化
 
         Returns:
             Messages: 创建或已存在的数据库消息记录
@@ -560,15 +568,25 @@ class StreamManager:
         Examples:
             >>> db_msg = await sm.add_message_to_history(message, direction="incoming")
         """
+        if direction not in ("incoming", "outgoing"):
+            raise ValueError(
+                f"direction 必须是 'incoming' 或 'outgoing'，收到: {direction!r}"
+            )
+
         stream_id = message.stream_id
 
         lock = self._get_stream_lock(stream_id)
         async with lock:
 
+            if direction == "outgoing":
+                person_id: str | None = "bot"
+            else:
+                person_id = self._resolve_person_id_from_message(message)
+
             message_data = {
                 "message_id": message.message_id,
                 "stream_id": stream_id,
-                "person_id": "bot",
+                "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
                 "content": _serialize_content_for_db(message.content),
@@ -743,14 +761,8 @@ class StreamManager:
         Examples:
             >>> messages = await sm.get_stream_messages("abc123", limit=50, offset=0)
         """
-        messages_records = (
-            await QueryBuilder(self._Messages)
-            .filter(stream_id=stream_id)
-            .order_by("-id")
-            .limit(limit)
-            .offset(offset)
-            .all()
-        )
+        query = QueryBuilder(self._Messages).filter(stream_id=stream_id).order_by("-time", "-id")
+        messages_records = await query.limit(limit).offset(offset).all()
 
         return [
             await self._db_message_to_runtime(msg) for msg in reversed(messages_records) # type: ignore
