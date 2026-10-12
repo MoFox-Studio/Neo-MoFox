@@ -24,7 +24,7 @@ kernel/llm/
 ├── roles.py                 # 消息角色枚举
 ├── request.py               # LLMRequest 门面 + 模型校验
 ├── request_execution.py     # 请求执行主流程（生命周期管理）
-├── request_inspector.py     # 请求调试与检查工具
+├── request_inspector.py     # 请求捕获与结构化视图（进程内，不提供 Web 端点）
 ├── response.py              # LLMResponse 包装层
 ├── stream_state.py          # 流式状态归并（LLMStreamReducer）
 ├── tool_call_compat.py      # 工具调用兼容解析
@@ -309,6 +309,15 @@ extra_params = {headers = {"X-API-Version" = "2024-06", "X-Priority" = "high"}, 
 ### Q: 指标收集是否有性能开销？
 
 A: 内存级指标可以通过 `enable_metrics=False` 关闭。持久化统计仅在显式调用 `init_llm_stats` 后生效。
+
+### Q: 如何可视化查看 LLM 请求体？
+
+A: 框架本体不再内置调试 WebUI，请安装官方 WebUI：
+[MoFox-Core-Webui](https://github.com/MoFox-Studio/MoFox-Core-Webui)。
+
+`src/kernel/llm/request_inspector.py` 仅在**进程内**保留请求捕获与结构化视图构造，
+不对外提供任何 HTTP 端点。需要程序内调试时可直接调用 `capture()` 后用
+`get_inspector()` 读取记录。
 
 ## 相关资源
 

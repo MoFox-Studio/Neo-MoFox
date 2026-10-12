@@ -307,3 +307,21 @@ def test_request_inspector_rejects_unknown_import_shape() -> None:
         assert "无法识别导入 JSON 结构" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_request_inspector_exposes_no_http_surface() -> None:
+    """本模块仅在进程内工作，不应再提供任何 HTTP 挂载能力或内联 WebUI。
+
+    框架本体不内置可视化后台（见 README.md 的 WebUI 安装提示），
+    可视化调试请使用官方 WebUI。此用例防止 HTTP 端点被重新引入。
+    """
+    import src.kernel.llm.request_inspector as inspector_module
+
+    assert not hasattr(inspector_module, "_WEBUI_HTML")
+    assert not hasattr(inspector_module, "_ANALYTICS_HTML")
+    assert not hasattr(RequestInspector, "mount")
+    assert not hasattr(RequestInspector, "_build_router")
+
+    # 进程内捕获能力必须仍然可用
+    assert callable(inspector_module.capture)
+    assert callable(inspector_module.get_inspector)
