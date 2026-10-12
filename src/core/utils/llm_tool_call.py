@@ -167,6 +167,57 @@ async def create_llm_usable_execution(
     if should_strip_auto_reason_argument(instance.execute, call_kwargs):
         call_kwargs.pop("reason", None)
 
+    # ──────────────────────────────────────────────────────────────────
+    # [本地补丁 2026-10-12] LLM 工具调用路径也发布「执行前事件」。
+    #
+    # 背景：agent 模式的聊天器（default_chatter / neo_default_chatter）走
+    # ``run_tool_call`` → 本函数直接 ``_wrap_execute``，既不经过
+    # ActionManager.execute_action（before_action_call），也不经过
+    # ToolManager.execute_tool（before_tool_call）。于是「在生图前改写参数」
+    # 这类插件（如 char_prompt_guard）在真实对话里永远收不到通知。
+    # 这里补发两条事件，参数结构与原发布点保持一致，插件侧无需改动。
+    # ──────────────────────────────────────────────────────────────────
+    try:
+        from src.core.components.types import EventType
+        from src.kernel.event import get_event_bus
+
+        _bus = get_event_bus()
+        if issubclass(usable_cls, BaseAction):
+            _event_type: Any = EventType.BEFORE_ACTION_CALL
+            _event_params: dict[str, Any] = {
+                "signature": (
+                    f"{getattr(plugin, 'plugin_name', '')}:action:"
+                    f"{getattr(instance, 'action_name', '')}"
+                ),
+                "action_name": getattr(instance, "action_name", ""),
+                "action_description": getattr(instance, "action_description", ""),
+                "args": dict(call_kwargs),
+                "message": message,
+            }
+        elif issubclass(usable_cls, BaseTool):
+            _event_type = EventType.BEFORE_TOOL_CALL
+            _event_params = {
+                "signature": (
+                    f"{getattr(plugin, 'plugin_name', '')}:tool:"
+                    f"{getattr(instance, 'name', '')}"
+                ),
+                "tool_name": getattr(instance, "name", ""),
+                "tool_description": getattr(instance, "description", ""),
+                "args": dict(call_kwargs),
+                "message": message,
+            }
+        else:
+            _event_type = None
+
+        if _event_type is not None and _bus.get_subscribers(_event_type):
+            _, _modified = await _bus.publish(_event_type, _event_params)
+            _new_args = _modified.get("args")
+            if isinstance(_new_args, dict):
+                call_kwargs = _new_args
+    except Exception:
+        # 与框架其它发布点一致：事件失败不阻断组件执行，静默降级
+        pass
+
     execution = instance._wrap_execute(**call_kwargs)
     if task_observer is not None:
         execution.add_task_observer(task_observer)
