@@ -34,6 +34,7 @@ from .backends.layersplit_store import LayerSplitStore, SensoryItem
 from .backends.transformer import MemoryToken, MemoryTransformerBlock, temporal_encoding
 from .domain import RetrievalQuery
 from .enums import EvidenceSourceType, MemoryEventType, MemoryKind, MemoryStatus
+from .learning.features import LearningCandidate, LearningFeatureBatch, build_feature_batch
 from .models import (
     EvidenceMessageLinkModel,
     EvidenceMessageSnapshotModel,
@@ -268,6 +269,7 @@ class FeedForwardResult:
     selected: tuple[FeedForwardMemory, ...]
     candidate_count: int
     gates: dict[str, float]
+    learning_batch: LearningFeatureBatch | None = None
 
 
 class FeedForwardRetrievalService:
@@ -280,6 +282,8 @@ class FeedForwardRetrievalService:
         settings: FeedForwardSettings | None = None,
         *,
         layers: LayerSplitStore | None = None,
+        learning_input_dim: int = 128,
+        learning_max_candidates: int = 32,
     ) -> None:
         """装配四个认知后端。
 
@@ -288,6 +292,8 @@ class FeedForwardRetrievalService:
             retrieval: 混合检索服务，作为候选召回入口。
             settings: 前馈参数。
             layers: 可注入的分层存储，默认新建。
+            learning_input_dim: 学习控制器输入维度。
+            learning_max_candidates: 学习控制器候选槽位数。
 
         Raises:
             ValueError: 参数非法时抛出。
@@ -296,6 +302,10 @@ class FeedForwardRetrievalService:
         self._settings.validate()
         self._schema = schema
         self._retrieval = retrieval
+        if learning_input_dim < 16 or learning_max_candidates <= 0:
+            raise ValueError("学习控制器特征尺寸无效")
+        self._learning_input_dim = learning_input_dim
+        self._learning_max_candidates = learning_max_candidates
         self.layers = layers or LayerSplitStore()
         self.actr = ACTRActivationEngine(
             decay=0.5,
@@ -552,9 +562,53 @@ class FeedForwardRetrievalService:
             )
             for item in chosen
         )
+        learning_batch = build_feature_batch(
+            query_text=cue.text,
+            candidates=tuple(
+                LearningCandidate(
+                    memory_id=memory_id,
+                    title=facts[memory_id].title,
+                    content=facts[memory_id].content,
+                    similarity=similarity.get(memory_id, 0.0),
+                    lexical=lexical.get(memory_id, 0.0),
+                    working=working.get(memory_id, 0.0),
+                    kda=kda_scores.get(memory_id, 0.0),
+                    recency=recency.get(memory_id, 0.0),
+                    activation=components[memory_id].total,
+                    probability=next(
+                        (
+                            item.probability
+                            for item in chosen
+                            if item.memory_id == memory_id
+                        ),
+                        0.0,
+                    ),
+                    transformer_score=output.scores.get(memory_id, 0.0),
+                    person_match=(
+                        1.0
+                        if cue.person_ids
+                        and set(cue.person_ids).intersection(facts[memory_id].person_ids)
+                        else 0.0
+                    ),
+                    age_days=max(
+                        0.0,
+                        (cue.now - facts[memory_id].experienced_at).total_seconds()
+                        / 86400.0,
+                    ),
+                )
+                for memory_id in facts
+            ),
+            selected_ids=frozenset(item.memory_id for item in selected),
+            max_candidates=self._learning_max_candidates,
+            input_dim=self._learning_input_dim,
+            now=cue.now,
+        )
         self._consolidate(cue, cue_key, selected, turn)
         return FeedForwardResult(
-            selected=selected, candidate_count=len(facts), gates=dict(gates)
+            selected=selected,
+            candidate_count=len(facts),
+            gates=dict(gates),
+            learning_batch=learning_batch,
         )
 
     def _is_relevant(

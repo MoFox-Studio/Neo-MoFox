@@ -25,6 +25,7 @@
     { "component_type": "action", "component_name": "memory_revise", "dependencies": [] },
     { "component_type": "action", "component_name": "memory_invalidate", "dependencies": [] },
     { "component_type": "tool", "component_name": "recall_association", "dependencies": [] },
+    { "component_type": "tool", "component_name": "memory_feedback", "dependencies": [] },
     { "component_type": "tool", "component_name": "propose_memory_update", "dependencies": [] },
     { "component_type": "action", "component_name": "confirm_memory_update", "dependencies": [] },
     { "component_type": "tool", "component_name": "person_lookup", "dependencies": [] },

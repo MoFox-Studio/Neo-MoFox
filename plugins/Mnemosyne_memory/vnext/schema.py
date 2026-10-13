@@ -18,7 +18,7 @@ from src.app.plugin_system.api.storage_api import PluginDatabase
 from .models import ALL_MODELS, SchemaVersionModel
 
 SCHEMA_KEY = "mnemosyne_memory_vnext"
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def create_episode_tables(connection: sqlite3.Connection) -> None:
@@ -133,9 +133,77 @@ def create_episode_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def create_learning_tables(connection: sqlite3.Connection) -> None:
+    """为已有 Mnemosyne 数据库追加可训练记忆控制器的审计表。"""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS mnemosyne_vnext_memory_feedback (
+            feedback_id VARCHAR(36) PRIMARY KEY,
+            stream_id TEXT NOT NULL,
+            query_episode_id VARCHAR(36),
+            candidate_episode_id VARCHAR(36),
+            candidate_memory_id VARCHAR(36),
+            feedback_type VARCHAR(32) NOT NULL,
+            reward FLOAT NOT NULL,
+            source VARCHAR(32) NOT NULL,
+            model_id VARCHAR(36),
+            metadata_json JSON,
+            created_at VARCHAR(32) NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mnemosyne_vnext_feedback_stream_time
+            ON mnemosyne_vnext_memory_feedback(stream_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_mnemosyne_vnext_feedback_type
+            ON mnemosyne_vnext_memory_feedback(feedback_type, created_at);
+        CREATE TABLE IF NOT EXISTS mnemosyne_vnext_memory_training_sample (
+            sample_id VARCHAR(36) PRIMARY KEY,
+            stream_id TEXT NOT NULL,
+            query_episode_id VARCHAR(36),
+            candidate_ids JSON NOT NULL,
+            features_json JSON NOT NULL,
+            labels_json JSON NOT NULL,
+            source VARCHAR(32) NOT NULL,
+            consumed_at VARCHAR(32),
+            created_at VARCHAR(32) NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mnemosyne_vnext_training_sample_created
+            ON mnemosyne_vnext_memory_training_sample(created_at);
+        CREATE INDEX IF NOT EXISTS idx_mnemosyne_vnext_training_sample_consumed
+            ON mnemosyne_vnext_memory_training_sample(consumed_at);
+        CREATE TABLE IF NOT EXISTS mnemosyne_vnext_memory_training_run (
+            run_id VARCHAR(36) PRIMARY KEY,
+            model_id VARCHAR(36),
+            sample_count INTEGER NOT NULL,
+            train_loss FLOAT,
+            validation_loss FLOAT,
+            recall_at_1 FLOAT,
+            recall_at_5 FLOAT,
+            mrr FLOAT,
+            false_injection_rate FLOAT,
+            status VARCHAR(16) NOT NULL,
+            error TEXT,
+            created_at VARCHAR(32) NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mnemosyne_vnext_memory_checkpoint (
+            model_id VARCHAR(36) PRIMARY KEY,
+            format_version INTEGER NOT NULL,
+            architecture_json JSON NOT NULL,
+            checkpoint_path TEXT NOT NULL,
+            checkpoint_sha256 VARCHAR(64) NOT NULL,
+            storage_mode VARCHAR(16) NOT NULL,
+            training_run_id VARCHAR(36),
+            metrics_json JSON,
+            is_active BOOLEAN NOT NULL DEFAULT 0,
+            created_at VARCHAR(32) NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mnemosyne_vnext_checkpoint_active
+            ON mnemosyne_vnext_memory_checkpoint(is_active, created_at);
+        """
+    )
+
+
 def upgrade_persona_audit(connection: sqlite3.Connection, source_version: int) -> None:
     """在调用者事务内升级已知人物审查结构及版本，不改写历史内容。"""
-    if source_version not in {2, 3, 4, 5, 6}:
+    if source_version not in {2, 3, 4, 5, 6, 7}:
         raise RuntimeError(f"不支持自动升级的 Mnemosyne Schema: {source_version}")
     if source_version in {2, 3}:
         connection.execute(
@@ -214,7 +282,7 @@ class VNextSchema:
                     "SELECT version FROM mnemosyne_vnext_schema_version WHERE schema_key=?",
                     (SCHEMA_KEY,),
                 ).fetchone()
-                if row is None or row[0] not in {1, 2, 3, 4, 5, 6, SCHEMA_VERSION}:
+                if row is None or row[0] not in {1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION}:
                     raise RuntimeError(
                         "不支持的 Mnemosyne Schema 版本，拒绝自动修改未知结构"
                     )
@@ -261,9 +329,12 @@ class VNextSchema:
                     raise
                 if source_version == 1:
                     self._upgrade_legacy(connection, backup_path)
+                    create_episode_tables(connection)
+                    create_learning_tables(connection)
                 else:
                     upgrade_persona_audit(connection, source_version)
                     create_episode_tables(connection)
+                    create_learning_tables(connection)
                 if (
                     connection.execute("PRAGMA foreign_key_check").fetchone()
                     is not None

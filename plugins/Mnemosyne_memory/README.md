@@ -1,6 +1,6 @@
 # Mnemosyne Memory
 
-当前市场版本为 **2.0.3**，开发分支为 `mnemosyne-memory-dev`，以主 `dev` 为基线独立开发，不再依赖 `feat/mnemosyne-memory-trial` 分支。沿用 `2.0.1` 的版本序列，误发布的 `1.1.0` 已撤下。本次补充初始化成功日志、实际组件注册及构建包加载验收，不改变数据库 Schema 或已保存的数据。
+当前开发版本为 **2.1.0**，开发分支为 `engram-memory-dev`，以主 `dev` 为基线独立开发，不再依赖 `feat/mnemosyne-memory-trial` 分支。沿用 `2.x` 版本序列，误发布的 `1.1.0` 已撤下。本次补充真正可训练的 Transformer 记忆控制器，但默认关闭学习和训练，不改变既有前馈选择或已保存的正式记忆。
 
 ## 安装与加载
 
@@ -73,6 +73,20 @@ L0 感知、L1 工作集、L2 热缓存、ACT-R/KDA 读出和 Transformer 排序
 前馈注入只作用于主聊天的 User prompt。SubAgent、Mnemosyne 日记整理、人物印象生成等内部请求会跳过前馈，避免把当前聊天的记忆再次注入后台生成上下文。私聊按当前流及准确人物范围检索；群聊只接受同一聊天流的可验证来源，不能跨群或把私聊来源带入群聊。
 
 话题切换时，最新一条输入会单独检索一次并以 `recency_weight` 参与扩散；连续被选中、但本轮最新输入并不指向的记忆按复述次数受 `inhibition_weight` 返回抑制，避免先被想起的记忆一直占据首位。
+
+### 可训练记忆控制器
+
+`vnext.learning` 是可选的监督学习层。它使用 `torch.nn.TransformerEncoder` 读取当前线索和最多 32 个候选的冻结特征，只学习召回、冲突和巩固控制分数；正式 Memory、Revision、Evidence 和 Episode 仍由数据库保存并负责可追溯性。旧的 ACT-R、KDA 和固定 Transformer 前馈选择仍是默认决策路径。
+
+默认配置为 `enabled=false`、`training_enabled=false`、`shadow_mode=true`。启用后，运行时会把候选特征、候选 mask、旧选择标签和 shadow 输出写入学习审计表；`memory_feedback` 只接受当前聊天流最近一次已展示候选的反馈，不允许直接写正式记忆。训练达到 `min_feedback_samples` 后由托管后台任务执行，并保存带 SHA-256 校验和的 checkpoint。
+
+PyTorch 不属于插件的强制依赖。需要启用推理或训练时，在与 Neo-MoFox 相同的环境中安装可选依赖：
+
+```powershell
+uv pip install torch
+```
+
+在没有 PyTorch、checkpoint 文件缺失或校验失败时，插件继续使用现有 Mnemosyne 前馈能力；不会因为可选学习层不可用而阻断正式记忆加载。
 
 ## Neo4j Episode 图
 
@@ -181,10 +195,14 @@ Doctor 提供正式记忆、版本证据、检索入口和向量索引的检查�
 | `vnext.flashback.max_memories` | `2` | 每轮闪回最多注入条数，可设为 `0`、`1`、`2` |
 | `vnext.flashback.cooldown_turns` | `3` | 同一记忆在同一聊天中的重复闪回间隔 |
 | `vnext.vector.worker_retry_limit` | `3` | 向量任务的失败重试上限 |
+| `vnext.learning.enabled` | `false` | 是否装配可训练 Transformer 控制器 |
+| `vnext.learning.shadow_mode` | `true` | 是否只记录学习输出而不改变现有召回排序 |
+| `vnext.learning.training_enabled` | `false` | 是否启动托管后台训练 |
+| `vnext.learning.min_feedback_samples` | `500` | 开始训练前所需的反馈与未消费样本数量 |
 
 正式记忆数据库默认位于 `data/mnemosyne_memory/vnext.db`，向量索引默认位于 `data/mnemosyne_memory/chroma`。可通过 `storage.vnext_db_path` 和 `storage.vector_db_path` 调整位置。
 
-启用后，插件注册四个 Action、六个 Tool、记忆变化、闪回、私聊印象、群聊印象与聊天日记 EventHandler、记忆 Service、Doctor 与管理 Router，并维护派生向量索引。vnext 包含 `persona`、`retrieval`、`flashback`、`feedforward`、`claim_review`、`neo4j`、`prompt_injection`、`vector`；独立聊天日记使用 `diary` 节。前馈开启时替代自然闪回，关闭自动回忆须同时关闭 `vnext.feedforward.enabled` 与 `vnext.flashback.enabled`。
+启用后，插件注册四个 Action、七个 Tool、记忆变化、闪回、私聊印象、群聊印象与聊天日记 EventHandler、记忆 Service、Doctor 与管理 Router，并维护派生向量索引。vnext 包含 `persona`、`retrieval`、`flashback`、`feedforward`、`claim_review`、`neo4j`、`prompt_injection`、`vector`、`learning`；独立聊天日记使用 `diary` 节。前馈开启时替代自然闪回，关闭自动回忆须同时关闭 `vnext.feedforward.enabled` 与 `vnext.flashback.enabled`。
 
 记忆使用指引和闪回通过框架原生 `SystemReminder` 注入，不修改模型权重。指引默认随最新输入刷新；前馈开启时每轮主聊天 prompt 构建前都会尝试一次检索，选中的记忆在当前 User payload 中只保留一份；同一记忆不会反复累加。正式记忆更正或作废时，已有提醒随之更新或移除；来源隐私删除也会撤回对应提醒。提醒源在插件卸载时清理，不保证跨 Bot 重启保留；正式记忆库不受影响。向量模型或向量索引不可用时，插件仍启动并保留 SQLite 正式记忆、词法/结构化检索、Episode、日记和人物更新，前馈自动跳过向量通道；可通过 Doctor 检查定位 `VECTOR_INDEX_UNAVAILABLE`，恢复模型后重新启动插件即可重建或继续投递派生索引。前馈仍受相关性、人物/聊天流范围和耗时预算限制。
 
@@ -226,7 +244,7 @@ uv run --no-sync python -m plugins.mnemosyne_memory.examples.chat_diary
 
 ## 迁移已有 Mnemosyne 数据结构
 
-当前 Schema 为 v7，保存正式记忆、经历、候选审核与人物印象历史。升级插件后正常启动即可：初始化会自动将已知的 Schema v1 至 v6 升级至当前版本，无须手动运行脚本或切换数据库路径。迁移在运行时数据库打开、后台任务启动前完成；已经是当前版本时不重复迁移，也不创建升级备份。
+当前 Schema 为 v8，保存正式记忆、经历、候选审核、人物印象历史及可训练控制器的反馈、样本、训练运行与 checkpoint 审计。升级插件后正常启动即可：初始化会自动将已知的 Schema v1 至 v7 升级至当前版本，无须手动运行脚本或切换数据库路径。迁移在运行时数据库打开、后台任务启动前完成；已经是当前版本时不重复迁移，也不创建升级备份。
 
 自动迁移先锁定写入，并用 SQLite Backup API 保存包含已提交 WAL 数据的一致快照。备份保存在数据库同级的 `backups/` 目录，文件名包含旧 Schema 版本及唯一标识。随后在同一个 SQLite 事务内完成结构转换和版本更新，检查完整性及外键后提交。备份失败或迁移失败会停止插件加载；未提交的结构和版本更新会回滚，下一次启动仍可重试，不把半升级的数据库交给后台任务。未知版本、缺少版本记录或比当前代码更新的数据库明确拒绝，不猜测结构、不自动降级。进程退出后未提交事务由 SQLite 恢复；备份不替代正常的数据备份策略，不能保证磁盘故障或硬件损坏时绝对无损。
 

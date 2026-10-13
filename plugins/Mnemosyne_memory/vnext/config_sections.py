@@ -359,6 +359,50 @@ class VectorSection(SectionBase):
     )
 
 
+@config_section("learning", title="可训练记忆控制器", tag="ai")
+class LearningSection(SectionBase):
+    """真正可反向传播 Transformer 记忆控制器的配置。"""
+
+    enabled: bool = Field(
+        default=False,
+        description="是否装配可训练记忆控制器；关闭时不加载 PyTorch",
+    )
+    inference_enabled: bool = Field(
+        default=True,
+        description="是否在启用后运行 Transformer shadow 推理",
+    )
+    training_enabled: bool = Field(
+        default=False,
+        description="是否允许后台训练；训练只读取反馈和样本，不直接修改正式记忆",
+    )
+    shadow_mode: bool = Field(
+        default=True,
+        description="是否只记录 Transformer 结果而不改变现有召回排序",
+    )
+    input_dim: int = Field(default=128, ge=16, le=1024)
+    d_model: int = Field(default=192, ge=8, le=1024)
+    nhead: int = Field(default=6, ge=1, le=32)
+    num_layers: int = Field(default=3, ge=1, le=12)
+    dim_feedforward: int = Field(default=768, ge=8, le=4096)
+    dropout: float = Field(default=0.1, ge=0.0, lt=1.0)
+    max_candidates: int = Field(default=32, ge=1, le=128)
+    checkpoint_dir: str = Field(
+        default="data/mnemosyne_memory/checkpoints",
+        description="Transformer checkpoint 文件目录",
+        input_type="text",
+    )
+    learning_rate: float = Field(default=0.0001, gt=0.0, le=1.0)
+    batch_size: int = Field(default=8, ge=1, le=256)
+    training_interval_seconds: int = Field(default=86400, ge=60, le=604800)
+    min_feedback_samples: int = Field(default=500, ge=1, le=1000000)
+    learned_weight: float = Field(
+        default=0.2,
+        ge=0.0,
+        le=1.0,
+        description="非 shadow 模式下 Transformer 分数对旧评分的混合权重",
+    )
+
+
 @config_section(
     "vnext",
     title="Mnemosyne Memory vNext",
@@ -378,3 +422,4 @@ class VNextConfig(SectionBase):
         default_factory=PromptInjectionSection
     )
     vector: VectorSection = Field(default_factory=VectorSection)
+    learning: LearningSection = Field(default_factory=LearningSection)

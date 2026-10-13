@@ -970,6 +970,86 @@ class VectorIndexManifestModel(Base):
     )
 
 
+class MemoryFeedbackModel(Base):
+    """候选记忆的显式或弱监督反馈，不直接修改事实内容。"""
+
+    __tablename__ = "mnemosyne_vnext_memory_feedback"
+
+    feedback_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    stream_id: Mapped[str] = mapped_column(Text, nullable=False)
+    query_episode_id: Mapped[str | None] = mapped_column(String(36))
+    candidate_episode_id: Mapped[str | None] = mapped_column(String(36))
+    candidate_memory_id: Mapped[str | None] = mapped_column(String(36))
+    feedback_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    reward: Mapped[float] = mapped_column(Float, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_id: Mapped[str | None] = mapped_column(String(36))
+    metadata_json: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_mnemosyne_vnext_feedback_stream_time", "stream_id", "created_at"),
+        Index("idx_mnemosyne_vnext_feedback_type", "feedback_type", "created_at"),
+    )
+
+
+class MemoryTrainingSampleModel(Base):
+    """冻结的训练样本快照，保存特征和标签以支持可复现训练。"""
+
+    __tablename__ = "mnemosyne_vnext_memory_training_sample"
+
+    sample_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    stream_id: Mapped[str] = mapped_column(Text, nullable=False)
+    query_episode_id: Mapped[str | None] = mapped_column(String(36))
+    candidate_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    features_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    labels_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_mnemosyne_vnext_training_sample_created", "created_at"),
+        Index("idx_mnemosyne_vnext_training_sample_consumed", "consumed_at"),
+    )
+
+
+class MemoryTrainingRunModel(Base):
+    """一次本地训练运行的指标与状态。"""
+
+    __tablename__ = "mnemosyne_vnext_memory_training_run"
+
+    run_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    model_id: Mapped[str | None] = mapped_column(String(36))
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    train_loss: Mapped[float | None] = mapped_column(Float)
+    validation_loss: Mapped[float | None] = mapped_column(Float)
+    recall_at_1: Mapped[float | None] = mapped_column(Float)
+    recall_at_5: Mapped[float | None] = mapped_column(Float)
+    mrr: Mapped[float | None] = mapped_column(Float)
+    false_injection_rate: Mapped[float | None] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class MemoryCheckpointModel(Base):
+    """可回滚的 Transformer checkpoint 元数据。"""
+
+    __tablename__ = "mnemosyne_vnext_memory_checkpoint"
+
+    model_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    format_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    architecture_json: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False)
+    checkpoint_path: Mapped[str] = mapped_column(Text, nullable=False)
+    checkpoint_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    training_run_id: Mapped[str | None] = mapped_column(String(36))
+    metrics_json: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    is_active: Mapped[bool] = mapped_column(default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
 IMMUTABLE_MODELS: ClassVar[tuple[type[Base], ...]] = (
     EpisodeModel,
     EpisodeSemanticModel,
@@ -1037,4 +1117,8 @@ ALL_MODELS: tuple[type[Base], ...] = tuple(Base.metadata.tables) and (
     MemoryRetrievalEntryModel,
     VectorOutboxModel,
     VectorIndexManifestModel,
+    MemoryFeedbackModel,
+    MemoryTrainingSampleModel,
+    MemoryTrainingRunModel,
+    MemoryCheckpointModel,
 )

@@ -548,6 +548,47 @@ class VNextRecallAssociationTool(BaseTool):
         return True, {"episodes": list(result)}
 
 
+class VNextMemoryFeedbackTool(BaseTool):
+    """保存当前流已暴露记忆候选的监督反馈。"""
+
+    name = "memory_feedback"
+    description = (
+        "反馈本轮前馈实际展示的记忆是否有帮助；只记录训练监督信号，"
+        "不会修改正式记忆，也不能反馈未在当前聊天流展示的 Memory ID。"
+    )
+
+    async def execute(
+        self,
+        candidate_memory_id: str,
+        feedback_type: str,
+        reward: float,
+    ) -> tuple[bool, str | dict[str, object]]:
+        """校验当前流候选并追加一条反馈审计记录。"""
+        memory_id = _text(candidate_memory_id, "candidate_memory_id")
+        kind = _text(feedback_type, "feedback_type")
+        context = _actor_context(self)
+        if not context.stream_id:
+            return False, json.dumps({"error": "当前聊天流未绑定"}, ensure_ascii=False)
+        owner = _owner(self.plugin)
+        exposed = owner._recent_learning_candidates.get(context.stream_id, frozenset())
+        if memory_id not in exposed:
+            return False, json.dumps(
+                {"error": "candidate_memory_id 不属于当前流最近一次已展示的记忆"},
+                ensure_ascii=False,
+            )
+        try:
+            feedback_id = await owner.learning.record_feedback(
+                stream_id=context.stream_id,
+                candidate_memory_id=memory_id,
+                feedback_type=kind,
+                reward=float(reward),
+                source="actor_tool",
+            )
+        except (TypeError, ValueError) as error:
+            return _action_result(error)
+        return True, {"feedback_id": feedback_id, "status": "RECORDED"}
+
+
 class VNextMemoryUpdateProposalTool(BaseTool):
     """提交待确认的结构化记忆更新提案。"""
 

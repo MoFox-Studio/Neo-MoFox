@@ -734,7 +734,7 @@ def test_manifest_matches_runtime_components_and_current_api() -> None:
     from ..plugin import MnemosyneMemoryPlugin
 
     manifest = json.loads((Path(__file__).resolve().parents[1] / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "2.0.3"
+    assert manifest["version"] == "2.1.0"
     assert manifest["categories"] == ["tool"]
     assert manifest["min_core_version"] == "1.2.0-rc.2"
     assert all(PLUGIN_API_VERSIONS[name] == version for name, version in manifest["api_version"].items())
@@ -759,6 +759,7 @@ def test_plugin_registers_exact_component_graph() -> None:
         "VNextMemoryReviseAction",
         "VNextMemoryInvalidateAction",
         "VNextRecallAssociationTool",
+        "VNextMemoryFeedbackTool",
         "VNextMemoryUpdateProposalTool",
         "VNextMemoryUpdateConfirmAction",
         "VNextMemoryChangedEventHandler",
@@ -770,7 +771,7 @@ def test_plugin_registers_exact_component_graph() -> None:
         "VNextDoctorRouter",
         "VNextMemoryAdminRouter",
     }
-    assert len(components) == 18
+    assert len(components) == 19
     for component in components:
         if issubclass(component, BaseAction):
             assert component.validate_associated_types() == ["text"]
