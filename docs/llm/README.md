@@ -251,6 +251,40 @@ by_model = await collector.get_by_model()
 cache_rate = await collector.get_cache_hit_rate()
 ```
 
+### 9. 请求检视器（RequestInspector）
+
+在**进程内**记录每次 LLM 调用的完整请求体到内存环形缓冲（默认保留最近 200 条），
+并提供只读查询接口。本模块**不提供任何 HTTP 端点**——框架本体不内置可视化后台
+（见根目录 README「WebUI 安装提示」），可视化调试请使用官方 WebUI。
+
+写入侧由 model_client 自动完成（`chat.completions.create` / `messages.create` /
+`responses.create` / `embeddings.create` / `rerank.create` 都会捕获），
+以下为读取侧的公共接口：
+
+```python
+from src.kernel.llm import get_inspector
+
+inspector = get_inspector()          # 进程内单例
+
+inspector.list_summaries()          # 按捕获顺序返回摘要列表
+inspector.get_record(record_id)      # 返回单条完整记录；不存在返回 None
+inspector.clear()                    # 清空缓冲，返回被清除的条数
+```
+
+要点：
+
+- **只读快照语义**：`get_record()` 返回的 `params` / `metadata` 是深拷贝，
+  调用方就地修改不会污染缓冲中的原始记录；`import_json()` 返回的同样是
+  与缓冲隔离的 `CapturedRequest` 副本。`capture()` 会深拷贝传入的 metadata，
+  记录与调用方不共享嵌套对象。
+- **环形缓冲淘汰**：`max_records` 超出后最旧的记录会被挤出，
+  此时 `get_record()` 对被淘汰的 ID 返回 `None`。
+- **并发模型**：所有方法均为同步、无 `await`。读取前会对 deque 取快照，
+  因此可安全地与其他线程的 `capture()` 并发调用，不会抛
+  `RuntimeError: deque mutated during iteration`。
+- 捕获内容包含完整 system prompt、用户消息、工具定义与返回，**属敏感数据**，
+  接入方需自行控制暴露范围。
+
 ## 详细文档索引
 
 - [Exceptions](./exceptions.md) - 异常类和错误分类（含 `classify_exception`）
@@ -316,8 +350,9 @@ A: 框架本体不再内置调试 WebUI，请安装官方 WebUI：
 [MoFox-Core-Webui](https://github.com/MoFox-Studio/MoFox-Core-Webui)。
 
 `src/kernel/llm/request_inspector.py` 仅在**进程内**保留请求捕获与结构化视图构造，
-不对外提供任何 HTTP 端点。需要程序内调试时可直接调用 `capture()` 后用
-`get_inspector()` 读取记录。
+不对外提供任何 HTTP 端点。需要程序内调试时用 `get_inspector()` 获取实例，
+再调用 `list_summaries()` / `get_record()` 读取记录，
+详见 [第 9 节](#9-请求检视器requestinspector)。
 
 ## 相关资源
 

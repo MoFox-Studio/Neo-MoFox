@@ -7,17 +7,24 @@
 https://github.com/MoFox-Studio/MoFox-Core-Webui
 
 使用方式：
-    # 在发起请求前调用
+    # 读取：供 WebUI / 调试工具消费
+    from src.kernel.llm import get_inspector
+    inspector = get_inspector()
+    inspector.list_summaries()      # 摘要列表
+    inspector.get_record(record_id) # 单条完整请求体
+
+    # 在发起请求前调用（内部由 model_client 自动调用）
     from src.kernel.llm.request_inspector import capture
     capture("chat.completions.create", params)
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 
@@ -471,7 +478,7 @@ class CapturedRequest:
             "model": self.model,
             "api_provider": str(self.metadata.get("api_provider", "-")),
             "request_name": str(self.metadata.get("request_name", "")),
-            "estimated_input_tokens": self.metadata.get("estimated_input_tokens"),
+            "estimated_input_tokens": copy.deepcopy(self.metadata.get("estimated_input_tokens")),
             "msg_count": msg_count,
             "tool_count": tool_count,
         }
@@ -488,7 +495,12 @@ class CapturedRequest:
 
 
 class RequestInspector:
-    """LLM 请求体检视器，保存最近 N 条请求记录供进程内调试。"""
+    """LLM 请求体检视器，保存最近 N 条请求记录供进程内调试。
+
+    并发说明：所有方法均为同步且内部无 ``await``。读取前会对 deque 取快照，
+    因此可与任意线程的 ``capture()`` 并发调用，不会因 deque 扩容触发
+    ``RuntimeError: deque mutated during iteration``。
+    """
 
     def __init__(self, max_records: int = 200) -> None:
         self._max_records = max_records
@@ -507,7 +519,7 @@ class RequestInspector:
             copied = json.loads(json.dumps(params, default=str))
         except Exception:
             copied = {"_raw": str(params)}
-        effective_metadata = metadata.copy() if isinstance(metadata, dict) else {}
+        effective_metadata = copy.deepcopy(metadata) if isinstance(metadata, dict) else {}
 
         model = str(copied.get("model", "—"))
         record = CapturedRequest(
@@ -521,7 +533,13 @@ class RequestInspector:
         self._records.append(record)
 
     def import_json(self, payload: Any) -> list[CapturedRequest]:
-        """导入外部 JSON，并转换为可渲染的捕获记录。"""
+        """导入外部 JSON，并转换为可渲染的捕获记录。
+
+        返回的是与内部缓冲隔离的副本，调用方就地修改不会污染缓冲。
+
+        Returns:
+            导入后的记录副本列表。
+        """
         imported: list[CapturedRequest] = []
         for api_name, params, metadata in _normalize_import_payload(payload):
             next_id = self._counter + 1
@@ -529,8 +547,86 @@ class RequestInspector:
             record = self._records[-1]
             if record.id != next_id:
                 raise RuntimeError("导入记录 ID 不连续")
-            imported.append(record)
+            imported.append(_copy_record(record))
         return imported
+
+    def list_summaries(self) -> list[dict[str, Any]]:
+        """返回按捕获顺序排列的请求摘要列表。
+
+        遍历前对 deque 取快照，避免与其他线程的 ``capture()`` 并发时
+        触发 ``RuntimeError: deque mutated during iteration``。
+
+        Returns:
+            每条记录的摘要字典，字段见 :meth:`CapturedRequest.to_summary`；
+            无记录时返回空列表。
+        """
+        return [record.to_summary() for record in list(self._records)]
+
+    def get_record(self, record_id: int) -> dict[str, Any] | None:
+        """返回指定 ID 的完整请求体。
+
+        遍历前对 deque 取快照，避免与其他线程的 ``capture()`` 并发时
+        触发 ``RuntimeError: deque mutated during iteration``。
+
+        Args:
+            record_id: :meth:`CapturedRequest.to_summary` 中的 ``id``。
+
+        Returns:
+            完整记录（含 ``params`` / ``metadata`` / ``rendered``）；
+            不存在或已被环形缓冲淘汰时返回 ``None``。
+        """
+        for record in reversed(list(self._records)):
+            if record.id == record_id:
+                return _snapshot_record(record)
+        return None
+
+    def clear(self) -> int:
+        """清空已捕获的全部请求。
+
+        Returns:
+            被清除的记录条数。
+        """
+        count = len(self._records)
+        self._records.clear()
+        return count
+
+
+def _copy_record(record: CapturedRequest) -> CapturedRequest:
+    """构造与内部缓冲隔离的 :class:`CapturedRequest` 副本。
+
+    :meth:`RequestInspector.import_json` 返回内部记录对象本身会让调用方
+    直接改写缓冲内容，这里返回等值但独立的实例。
+
+    Args:
+        record: 源记录。
+
+    Returns:
+        独立副本，``params`` / ``metadata`` 为深拷贝。
+    """
+    return replace(
+        record,
+        params=copy.deepcopy(record.params),
+        metadata=copy.deepcopy(record.metadata),
+    )
+
+
+def _snapshot_record(record: CapturedRequest) -> dict[str, Any]:
+    """构造与内部状态隔离的记录副本。
+
+    :meth:`CapturedRequest.to_full` 会把 ``params`` / ``metadata`` 以引用形式挂进
+    返回值，调用方若就地修改会污染缓冲中的原始记录。这里对两者做深拷贝，
+    使只读接口对调用方只暴露快照。
+
+    Args:
+        record: 源记录。
+
+    Returns:
+        完整记录字典，其中 ``params`` / ``metadata`` 为深拷贝。
+    """
+    data = record.to_full()
+    data["params"] = copy.deepcopy(record.params)
+    data["metadata"] = copy.deepcopy(record.metadata)
+    return data
 
 
 _inspector: RequestInspector | None = None
