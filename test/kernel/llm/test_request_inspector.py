@@ -512,3 +512,56 @@ def test_read_api_is_safe_against_concurrent_capture() -> None:
 
     assert not errors, f"并发读写触发了异常: {errors!r}"
     assert not any(thread.is_alive() for thread in threads), "线程未在超时内结束"
+
+
+def test_capture_degrades_uncopyable_metadata_instead_of_raising() -> None:
+    """metadata 含不可深拷贝对象时应降级为 _raw，而不是抛异常。"""
+    inspector = RequestInspector()
+
+    inspector.capture(
+        "chat.completions.create",
+        {"model": "gpt-4"},
+        {"api_provider": "OpenAI", "lock": threading.Lock()},
+    )
+
+    metadata = inspector.get_record(1)["metadata"]
+    assert "_raw" in metadata, "不可拷贝的 metadata 应降级为 _raw"
+    assert "api_provider" not in metadata
+
+
+def test_capture_failure_leaves_no_id_gap() -> None:
+    """失败的捕获不应推进计数器，避免 list_summaries() 的 id 出现空洞。"""
+    inspector = RequestInspector()
+
+    inspector.capture("x", {"model": "first"})
+    inspector.capture("x", {"model": "second"}, {"lock": threading.Lock()})
+    inspector.capture("x", {"model": "third"})
+
+    ids = [summary["id"] for summary in inspector.list_summaries()]
+    assert ids == [1, 2, 3], f"id 序列应连续，实际为 {ids}"
+    assert inspector.get_record(2) is not None, "id=2 应存在，不该是空洞"
+
+
+def test_capture_falls_back_like_params_side() -> None:
+    """params 与 metadata 应共用同一套 _raw 降级约定。
+
+    注意 params 侧走的是 ``json.dumps(..., default=str)``，不可序列化的值会被
+    ``str()`` 转换而非抛错；只有连 ``str()`` 都无法处理的对象才会触发降级。
+    这里用一个 ``__str__`` 自身抛错的对象构造该路径。
+    """
+
+    class Unstringable:
+        def __str__(self) -> str:
+            raise RuntimeError("无法转为字符串")
+
+    inspector = RequestInspector()
+
+    inspector.capture(
+        "x",
+        {"model": "m", "bad": Unstringable()},
+        {"api_provider": "OpenAI", "also_bad": threading.Lock()},
+    )
+
+    record = inspector.get_record(1)
+    assert "_raw" in record["params"], "无法 str() 的 params 应降级为 _raw"
+    assert "_raw" in record["metadata"], "不可拷贝的 metadata 应降级为 _raw"

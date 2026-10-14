@@ -513,15 +513,23 @@ class RequestInspector:
         params: dict[str, Any],
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """捕获一条请求体，存入内存环形缓冲。"""
-        self._counter += 1
+        """捕获一条请求体，存入内存环形缓冲。
+
+        ``params`` 不可 JSON 序列化、``metadata`` 不可深拷贝时，
+        两者都降级为 ``{"_raw": str(...)}``，本方法不会因入参而抛异常。
+        """
         try:
             copied = json.loads(json.dumps(params, default=str))
         except Exception:
             copied = {"_raw": str(params)}
-        effective_metadata = copy.deepcopy(metadata) if isinstance(metadata, dict) else {}
+        try:
+            effective_metadata = copy.deepcopy(metadata) if isinstance(metadata, dict) else {}
+        except Exception:
+            effective_metadata = {"_raw": str(metadata)}
 
         model = str(copied.get("model", "—"))
+        # 全部准备工作成功后再自增：id 空洞会让 list_summaries() 的 id 序列断裂
+        self._counter += 1
         record = CapturedRequest(
             id=self._counter,
             ts=time.time(),
