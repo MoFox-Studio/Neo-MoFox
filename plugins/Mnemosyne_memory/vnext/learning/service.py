@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +31,9 @@ try:
 except ImportError:  # pragma: no cover - depends on optional environment
     torch = None  # type: ignore[assignment]
     Tensor = Any  # type: ignore[misc,assignment]
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +87,9 @@ class MemoryLearningService:
 
     def initialize(self) -> bool:
         """加载可选模型；依赖缺失时返回 False 而不是阻断插件。"""
-        if not self.config.enabled or not self.config.inference_enabled:
+        if not self.config.enabled or not (
+            self.config.inference_enabled or self.config.training_enabled
+        ):
             return False
         if torch is None:
             return False
@@ -255,7 +262,7 @@ class MemoryLearningService:
 
     async def load_active_checkpoint(self) -> bool:
         """Load and hash-check the active local checkpoint, if one exists."""
-        if not self.config.enabled or not self.config.inference_enabled:
+        if not self.config.enabled:
             return False
         if self._model is None or torch is None:
             return False
@@ -293,7 +300,6 @@ class MemoryLearningService:
         """消费一批已保存样本训练模型并原子发布新 checkpoint。"""
         if (
             not self.config.enabled
-            or not self.config.inference_enabled
             or not self.config.training_enabled
             or self._model is None
             or self._optimizer is None
@@ -305,25 +311,49 @@ class MemoryLearningService:
             feedback_count = await session.scalar(
                 select(func.count()).select_from(MemoryFeedbackModel)
             )
-            if int(feedback_count or 0) < self.config.min_feedback_samples:
-                return None
-            pending_count = await session.scalar(
-                select(func.count())
-                .select_from(MemoryTrainingSampleModel)
-                .where(MemoryTrainingSampleModel.consumed_at.is_(None))
-            )
-            if int(pending_count or 0) < 1:
-                return None
-            rows = (
-                await session.scalars(
-                    select(MemoryTrainingSampleModel)
-                    .where(MemoryTrainingSampleModel.consumed_at.is_(None))
-                    .order_by(MemoryTrainingSampleModel.created_at)
-                    .limit(self.config.batch_size)
-                )
-            ).all()
-        if not rows:
+        if int(feedback_count or 0) < self.config.min_feedback_samples:
             return None
+
+        # Retire incompatible snapshots so one old configuration cannot block
+        # every newer sample in the FIFO queue. The sample row and feature data
+        # remain available for inspection; consumed_at marks it as handled.
+        while True:
+            async with self._schema.database.session() as session:
+                pending_rows = (
+                    await session.scalars(
+                        select(MemoryTrainingSampleModel)
+                        .where(MemoryTrainingSampleModel.consumed_at.is_(None))
+                        .order_by(MemoryTrainingSampleModel.created_at)
+                        .limit(self.config.batch_size)
+                    )
+                ).all()
+                if not pending_rows:
+                    return None
+
+                rows = []
+                rejected_ids = []
+                for row in pending_rows:
+                    reason = _training_sample_error(
+                        row,
+                        input_dim=self.config.input_dim,
+                        max_candidates=self.config.max_candidates,
+                    )
+                    if reason is None:
+                        rows.append(row)
+                    else:
+                        rejected_ids.append(row.sample_id)
+                        logger.warning(
+                            "跳过尺寸不兼容的 Mnemosyne 训练样本 "
+                            f"sample={row.sample_id}: {reason}"
+                        )
+                if rejected_ids:
+                    await session.execute(
+                        update(MemoryTrainingSampleModel)
+                        .where(MemoryTrainingSampleModel.sample_id.in_(rejected_ids))
+                        .values(consumed_at=datetime.now(UTC))
+                    )
+            if rows:
+                break
         feedback_keys = {
             (row.stream_id, str(candidate_id))
             for row in rows
@@ -560,6 +590,83 @@ def _recall_labels(labels_json: dict[str, object]) -> list[object]:
             raise ValueError("训练样本 recall 标签格式无效")
         return nested
     return raw
+
+
+def _training_sample_error(
+    row: MemoryTrainingSampleModel,
+    *,
+    input_dim: int,
+    max_candidates: int,
+) -> str | None:
+    """Return why a frozen sample cannot be used with the current model shape."""
+    snapshot = row.features_json
+    if not isinstance(snapshot, dict):
+        return "features_json is not an object"
+
+    stored_input_dim = snapshot.get("input_dim")
+    if stored_input_dim is not None and stored_input_dim != input_dim:
+        return f"input_dim={stored_input_dim}, current={input_dim}"
+    stored_max_candidates = snapshot.get("max_candidates")
+    if stored_max_candidates is not None and stored_max_candidates != max_candidates:
+        return f"max_candidates={stored_max_candidates}, current={max_candidates}"
+
+    tensor = snapshot.get("tensor")
+    if not isinstance(tensor, list) or len(tensor) != 1:
+        return "tensor must have one batch dimension"
+    sequence = tensor[0]
+    if not isinstance(sequence, list) or len(sequence) != max_candidates + 1:
+        return f"tensor sequence must contain {max_candidates + 1} slots"
+    for slot, vector in enumerate(sequence):
+        if not isinstance(vector, list) or len(vector) != input_dim:
+            return f"tensor slot {slot} does not have input_dim={input_dim}"
+        for value in vector:
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                return f"tensor slot {slot} contains a non-numeric value"
+            if not _is_finite_number(value):
+                return f"tensor slot {slot} contains a non-finite value"
+
+    candidate_mask = snapshot.get("candidate_mask")
+    if candidate_mask is not None and (
+        not isinstance(candidate_mask, list)
+        or len(candidate_mask) != 1
+        or not isinstance(candidate_mask[0], list)
+        or len(candidate_mask[0]) != max_candidates
+    ):
+        return f"candidate_mask must have shape [1, {max_candidates}]"
+    if candidate_mask is not None and any(
+        not isinstance(value, (bool, int, float))
+        or (not isinstance(value, bool) and value not in (0, 1))
+        for value in candidate_mask[0]
+    ):
+        return "candidate_mask contains a value other than true/false"
+
+    if (
+        not isinstance(row.candidate_ids, list)
+        or len(row.candidate_ids) > max_candidates
+    ):
+        return f"candidate_ids cannot exceed max_candidates={max_candidates}"
+    if not isinstance(row.labels_json, dict):
+        return "labels_json is not an object"
+    try:
+        labels = _recall_labels(row.labels_json)
+    except (TypeError, ValueError) as error:
+        return f"invalid recall labels: {error}"
+    if len(labels) != max_candidates:
+        return f"recall labels must contain {max_candidates} values"
+    for label in labels:
+        if not isinstance(label, (int, float)) or isinstance(label, bool):
+            return "recall labels contain a non-numeric value"
+        if not _is_finite_number(label) or not 0.0 <= label <= 1.0:
+            return "recall labels must be finite values in [0, 1]"
+    return None
+
+
+def _is_finite_number(value: int | float) -> bool:
+    """Handle malformed oversized JSON integers without raising in validation."""
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def _feedback_task(feedback_type: str) -> str:
