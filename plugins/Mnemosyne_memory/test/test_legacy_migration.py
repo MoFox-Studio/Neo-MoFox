@@ -213,3 +213,104 @@ def test_command_line_entrypoint_runs_offline(tmp_path):
     report = json.loads(result.stdout)
     assert report["sources"][0]["counts"]["original_records_and_tags_verified"] == 5
     assert output.is_file()
+
+
+def test_existing_canonical_memory_rows_are_preserved_when_adding_booku(tmp_path):
+    source = make_engram(tmp_path / "engram.db")
+    booku = make_booku(tmp_path / "booku.db")
+    base, output = tmp_path / "existing.db", tmp_path / "merged.db"
+    migrate(base=None, engram=[source], booku=[], output=base)
+    original = database_rows(base)
+    migrate(base=base, engram=[], booku=[booku], output=output)
+    actual = database_rows(output)
+    for table, rows in original.items():
+        assert set(rows).issubset(set(actual[table])), table
+
+
+@pytest.mark.parametrize("change", ["content", "tag"])
+def test_changed_booku_source_is_rejected_without_modifying_existing_import(tmp_path, change):
+    source = make_booku(tmp_path / "booku.db")
+    base, output = tmp_path / "existing.db", tmp_path / "conflict.db"
+    migrate(base=None, engram=[], booku=[source], output=base)
+    before = fingerprint(base)
+    with closing(connect(source)) as db, db:
+        if change == "content":
+            db.execute("UPDATE booku_memory_records SET content='changed' WHERE memory_id='booku-0'")
+        else:
+            db.execute("UPDATE booku_memory_tags SET tag_value='changed' WHERE id=1")
+    with pytest.raises(MigrationError, match="differs from previously imported provenance"):
+        migrate(base=base, engram=[], booku=[source], output=output)
+    assert fingerprint(base) == before
+    assert not output.exists() and not Path(str(output) + ".migration.json").exists()
+
+
+def test_cross_memory_current_revision_is_rejected(tmp_path):
+    source = make_engram(tmp_path / "engram.db")
+    with closing(connect(source)) as db, db:
+        db.execute("UPDATE engram_vnext_memory SET current_revision_id='engram-r3' WHERE memory_id='engram-m1'")
+    before = fingerprint(source)
+    output = tmp_path / "invalid.db"
+    with pytest.raises(MigrationError, match="ownership"):
+        migrate(base=None, engram=[source], booku=[], output=output)
+    assert fingerprint(source) == before and not output.exists()
+
+
+@pytest.mark.parametrize("suffix", [".migration.json", "-wal", "-shm", "-journal"])
+def test_existing_output_report_or_sidecars_are_never_overwritten(tmp_path, suffix):
+    source = make_booku(tmp_path / "booku.db")
+    output = tmp_path / "output.db"
+    existing = Path(str(output) + suffix)
+    existing.write_bytes(b"must remain unchanged")
+    with pytest.raises(MigrationError, match="must not already exist"):
+        migrate(base=None, engram=[], booku=[source], output=output)
+    assert existing.read_bytes() == b"must remain unchanged"
+    assert not output.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_manifest", [False, True])
+async def test_runtime_processes_migrated_vector_tasks_without_external_api(tmp_path, has_manifest):
+    """真实 ORM/Outbox 服务消费迁移入口，向量后端用内存实现隔离外部 API。"""
+    from ..vnext.schema import VNextSchema
+    from ..vnext.vector_service import VectorIndexService, VectorSink
+
+    class RecordingSink(VectorSink):
+        def __init__(self):
+            self.items = {}
+
+        async def upsert(self, item):
+            assert hashlib.sha256(item.text.encode()).hexdigest() == item.content_hash
+            self.items[item.entry_id] = item.text
+
+        async def delete(self, entry_id):
+            self.items.pop(entry_id, None)
+
+        async def entry_ids(self):
+            return frozenset(self.items)
+
+    engram, booku = make_engram(tmp_path / "engram.db"), make_booku(tmp_path / "booku.db")
+    base, output = tmp_path / "base.db", tmp_path / "merged.db"
+    initialize(base)
+    if has_manifest:
+        with closing(connect(base)) as db, db:
+            put(db, PREFIX + "vector_index_manifest", index_id="target-index", index_version="target-collection",
+                embedding_model_id="test-model", embedding_dimension=4, retrieval_schema_version="mnemosyne-vnext-2",
+                status="ACTIVE", activated_at=STAMP)
+    report = migrate(base=base, engram=[engram], booku=[booku], output=output)
+    with closing(connect(output)) as db:
+        expected = dict(db.execute(f"SELECT e.entry_id,e.text FROM {PREFIX}memory_retrieval_entry e JOIN {PREFIX}memory m ON m.memory_id=e.memory_id WHERE m.status='ACTIVE'"))
+    assert expected
+    assert report["retrieval"]["vector_updates_queued"] == (len(expected) if has_manifest else 0)
+    sink = RecordingSink()
+    schema = VNextSchema(str(output))
+    await schema.initialize()
+    try:
+        service = VectorIndexService(schema, sink)
+        await service.ensure_active_manifest("test-model", 4, "mnemosyne-vnext-2")
+        await service.process_pending_outbox(limit=100)
+        assert sink.items == expected
+        with closing(connect(output)) as db:
+            assert db.execute(f"SELECT count(*) FROM {PREFIX}vector_outbox WHERE status!='DONE'").fetchone()[0] == 0
+            assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        await schema.close()

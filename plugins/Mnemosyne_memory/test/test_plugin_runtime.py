@@ -318,6 +318,91 @@ async def test_owner_initializes_vector_resources_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("enabled,inference,training", [
+    (False, True, False), (False, True, True), (True, False, False),
+])
+async def test_owner_disabled_learning_starts_without_false_warning(
+    owner: VNextRuntimeOwner, monkeypatch: pytest.MonkeyPatch,
+    enabled: bool, inference: bool, training: bool,
+) -> None:
+    """关闭模型的所有配置分支均正常启动，不加载权重或误报初始化失败。"""
+    settings = owner.config.vnext.learning
+    settings.enabled, settings.inference_enabled, settings.training_enabled = enabled, inference, training
+    warning = Mock()
+    load = AsyncMock()
+    start_training = Mock()
+    monkeypatch.setattr(runtime_owner.logger, "warning", warning)
+    monkeypatch.setattr(owner.learning, "load_active_checkpoint", load)
+    monkeypatch.setattr(owner, "_start_learning_loop", start_training)
+    try:
+        await owner.initialize()
+        assert owner._initialized is True
+        assert owner.learning.available is False
+        load.assert_not_awaited()
+        start_training.assert_not_called()
+        warning.assert_not_called()
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inference,training", [(True, False), (False, True)])
+async def test_owner_missing_torch_reports_dependency_without_name_error(
+    owner: VNextRuntimeOwner, monkeypatch: pytest.MonkeyPatch,
+    inference: bool, training: bool,
+) -> None:
+    """启用模型但缺失依赖时只报告缺失 PyTorch，基础记忆仍完成启动。"""
+    from ..vnext.learning import service as learning_service
+
+    settings = owner.config.vnext.learning
+    settings.enabled, settings.inference_enabled, settings.training_enabled = True, inference, training
+    warning = Mock()
+    monkeypatch.setattr(learning_service, "torch", None)
+    monkeypatch.setattr(runtime_owner.logger, "warning", warning)
+    try:
+        await owner.initialize()
+        assert owner._initialized is True and owner.learning.available is False
+        assert owner._learning_task_id is None
+        warning.assert_called_once()
+        assert "PyTorch" in warning.call_args.args[0]
+        assert "初始化失败" not in warning.call_args.args[0]
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inference,training", [(True, False), (False, True), (True, True)])
+async def test_owner_enabled_learning_initializes_and_loads_checkpoint(
+    owner: VNextRuntimeOwner, monkeypatch: pytest.MonkeyPatch,
+    inference: bool, training: bool,
+) -> None:
+    """真实小模型覆盖推理、训练和同时启用，并保留 checkpoint 加载流程。"""
+    from ..vnext.learning.model import torch
+
+    if torch is None:
+        pytest.skip("optional torch is not installed")
+    settings = owner.config.vnext.learning
+    for name, value in {"enabled": True, "inference_enabled": inference,
+                        "training_enabled": training, "input_dim": 16, "d_model": 8,
+                        "nhead": 2, "num_layers": 1, "dim_feedforward": 16,
+                        "max_candidates": 2}.items():
+        setattr(settings, name, value)
+    warning, start_training = Mock(), Mock()
+    load = AsyncMock(return_value=False)
+    monkeypatch.setattr(runtime_owner.logger, "warning", warning)
+    monkeypatch.setattr(owner.learning, "load_active_checkpoint", load)
+    monkeypatch.setattr(owner, "_start_learning_loop", start_training)
+    try:
+        await owner.initialize()
+        assert owner._initialized is True and owner.learning.available is True
+        load.assert_awaited_once()
+        assert start_training.call_count == int(training)
+        warning.assert_not_called()
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_owner_cleans_legacy_before_starting_generation(
     owner: VNextRuntimeOwner,
 ) -> None:
@@ -698,6 +783,8 @@ async def main():
         assert plugin is not None and plugin.plugin_version == "2.1.0"
         owner = plugin.runtime_owner
         assert owner is not None and owner._initialized and owner.diary.ready
+        assert owner.config.vnext.learning.enabled is False
+        assert owner.learning.available is False and owner._learning_task_id is None
         assert "group_persona" in {item.name for item in plugin.get_components()}
         registry = get_global_registry()
         signatures = {
@@ -726,6 +813,7 @@ asyncio.run(main())
         env=environment, capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "可训练记忆控制器初始化失败" not in result.stdout + result.stderr
 
 
 def test_manifest_matches_runtime_components_and_current_api() -> None:
