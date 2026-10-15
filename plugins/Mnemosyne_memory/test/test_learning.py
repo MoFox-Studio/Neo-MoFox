@@ -93,6 +93,7 @@ async def test_schema_creates_learning_tables(schema: VNextSchema) -> None:
 async def test_feedback_and_training_sample_round_trip(schema: VNextSchema) -> None:
     """Feedback and frozen features are persisted without formal-memory writes."""
     service = MemoryLearningService(schema, MnemosyneMemoryConfig().vnext.learning)
+    service.config.enabled = True
     feedback_id = await service.record_feedback(
         stream_id="stream-1",
         candidate_memory_id="memory-1",
@@ -116,6 +117,7 @@ async def test_feedback_and_training_sample_round_trip(schema: VNextSchema) -> N
 async def test_feedback_rejects_invalid_reward(schema: VNextSchema) -> None:
     """Feedback validation rejects values that cannot be training rewards."""
     service = MemoryLearningService(schema, MnemosyneMemoryConfig().vnext.learning)
+    service.config.enabled = True
     with pytest.raises(ValueError, match="reward"):
         await service.record_feedback(
             stream_id="stream-1",
@@ -132,3 +134,55 @@ def test_missing_torch_is_guarded() -> None:
         pytest.skip("selected environment provides optional torch")
     with pytest.raises(RuntimeError, match="requires PyTorch"):
         TrainableMemoryTransformer()
+
+
+@pytest.mark.asyncio
+async def test_training_only_skips_bad_samples_and_keeps_feedback_for_each_head(
+    schema: VNextSchema, tmp_path: Path, monkeypatch
+) -> None:
+    """Exercise actual CPU training, queue recovery and checkpoint reload together."""
+    if torch is None:
+        pytest.skip("optional torch is not installed")
+    config = MnemosyneMemoryConfig().vnext.learning.model_copy(update={
+        "enabled": True, "inference_enabled": False, "training_enabled": True,
+        "input_dim": 16, "d_model": 8, "nhead": 2, "num_layers": 1,
+        "dim_feedforward": 16, "max_candidates": 2, "batch_size": 1,
+        "min_feedback_samples": 1, "checkpoint_dir": str(tmp_path / "checkpoints"),
+    })
+    service = MemoryLearningService(schema, config)
+    assert service.initialize() is True
+    batches = [
+        build_feature_batch(query_text="old", candidates=(LearningCandidate("old", "old", "old"),), input_dim=32, max_candidates=2),
+        build_feature_batch(query_text="empty", candidates=(), input_dim=16, max_candidates=2),
+        build_feature_batch(query_text="咖啡", candidates=(LearningCandidate("memory-1", "咖啡", "咖啡影响睡眠"),), selected_ids=frozenset({"memory-1"}), input_dim=16, max_candidates=2),
+    ]
+    sample_ids = []
+    for batch in batches:
+        sample_ids.append(await service.record_training_sample(
+            stream_id="stream-1", candidate_ids=list(batch.candidate_ids[0]),
+            features=batch.to_json(), labels=batch.labels_json(), source="test",
+        ))
+    for task, reward in (("recall", -1.0), ("conflict", 1.0)):
+        await service.record_feedback(stream_id="stream-1", candidate_memory_id="memory-1",
+            feedback_type=task, reward=reward, source="test", metadata={"training_sample_id": sample_ids[-1]})
+    with pytest.raises(RuntimeError, match="disabled"):
+        service.infer_batch(batches[-1])
+    observed_targets = []
+    original_loss = torch.nn.functional.binary_cross_entropy_with_logits
+    def capture_loss(logits, targets, **kwargs):
+        observed_targets.append(targets.detach().clone())
+        return original_loss(logits, targets, **kwargs)
+    monkeypatch.setattr(torch.nn.functional, "binary_cross_entropy_with_logits", capture_loss)
+    summary = await service.train_once()
+    assert summary is not None and summary.sample_count == 1
+    assert len(observed_targets) == 2
+    assert observed_targets[0][0, 0].item() == 0.0  # Explicit recall feedback overrides pseudo-label 1.
+    assert observed_targets[1][0, 0].item() == 1.0  # Conflict feedback survives on the same candidate.
+    async with schema.database.session() as session:
+        assert await session.scalar(text("SELECT count(*) FROM mnemosyne_vnext_memory_training_sample WHERE consumed_at IS NOT NULL")) == 3
+    restored = MemoryLearningService(schema, config)
+    assert restored.initialize() is True
+    assert await restored.load_active_checkpoint() is True
+    assert restored.trained is True and restored.model_id == summary.model_id
+    service.close()
+    restored.close()

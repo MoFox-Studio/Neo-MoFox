@@ -255,7 +255,13 @@ uv run --no-sync python plugins/mnemosyne_memory/scripts/migrate_schema.py --sou
 
 脚本要求交互确认，拒绝当前配置正在使用的数据库和已存在的输出文件。它与自动迁移复用转换规则，只写新副本，并核对来源未变、原始字段摘要、数据库完整性及外键。离线维护时，向量目录应另行复制并与新数据库一起切换；脚本不会操作 Bot、修改配置或切换生产库。
 
-## 从 Booku 迁移记忆
+## 从 Engram / Booku 合并迁移
+
+使用 `scripts/migrate_legacy.py` 可将 Engram 和 Booku 数据库合并进现有 Mnemosyne 库的副本，也可创建新库。脚本包含 Booku 的全部存储桶、标签及原始字段，保留 Engram 的历史版本、证据和关联；只读来源，拒绝覆盖输出，并检查正文回读、外键和数据库完整性。向量任务由启用新库后的运行时处理。
+
+参数、迁移范围和测试来源见 [数据库迁移说明](scripts/MIGRATION.md)。Engram 测试依据指定 GitHub 分支的真实表结构构造样本，该仓库没有提供实际数据库文件。
+
+## 旧 Booku 独立导入工具
 
 迁移器只把 Booku 的 `memory` bucket 导入 Mnemosyne；`knowledge` 文档片段会明确计数并跳过，不会变成正式记忆。迁移不会写入当前 Mnemosyne 或 Booku 数据库，也不会修改配置。目标目录必须是新目录，已存在时拒绝覆盖。
 

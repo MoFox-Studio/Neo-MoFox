@@ -16,9 +16,7 @@ from sqlalchemy import select
 from src.app.plugin_system.api.storage_api import PluginDatabase
 
 from .models import ALL_MODELS, SchemaVersionModel
-
-SCHEMA_KEY = "mnemosyne_memory_vnext"
-SCHEMA_VERSION = 8
+from .schema_version import SCHEMA_KEY, SCHEMA_VERSION
 
 
 def create_episode_tables(connection: sqlite3.Connection) -> None:

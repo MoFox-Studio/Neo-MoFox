@@ -360,8 +360,8 @@ class MemoryLearningService:
             for candidate_id in row.candidate_ids
             if candidate_id
         }
-        feedback_map: dict[tuple[str, str], MemoryFeedbackModel] = {}
-        legacy_feedback_map: dict[tuple[str, str], MemoryFeedbackModel] = {}
+        feedback_map: dict[tuple[str, str, str], MemoryFeedbackModel] = {}
+        legacy_feedback_map: dict[tuple[str, str, str], MemoryFeedbackModel] = {}
         if feedback_keys:
             async with self._schema.database.session() as session:
                 feedback_rows = (
@@ -378,15 +378,20 @@ class MemoryLearningService:
                 ).all()
             for feedback in feedback_rows:
                 if feedback.candidate_memory_id is not None:
+                    try:
+                        task = _feedback_task(feedback.feedback_type)
+                    except ValueError:
+                        logger.warning("忽略类型无法识别的历史训练反馈")
+                        continue
                     sample_id = (
                         feedback.metadata_json.get("training_sample_id")
                         if isinstance(feedback.metadata_json, dict)
                         else None
                     )
                     if isinstance(sample_id, str) and sample_id:
-                        feedback_map[(sample_id, feedback.candidate_memory_id)] = feedback
+                        feedback_map[(sample_id, feedback.candidate_memory_id, task)] = feedback
                     else:
-                        legacy_feedback_map[(feedback.stream_id, feedback.candidate_memory_id)] = feedback
+                        legacy_feedback_map[(feedback.stream_id, feedback.candidate_memory_id, task)] = feedback
         run_id = str(uuid4())
         serialized_features = [row.features_json["tensor"] for row in rows]
         if serialized_features and isinstance(serialized_features[0], list):
@@ -438,15 +443,15 @@ class MemoryLearningService:
             for candidate_index, candidate_id in enumerate(row.candidate_ids):
                 if not candidate_id or not bool(candidate_masks[row_index, candidate_index]):
                     continue
-                feedback = feedback_map.get((row.sample_id, candidate_id))
-                if feedback is None:
-                    feedback = legacy_feedback_map.get((row.stream_id, candidate_id))
-                if feedback is None:
-                    continue
-                task = _feedback_task(feedback.feedback_type)
-                target_values[task][row_index][candidate_index] = (float(feedback.reward) + 1.0) / 2.0
-                if task != "recall":
-                    target_masks[task][row_index, candidate_index] = True
+                for task in target_values:
+                    feedback = feedback_map.get((row.sample_id, candidate_id, task))
+                    if feedback is None:
+                        feedback = legacy_feedback_map.get((row.stream_id, candidate_id, task))
+                    if feedback is None:
+                        continue
+                    target_values[task][row_index][candidate_index] = (float(feedback.reward) + 1.0) / 2.0
+                    if task != "recall":
+                        target_masks[task][row_index, candidate_index] = True
         targets = {
             name: torch.tensor(values, dtype=torch.float32)
             for name, values in target_values.items()
@@ -639,12 +644,16 @@ def _training_sample_error(
         for value in candidate_mask[0]
     ):
         return "candidate_mask contains a value other than true/false"
+    if candidate_mask is not None and not any(candidate_mask[0]):
+        return "sample contains no valid candidate slots"
 
     if (
         not isinstance(row.candidate_ids, list)
         or len(row.candidate_ids) > max_candidates
     ):
         return f"candidate_ids cannot exceed max_candidates={max_candidates}"
+    if not any(row.candidate_ids):
+        return "sample contains no candidate identifiers"
     if not isinstance(row.labels_json, dict):
         return "labels_json is not an object"
     try:
