@@ -365,7 +365,11 @@ class LearningSection(SectionBase):
 
     enabled: bool = Field(
         default=False,
-        description="是否装配可训练记忆控制器；关闭时不加载 PyTorch",
+        description=(
+            "可训练 Transformer 模型总开关；关闭时不初始化、推理、训练或采集训练样本，"
+            "已保存的 checkpoint 文件和数据库记录会保留"
+        ),
+        label="启用可训练 Transformer 模型",
     )
     inference_enabled: bool = Field(
         default=True,

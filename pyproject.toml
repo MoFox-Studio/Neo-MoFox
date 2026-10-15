@@ -16,7 +16,6 @@ dependencies = [
     "json-repair>=0.57.1",
     "mcp>=1.26.0",
     "mofox-wire>=0.1.7",
-    "neo4j>=5.0.0",
     "openai>=2.16.0",
     "packaging>=26.0",
     "prompt-toolkit>=3.0.52",
@@ -26,7 +25,6 @@ dependencies = [
     "rich>=14.3.1",
     "sqlalchemy[asyncio]>=2.0.46",
     "tiktoken>=0.12.0",
-    "tzdata>=2026.5",
 ]
 
 [dependency-groups]

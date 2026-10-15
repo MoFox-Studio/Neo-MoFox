@@ -58,6 +58,26 @@ class LearningFeatureBatch:
         )
         return {"recall": values}
 
+    def with_selected(self, selected_ids: frozenset[str]) -> LearningFeatureBatch:
+        """Replace pseudo-labels with the candidates actually exposed this turn."""
+        labels = tuple(
+            tuple(
+                1.0 if is_valid and memory_id in selected_ids else 0.0
+                for memory_id, is_valid in zip(candidate_ids, mask, strict=True)
+            )
+            for candidate_ids, mask in zip(
+                self.candidate_ids, self.candidate_mask, strict=True
+            )
+        )
+        return LearningFeatureBatch(
+            tensor=self.tensor,
+            candidate_mask=self.candidate_mask,
+            candidate_ids=self.candidate_ids,
+            labels=labels,
+            input_dim=self.input_dim,
+            max_candidates=self.max_candidates,
+        )
+
 
 def build_feature_batch(
     *,

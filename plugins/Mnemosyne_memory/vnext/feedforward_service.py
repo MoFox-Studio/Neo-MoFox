@@ -22,8 +22,8 @@ import asyncio
 import hashlib
 import math
 from collections import defaultdict
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -35,6 +35,7 @@ from .backends.transformer import MemoryToken, MemoryTransformerBlock, temporal_
 from .domain import RetrievalQuery
 from .enums import EvidenceSourceType, MemoryEventType, MemoryKind, MemoryStatus
 from .learning.features import LearningCandidate, LearningFeatureBatch, build_feature_batch
+from .learning.service import LearningInference
 from .models import (
     EvidenceMessageLinkModel,
     EvidenceMessageSnapshotModel,
@@ -270,6 +271,7 @@ class FeedForwardResult:
     candidate_count: int
     gates: dict[str, float]
     learning_batch: LearningFeatureBatch | None = None
+    learning_inference: LearningInference | None = None
 
 
 class FeedForwardRetrievalService:
@@ -306,6 +308,10 @@ class FeedForwardRetrievalService:
             raise ValueError("学习控制器特征尺寸无效")
         self._learning_input_dim = learning_input_dim
         self._learning_max_candidates = learning_max_candidates
+        self._learning_enabled: Callable[[], bool] | None = None
+        self._learning_scorer: Callable[[LearningFeatureBatch], LearningInference] | None = None
+        self._learning_active: Callable[[], bool] | None = None
+        self._learned_weight = 0.0
         self.layers = layers or LayerSplitStore()
         self.actr = ACTRActivationEngine(
             decay=0.5,
@@ -334,6 +340,22 @@ class FeedForwardRetrievalService:
     def settings(self) -> FeedForwardSettings:
         """当前参数。"""
         return self._settings
+
+    def configure_learning(
+        self,
+        *,
+        enabled: Callable[[], bool],
+        scorer: Callable[[LearningFeatureBatch], LearningInference],
+        active: Callable[[], bool],
+        weight: float,
+    ) -> None:
+        """Bind the trained controller without making it a hard dependency."""
+        if not 0.0 <= weight <= 1.0:
+            raise ValueError("learned_weight 必须位于 [0, 1]")
+        self._learning_enabled = enabled
+        self._learning_scorer = scorer
+        self._learning_active = active
+        self._learned_weight = weight
 
     # ------------------------------------------------------------------ 入口
 
@@ -546,13 +568,103 @@ class FeedForwardRetrievalService:
             if relevant
             else ()
         )
+        learning_batch = None
+        if self._learning_enabled is None or self._learning_enabled():
+            learning_batch = build_feature_batch(
+                query_text=cue.text,
+                candidates=tuple(
+                    LearningCandidate(
+                        memory_id=memory_id,
+                        title=facts[memory_id].title,
+                        content=facts[memory_id].content,
+                        similarity=similarity.get(memory_id, 0.0),
+                        lexical=lexical.get(memory_id, 0.0),
+                        working=working.get(memory_id, 0.0),
+                        kda=kda_scores.get(memory_id, 0.0),
+                        recency=recency.get(memory_id, 0.0),
+                        activation=components[memory_id].total,
+                        probability=next(
+                            (
+                                item.probability
+                                for item in chosen
+                                if item.memory_id == memory_id
+                            ),
+                            0.0,
+                        ),
+                        transformer_score=output.scores.get(memory_id, 0.0),
+                        person_match=(
+                            1.0
+                            if cue.person_ids
+                            and set(cue.person_ids).intersection(facts[memory_id].person_ids)
+                            else 0.0
+                        ),
+                        age_days=max(
+                            0.0,
+                            (cue.now - facts[memory_id].experienced_at).total_seconds()
+                            / 86400.0,
+                        ),
+                    )
+                    for memory_id in facts
+                ),
+                selected_ids=frozenset(item.memory_id for item in chosen),
+                max_candidates=self._learning_max_candidates,
+                input_dim=self._learning_input_dim,
+                now=cue.now,
+            )
+        learning_inference: LearningInference | None = None
+        if (
+            learning_batch is not None
+            and self._learning_scorer is not None
+            and self._learning_active is not None
+            and self._learning_active()
+        ):
+            try:
+                learning_inference = self._learning_scorer(learning_batch)
+            except Exception:  # noqa: BLE001 - retain the established recall path
+                learning_inference = None
+            if learning_inference is not None:
+                for index, memory_id in enumerate(learning_batch.candidate_ids[0]):
+                    if not memory_id or memory_id not in final:
+                        continue
+                    if index >= len(learning_inference.recall):
+                        break
+                    recall_score = learning_inference.recall[index]
+                    # Only the recall head participates in ranking. Conflict and
+                    # consolidation heads remain trainable, but must not affect
+                    # selection before they have task-specific supervision.
+                    adjustment = self._learned_weight * (2.0 * recall_score - 1.0)
+                    parts = final[memory_id]
+                    final[memory_id] = replace(parts, total=parts.total + adjustment)
+                relevant = {
+                    memory_id: parts
+                    for memory_id, parts in final.items()
+                    if self._is_relevant(
+                        memory_id,
+                        similarity,
+                        lexical,
+                        working,
+                        kda_scores,
+                        recency,
+                        cue,
+                        facts,
+                    )
+                }
+                chosen = (
+                    self.actr.select(relevant, limit=self._settings.max_memories)
+                    if relevant
+                    else ()
+                )
+        if learning_batch is not None:
+            learning_batch = learning_batch.with_selected(
+                frozenset(item.memory_id for item in chosen)
+            )
         selected = tuple(
             FeedForwardMemory(
                 memory_id=item.memory_id,
                 title=facts[item.memory_id].title,
                 content=facts[item.memory_id].content,
                 probability=item.probability,
-                activation=components[item.memory_id],
+                activation=final[item.memory_id],
                 transformer_score=output.scores.get(item.memory_id, 0.0),
                 channels=facts[item.memory_id].channels(),
                 head_attention={
@@ -562,53 +674,13 @@ class FeedForwardRetrievalService:
             )
             for item in chosen
         )
-        learning_batch = build_feature_batch(
-            query_text=cue.text,
-            candidates=tuple(
-                LearningCandidate(
-                    memory_id=memory_id,
-                    title=facts[memory_id].title,
-                    content=facts[memory_id].content,
-                    similarity=similarity.get(memory_id, 0.0),
-                    lexical=lexical.get(memory_id, 0.0),
-                    working=working.get(memory_id, 0.0),
-                    kda=kda_scores.get(memory_id, 0.0),
-                    recency=recency.get(memory_id, 0.0),
-                    activation=components[memory_id].total,
-                    probability=next(
-                        (
-                            item.probability
-                            for item in chosen
-                            if item.memory_id == memory_id
-                        ),
-                        0.0,
-                    ),
-                    transformer_score=output.scores.get(memory_id, 0.0),
-                    person_match=(
-                        1.0
-                        if cue.person_ids
-                        and set(cue.person_ids).intersection(facts[memory_id].person_ids)
-                        else 0.0
-                    ),
-                    age_days=max(
-                        0.0,
-                        (cue.now - facts[memory_id].experienced_at).total_seconds()
-                        / 86400.0,
-                    ),
-                )
-                for memory_id in facts
-            ),
-            selected_ids=frozenset(item.memory_id for item in selected),
-            max_candidates=self._learning_max_candidates,
-            input_dim=self._learning_input_dim,
-            now=cue.now,
-        )
         self._consolidate(cue, cue_key, selected, turn)
         return FeedForwardResult(
             selected=selected,
             candidate_count=len(facts),
             gates=dict(gates),
             learning_batch=learning_batch,
+            learning_inference=learning_inference,
         )
 
     def _is_relevant(

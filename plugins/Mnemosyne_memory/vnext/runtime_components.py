@@ -553,8 +553,9 @@ class VNextMemoryFeedbackTool(BaseTool):
 
     name = "memory_feedback"
     description = (
-        "反馈本轮前馈实际展示的记忆是否有帮助；只记录训练监督信号，"
-        "不会修改正式记忆，也不能反馈未在当前聊天流展示的 Memory ID。"
+        "反馈本轮前馈实际展示的记忆。feedback_type 使用 helpful/irrelevant、"
+        "conflict 或 consolidation；reward 正数表示是，负数表示否；"
+        "只记录训练信号，不修改正式记忆，也不能反馈未在当前流展示的 Memory ID。"
     )
 
     async def execute(
@@ -570,8 +571,14 @@ class VNextMemoryFeedbackTool(BaseTool):
         if not context.stream_id:
             return False, json.dumps({"error": "当前聊天流未绑定"}, ensure_ascii=False)
         owner = _owner(self.plugin)
-        exposed = owner._recent_learning_candidates.get(context.stream_id, frozenset())
-        if memory_id not in exposed:
+        if not owner.learning.config.enabled:
+            return False, json.dumps(
+                {"error": "可训练 Transformer 模型已关闭，当前不收集反馈"},
+                ensure_ascii=False,
+            )
+        exposed = owner._recent_learning_candidates.get(context.stream_id, {})
+        sample_id = exposed.get(memory_id)
+        if sample_id is None:
             return False, json.dumps(
                 {"error": "candidate_memory_id 不属于当前流最近一次已展示的记忆"},
                 ensure_ascii=False,
@@ -583,6 +590,7 @@ class VNextMemoryFeedbackTool(BaseTool):
                 feedback_type=kind,
                 reward=float(reward),
                 source="actor_tool",
+                metadata={"training_sample_id": sample_id},
             )
         except (TypeError, ValueError) as error:
             return _action_result(error)

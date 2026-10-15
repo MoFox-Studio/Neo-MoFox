@@ -1657,7 +1657,6 @@ dependencies = [
     { name = "json-repair" },
     { name = "mcp" },
     { name = "mofox-wire" },
-    { name = "neo4j" },
     { name = "openai" },
     { name = "packaging" },
     { name = "pillow" },
@@ -1668,7 +1667,6 @@ dependencies = [
     { name = "rich" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "tiktoken" },
-    { name = "tzdata" },
 ]
 
 [package.dev-dependencies]
@@ -1693,7 +1691,6 @@ requires-dist = [
     { name = "json-repair", specifier = ">=0.57.1" },
     { name = "mcp", specifier = ">=1.26.0" },
     { name = "mofox-wire", specifier = ">=0.1.7" },
-    { name = "neo4j", specifier = ">=5.0.0" },
     { name = "openai", specifier = ">=2.16.0" },
     { name = "packaging", specifier = ">=26.0" },
     { name = "pillow", specifier = ">=11.0.0" },
@@ -1704,7 +1701,6 @@ requires-dist = [
     { name = "rich", specifier = ">=14.3.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.46" },
     { name = "tiktoken", specifier = ">=0.12.0" },
-    { name = "tzdata", specifier = ">=2026.5" },
 ]
 
 [package.metadata.requires-dev]
@@ -1715,18 +1711,6 @@ dev = [
     { name = "pytest-mock", specifier = ">=3.15.1" },
     { name = "pytest-randomly", specifier = ">=4.0.1" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
-]
-
-[[package]]
-name = "neo4j"
-version = "6.4.0"
-source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
-dependencies = [
-    { name = "pytz" },
-]
-sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/80/db/024bd576bde5d97436d0acb71b41cf928c036ed8fec95ea1122eb05e47d1/neo4j-6.4.0.tar.gz", hash = "sha256:056676698f080b5af5b24b0fc5abb485b8db1b95edf366d01dcfd63bcff9b71d" }
-wheels = [
-    { url = "https://repo.huaweicloud.com/repository/pypi/packages/c9/5d/519aefe3b38a490924641e980a16ea6c70f6c96c08d84cf661d32c4a08c2/neo4j-6.4.0-py3-none-any.whl", hash = "sha256:fdd048ba827be138063b045cf59e40056fbf0405ac02dadc24f64e369fbd9d3d" },
 ]
 
 [[package]]
@@ -2710,15 +2694,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pytz"
-version = "2026.5"
-source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
-sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/14/21/d83d6ef28c4c912c4bb4d1dcf591f7b8c6bde87b9c66f9f454677314e16d/pytz-2026.5.tar.gz", hash = "sha256:fa23724b9c486543b9ff54a327ee7569ac83ade54bb9afd0fc18676620401c86" }
-wheels = [
-    { url = "https://repo.huaweicloud.com/repository/pypi/packages/4f/ef/c66110d46fb800dda0bf33164182dfadabe26a90e4476844d502a23dca8e/pytz-2026.5-py2.py3-none-any.whl", hash = "sha256:e658af3757f9e26a9d25dd2aff38335acd92bc9104f890a894b2c1ba28311b03" },
-]
-
-[[package]]
 name = "pywin32"
 version = "311"
 source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
@@ -3360,15 +3335,6 @@ dependencies = [
 sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/55/e3/70399cb7dd41c10ac53367ae42139cf4b1ca5f36bb3dc6c9d33acdb43655/typing_inspection-0.4.2.tar.gz", hash = "sha256:ba561c48a67c5958007083d386c3295464928b01faa735ab8547c5692e87f464" }
 wheels = [
     { url = "https://repo.huaweicloud.com/repository/pypi/packages/dc/9b/47798a6c91d8bdb567fe2698fe81e0c6b7cb7ef4d13da4114b41d239f65d/typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7" },
-]
-
-[[package]]
-name = "tzdata"
-version = "2026.5"
-source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
-sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/d9/68/f1b440335057bfce71b6e50a9d09445aa2ecbd08359a337976627b8409e7/tzdata-2026.5.tar.gz", hash = "sha256:8cc73c0a0bfca7dbfa59235d60b2eff82231dee33f53d206db1acd9173cfc0a7" }
-wheels = [
-    { url = "https://repo.huaweicloud.com/repository/pypi/packages/94/21/1e5995a1c920cce14e4bffae20c665ec10e7ed03ab25e006cd741092b718/tzdata-2026.5-py2.py3-none-any.whl", hash = "sha256:b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac" },
 ]
 
 [[package]]

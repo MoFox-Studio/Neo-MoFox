@@ -76,17 +76,13 @@ L0 感知、L1 工作集、L2 热缓存、ACT-R/KDA 读出和 Transformer 排序
 
 ### 可训练记忆控制器
 
-`vnext.learning` 是可选的监督学习层。它使用 `torch.nn.TransformerEncoder` 读取当前线索和最多 32 个候选的冻结特征，只学习召回、冲突和巩固控制分数；正式 Memory、Revision、Evidence 和 Episode 仍由数据库保存并负责可追溯性。旧的 ACT-R、KDA 和固定 Transformer 前馈选择仍是默认决策路径。
+`vnext.learning` 使用 `torch.nn.TransformerEncoder` 读取当前线索和最多 32 个候选的冻结特征，输出召回、冲突和巩固分数。反馈样本只保存哈希文本特征、候选 ID 与标签，不保存记忆正文；正式 Memory、Revision、Evidence 和 Episode 仍由数据库保存并负责可追溯性。
 
-默认配置为 `enabled=false`、`training_enabled=false`、`shadow_mode=true`。启用后，运行时会把候选特征、候选 mask、旧选择标签和 shadow 输出写入学习审计表；`memory_feedback` 只接受当前聊天流最近一次已展示候选的反馈，不允许直接写正式记忆。训练达到 `min_feedback_samples` 后由托管后台任务执行，并保存带 SHA-256 校验和的 checkpoint。
+`vnext.learning.enabled` 是可训练 Transformer 模型总开关，默认 `false`。关闭后不初始化或调用这个模型、不训练，也不采集新的训练样本；已经保存的 checkpoint 文件和数据库记录不会删除。设为 `true` 并重启后可继续加载已有 checkpoint。当前实例默认关闭；启用后，训练任务每 300 秒最多处理 8 个 batch，累计 32 条显式反馈后开始训练，之后继续自更新。新权重、训练记录和样本消费状态在同一数据库事务中发布，失败时保留旧 checkpoint 和待训练样本。没有已训练 checkpoint 时，现有 ACT-R、KDA 与固定 Transformer 继续负责排序，随机初始化权重不会影响召回。
 
-PyTorch 不属于插件的强制依赖。需要启用推理或训练时，在与 Neo-MoFox 相同的环境中安装可选依赖：
+`memory_feedback` 只接受当前流最近一轮实际展示的 Memory ID。用户明确表示记忆有帮助/无关时，用 `helpful` 或 `irrelevant` 配合正/负 `reward` 训练召回头；`conflict` 和 `consolidation` 分别提供对应控制头的监督信号。它只写训练审计数据，不会修改正式记忆。模型经训练并保存 checkpoint 后，召回分数才会以 `learned_weight` 参与前馈排序。
 
-```powershell
-uv pip install torch
-```
-
-在没有 PyTorch、checkpoint 文件缺失或校验失败时，插件继续使用现有 Mnemosyne 前馈能力；不会因为可选学习层不可用而阻断正式记忆加载。
+PyTorch 是可选插件依赖。环境已安装 PyTorch 时，训练和推理可直接运行；未安装或安装失败时，插件仍会加载、继续记录训练样本并运行传统记忆检索。补装 PyTorch 并重启后即可启用训练。checkpoint 缺失或校验失败时也会回退到现有 Mnemosyne 前馈能力。
 
 ## Neo4j Episode 图
 
@@ -195,10 +191,11 @@ Doctor 提供正式记忆、版本证据、检索入口和向量索引的检查�
 | `vnext.flashback.max_memories` | `2` | 每轮闪回最多注入条数，可设为 `0`、`1`、`2` |
 | `vnext.flashback.cooldown_turns` | `3` | 同一记忆在同一聊天中的重复闪回间隔 |
 | `vnext.vector.worker_retry_limit` | `3` | 向量任务的失败重试上限 |
-| `vnext.learning.enabled` | `false` | 是否装配可训练 Transformer 控制器 |
-| `vnext.learning.shadow_mode` | `true` | 是否只记录学习输出而不改变现有召回排序 |
-| `vnext.learning.training_enabled` | `false` | 是否启动托管后台训练 |
-| `vnext.learning.min_feedback_samples` | `500` | 开始训练前所需的反馈与未消费样本数量 |
+| `vnext.learning.enabled` | `false` | 可训练 Transformer 总开关；开启后才会推理、训练和收集样本，保留已有 checkpoint |
+| `vnext.learning.shadow_mode` | `false`（启用总开关后生效） | 是否只记录学习输出而不改变现有召回排序 |
+| `vnext.learning.training_enabled` | `true`（启用总开关后生效） | 是否启动托管后台训练 |
+| `vnext.learning.training_interval_seconds` | `300`（当前实例） | 后台检查和自更新间隔 |
+| `vnext.learning.min_feedback_samples` | `32`（当前实例） | 首次开始训练所需的显式反馈数 |
 
 正式记忆数据库默认位于 `data/mnemosyne_memory/vnext.db`，向量索引默认位于 `data/mnemosyne_memory/chroma`。可通过 `storage.vnext_db_path` 和 `storage.vector_db_path` 调整位置。
 

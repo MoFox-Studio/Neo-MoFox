@@ -272,6 +272,18 @@ class VNextRuntimeOwner:
             learning_max_candidates=vnext.learning.max_candidates,
         )
         self.learning = MemoryLearningService(self.schema, vnext.learning)
+        self.feedforward.configure_learning(
+            enabled=lambda: self.learning.config.enabled,
+            scorer=self.learning.infer_batch,
+            active=lambda: (
+                self.learning.config.enabled
+                and self.learning.config.inference_enabled
+                and self.learning.available
+                and self.learning.trained
+                and not self.learning.config.shadow_mode
+            ),
+            weight=vnext.learning.learned_weight,
+        )
         self.episode_service = EpisodeService(
             self.schema,
             max_working_memory=vnext.flashback.max_working_memory,
@@ -329,7 +341,7 @@ class VNextRuntimeOwner:
         self._learning_task_id: str | None = None
         self._vector_available = False
         self._vector_error: str | None = None
-        self._recent_learning_candidates: dict[str, frozenset[str]] = {}
+        self._recent_learning_candidates: dict[str, dict[str, str]] = {}
 
     async def _export_diary_episode(self, export: DiaryEpisodeExportSnapshot) -> None:
         """将聊天日记作为低置信度 SUMMARY Episode 幂等保存。"""
@@ -373,11 +385,18 @@ class VNextRuntimeOwner:
                     try:
                         if await self.learning.load_active_checkpoint():
                             logger.info("Mnemosyne 可训练记忆控制器已加载 active checkpoint")
+                        else:
+                            logger.info("学习控制器尚无已训练 checkpoint，将收集样本并等待反馈")
                     except Exception as error:  # noqa: BLE001
                         logger.warning(
                             "学习 checkpoint 加载失败，继续使用新初始化模型: "
                             f"{type(error).__name__}: {error}"
                         )
+                elif vnext.learning.enabled and vnext.learning.inference_enabled:
+                    logger.warning(
+                        "学习控制器未启用：当前 Python 环境没有可用 PyTorch，"
+                        "仍会记录候选训练样本"
+                    )
             except Exception as error:  # noqa: BLE001
                 logger.warning(
                     "可训练记忆控制器初始化失败，继续使用现有前馈记忆: "
@@ -436,7 +455,11 @@ class VNextRuntimeOwner:
                 self._worker_started = True
                 self.vector_worker.start()
             self._initialized = True
-            if self.learning.available and self.config.vnext.learning.training_enabled:
+            if (
+                self.config.vnext.learning.enabled
+                and self.config.vnext.learning.training_enabled
+                and self.learning.available
+            ):
                 self._start_learning_loop()
             await self.diary.initialize()
             self.persona_updater.start()
@@ -586,26 +609,26 @@ class VNextRuntimeOwner:
             self._task_ids_by_task[handle.task] = handle.task_id
 
     async def _run_learning_loop(self) -> None:
-        """按配置周期训练并保存控制器；失败不影响正式记忆。"""
+        """立即检查待训练数据，之后按配置周期更新控制器。"""
         interval = self.config.vnext.learning.training_interval_seconds
         try:
             while self._initialized:
-                await asyncio.sleep(interval)
-                if not self._initialized:
-                    break
-                try:
-                    summary = await self.learning.train_once()
-                except Exception as error:  # noqa: BLE001
-                    logger.warning(
-                        "可训练记忆控制器训练失败: "
-                        f"{type(error).__name__}: {error}"
-                    )
-                    continue
-                if summary is not None:
+                for _ in range(8):
+                    try:
+                        summary = await self.learning.train_once()
+                    except Exception as error:  # noqa: BLE001
+                        logger.warning(
+                            "可训练记忆控制器训练失败: "
+                            f"{type(error).__name__}: {error}"
+                        )
+                        break
+                    if summary is None:
+                        break
                     logger.info(
                         f"可训练记忆控制器训练完成 run={summary.run_id} "
                         f"samples={summary.sample_count} loss={summary.train_loss:.6f}"
                     )
+                await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
         finally:
@@ -1109,29 +1132,37 @@ class VNextRuntimeOwner:
         )
 
     async def _record_learning_observation(self, cue: FeedForwardCue, result: FeedForwardResult) -> None:
-        """Run optional shadow inference and persist a frozen training snapshot."""
+        """Persist text-free candidate features and link feedback to this turn."""
+        self._recent_learning_candidates[cue.stream_id] = {}
         batch = result.learning_batch
-        self._recent_learning_candidates[cue.stream_id] = frozenset(
-            item.memory_id for item in result.selected
-        )
-        if not self.learning.available or batch is None:
+        if batch is None or not self.config.vnext.learning.enabled:
             return
         try:
-            inference = self.learning.infer_batch(batch)
-            await self.learning.record_training_sample(
+            inference = result.learning_inference
+            if inference is None and self.learning.available:
+                inference = self.learning.infer_batch(batch)
+            features = batch.to_json()
+            if inference is not None:
+                features.update(
+                    {
+                        "shadow_recall": list(inference.recall),
+                        "shadow_conflict": list(inference.conflict),
+                        "shadow_consolidation": list(inference.consolidation),
+                        "model_id": inference.model_id,
+                    }
+                )
+            sample_id = await self.learning.record_training_sample(
                 stream_id=cue.stream_id,
                 candidate_ids=list(batch.candidate_ids[0]),
-                features={
-                    **batch.to_json(),
-                    "shadow_recall": list(inference.recall),
-                    "shadow_conflict": list(inference.conflict),
-                    "shadow_consolidation": list(inference.consolidation),
-                },
+                features=features,
                 labels=batch.labels_json(),
                 source="feedforward_shadow",
             )
+            self._recent_learning_candidates[cue.stream_id] = {
+                item.memory_id: sample_id for item in result.selected
+            }
         except Exception as error:  # noqa: BLE001
             logger.warning(
-                f"可训练记忆控制器 shadow 记录失败 stream={cue.stream_id}: "
+                f"可训练记忆控制器样本记录失败 stream={cue.stream_id}: "
                 f"{type(error).__name__}: {error}"
             )

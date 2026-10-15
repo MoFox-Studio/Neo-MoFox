@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -62,6 +63,7 @@ class MemoryLearningService:
         self._optimizer: Any = None
         self._model_id = str(uuid4())
         self._loaded_checkpoint: Path | None = None
+        self._trained = False
 
     @property
     def available(self) -> bool:
@@ -72,6 +74,11 @@ class MemoryLearningService:
     def model_id(self) -> str:
         """返回当前进程中的模型标识。"""
         return self._model_id
+
+    @property
+    def trained(self) -> bool:
+        """只有已恢复或成功训练的 checkpoint 才能影响正式召回排序。"""
+        return self._trained
 
     def initialize(self) -> bool:
         """加载可选模型；依赖缺失时返回 False 而不是阻断插件。"""
@@ -100,9 +107,12 @@ class MemoryLearningService:
         self._model = None
         self._optimizer = None
         self._loaded_checkpoint = None
+        self._trained = False
 
     def infer_batch(self, batch: LearningFeatureBatch) -> LearningInference:
         """Convert a serializable feature batch and run shadow inference."""
+        if not self.config.enabled or not self.config.inference_enabled:
+            raise RuntimeError("Mnemosyne Transformer model is disabled")
         if torch is None:
             raise RuntimeError("Mnemosyne learning requires PyTorch")
         if batch.input_dim != self.config.input_dim:
@@ -115,6 +125,8 @@ class MemoryLearningService:
 
     def infer(self, features: Tensor, candidate_mask: Tensor | None = None) -> LearningInference:
         """运行无梯度 shadow 推理并返回候选级别概率。"""
+        if not self.config.enabled or not self.config.inference_enabled:
+            raise RuntimeError("Mnemosyne Transformer model is disabled")
         if self._model is None or torch is None:
             raise RuntimeError("Mnemosyne learning model is not initialized")
         self._model.eval()
@@ -143,12 +155,15 @@ class MemoryLearningService:
         metadata: dict[str, object] | None = None,
     ) -> str:
         """追加一条候选反馈，不修改正式记忆正文。"""
+        if not self.config.enabled:
+            raise RuntimeError("Mnemosyne Transformer model is disabled")
         if not stream_id.strip():
             raise ValueError("stream_id 不能为空")
         if not feedback_type.strip() or not source.strip():
             raise ValueError("feedback_type 和 source 不能为空")
         if not -1.0 <= reward <= 1.0:
             raise ValueError("reward 必须位于 [-1, 1]")
+        feedback_type = _feedback_task(feedback_type)
         feedback_id = str(uuid4())
         async with self._schema.database.session() as session:
             session.add(
@@ -179,6 +194,8 @@ class MemoryLearningService:
         query_episode_id: str | None = None,
     ) -> str:
         """追加一份冻结特征样本，供之后的本地训练消费。"""
+        if not self.config.enabled:
+            raise RuntimeError("Mnemosyne Transformer model is disabled")
         if not stream_id.strip() or not source.strip():
             raise ValueError("stream_id 和 source 不能为空")
         if not candidate_ids:
@@ -212,39 +229,34 @@ class MemoryLearningService:
         metrics: dict[str, object] | None = None,
     ) -> MemoryCheckpointModel:
         """保存模型权重并登记 SHA-256 元数据。"""
+        if not self.config.enabled:
+            raise RuntimeError("Mnemosyne Transformer model is disabled")
         if self._model is None or torch is None:
             raise RuntimeError("Mnemosyne learning model is not initialized")
-        target_dir = Path(self.config.checkpoint_dir)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_model_id = str(uuid4())
-        path = target_dir / f"{checkpoint_model_id}.pt"
-        torch.save(self._model.state_dict(), path)
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        record = MemoryCheckpointModel(
-            model_id=checkpoint_model_id,
-            format_version=MODEL_FORMAT_VERSION,
-            architecture_json=self._model.architecture(),
-            checkpoint_path=str(path),
-            checkpoint_sha256=digest,
-            storage_mode="torch",
+        record, path = self._build_checkpoint(
             training_run_id=training_run_id,
-            metrics_json=metrics,
-            is_active=True,
-            created_at=datetime.now(UTC),
+            metrics=metrics,
         )
-        async with self._schema.database.session() as session:
-            await session.execute(
-                update(MemoryCheckpointModel)
-                .where(MemoryCheckpointModel.model_id != checkpoint_model_id)
-                .values(is_active=False)
-            )
-            session.add(record)
-        self._model_id = checkpoint_model_id
+        try:
+            async with self._schema.database.session() as session:
+                await session.execute(
+                    update(MemoryCheckpointModel)
+                    .where(MemoryCheckpointModel.is_active.is_(True))
+                    .values(is_active=False)
+                )
+                session.add(record)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        self._model_id = record.model_id
         self._loaded_checkpoint = path
+        self._trained = training_run_id is not None
         return record
 
     async def load_active_checkpoint(self) -> bool:
         """Load and hash-check the active local checkpoint, if one exists."""
+        if not self.config.enabled or not self.config.inference_enabled:
+            return False
         if self._model is None or torch is None:
             return False
         async with self._schema.database.session() as session:
@@ -274,11 +286,18 @@ class MemoryLearningService:
         self._model.eval()
         self._model_id = record.model_id
         self._loaded_checkpoint = path
+        self._trained = record.training_run_id is not None
         return True
 
     async def train_once(self) -> TrainingSummary | None:
-        """消费已保存样本执行一次最小监督训练；样本不足时不训练。"""
-        if not self.config.training_enabled or self._model is None or self._optimizer is None:
+        """消费一批已保存样本训练模型并原子发布新 checkpoint。"""
+        if (
+            not self.config.enabled
+            or not self.config.inference_enabled
+            or not self.config.training_enabled
+            or self._model is None
+            or self._optimizer is None
+        ):
             return None
         if torch is None:
             return None
@@ -293,7 +312,7 @@ class MemoryLearningService:
                 .select_from(MemoryTrainingSampleModel)
                 .where(MemoryTrainingSampleModel.consumed_at.is_(None))
             )
-            if int(pending_count or 0) < self.config.min_feedback_samples:
+            if int(pending_count or 0) < 1:
                 return None
             rows = (
                 await session.scalars(
@@ -312,6 +331,7 @@ class MemoryLearningService:
             if candidate_id
         }
         feedback_map: dict[tuple[str, str], MemoryFeedbackModel] = {}
+        legacy_feedback_map: dict[tuple[str, str], MemoryFeedbackModel] = {}
         if feedback_keys:
             async with self._schema.database.session() as session:
                 feedback_rows = (
@@ -328,7 +348,15 @@ class MemoryLearningService:
                 ).all()
             for feedback in feedback_rows:
                 if feedback.candidate_memory_id is not None:
-                    feedback_map[(feedback.stream_id, feedback.candidate_memory_id)] = feedback
+                    sample_id = (
+                        feedback.metadata_json.get("training_sample_id")
+                        if isinstance(feedback.metadata_json, dict)
+                        else None
+                    )
+                    if isinstance(sample_id, str) and sample_id:
+                        feedback_map[(sample_id, feedback.candidate_memory_id)] = feedback
+                    else:
+                        legacy_feedback_map[(feedback.stream_id, feedback.candidate_memory_id)] = feedback
         run_id = str(uuid4())
         serialized_features = [row.features_json["tensor"] for row in rows]
         if serialized_features and isinstance(serialized_features[0], list):
@@ -346,76 +374,179 @@ class MemoryLearningService:
             ],
             dtype=torch.bool,
         )
-        labels = torch.tensor(
-            [
-                [
-                    (
-                        1.0
-                        if feedback_map.get((row.stream_id, candidate_id), None)
-                        and feedback_map[(row.stream_id, candidate_id)].reward > 0
-                        else 0.0
-                        if feedback_map.get((row.stream_id, candidate_id), None)
-                        else float(label)
-                    )
-                    for candidate_id, label in zip(
-                        row.candidate_ids,
-                        _recall_labels(row.labels_json),
-                        strict=True,
-                    )
-                ]
-                for row in rows
-            ],
-            dtype=torch.float32,
+        expected_feature_shape = (
+            len(rows),
+            self.config.max_candidates + 1,
+            self.config.input_dim,
         )
-        self._model.train()
-        self._optimizer.zero_grad()
-        output: MemoryControllerOutput = self._model(
-            features,
-            candidate_mask=candidate_masks,
-        )
-        loss_values = torch.nn.functional.binary_cross_entropy_with_logits(
-            output.recall_logits,
-            labels,
-            reduction="none",
-        )
-        loss = loss_values.masked_select(candidate_masks).mean()
-        loss.backward()
-        self._optimizer.step()
-        self._model.eval()
-        now = datetime.now(UTC)
-        async with self._schema.database.session() as session:
-            await session.execute(
-                update(MemoryTrainingSampleModel)
-                .where(MemoryTrainingSampleModel.sample_id.in_([row.sample_id for row in rows]))
-                .values(consumed_at=now)
+        expected_mask_shape = (len(rows), self.config.max_candidates)
+        if tuple(features.shape) != expected_feature_shape:
+            raise ValueError(
+                f"训练样本特征 shape={tuple(features.shape)}，期望 {expected_feature_shape}"
             )
-            session.add(
-                MemoryTrainingRunModel(
-                    run_id=run_id,
-                    model_id=self._model_id,
-                    sample_count=len(rows),
-                    train_loss=float(loss.detach().cpu().item()),
-                    status="COMPLETED",
-                    created_at=now,
+        if tuple(candidate_masks.shape) != expected_mask_shape:
+            raise ValueError(
+                f"训练样本 mask shape={tuple(candidate_masks.shape)}，期望 {expected_mask_shape}"
+            )
+        target_values = {
+            task: [] for task in ("recall", "conflict", "consolidation")
+        }
+        target_masks = {
+            "recall": candidate_masks.clone(),
+            "conflict": torch.zeros_like(candidate_masks),
+            "consolidation": torch.zeros_like(candidate_masks),
+        }
+        for row_index, row in enumerate(rows):
+            recall = _recall_labels(row.labels_json)
+            if len(recall) != self.config.max_candidates:
+                raise ValueError(
+                    f"训练样本 {row.sample_id} 的 recall 标签长度与 max_candidates 不一致"
                 )
+            target_values["recall"].append([float(item) for item in recall])
+            target_values["conflict"].append([0.0] * self.config.max_candidates)
+            target_values["consolidation"].append([0.0] * self.config.max_candidates)
+            for candidate_index, candidate_id in enumerate(row.candidate_ids):
+                if not candidate_id or not bool(candidate_masks[row_index, candidate_index]):
+                    continue
+                feedback = feedback_map.get((row.sample_id, candidate_id))
+                if feedback is None:
+                    feedback = legacy_feedback_map.get((row.stream_id, candidate_id))
+                if feedback is None:
+                    continue
+                task = _feedback_task(feedback.feedback_type)
+                target_values[task][row_index][candidate_index] = (float(feedback.reward) + 1.0) / 2.0
+                if task != "recall":
+                    target_masks[task][row_index, candidate_index] = True
+        targets = {
+            name: torch.tensor(values, dtype=torch.float32)
+            for name, values in target_values.items()
+        }
+
+        model_before = {
+            name: value.detach().clone()
+            for name, value in self._model.state_dict().items()
+        }
+        optimizer_before = copy.deepcopy(self._optimizer.state_dict())
+        checkpoint_path: Path | None = None
+        try:
+            self._model.train()
+            self._optimizer.zero_grad()
+            output: MemoryControllerOutput = self._model(
+                features,
+                candidate_mask=candidate_masks,
             )
-        checkpoint = await self.save_checkpoint(
-            training_run_id=run_id,
-            metrics={"train_loss": float(loss.detach().cpu().item())},
-        )
-        async with self._schema.database.session() as session:
-            await session.execute(
-                update(MemoryTrainingRunModel)
-                .where(MemoryTrainingRunModel.run_id == run_id)
-                .values(model_id=checkpoint.model_id)
+            losses = []
+            for task, logits in (
+                ("recall", output.recall_logits),
+                ("conflict", output.conflict_logits),
+                ("consolidation", output.consolidation_logits),
+            ):
+                mask = target_masks[task]
+                if bool(mask.any()):
+                    loss_values = torch.nn.functional.binary_cross_entropy_with_logits(
+                        logits,
+                        targets[task],
+                        reduction="none",
+                    )
+                    losses.append(loss_values.masked_select(mask).mean())
+            if not losses or not bool(candidate_masks.any()):
+                self._model.eval()
+                return None
+            loss = torch.stack(losses).mean()
+            if not bool(torch.isfinite(loss)):
+                raise ValueError("训练 loss 不是有限值，已撤销本轮权重更新")
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self._model.parameters(), max_norm=1.0)
+            self._optimizer.step()
+            self._model.eval()
+            now = datetime.now(UTC)
+            loss_value = float(loss.detach().cpu().item())
+            checkpoint, checkpoint_path = self._build_checkpoint(
+                training_run_id=run_id,
+                metrics={"train_loss": loss_value},
             )
+            async with self._schema.database.session() as session:
+                await session.execute(
+                    update(MemoryCheckpointModel)
+                    .where(MemoryCheckpointModel.is_active.is_(True))
+                    .values(is_active=False)
+                )
+                session.add(checkpoint)
+                session.add(
+                    MemoryTrainingRunModel(
+                        run_id=run_id,
+                        model_id=checkpoint.model_id,
+                        sample_count=len(rows),
+                        train_loss=loss_value,
+                        status="COMPLETED",
+                        created_at=now,
+                    )
+                )
+                await session.execute(
+                    update(MemoryTrainingSampleModel)
+                    .where(
+                        MemoryTrainingSampleModel.sample_id.in_(
+                            [row.sample_id for row in rows]
+                        )
+                    )
+                    .values(consumed_at=now)
+                )
+        except BaseException:
+            self._model.load_state_dict(model_before)
+            self._optimizer.load_state_dict(optimizer_before)
+            self._model.eval()
+            if checkpoint_path is not None:
+                checkpoint_path.unlink(missing_ok=True)
+            raise
+        self._model_id = checkpoint.model_id
+        self._loaded_checkpoint = checkpoint_path
+        self._trained = True
         return TrainingSummary(
             run_id=run_id,
             model_id=checkpoint.model_id,
             sample_count=len(rows),
-            train_loss=float(loss.detach().cpu().item()),
+            train_loss=loss_value,
             status="COMPLETED",
         )
+
+    def _build_checkpoint(
+        self,
+        *,
+        training_run_id: str | None = None,
+        metrics: dict[str, object] | None = None,
+    ) -> tuple[MemoryCheckpointModel, Path]:
+        """写入校验后的权重文件，但不修改数据库 active 指针。"""
+        if self._model is None or torch is None:
+            raise RuntimeError("Mnemosyne learning model is not initialized")
+        target_dir = Path(self.config.checkpoint_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_model_id = str(uuid4())
+        path = target_dir / f"{checkpoint_model_id}.pt"
+        temporary_path = path.with_suffix(".pt.tmp")
+        try:
+            torch.save(self._model.state_dict(), temporary_path)
+            temporary_path.replace(path)
+        except BaseException:
+            temporary_path.unlink(missing_ok=True)
+            raise
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            record = MemoryCheckpointModel(
+                model_id=checkpoint_model_id,
+                format_version=MODEL_FORMAT_VERSION,
+                architecture_json=self._model.architecture(),
+                checkpoint_path=str(path),
+                checkpoint_sha256=digest,
+                storage_mode="torch",
+                training_run_id=training_run_id,
+                metrics_json=metrics,
+                is_active=True,
+                created_at=datetime.now(UTC),
+            )
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return record, path
 
 
 def _recall_labels(labels_json: dict[str, object]) -> list[object]:
@@ -429,6 +560,32 @@ def _recall_labels(labels_json: dict[str, object]) -> list[object]:
             raise ValueError("训练样本 recall 标签格式无效")
         return nested
     return raw
+
+
+def _feedback_task(feedback_type: str) -> str:
+    """Normalize feedback names into the three trainable controller heads."""
+    normalized = feedback_type.strip().casefold().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "helpful": "recall",
+        "useful": "recall",
+        "relevant": "recall",
+        "not_helpful": "recall",
+        "unhelpful": "recall",
+        "irrelevant": "recall",
+        "recall": "recall",
+        "conflict": "conflict",
+        "contradiction": "conflict",
+        "contradictory": "conflict",
+        "consolidation": "consolidation",
+        "consolidate": "consolidation",
+        "reinforce": "consolidation",
+    }
+    task = aliases.get(normalized)
+    if task is None:
+        raise ValueError(
+            "feedback_type 必须是 recall/helpful、conflict 或 consolidation"
+        )
+    return task
 
 
 __all__ = ["LearningInference", "MemoryLearningService", "TrainingSummary"]

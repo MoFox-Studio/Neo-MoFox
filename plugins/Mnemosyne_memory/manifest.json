@@ -55,5 +55,6 @@
     "service_api": "1.0.0"
   },
   "python_dependencies": ["tzdata", "neo4j"],
+  "optional_python_dependencies": ["torch"],
   "dependencies_required": true
 }
