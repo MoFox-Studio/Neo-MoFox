@@ -392,8 +392,9 @@ class VNextRuntimeOwner:
                             "学习 checkpoint 加载失败，继续使用新初始化模型: "
                             f"{type(error).__name__}: {error}"
                         )
-                elif vnext.learning.enabled and (
-                    vnext.learning.inference_enabled or vnext.learning.training_enabled
+                elif self.config.vnext.learning.enabled and (
+                    self.config.vnext.learning.inference_enabled
+                    or self.config.vnext.learning.training_enabled
                 ):
                     logger.warning(
                         "学习控制器未启用：当前 Python 环境没有可用 PyTorch，"
