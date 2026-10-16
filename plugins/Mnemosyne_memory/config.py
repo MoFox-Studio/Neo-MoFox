@@ -2,12 +2,39 @@
 
 from __future__ import annotations
 
+import shutil
+import tomllib
+from pathlib import Path
 from typing import Any, ClassVar, Self
+from uuid import uuid4
+
+from pydantic import model_validator
 
 from src.app.plugin_system.base import BaseConfig, Field, SectionBase, config_section
 
 from .diary.config import DiaryConfig
 from .vnext.config_sections import VNextConfig
+
+
+def _restore_diary_parent_fields(data: Any) -> Any:
+    """Recover known parent fields emitted under the final legacy child table."""
+    if not isinstance(data, dict) or not isinstance(data.get("diary"), dict):
+        return data
+    diary = data["diary"]
+    private = diary.get("private")
+    if not isinstance(private, dict):
+        return data
+    misplaced = (set(DiaryConfig.model_fields) - {"group", "private"}) & private.keys()
+    if not misplaced and "recovery_messages" not in private:
+        return data
+    restored, policy = dict(diary), dict(private)
+    for name in misplaced:
+        value = policy.pop(name)
+        # An explicitly configured parent value takes precedence.
+        restored.setdefault(name, value)
+    policy.pop("recovery_messages", None)
+    restored["private"] = policy
+    return {**data, "diary": restored}
 
 
 @config_section("plugin", title="插件设置", tag="plugin")
@@ -47,6 +74,37 @@ class MnemosyneMemoryConfig(BaseConfig):
 
     name: ClassVar[str] = "config"
     description: ClassVar[str] = "正式记忆、人物印象、前馈检索与聊天日记配置"
+
+    @model_validator(mode="before")
+    @classmethod
+    def restore_legacy_diary_layout(cls, data: Any) -> Any:
+        """Accept saved legacy layouts from both model_validate and WebUI writes."""
+        return _restore_diary_parent_fields(data)
+
+    @classmethod
+    def load(cls, path: str | Path, *, auto_update: bool = False) -> Self:
+        """Repair before the host's default merge can discard misplaced values."""
+        config_path = Path(path)
+        if auto_update and config_path.is_file():
+            original_text = config_path.read_text(encoding="utf-8")
+            raw = tomllib.loads(original_text)
+            restored = _restore_diary_parent_fields(raw)
+            if restored is not raw:
+                from src.kernel.config.core import _render_toml_with_signature
+
+                # Validate first: malformed user values must not be reset to defaults.
+                config = cls.from_dict(restored)
+                rendered = _render_toml_with_signature(cls, config.model_dump())
+                reparsed = cls.from_dict(tomllib.loads(rendered))
+                if reparsed.model_dump() != config.model_dump():
+                    raise ValueError("日记配置修复后的保存回读结果不一致")
+                backup = config_path.with_name(
+                    f"{config_path.name}.diary-layout-{uuid4().hex}.bak"
+                )
+                shutil.copy2(config_path, backup)
+                config_path.write_text(rendered, encoding="utf-8")
+                return config
+        return super().load(config_path, auto_update=auto_update)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:

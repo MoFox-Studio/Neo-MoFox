@@ -66,8 +66,8 @@ class PrivateDiaryPolicy(DiaryPolicy):
 class DiaryConfig(SectionBase):
     """独立于长期记忆的近期交流日记配置。"""
 
-    group: GroupDiaryPolicy = Field(label="群聊日记", default_factory=GroupDiaryPolicy)
-    private: PrivateDiaryPolicy = Field(label="私聊日记", default_factory=PrivateDiaryPolicy)
+    # The host renders fields in declaration order. Parent values must precede
+    # child tables, otherwise TOML assigns them to the final [diary.private].
     database_path: str = Field(
         label="日记数据库路径",
         default="data/mnemosyne_memory/chat_diary.db",
@@ -97,6 +97,9 @@ class DiaryConfig(SectionBase):
         label="失败追加重试次数",
         default=2, ge=0, description="同一批次失败后的追加重试次数"
     )
+
+    group: GroupDiaryPolicy = Field(label="群聊日记", default_factory=GroupDiaryPolicy)
+    private: PrivateDiaryPolicy = Field(label="私聊日记", default_factory=PrivateDiaryPolicy)
 
     def policy_for(self, chat_type: str) -> DiaryPolicy:
         """取得群聊或私聊策略，不将未知聊天类型归入其他流。"""
