@@ -36,7 +36,7 @@ class StorageSection(SectionBase):
     vnext_db_path: str = Field(
         default="data/mnemosyne_memory/vnext.db",
         description="正式记忆数据库路径",
-        label="vNext 数据库路径",
+        label="记忆数据库路径",
         input_type="text",
         tag="file",
     )
@@ -46,7 +46,7 @@ class MnemosyneMemoryConfig(BaseConfig):
     """Mnemosyne Memory 连续记忆配置模型。"""
 
     name: ClassVar[str] = "config"
-    description: ClassVar[str] = "Mnemosyne Memory 正式记忆、人物印象与自然闪回"
+    description: ClassVar[str] = "正式记忆、人物印象、前馈检索与聊天日记配置"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
@@ -89,8 +89,8 @@ class MnemosyneMemoryConfig(BaseConfig):
 
         return super().from_dict(filtered)
 
-    plugin: PluginSection = Field(default_factory=PluginSection)
-    storage: StorageSection = Field(default_factory=StorageSection)
+    plugin: PluginSection = Field(label="插件设置", default_factory=PluginSection)
+    storage: StorageSection = Field(label="存储配置", default_factory=StorageSection)
 
-    vnext: VNextConfig = Field(default_factory=VNextConfig)
-    diary: DiaryConfig = Field(default_factory=DiaryConfig)
+    vnext: VNextConfig = Field(label="记忆与召回", default_factory=VNextConfig)
+    diary: DiaryConfig = Field(label="聊天日记", default_factory=DiaryConfig)

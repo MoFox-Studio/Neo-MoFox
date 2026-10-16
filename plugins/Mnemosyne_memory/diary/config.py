@@ -12,18 +12,22 @@ TriggerMode = Literal["time", "messages", "either", "both"]
 class DiaryPolicy(SectionBase):
     """一种聊天类型的日记采集与注入策略。"""
 
-    enabled: bool = Field(default=True, description="启用此类聊天的日记整理与注入")
+    enabled: bool = Field(label="启用日记整理与注入", default=True, description="启用此类聊天的日记整理与注入")
     trigger_mode: TriggerMode = Field(
+        label="日记整理触发条件",
         default="messages",
         description="time 仅时间；messages 仅消息数；either 任一满足；both 同时满足",
     )
     interval_seconds: int = Field(
+        label="日记整理间隔（秒）",
         default=10800, ge=1, description="成功整理后的时间间隔（秒）"
     )
     message_threshold: int = Field(
+        label="未处理消息条数阈值",
         default=100, ge=1, description="尚未处理的实际聊天消息条数"
     )
     context_days: int = Field(
+        label="注入日记范围（天）",
         default=7, ge=1, description="注入的最近自然日数，包含今天"
     )
 
@@ -46,8 +50,9 @@ class DiaryPolicy(SectionBase):
 class GroupDiaryPolicy(DiaryPolicy):
     """群聊默认同时满足三小时与两百条消息后整理。"""
 
-    trigger_mode: TriggerMode = Field(default="both", description="群聊日记触发方式")
+    trigger_mode: TriggerMode = Field(label="群聊日记触发条件", default="both", description="群聊日记触发方式")
     message_threshold: int = Field(
+        label="群聊未处理消息阈值",
         default=200, ge=1, description="群聊未处理消息条数阈值"
     )
 
@@ -61,29 +66,35 @@ class PrivateDiaryPolicy(DiaryPolicy):
 class DiaryConfig(SectionBase):
     """独立于长期记忆的近期交流日记配置。"""
 
-    group: GroupDiaryPolicy = Field(default_factory=GroupDiaryPolicy)
-    private: PrivateDiaryPolicy = Field(default_factory=PrivateDiaryPolicy)
+    group: GroupDiaryPolicy = Field(label="群聊日记", default_factory=GroupDiaryPolicy)
+    private: PrivateDiaryPolicy = Field(label="私聊日记", default_factory=PrivateDiaryPolicy)
     database_path: str = Field(
+        label="日记数据库路径",
         default="data/mnemosyne_memory/chat_diary.db",
         description="独立日记数据库路径",
     )
-    timezone: str = Field(default="Asia/Shanghai", description="日记自然日所属时区")
+    timezone: str = Field(label="日记时区", default="Asia/Shanghai", description="日记自然日所属时区")
     model_task: str = Field(
+        label="日记生成模型任务",
         default="actor", min_length=1,
         description="日记生成使用的模型任务名，对应核心模型配置中的任务",
     )
     episode_export_enabled: bool = Field(
+        label="导出日记经历索引",
         default=True,
         description="将已保存日记作为低置信度经历索引投递，不直接创建正式记忆",
     )
     max_concurrency: int = Field(
+        label="日记生成并发数",
         default=3, ge=1, description="不同聊天流的生成并发上限"
     )
-    batch_messages: int = Field(default=100, ge=1, description="每批连续新消息条数上限")
+    batch_messages: int = Field(label="单批处理消息上限", default=100, ge=1, description="每批连续新消息条数上限")
     context_messages: int = Field(
+        label="前文上下文消息数",
         default=6, ge=0, description="用于理解指代的少量前文条数"
     )
     retry_limit: int = Field(
+        label="失败追加重试次数",
         default=2, ge=0, description="同一批次失败后的追加重试次数"
     )
 
