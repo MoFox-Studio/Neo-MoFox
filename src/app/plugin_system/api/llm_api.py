@@ -25,7 +25,7 @@ from src.kernel.llm.usable_execution import (
     exec_llm_usable,
 )
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.2.0"
 
 __all__ = [
     "API_VERSION",
