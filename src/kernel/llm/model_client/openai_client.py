@@ -399,8 +399,16 @@ def _should_backfill_reasoning_content(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+_THINKING_TYPE_DISABLED = {"disabled", "disable", "false", "none", "no", "off"}
+
+
 def _thinking_enabled(model_set: dict[str, Any]) -> bool:
-    """判断当前模型请求是否显式开启了 thinking / reasoning 模式。"""
+    """判断当前模型请求是否显式开启了 thinking / reasoning 模式。
+
+    ``extra_params.thinking`` 存在两种控制方言：``{"enabled": bool}`` 与
+    ``{"type": "disabled" / "enabled"}``（DeepSeek 等供应商）。无法识别的 ``type``
+    视为开启，避免静默改变既有部署的行为。
+    """
     extra_params = model_set.get("extra_params")
     if not isinstance(extra_params, dict):
         return False
@@ -413,6 +421,11 @@ def _thinking_enabled(model_set: dict[str, Any]) -> bool:
         return True
     if isinstance(thinking, dict):
         enabled = thinking.get("enabled")
+        if enabled is True:
+            return True
+        thinking_type = thinking.get("type")
+        if isinstance(thinking_type, str) and thinking_type.strip().lower() in _THINKING_TYPE_DISABLED:
+            return False
         if enabled is not False:
             return True
 
