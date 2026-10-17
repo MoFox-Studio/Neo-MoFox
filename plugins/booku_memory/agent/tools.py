@@ -73,38 +73,116 @@ def _split_segments(command: str) -> list[str]:
     return [part.strip() for part in command.split("&&") if part.strip()]
 
 
-def _parse_segment(segment: str) -> tuple[str, dict[str, list[str]]]:
-    """解析单条命令段为操作名和参数表。"""
+def _tokenize(segment: str) -> list[tuple[str, int, int, bool]]:
+    """切词，并保留每个词在原文里的位置区间。
 
-    tokens = shlex.split(segment)
+    与 ``shlex`` 不同：不成对的引号按普通字符处理（不会抛异常），
+    反斜杠不做转义（Windows 路径要原样保留），成对引号剥离但位置区间照旧。
+
+    返回的第四项标记该词是否由成对引号包裹：被引号包起来的是字面值，
+    即使以 ``-`` 开头也不该被当成下一个选项键。
+    """
+
+    tokens: list[tuple[str, int, int, bool]] = []
+    buffer: list[str] = []
+    start = -1
+    quoted = False
+    index = 0
+    length = len(segment)
+
+    def flush(end: int) -> None:
+        nonlocal start, quoted
+        if buffer:
+            tokens.append(("".join(buffer), start, end, quoted))
+            buffer.clear()
+            start = -1
+            quoted = False
+
+    while index < length:
+        char = segment[index]
+        if char.isspace():
+            flush(index)
+            index += 1
+            continue
+        # 引号只在词首生效。词内撇号（don't、it's）按普通字符处理，
+        # 否则会把后面的内容当成一段引号文本吞掉。
+        if char in ('"', "'") and start < 0:
+            end = segment.find(char, index + 1)
+            if end != -1:
+                start = index
+                quoted = True
+                buffer.append(segment[index + 1 : end])
+                index = end + 1
+                continue
+        if start < 0:
+            start = index
+        buffer.append(char)
+        index += 1
+
+    flush(length)
+    return tokens
+
+
+def _parse_segment(segment: str) -> tuple[str, dict[str, list[str]]]:
+    """解析单条命令段为操作名和参数表。
+
+    参数值可以包含空格：从 ``-key`` 之后一直取到下一个 ``-key`` 之前，
+    值按原文还原（词间空格与换行保留）。LLM 生成的命令大多不给值加引号，
+    而标题与正文里常有空格，因此不能只取紧跟的一个词。
+    """
+
+    tokens = _tokenize(segment)
     if not tokens:
         raise ValueError("空命令段")
 
-    operation = tokens[0].strip().lower()
+    operation = tokens[0][0].strip().lower()
     options: dict[str, list[str]] = {}
+    state: dict[str, object] = {"key": None, "start": None, "end": None}
 
-    index = 1
-    while index < len(tokens):
-        token = tokens[index]
-        if not token.startswith("-"):
-            index += 1
-            continue
-
-        key = token.lstrip("-").strip().lower()
-        if not key:
-            index += 1
-            continue
-
-        value: str
-        if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
-            value = tokens[index + 1]
-            index += 2
+    def commit() -> None:
+        key = state["key"]
+        if not isinstance(key, str) or not key:
+            return
+        begin, finish = state["start"], state["end"]
+        if begin is None or finish is None:
+            options.setdefault(key, []).append("true")
         else:
-            value = "true"
-            index += 1
+            # 用 tokenizer 已剥引号的文本重建值，位置区间只用来补回词间空白。
+            # 直接切原文会把已经剥掉的引号又带回来，也处理不了 hello "world" 这类混合值。
+            span_begin, span_finish = int(begin), int(finish)
+            picked = [
+                (text, token_begin, token_finish)
+                for text, token_begin, token_finish, _quoted in tokens[1:]
+                if span_begin <= token_begin and token_finish <= span_finish
+            ]
+            if not picked:
+                options.setdefault(key, []).append("true")
+            else:
+                parts = [picked[0][0]]
+                previous_finish = picked[0][2]
+                for text, token_begin, token_finish in picked[1:]:
+                    parts.append(segment[previous_finish:token_begin])
+                    parts.append(text)
+                    previous_finish = token_finish
+                options.setdefault(key, []).append("".join(parts).strip())
+        state["key"], state["start"], state["end"] = None, None, None
 
-        options.setdefault(key, []).append(value)
+    for text, begin, finish, quoted in tokens[1:]:
+        # 引号包起来的是字面值：即使以 - 开头也不当选项键，
+        # 这样 -content "版本 -beta 测试" 不会被切成两个选项。
+        if text.startswith("-") and len(text) > 1 and not quoted:
+            key = text.lstrip("-").strip().lower()
+            if key:
+                commit()
+                state["key"] = key
+                continue
+        if state["key"] is None:
+            continue
+        if state["start"] is None:
+            state["start"] = begin
+        state["end"] = finish
 
+    commit()
     return operation, options
 
 
