@@ -104,8 +104,33 @@ def test_text_fallback_to_message_segment() -> None:
     assert "系统通知[poke]: 张三戳了戳机器人" in store.get(_group_bucket())
 
 
-def test_missing_text_skips_injection() -> None:
-    """无可读文本时不注入任何 reminder。"""
+def test_missing_text_falls_back_to_raw_json() -> None:
+    """extra.text_description 缺失时兜底注入 extra.raw 的 JSON。"""
+    raw_data = {
+        "notice_type": "essence",
+        "sub_type": "add",
+        "target_id": 30001,
+        "operator_id": 40001,
+    }
+    envelope = _group_envelope()
+    envelope["message_info"]["extra"] = {
+        "notice_type": "essence",
+        "raw": raw_data,
+    }
+    envelope["message_segment"] = {"type": "notify", "data": {}}
+
+    result = asyncio.run(inject_notice_to_stream_reminder("essence", envelope))
+
+    assert result is None
+    store = get_system_reminder_store()
+    content = store.get(_group_bucket())
+    assert "系统通知[essence]:" in content
+    assert '"sub_type": "add"' in content
+    assert '"target_id": 30001' in content
+
+
+def test_missing_text_falls_back_to_summary() -> None:
+    """连原始数据都缺失时，兜底注入 envelope 关键字段摘要。"""
     envelope = _group_envelope()
     envelope["message_info"]["extra"] = {"notice_type": "poke"}
     envelope["message_segment"] = {"type": "notify", "data": {}}
@@ -114,7 +139,10 @@ def test_missing_text_skips_injection() -> None:
 
     assert result is None
     store = get_system_reminder_store()
-    assert store.get(_group_bucket()) == ""
+    content = store.get(_group_bucket())
+    assert "系统通知[poke]:" in content
+    assert '"group_id": "10086"' in content
+    assert '"message_id": "notice_test_1"' in content
 
 
 def test_forever_consume_overwrites_per_type() -> None:

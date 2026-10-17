@@ -1,6 +1,20 @@
 # 启动循环重写：任务注册前置与显式初始化
 
-> 状态：设计阶段（未实施）
+> 状态：调度器生命周期、Bot 启动和关闭阶段拆分已实施；插件迁移及组件内部生命周期完善待实施
+
+本文是 `src/app/runtime/bot.py` 启动生命周期重构的设计基线。它描述目标顺序、组件边界和实施批次；代码改动应按“实施顺序”逐步落地，并在每个批次完成后更新本文状态和测试清单。
+
+当前已完成：调度器支持运行前注册任务；媒体管理器不再在构造函数中创建后台任务，并由 Bot 显式初始化、启动和关闭；日志清理模块改为延迟导入调度器，避免初始化循环。
+
+第二批已完成：Kernel 和 Core 按资源拆分初始化函数，媒体管理器归入 Core 阶段；
+插件准备集中在 `_initialize_plugins()`；`run()` 拆为运行服务启动、事件发布、
+信号/终端准备与命令循环，并增加必需资源校验。所有新增阶段方法具备文档字符串。
+当前实际流程见 [Runtime 模块说明](../app/runtime.md)，下文尚未实施的设计草图不作为当前 API 保证。
+
+第三批已完成：为各编排入口补齐编号步骤注释；关闭流程按资源拆分并隔离各步骤异常，
+每个异步步骤及单个插件独立限时。聊天流先于插件和数据库停止，云端发送先于统计存储停止。
+初始化前登记资源以覆盖部分失败，关闭时恢复原默认线程池，仅取消受管理任务。
+终端与信号恢复独立兜底，关闭错误不会覆盖原始启动异常。
 
 ## 1. 背景
 
@@ -84,6 +98,21 @@ shutdown()                   —— 逆序显式释放
 
 > **构造对象不启动后台任务；初始化阶段完成依赖准备与任务注册；运行阶段只启动循环；关闭阶段按逆序显式释放。**
 
+### 3.1 当前实现与目标实现的边界
+
+当前已支持启动前注册调度任务；媒体管理器由 Bot 显式初始化，在调度器启动后调用
+`start()` 注册清理任务，在调度器停止前调用 `shutdown()` 移除任务。
+媒体构造函数不再创建后台协程。`Bot.run()` 已完成阶段化拆分，退出或启动异常时复位运行标记。
+
+调度器当前执行约束：
+
+- 首次 `start()` 前注册仅入表，时间任务和自定义条件任务不会自动执行。
+- `trigger_schedule()` 和 `trigger_event()` 在未启动或关闭期间抛出 `RuntimeError`；事件不会缓存重放。
+- 相对时间从注册时计算。启动时已到期的任务在首轮检查执行；周期任务跳过错过的周期，不逐次补跑。
+- `stop()` 即使在首次启动前调用也会清空预注册任务及事件索引。
+- 关闭期间和停止后拒绝注册；再次 `start()` 后可注册新任务，已清空任务不会恢复。
+- 事件参数在入表及覆盖同名任务前校验，失败不会留下无效任务或移除原任务。
+
 ## 4. 改动设计
 
 ### 4.1 Scheduler 支持"先注册，后启动"（P1）
@@ -100,7 +129,7 @@ async def create_schedule(self, ...) -> str:
 
 @property
 def is_started(self) -> bool:
-    """start() 是否被调用过（任务注册永远允许，此状态供诊断/UI 使用）。"""
+    """调度器检查循环是否正在运行。"""
 ```
 
 语义确认：
@@ -108,10 +137,10 @@ def is_started(self) -> bool:
 - 一次性任务 `delay_seconds=0`：在 `start()` 后第一次 `_check_and_trigger_tasks` 触发；
   `created_at` 在 `initialize()` 阶段写入，`elapsed >= 0` 恒成立，符合"启动后尽快执行"直觉。
 - 周期任务 `interval_seconds`：`_scheduled_trigger_time = created_at + interval`，
-  首次触发在启动后一个完整周期，与现状一致。
+  首次触发按注册时间计算；初始化超过一个周期时，启动后的首轮检查即可触发。
 
-**风险**：`stop()` 会 `_tasks.clear()`，若存在"stop 后仍注册"的调用方会丢任务。
-缓解：`stop()` 后调用 `create_schedule()` 记录 WARNING（允许但提示），不抛错。
+`stop()` 会清空任务；关闭期间及停止后调用 `create_schedule()` 明确抛错，
+避免调用方误以为任务将继续执行。需要重新运行时先 `start()`，再重新注册任务。
 
 ### 4.2 MediaManager 显式初始化（P3 / P4）
 
@@ -197,6 +226,13 @@ async def _register_schedule(self) -> None:
 
 ### 4.4 bot.py 阶段化重写（P5 / P6）
 
+本节初始化、运行及关闭阶段拆分已实施；以下草图展示最初计划，实际顺序以 Runtime 文档为准。
+实际方法名为 `_initialize_plugins()`、`_validate_startup_contract()`、
+`_start_runtime_services()`、`_publish_start_event()`、`_install_signal_handler()`、
+`_create_command_parser()` 和 `_run_command_loop()`。
+`_start_runtime_services()` 包含调度器、媒体清理、日志清理和云端遥测启动。
+`ON_ALL_PLUGIN_LOADED` 保留在 `_load_plugins()` 中，以兼容适配器及路由的事件订阅。
+
 `initialize()` 拆为明确的内部阶段方法：
 
 ```python
@@ -229,13 +265,17 @@ async def run(self) -> None:
 
 ```python
 await publish(ON_STOP)
+await stop_http_server()
+await stop_stream_loops()
 await unload_plugins()
 await media_manager.shutdown()
 await stop_logger_cleanup()
 await scheduler.stop()
-await stop_http_server() / stop_mcp() / stop_watchdog() / stop_task_manager()
-await close_database() / close_vector_db() / close_llm_stats() / close_cloud_telemetry()
+await stop_mcp() / close_cloud_telemetry() / stop_watchdog() / stop_task_manager()
+await close_database() / close_vector_db() / close_llm_stats()
 ```
+
+各步骤独立限时、汇总错误；最终同步资源恢复放在 finally 中，详情见 Runtime 文档。
 
 ### 4.5 启动契约校验（新增）
 
@@ -267,6 +307,16 @@ def _validate_startup_contract(self) -> None:
 | 6 | 测试补齐 | `test/kernel/test_scheduler.py`、`test/core/managers/test_media_manager.py` 等 |
 
 ## 6. 测试要点
+
+第三批回归：`uv run pytest test/app/runtime test/kernel/test_scheduler_lifecycle.py -q --no-cov`，
+结果为 73 passed、1 skipped。新增 `test/app/runtime/test_bot_shutdown.py` 覆盖关闭依赖顺序、
+插件挂起超时后继续清理、部分初始化失败释放、未初始化资源跳过、终端异常和外部取消时
+恢复信号、原始启动异常保留，以及无关任务和默认线程池的保护。
+
+已执行第二批回归：`uv run pytest test/app/runtime test/kernel/test_scheduler_lifecycle.py -q --no-cov`，
+结果为 65 passed、1 skipped。新增 `test/app/runtime/test_bot_lifecycle.py` 验证媒体先于插件初始化、
+服务先于 ON_START 启动、服务失败不发布启动事件、必需依赖缺失阻止运行、
+ON_START 可请求停止，以及完整入口在初始化失败后仍执行关闭。
 
 - scheduler 未启动时注册一次性 / 周期任务，`start()` 后正常触发；
 - `delay_seconds=0` 的一次性任务在 `start()` 后首轮检查即执行；

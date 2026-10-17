@@ -13,6 +13,20 @@
 
 模块对外主入口是 `get_unified_scheduler()`。
 
+### 注册和执行的生命周期
+
+`create_schedule()` 可以在首次 `start()` 前调用：此时只保存任务，不执行回调。
+`start()` 启动检查循环后才自动执行到期任务。手动触发 `trigger_schedule()` 和
+事件触发 `trigger_event()` 也要求调度器正在运行，否则抛出 `RuntimeError`；
+启动前的事件不会缓存。
+
+`delay_seconds` 和相对周期从注册时间开始计算。假设注册一个延迟 10 秒的任务，
+30 秒后才启动调度器，该任务将在启动后的首轮检查执行。周期任务只触发一次，
+跳过已经错过的周期。需要从启动时计时的任务，应在 `start()` 后注册。
+
+`stop()` 会清空任务，包括首次启动前已注册的任务。关闭期间及停止后拒绝注册，
+再次调用 `start()` 后可以注册新任务；旧任务不会自动恢复。
+
 ---
 
 ## 模块结构
@@ -190,7 +204,7 @@ from src.kernel.scheduler import (
 
 ## 注意事项
 
-- 调度器未启动时调用 `create_schedule()` 会抛出 `RuntimeError`
+- 首次启动前可以调用 `create_schedule()`；关闭期间及停止后调用会抛出 `RuntimeError`
 - 同名且活跃任务默认不允许重复创建，可使用 `force_overwrite=True`
 - 回调函数支持同步/异步，同步函数会在线程中执行
 - 文件中不存在 `get_schedule()`、`list_all_schedules()` 等接口，请使用 `get_task_info()` 和 `list_tasks()`
