@@ -315,7 +315,7 @@ async def execute(self, content: str):
 
 异步生成器的最后一次非空 `yield` 会作为最终结果；空 `yield` 只表示“已经准备好，
 可以等待统一调度”。一次 LLM 响应中的普通 tool calls 会通过
-`src.core.utils.llm_tool_call.run_tool_call()` 批量执行，结果按原始 call 顺序写回
+`src.app.plugin_system.api.llm_api.dispatch_llm_tool_calls()` 批量路由，结果按原始 call 顺序写回
 `TOOL_RESULT`。
 
 ---
@@ -513,9 +513,9 @@ for schema in schemas:
 ### 模式 4：批量执行一次响应中的工具调用
 
 ```python
-from src.core.utils.llm_tool_call import run_tool_call
+from src.app.plugin_system.api.llm_api import dispatch_llm_tool_calls
 
-await run_tool_call(
+await dispatch_llm_tool_calls(
     calls=response.call_list,
     response=response,
     usable_map=usable_map,
@@ -636,7 +636,7 @@ A: 统一执行器会捕获单个 tool call 的异常，并为对应调用写回
 `TOOL_RESULT`，不会因为一个调用失败而打乱整批结果的写回顺序：
 
 ```python
-await run_tool_call(
+await dispatch_llm_tool_calls(
     calls=response.call_list,
     response=response,
     usable_map=usable_map,
@@ -672,4 +672,3 @@ A: 可以，但需要谨慎处理。推荐使用嵌套的 `ToolRegistry`。
 - [Content 模块](./content.md) - 内容类型
 - [Request 模块](../request.md) - 请求发送
 - [Response 模块](../response.md) - 响应处理
-

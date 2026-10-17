@@ -1,8 +1,8 @@
 """插件侧 LLM API 便捷入口。
 
 除请求构造和模型配置查询外，本模块也导出统一 tool call 执行函数：
-``exec_llm_usable`` 用于执行单个组件，``run_tool_call``
-用于执行一次响应中的一批工具调用，并保持 TOOL_RESULT 写回顺序。
+``exec_llm_usable`` 用于执行单个组件，``dispatch_llm_tool_calls``
+用于把一次响应中的工具调用路由到对应 Manager，并保持 TOOL_RESULT 写回顺序。
 """
 
 from __future__ import annotations
@@ -21,9 +21,8 @@ from src.kernel.llm import (
     get_llm_stats_collector,
 )
 from src.core.config import get_model_config
-from src.core.utils.llm_tool_call import (
+from src.kernel.llm.usable_execution import (
     exec_llm_usable,
-    run_tool_call,
 )
 
 API_VERSION = "1.1.0"
@@ -43,7 +42,7 @@ __all__ = [
     "get_llm_cache_hit_rate",
     "get_recent_llm_requests",
     "exec_llm_usable",
-    "run_tool_call",
+    "dispatch_llm_tool_calls",
 ]
 
 if TYPE_CHECKING:
@@ -239,6 +238,79 @@ def create_tool_registry(tools: list[type[LLMUsable]] | None = None) -> ToolRegi
         for tool in tools:
             registry.register(tool)
     return registry
+
+
+async def dispatch_llm_tool_calls(
+    *,
+    calls: list[Any],
+    response: Any,
+    usable_map: ToolRegistry,
+    trigger_msg: Any,
+    plugin: Any,
+    stream_id: str | None = None,
+    resolve_component_plugin: Any = None,
+) -> list[tuple[bool, bool]]:
+    """将 LLM 返回的一批 ``ToolCall`` 路由到对应 Manager。
+
+    本函数只负责批量调用的分发和 ``TOOL_RESULT`` 顺序回写。Tool、Action
+    和 Agent 的实例化、执行前后事件、缓存、历史记录及错误处理由各自的
+    Manager 负责。
+    """
+    from src.core.components.base.action import BaseAction
+    from src.core.components.base.agent import BaseAgent
+    from src.core.components.base.tool import BaseTool
+    from src.core.managers import get_action_manager, get_agent_manager, get_tool_use
+    from src.kernel.llm import LLMPayload, ROLE, ToolResult
+
+    results: list[tuple[bool, bool]] = []
+    for call in calls:
+        usable_cls = usable_map.get(call.name)
+        appended = True
+        success = False
+        result_text = ""
+        try:
+            if usable_cls is None:
+                result_text = f"未知的工具: {call.name}"
+            elif trigger_msg is None:
+                result_text = "无触发消息，跳过执行"
+            else:
+                get_signature = getattr(usable_cls, "get_signature", None)
+                raw_signature = get_signature() if callable(get_signature) else None
+                if not isinstance(raw_signature, str) or not raw_signature:
+                    raise ValueError(f"LLMUsable 缺少组件签名: {usable_cls}")
+                signature = raw_signature
+                owner_plugin = (
+                    resolve_component_plugin(signature)
+                    if resolve_component_plugin is not None
+                    else plugin
+                )
+                args = dict(call.args) if isinstance(call.args, dict) else {}
+                if issubclass(usable_cls, BaseAction):
+                    success, result = await get_action_manager().execute_action(
+                        signature, owner_plugin, trigger_msg, **args
+                    )
+                elif issubclass(usable_cls, BaseAgent):
+                    success, result = await get_agent_manager().execute_agent(
+                        signature, owner_plugin, stream_id or trigger_msg.stream_id, **args
+                    )
+                elif issubclass(usable_cls, BaseTool):
+                    success, result = await get_tool_use().execute_tool(
+                        signature, owner_plugin, trigger_msg, **args
+                    )
+                else:
+                    raise ValueError(f"未知的 LLMUsable 组件类型: {usable_cls}")
+                result_text = str(result) if success else f"执行失败: {result}"
+        except Exception as exc:
+            result_text = f"执行异常: {exc}"
+
+        response.add_payload(
+            LLMPayload(
+                ROLE.TOOL_RESULT,
+                ToolResult(value=result_text, call_id=call.id, name=call.name),
+            )
+        )
+        results.append((appended, bool(success)))
+    return results
 
 
 async def get_llm_stats_summary() -> dict[str, Any]:

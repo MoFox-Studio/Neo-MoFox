@@ -7,7 +7,7 @@ Action 是"主动的响应"，通过 LLM Tool Calling 调用。
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from src.kernel.logger import get_logger
 from src.kernel.llm import LLMUsable
@@ -389,7 +389,12 @@ class ActionManager:
 
         # 执行 Action
         try:
-            result = await action_instance._wrap_execute(**kwargs).wait_done()
+            from src.kernel.llm.usable_execution import execute_usable_instance
+
+            result = cast(
+                tuple[bool, str],
+                await execute_usable_instance(action_instance, kwargs=kwargs),
+            )
 
             execution_time = time.time() - start_time
             status_emoji = "✅" if result[0] else "❌"

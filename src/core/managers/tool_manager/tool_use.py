@@ -214,7 +214,9 @@ class ToolUse:
                 pass
 
             # 调用 Tool 的 execute 方法
-            success, result = await tool_instance._wrap_execute(**kwargs).wait_done()
+            from src.kernel.llm.usable_execution import execute_usable_instance
+
+            success, result = await execute_usable_instance(tool_instance, kwargs=kwargs)
 
             # 格式化结果（确保是字典形式以兼容 ToolHistory）
             if isinstance(result, str):

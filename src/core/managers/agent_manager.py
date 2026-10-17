@@ -6,7 +6,7 @@ Agent 是 Chatter 的任务协助者，拥有专属的私有 usables 套件。
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from src.core.components.registry import get_global_registry
 from src.core.components.types import ChatType, ComponentType
@@ -261,7 +261,12 @@ class AgentManager:
             kwargs.pop("reason", None)
 
         try:
-            result = await agent_instance._wrap_execute(**kwargs).wait_done()
+            from src.kernel.llm.usable_execution import execute_usable_instance
+
+            result = cast(
+                tuple[bool, str | dict],
+                await execute_usable_instance(agent_instance, kwargs=kwargs),
+            )
             return result
         except Exception as e:
             logger.error(

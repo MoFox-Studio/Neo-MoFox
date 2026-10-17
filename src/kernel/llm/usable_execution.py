@@ -1,4 +1,4 @@
-"""LLM tool call 的统一执行与并行调度工具。"""
+"""LLMUsable 的底层执行与并行调度封装。"""
 
 from __future__ import annotations
 
@@ -206,6 +206,26 @@ async def exec_llm_usable(
     return _normalize_execute_result(execution.result)
 
 
+async def execute_usable_instance(
+    usable: Any,
+    *,
+    kwargs: dict[str, Any] | None = None,
+    task_observer: Callable[[asyncio.Task[None]], None] | None = None,
+) -> tuple[bool, object]:
+    """执行已经由 Manager 创建并完成上下文绑定的组件实例。"""
+    call_kwargs = dict(kwargs or {})
+    if should_strip_auto_reason_argument(usable.execute, call_kwargs):
+        call_kwargs.pop("reason", None)
+
+    execution = usable._wrap_execute(**call_kwargs)
+    if task_observer is not None:
+        execution.add_task_observer(task_observer)
+    await run_llm_usable_executions([execution])
+    if execution.exception is not None:
+        raise execution.exception
+    return _normalize_execute_result(execution.result)
+
+
 async def run_llm_usable_executions(
     executions: Sequence[LLMUsableExecution | None],
 ) -> None:
@@ -260,7 +280,7 @@ async def run_llm_usable_executions(
             await execution.wait_done()
 
 
-async def run_tool_call(
+async def execute_tool_calls(
     *,
     calls: Sequence["ToolCall"],
     response: _ToolResultReceiver,

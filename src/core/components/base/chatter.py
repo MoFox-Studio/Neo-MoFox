@@ -466,7 +466,7 @@ class BaseChatter(BaseComponent):
         """
         from src.app.plugin_system.api import llm_api
 
-        return await llm_api.run_tool_call(
+        return await llm_api.dispatch_llm_tool_calls(
             calls=calls,
             response=response,
             usable_map=usable_map,
@@ -474,8 +474,6 @@ class BaseChatter(BaseComponent):
             plugin=self.plugin,
             stream_id=self.stream_id,
             resolve_component_plugin=self._resolve_component_plugin,
-            display_name=self.name,
-            task_observer=task_observer,
         )
 
     @staticmethod
