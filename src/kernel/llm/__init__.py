@@ -55,6 +55,13 @@ from .stats import (
     close_llm_stats_db,
 )
 
+from .request_inspector import (
+    CapturedRequest,
+    RequestInspector,
+    build_render_view,
+    get_inspector,
+)
+
 from .exceptions import (
 	LLMError,
 	LLMContextError,
@@ -114,6 +121,11 @@ __all__ = [
 	"init_llm_stats",
 	"get_llm_stats_collector",
 	"close_llm_stats_db",
+	# 请求检视器相关
+	"CapturedRequest",
+	"RequestInspector",
+	"build_render_view",
+	"get_inspector",
 	# 异常相关
 	"LLMError",
 	"LLMContextError",
