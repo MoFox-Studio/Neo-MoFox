@@ -12,6 +12,7 @@ from plugins.notice_injector.handlers.stream_injector import (
     inject_notice_to_stream_reminder,
     set_config,
 )
+from src.core.models.stream import ChatStream
 from src.core.prompt import get_system_reminder_store, reset_system_reminder_store
 
 
@@ -23,6 +24,18 @@ def _isolated_store_and_config() -> None:
     yield
     reset_system_reminder_store()
     set_config(None)
+
+
+def _group_bucket() -> str:
+    """群聊 10086 对应的流私有 bucket key。"""
+    stream_id = ChatStream.generate_stream_id(platform="qq", group_id="10086")
+    return f"stream:{stream_id}:actor"
+
+
+def _private_bucket(user_id: str = "30001") -> str:
+    """私聊 user_id 对应的流私有 bucket。"""
+    stream_id = ChatStream.generate_stream_id(platform="qq", user_id=user_id)
+    return f"stream:{stream_id}:actor"
 
 
 def _group_envelope(text_description: str = "张三戳了戳机器人") -> dict[str, Any]:
@@ -51,10 +64,9 @@ def test_group_notice_injected_into_stream_private_bucket() -> None:
 
     assert result is None  # 默认放行分发，不拦截通知
     store = get_system_reminder_store()
-    bucket = "stream:qq:10086:group:actor"
-    # stream_id 为 SHA-256 哈希，这里直接校验渲染后的内容
-    assert "系统通知[poke]: 张三戳了戳机器人" in store.get(bucket)
-    assert "notice_poke_1786900000000" in store.get(bucket)
+    content = store.get(_group_bucket())
+    assert "系统通知[poke]: 张三戳了戳机器人" in content
+    assert "notice_poke_1786900000000" in content
 
 
 def test_private_notice_uses_user_stream() -> None:
@@ -77,8 +89,7 @@ def test_private_notice_uses_user_stream() -> None:
 
     assert result is None
     store = get_system_reminder_store()
-    bucket = "stream:qq:30001:private:actor"
-    assert "系统通知[friend_recall]: 李四撤回了一条消息" in store.get(bucket)
+    assert "系统通知[friend_recall]: 李四撤回了一条消息" in store.get(_private_bucket())
 
 
 def test_text_fallback_to_message_segment() -> None:
@@ -90,7 +101,7 @@ def test_text_fallback_to_message_segment() -> None:
 
     assert result is None
     store = get_system_reminder_store()
-    assert "系统通知[poke]: 张三戳了戳机器人" in store.get("stream:qq:10086:group:actor")
+    assert "系统通知[poke]: 张三戳了戳机器人" in store.get(_group_bucket())
 
 
 def test_missing_text_skips_injection() -> None:
@@ -103,10 +114,10 @@ def test_missing_text_skips_injection() -> None:
 
     assert result is None
     store = get_system_reminder_store()
-    assert store.get("stream:qq:10086:group:actor") == ""
+    assert store.get(_group_bucket()) == ""
 
 
-def test_forever_consume_uses_fixed_type_name() -> None:
+def test_forever_consume_overwrites_per_type() -> None:
     """consume=forever 时按类型命名并覆盖更新，insert_type 为 fixed。"""
     from src.core.prompt import SystemReminderInsertType
 
@@ -120,8 +131,7 @@ def test_forever_consume_uses_fixed_type_name() -> None:
     assert result is None
 
     store = get_system_reminder_store()
-    bucket = "stream:qq:10086:group:actor"
-    items = store.get_items(bucket)
+    items = store.get_items(_group_bucket())
     assert len(items) == 1  # 覆盖式更新，不累积
     item = items[0]
     assert item.name == "notice_poke"
@@ -140,7 +150,7 @@ def test_long_text_truncated() -> None:
 
     assert result is None
     store = get_system_reminder_store()
-    content = store.get("stream:qq:10086:group:actor")
+    content = store.get(_group_bucket())
     assert content.endswith("...")
     assert len(content) < 100
 
@@ -166,4 +176,4 @@ def test_disabled_plugin_skips_injection() -> None:
 
     assert result is None
     store = get_system_reminder_store()
-    assert store.get("stream:qq:10086:group:actor") == ""
+    assert store.get(_group_bucket()) == ""

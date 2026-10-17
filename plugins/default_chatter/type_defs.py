@@ -143,7 +143,11 @@ class UsableAdapter(Protocol):
 
 
 class ToolExecutionAdapter(Protocol):
-    """定义工具调用批量执行接口。"""
+    """定义插件内部的工具调用批量执行适配接口。
+
+    实现可以继续使用 ``run_tool_call`` 作为插件扩展协议；底层执行应由
+    ``BaseChatter`` 转发到 ``llm_api.dispatch_llm_tool_calls``。
+    """
 
     async def run_tool_call(
         self,

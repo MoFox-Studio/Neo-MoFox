@@ -366,7 +366,11 @@ class ActionManager:
                     EventType.BEFORE_ACTION_CALL,
                     {
                         "signature": signature,
-                        "action_name": action_instance.action_name,
+                        "action_name": getattr(
+                            action_instance,
+                            "name",
+                            getattr(action_instance, "action_name", ""),
+                        ),
                         "action_description": getattr(
                             action_instance, "action_description", ""
                         ),
