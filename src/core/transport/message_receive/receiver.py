@@ -8,6 +8,10 @@
 3. 调用 ``MessageConverter`` 转换为 ``Message``
 4. 通过事件系统分发给下游
 
+入站信封在路由前会先发布 ``BEFORE_MESSAGE_RECEIVED`` 事件，订阅者可就地修改
+``envelope``（包括 ``message_info`` / ``message_segment`` / ``message_type`` 等字段），
+或返回 ``EventDecision.STOP`` 直接丢弃该消息，不再进入转换与下游 ``ON_MESSAGE_RECEIVED``。
+
 对于非标准消息类型（notice、request 等），触发 ``on_received_other_message``
 事件并检查订阅者是否填充了 ``processed`` 字段；若有则构建简化 Message 继续分发。
 """
@@ -30,6 +34,7 @@ from src.core.transport.message_receive.utils import (
     extract_stream_id,
     infer_chat_type,
 )
+from src.kernel.event import EventDecision
 from src.kernel.logger import get_logger, COLOR
 
 logger = get_logger("message_receiver", display="消息接收器", color=COLOR.CYAN)
@@ -102,6 +107,11 @@ class MessageReceiver:
 
         这是与 ``SinkManager`` 集成的唯一入口。
 
+        在路由到 ``_handle_message`` / ``_handle_other`` 之前会先发布
+        ``BEFORE_MESSAGE_RECEIVED`` 事件，订阅者可就地修改 ``envelope`` 的
+        任意字段（例如 ``message_info`` / ``message_segment`` / ``message_type``），
+        也可返回 ``EventDecision.STOP`` 直接拦截该消息，使其不再进入后续流程。
+
         Args:
             envelope: mofox-wire 消息信封
             adapter_signature: 发送方适配器签名（如 ``"my_plugin:adapter:qq"``）
@@ -126,6 +136,42 @@ class MessageReceiver:
             f"收到消息: id={message_id}, platform={platform}, "
             f"adapter={adapter_signature}"
         )
+
+        # 预处理事件：在路由前发布，允许插件就地修改 envelope 或拦截消息。
+        # - 订阅者返回 STOP：丢弃该消息，不再进入 _handle_message / _handle_other。
+        # - 订阅者返回 SUCCESS：使用回写的 envelope 继续后续流程。
+        # - 订阅者返回 PASS：保留原 envelope 继续后续流程。
+        event_manager = self._get_event_manager()
+        try:
+            before_result = await event_manager.publish_event(
+                EventType.BEFORE_MESSAGE_RECEIVED,
+                {
+                    "envelope": envelope,
+                    "adapter_signature": adapter_signature,
+                },
+            )
+        except Exception as e:
+            logger.error(
+                f"BEFORE_MESSAGE_RECEIVED 事件发布失败，按放行处理: {e}",
+                exc_info=True,
+            )
+            before_result = {"decision": EventDecision.SUCCESS, "params": {"envelope": envelope}}
+
+        before_decision = before_result.get("decision", EventDecision.SUCCESS)
+        if before_decision == EventDecision.STOP:
+            logger.info(
+                f"消息被 BEFORE_MESSAGE_RECEIVED 拦截: id={message_id}, "
+                f"platform={platform}, adapter={adapter_signature}"
+            )
+            return
+
+        # 订阅者可能就地修改了 envelope（dict 是引用传递）；同时支持 SUCCESS
+        # 时回写 params["envelope"] 的情况，统一从回执中取回最新引用。
+        before_params = before_result.get("params", {}) or {}
+        updated_envelope = before_params.get("envelope")
+        if isinstance(updated_envelope, dict):
+            envelope = updated_envelope  # type: ignore[assignment]
+            msg_info = envelope.get("message_info") or {}
 
         # 检查是否为adapter_response类型
         message_segment = envelope.get("message_segment")

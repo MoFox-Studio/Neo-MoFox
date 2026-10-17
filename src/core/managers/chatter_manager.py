@@ -176,7 +176,7 @@ class ChatterManager:
             >>> from src.core.managers.chatter_manager import get_chatter_manager
             >>> await get_chatter_manager().resume_chatter("stream_1", source="sub_agent")
         """
-        from src.core.components.base.chatter import WaitResumeEvent
+        from src.core.components.types import WaitResumeEvent
         from src.core.transport.distribution.stream_loop_manager import (
             get_stream_loop_manager,
         )

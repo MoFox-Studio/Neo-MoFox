@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 from src.core.config import get_core_config
 from src.kernel.concurrency import get_watchdog
 from src.core.transport.distribution.tick import ConversationTick
-from src.core.components.base.chatter import Wait, WaitResumeEvent, Success, Failure, Stop
+from src.core.components.types import Wait, WaitResumeEvent, Success, Failure, Stop
 from src.kernel.logger import get_logger, COLOR
 
 if TYPE_CHECKING:
@@ -51,6 +51,23 @@ def _extract_step_data(result: Wait | Success | Failure | Stop) -> dict[str, obj
     if isinstance(step_data, dict):
         return step_data
     return None
+
+
+def _discard_blocked_messages(context: "StreamContext") -> int:
+    """丢弃被事件处理器阻断期间积压的消息，避免恢复时一次性涌入 Chatter。"""
+    discarded_count = 0
+
+    unread_messages = getattr(context, "unread_messages", None)
+    if isinstance(unread_messages, list):
+        discarded_count += len(unread_messages)
+        unread_messages.clear()
+
+    message_cache = getattr(context, "message_cache", None)
+    if message_cache is not None and hasattr(message_cache, "clear"):
+        discarded_count += len(message_cache)
+        message_cache.clear()
+
+    return discarded_count
 
 
 async def _publish_after_chatter_step_notification(
@@ -324,8 +341,11 @@ async def run_chat_stream(
                     )
                     step_event_params = step_event_result.get("params", {})
                     if step_event_params.get("continue") is False:
+                        discarded_count = _discard_blocked_messages(context)
                         logger.debug(
-                            f"[驱动器] stream={stream_id[:8]}, on_chatter_step continue=False，跳过本 Tick"
+                            f"[驱动器] stream={stream_id[:8]}, "
+                            f"on_chatter_step continue=False，跳过本 Tick，"
+                            f"丢弃积压消息={discarded_count}"
                         )
                         continue
                     

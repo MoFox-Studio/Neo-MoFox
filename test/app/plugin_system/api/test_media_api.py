@@ -154,3 +154,94 @@ class TestMediaAPI:
 
             assert result is not None
             assert result["voice_id"] == "voicehash123"
+
+    @pytest.mark.asyncio
+    async def test_save_description_cache_image(self) -> None:
+        """测试保存图片描述缓存（路由到 manager.save_description_cache）。"""
+        with patch('src.app.plugin_system.api.media_api._get_media_manager') as mock_get_mgr:
+            mock_manager = MagicMock()
+            mock_manager.save_description_cache = AsyncMock()
+            mock_get_mgr.return_value = mock_manager
+
+            await media_api.save_description_cache("img123", "image", "一只猫")
+
+            mock_manager.save_description_cache.assert_called_once_with(
+                media_hash="img123",
+                media_type="image",
+                description="一只猫",
+            )
+
+    @pytest.mark.asyncio
+    async def test_save_description_cache_video(self) -> None:
+        """测试保存视频描述缓存（路由到 manager.save_description_cache）。"""
+        with patch('src.app.plugin_system.api.media_api._get_media_manager') as mock_get_mgr:
+            mock_manager = MagicMock()
+            mock_manager.save_description_cache = AsyncMock()
+            mock_get_mgr.return_value = mock_manager
+
+            await media_api.save_description_cache("vid123", "video", "一段风景")
+
+            mock_manager.save_description_cache.assert_called_once_with(
+                media_hash="vid123",
+                media_type="video",
+                description="一段风景",
+            )
+
+    @pytest.mark.asyncio
+    async def test_save_description_cache_voice(self) -> None:
+        """测试保存语音描述缓存（路由到 manager.save_description_cache）。"""
+        with patch('src.app.plugin_system.api.media_api._get_media_manager') as mock_get_mgr:
+            mock_manager = MagicMock()
+            mock_manager.save_description_cache = AsyncMock()
+            mock_get_mgr.return_value = mock_manager
+
+            await media_api.save_description_cache("voi123", "voice", "你好")
+
+            mock_manager.save_description_cache.assert_called_once_with(
+                media_hash="voi123",
+                media_type="voice",
+                description="你好",
+            )
+
+    @pytest.mark.asyncio
+    async def test_save_description_cache_empty_hash_raises(self) -> None:
+        """测试空 media_hash 抛出 ValueError。"""
+        with pytest.raises(ValueError):
+            await media_api.save_description_cache("", "video", "描述")
+
+    @pytest.mark.asyncio
+    async def test_save_description_cache_empty_description_raises(self) -> None:
+        """测试空 description 抛出 ValueError。"""
+        with pytest.raises(ValueError):
+            await media_api.save_description_cache("hash123", "video", "")
+
+    @pytest.mark.asyncio
+    async def test_get_media_file(self) -> None:
+        """测试按哈希读取媒体文件（转发到 manager.get_media_file）。"""
+        with patch('src.app.plugin_system.api.media_api._get_media_manager') as mock_get_mgr:
+            mock_manager = MagicMock()
+            mock_manager.get_media_file = AsyncMock(return_value="base64data")
+            mock_get_mgr.return_value = mock_manager
+
+            result = await media_api.get_media_file("vid123")
+
+            assert result == "base64data"
+            mock_manager.get_media_file.assert_called_once_with("vid123")
+
+    @pytest.mark.asyncio
+    async def test_get_media_file_missing(self) -> None:
+        """测试文件不存在时返回 None。"""
+        with patch('src.app.plugin_system.api.media_api._get_media_manager') as mock_get_mgr:
+            mock_manager = MagicMock()
+            mock_manager.get_media_file = AsyncMock(return_value=None)
+            mock_get_mgr.return_value = mock_manager
+
+            result = await media_api.get_media_file("vid123")
+
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_media_file_empty_hash_raises(self) -> None:
+        """测试空 media_hash 抛出 ValueError。"""
+        with pytest.raises(ValueError):
+            await media_api.get_media_file("")

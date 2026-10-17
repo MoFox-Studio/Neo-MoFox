@@ -81,11 +81,14 @@ async def main() -> None:
         print(f"   - 参数: {func_schema.get('parameters', {}).get('properties', {}).keys()}")
 
     # 3. 获取特定聊天类型的 Agent
-    agents_for_chat = agent_api.get_agents_for_chat(chat_type=ChatType.PRIVATE)
+    agents_for_chat = await agent_api.filter_agents(
+        list(agents.values()),
+        chat_type=ChatType.PRIVATE,
+    )
     print(f"\n4. 私聊可用 Agent 数量: {len(agents_for_chat)}")
 
     # 4. 获取 Agent Schemas
-    schemas_for_chat = agent_api.get_agent_schemas(chat_type=ChatType.PRIVATE)
+    schemas_for_chat = agent_api.get_agent_schemas(agents_for_chat)
     print(f"\n5. 私聊 Agent Schema 数量: {len(schemas_for_chat)}")
 
     # 5. 按插件获取 Agent

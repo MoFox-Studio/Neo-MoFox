@@ -8,6 +8,7 @@ from .base import (
 )
 from .anthropic_client import AnthropicChatClient
 from .openai_client import OpenAIChatClient
+from .responses_client import OpenAIResponsesClient
 from .registry import ModelClientRegistry
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
 	"StreamEvent",
 	"AnthropicChatClient",
 	"OpenAIChatClient",
+	"OpenAIResponsesClient",
 	"ModelClientRegistry",
 ]

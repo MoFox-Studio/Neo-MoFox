@@ -15,16 +15,12 @@ class TestBasePlugin:
         # 创建一个具体的插件实现
         class ConcretePlugin(BasePlugin):
             plugin_name = "test_plugin"
-            plugin_description = "Test plugin description"
-            plugin_version = "1.0.0"
 
             def get_components(self):
                 return []
 
         plugin = ConcretePlugin(config=None)
         assert plugin.plugin_name == "test_plugin"
-        assert plugin.plugin_description == "Test plugin description"
-        assert plugin.plugin_version == "1.0.0"
         assert plugin.config is None
 
     def test_plugin_with_config(self, mock_plugin):
@@ -34,8 +30,6 @@ class TestBasePlugin:
 
         class ConcretePlugin(BasePlugin):
             plugin_name = "config_plugin"
-            plugin_description = "Plugin with config"
-            plugin_version = "2.0.0"
 
             def __init__(self, config):
                 super().__init__(config)
@@ -58,8 +52,6 @@ class TestBasePlugin:
         """测试 on_plugin_loaded 钩子。"""
         class ConcretePlugin(BasePlugin):
             plugin_name = "hook_test_plugin"
-            plugin_description = "Test hook plugin"
-            plugin_version = "1.0.0"
 
             def __init__(self, config=None):
                 super().__init__(config)
@@ -82,8 +74,6 @@ class TestBasePlugin:
         """测试 on_plugin_unloaded 钩子。"""
         class ConcretePlugin(BasePlugin):
             plugin_name = "unload_hook_plugin"
-            plugin_description = "Test unload hook"
-            plugin_version = "1.0.0"
 
             def __init__(self, config=None):
                 super().__init__(config)
@@ -106,8 +96,6 @@ class TestBasePlugin:
         """测试依赖组件属性。"""
         class ConcretePlugin(BasePlugin):
             plugin_name = "dependent_plugin"
-            plugin_description = "Plugin with dependencies"
-            plugin_version = "1.0.0"
             dependent_components = ["other_plugin:tool:calculator", "another_plugin:action:send_msg"]
 
             def get_components(self):
@@ -121,8 +109,6 @@ class TestBasePlugin:
         """测试 __repr__ 方法。"""
         class ConcretePlugin(BasePlugin):
             plugin_name = "repr_plugin"
-            plugin_description = "Test repr"
-            plugin_version = "2.5.0"
 
             def get_components(self):
                 return []
@@ -131,14 +117,11 @@ class TestBasePlugin:
         repr_str = repr(plugin)
         assert "ConcretePlugin" in repr_str
         assert "name=repr_plugin" in repr_str
-        assert "version=2.5.0" in repr_str
 
     def test_default_hooks_do_nothing(self):
         """测试默认钩子方法不执行任何操作。"""
         class ConcretePlugin(BasePlugin):
             plugin_name = "default_hook_plugin"
-            plugin_description = "Test default hooks"
-            plugin_version = "1.0.0"
 
             def get_components(self):
                 return []

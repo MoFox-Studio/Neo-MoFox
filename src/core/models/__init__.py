@@ -15,6 +15,8 @@ from .sql_alchemy import (
     PermissionNodes,
     PersonInfo,
     UserPermissions,
+    VideoDescriptions,
+    Videos,
     VoiceDescriptions,
     Voices,
 )
@@ -38,6 +40,8 @@ __all__ = [
     "PermissionNodes",
     "PersonInfo",
     "UserPermissions",
+    "Videos",
+    "VideoDescriptions",
     "Voices",
     "VoiceDescriptions",
 ]

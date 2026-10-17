@@ -3,16 +3,167 @@
 为插件提供简洁的消息发送接口，基于 transport 层的 MessageSender 实现。
 """
 import asyncio
-from typing import Any
+import base64
+import re
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import urlsplit
+from urllib.request import url2pathname, urlopen
 from uuid import uuid4
 
 from src.core.models.message import Message, MessageType
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
+
+
+def _build_media_content(
+    media_type: str,
+    media_data: str,
+    text: str,
+    media_id_key: str,
+) -> dict[str, Any]:
+    """将发送端媒体数据组装为与接收端一致的结构化 content。
+
+    发送路径（``send_image`` / ``send_emoji`` / ``send_voice`` / ``send_video``）
+    与接收路径（``MessageConverter.envelope_to_message`` 的 ``_build_content``）
+    采用相同的数据结构 ``{"text": ..., "media": [{"type", "data", "id"}]}``，
+    避免裸 base64 作为 ``Message.content`` 落库后被当作文本参与 token 计数。
+
+    base64 媒体经 ``normalize_base64`` 规范化，``id`` 用 MediaManager
+    相同的哈希算法计算；URL 由 ``send_media`` 先转换为 Base64。
+
+    Args:
+        media_type: 媒体段类型（``image`` / ``emoji`` / ``voice`` / ``video``）。
+        media_data: base64 媒体数据。
+        text: 消息的人类可读文本（占位符，如 ``[图片]``）。
+        media_id_key: 媒体 ID 字段名（``image_id`` / ``voice_id`` / ``video_id``）。
+
+    Returns:
+        结构化 content 字典。
+    """
+    from src.core.managers.media_manager import MediaManager
+    from src.core.transport.message_receive.utils import normalize_base64
+
+    normalized_data = normalize_base64(media_data)
+    return {
+        "text": text,
+        "media": [
+            {
+                "type": media_type,
+                "data": normalized_data,
+                media_id_key: MediaManager.compute_media_hash(normalized_data),
+            }
+        ],
+    }
+
 
 # =============================================================================
 # 基础消息发送
 # =============================================================================
+
+
+MediaType = Literal["image", "emoji", "voice", "video"]
+MediaContextMode = Literal["placeholder", "description", "native"]
+_MAX_URL_MEDIA_BYTES = 100 * 1024 * 1024
+
+
+def _read_media_url(media_url: str) -> str:
+    """读取 URL 媒体并转换为可缓存的 Base64；不接受超大或不可达的资源。"""
+    parsed = urlsplit(media_url)
+    try:
+        if parsed.scheme == "file":
+            if parsed.netloc not in ("", "localhost"):
+                raise ValueError("不支持远程文件 URL")
+            with Path(url2pathname(parsed.path)).open("rb") as media_file:
+                data = media_file.read(_MAX_URL_MEDIA_BYTES + 1)
+        else:
+            with urlopen(media_url, timeout=10) as response:
+                data = response.read(_MAX_URL_MEDIA_BYTES + 1)
+    except OSError as exc:
+        raise ValueError("媒体 URL 读取失败，无法发送") from exc
+    if not data or len(data) > _MAX_URL_MEDIA_BYTES:
+        raise ValueError("媒体 URL 内容为空或超出大小限制，无法发送")
+    return base64.b64encode(data).decode("ascii")
+
+
+async def send_media(
+    media_type: MediaType,
+    media_data: str,
+    stream_id: str,
+    platform: str | None = None,
+    processed_plain_text: str | None = None,
+    reply_to: str | None = None,
+    adapter_signature: str | None = None,
+    *,
+    context_mode: MediaContextMode = "placeholder",
+) -> bool:
+    """发送并缓存媒体，指定此条消息后续在聊天上下文中的表达方式。
+
+    ``placeholder`` 保留媒体类型及可回查 ID；调用者提供文字时作为媒体描述，
+    不调用识别服务；
+    ``description`` 调用相应媒体识别 API 并附加描述；
+    ``native`` 请求聊天流程将原始媒体内联到模型请求中，当前仅支持图片。
+    资源 URL 先读取实际字节并转为 Base64，再经同一缓存流程发送。
+
+    Args:
+        media_type: 图片、表情包、语音或视频类型。
+        media_data: base64、HTTP(S) 或 file URL 媒体数据。
+        stream_id: 聊天流 ID。
+        platform: 平台名称，可从聊天流推断。
+        processed_plain_text: 可选的调用者媒体描述；默认模式不触发识别。
+        reply_to: 被回复的消息 ID。
+        adapter_signature: 指定发送目标适配器组件签名。
+        context_mode: 历史消息的上下文表达模式。
+
+    Returns:
+        是否发送成功。
+
+    Raises:
+        ValueError: 不支持的媒体类型、模式或媒体与模式组合。
+    """
+    id_keys = {"image": "image_id", "emoji": "image_id", "voice": "voice_id", "video": "video_id"}
+    labels = {"image": "图片", "emoji": "表情包", "voice": "语音", "video": "视频"}
+    if media_type not in id_keys:
+        raise ValueError(f"不支持的媒体类型: {media_type}")
+    if context_mode not in ("placeholder", "description", "native"):
+        raise ValueError(f"不支持的上下文模式: {context_mode}")
+    if context_mode == "native" and media_type != "image":
+        raise ValueError(f"{media_type} 不支持 native 上下文模式")
+    if media_data.startswith(("http://", "https://", "file://")):
+        media_data = await asyncio.to_thread(_read_media_url, media_data)
+    description_text = processed_plain_text.strip() if processed_plain_text else ""
+    placeholder = f"[{labels[media_type]}]"
+    existing_marker = re.fullmatch(
+        rf"\[{labels[media_type]}(?:\([^()\[\]]+\))?(?::(.*))?\]",
+        description_text, flags=re.DOTALL,
+    )
+    if existing_marker:
+        description_text = existing_marker.group(1) or ""
+    text = f"[{labels[media_type]}:{description_text}]" if description_text else placeholder
+    content = _build_media_content(media_type, media_data, text, id_keys[media_type])
+    if context_mode == "description":
+        from src.app.plugin_system.api.media_api import recognize_media
+
+        description = await recognize_media(media_data, media_type)
+        if description and description.strip():
+            described = f"[{labels[media_type]}:{description.strip()}]"
+            text = described
+            content["text"] = text
+        else:
+            context_mode = "placeholder"
+
+    content["media"][0]["context_mode"] = context_mode
+    if context_mode == "native":
+        content["media"][0]["include_in_context"] = True
+    return await _send_message(
+        content=content,
+        message_type=MessageType(media_type),
+        stream_id=stream_id,
+        platform=platform,
+        processed_plain_text=text,
+        reply_to=reply_to,
+        adapter_signature=adapter_signature,
+    )
 
 
 async def send_text(
@@ -63,6 +214,8 @@ async def send_image(
     processed_plain_text: str = "[图片]",
     reply_to: str | None = None,
     adapter_signature: str | None = None,
+    *,
+    include_in_context: bool = False,
 ) -> bool:
     """发送图片消息
 
@@ -75,6 +228,7 @@ async def send_image(
         adapter_signature: 目标适配器组件签名（可选），格式为
                            ``plugin_name:adapter:adapter_name``；指定后直接通过该
                            适配器发送，不再按 platform 推断
+        include_in_context: 是否在后续模型上下文中内联此图片
 
     Returns:
         是否发送成功
@@ -87,14 +241,14 @@ async def send_image(
             adapter_signature="onebot:adapter:napcat"
         )
     """
-    return await _send_message(
-        content=image_data,
-        message_type=MessageType.IMAGE,
+    return await send_media(
+        "image", image_data,
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
         reply_to=reply_to,
         adapter_signature=adapter_signature,
+        context_mode="native" if include_in_context else "placeholder",
     )
 
 
@@ -127,9 +281,8 @@ async def send_emoji(
             adapter_signature="onebot:adapter:napcat"
         )
     """
-    return await _send_message(
-        content=emoji_data,
-        message_type=MessageType.EMOJI,
+    return await send_media(
+        "emoji", emoji_data,
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,
@@ -141,7 +294,7 @@ async def send_voice(
     voice_data: str,
     stream_id: str,
     platform: str | None = None,
-    processed_plain_text: str = "[语音]",
+    processed_plain_text: str | None = None,
     adapter_signature: str | None = None,
 ) -> bool:
     """发送语音消息
@@ -150,7 +303,9 @@ async def send_voice(
         voice_data: 语音数据（base64 或 URL）
         stream_id: 聊天流 ID
         platform: 平台名称（可选）；当指定 ``adapter_signature`` 时该参数被忽略
-        processed_plain_text: 人类可读文本（可选）
+        processed_plain_text: 可选的语音原文；提供时使用语音描述格式保留，
+                  缓存成功后附加媒体 ID，不调用识别服务。
+                  不提供时使用默认占位符。
         adapter_signature: 目标适配器组件签名（可选），格式为
                            ``plugin_name:adapter:adapter_name``；指定后直接通过该
                            适配器发送，不再按 platform 推断
@@ -165,11 +320,11 @@ async def send_voice(
             adapter_signature="onebot:adapter:napcat"
         )
     """
-    return await _send_message(
-        content=voice_data,
-        message_type=MessageType.VOICE,
-        stream_id=stream_id,
-        platform=platform,
+    if processed_plain_text is not None and not processed_plain_text.strip():
+        raise ValueError("processed_plain_text 不能只包含空白字符")
+
+    return await send_media(
+        "voice", voice_data, stream_id, platform=platform,
         processed_plain_text=processed_plain_text,
         adapter_signature=adapter_signature,
     )
@@ -203,9 +358,8 @@ async def send_video(
             adapter_signature="onebot:adapter:napcat"
         )
     """
-    return await _send_message(
-        content=video_data,
-        message_type=MessageType.VIDEO,
+    return await send_media(
+        "video", video_data,
         stream_id=stream_id,
         platform=platform,
         processed_plain_text=processed_plain_text,

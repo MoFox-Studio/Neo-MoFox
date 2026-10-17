@@ -30,31 +30,25 @@ if TYPE_CHECKING:
 
 logger = get_logger("stream_manager", display="StreamMgr")
 
-# 含原始二进制的媒体类型，序列化入库时仅在 payload 过大时剔除 data 字段
-_BINARY_MEDIA_TYPES: frozenset[str] = frozenset({"image", "emoji", "voice"})
-_MAX_MEDIA_DATA_BYTES = 1024
+# 含原始二进制的媒体类型，序列化入库时统一剔除 data 字段。
+# 二进制 base64 不应持久化：一是造成数据库存储暴涨，二是反序列化时
+# 会被当作普通文本参与 token 计数（触发上下文压缩误判）。媒体项经剔除
+# data 后仍保留 image_id/voice_id/video_id，可按哈希回查媒体表。
+# file 的 data 是元信息（name/size/id）而非二进制，不在此列。
+_BINARY_MEDIA_TYPES: frozenset[str] = frozenset(
+    {"image", "emoji", "voice", "video"}
+)
 
 
-def _get_content_size_bytes(content: Any) -> int:
-    """估算内容的 UTF-8 序列化字节数。"""
-    if isinstance(content, bytes):
-        return len(content)
-    if isinstance(content, str):
-        return len(content.encode("utf-8"))
-    return len(str(content).encode("utf-8"))
+def _strip_media_data(item: dict[str, Any]) -> dict[str, Any]:
+    """移除二进制媒体项的 data 字段，保留其余元信息。
 
-
-def _strip_oversized_media_data(item: dict[str, Any]) -> dict[str, Any]:
-    """移除超出阈值的媒体 data 字段，保留其余元信息。
-
-    媒体项的 ``image_id``（哈希）由 ``MessageConverter`` 在创建媒体项时注入，
-    此处剔除 ``data`` 后 ``image_id`` 自然保留，便于后续按哈希回查图片信息。
+    二进制项保留媒体 ID 供回查；URL 是资源引用，保留原始地址。
     """
-    media_data = item.get("data")
-    if media_data is None:
-        return item
-
-    if _get_content_size_bytes(media_data) <= _MAX_MEDIA_DATA_BYTES:
+    if item.get("data") is None or (
+        isinstance(item.get("data"), str)
+        and item["data"].startswith(("http://", "https://", "file://"))
+    ):
         return item
 
     return {key: value for key, value in item.items() if key != "data"}
@@ -63,31 +57,135 @@ def _strip_oversized_media_data(item: dict[str, Any]) -> dict[str, Any]:
 def _serialize_content_for_db(content: Any) -> str:
     """将消息 content 序列化为数据库存储字符串。
 
-    内存中的 content 字典可能包含图片/表情包/语音的原始 base64 数据（供 Chatter 多模态
-    使用），但这些数据不需要持久化，持久化会造成数据库存储暴涨。本函数在序列化前检查
-    image/emoji/voice 媒体项中的 ``data`` 实际大小，超过阈值时剔除该字段，其余元信息保留。
-    媒体项的 ``image_id``（哈希）由 ``MessageConverter`` 在创建时注入，剔除 ``data`` 后保留，
-    后续可按 ``image_id`` 从 Images 表回查图片信息。
+    内存中的 content 是接收/发送路径统一构建的结构化 dict：
+    ``{"text": ..., "media": [{"type": "image", "data": ..., "image_id": ...}]}``。
+    二进制 base64 不应持久化（存储暴涨 + 反序列化时被当作文本参与 token 计数），
+    本函数剔除二进制媒体项（``image``/``emoji``/``voice``/``video``）的 ``data``，
+    其余元信息保留；媒体 ID 由 ``MessageConverter``/``send_*`` 注入，剔除后仍可
+    按哈希回查媒体表。
+
+    Args:
+        content: 消息 content（结构化 dict 或纯文本字符串）。
+
+    Returns:
+        序列化后的数据库存储字符串。
     """
-    if not isinstance(content, dict):
+    if isinstance(content, dict):
+        media = content.get("media")
+        if isinstance(media, list):
+            stripped_media = []
+            for item in media:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") in _BINARY_MEDIA_TYPES:
+                    stripped_media.append(_strip_media_data(item))
+                    continue
+                stripped_media.append(item)
+            return str({**content, "media": stripped_media})
         return str(content)
 
-    media = content.get("media")
+    return str(content)
+
+
+def _parse_db_content(content: Any) -> dict[str, Any] | None:
+    """解析数据库消息的 content 字符串为 dict；非 dict 结构返回 None。
+
+    DB 中 content 由 ``_serialize_content_for_db`` 写入，含媒体的消息是
+    ``str({"text": ..., "media": [...]})``（Python dict 字面量，单引号）。
+    历史加载时需解析回 dict 以提取 ``image_id`` 等媒体元信息，因此使用
+    ``ast.literal_eval`` 而非 ``json.loads``（后者无法解析单引号字符串）。
+
+    Args:
+        content: 数据库消息的 content 字段。
+
+    Returns:
+        解析后的 dict；无法解析或非 dict 结构返回 None。
+    """
+    import ast
+
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str):
+        return None
+
+    try:
+        parsed = ast.literal_eval(content)
+    except (ValueError, SyntaxError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _restore_media_data_from_db(content: Any) -> Any:
+    """按媒体 ID 从媒体表回查 base64，补齐历史消息的媒体数据。
+
+    ``_serialize_content_for_db`` 入库时剔除了二进制 media 的 ``data`` 字段，
+    历史消息反序列化后仅保留媒体 ID。此函数按图片、语音或视频 ID
+    回查文件并编码为 base64，供后续处理使用。
+
+    返回与传入 ``content`` 同构的结构：dict 返回回填后的 dict，纯字符串
+    原样返回，保证调用方对 content 的访问路径一致。
+
+    Args:
+        content: 数据库消息的 content 字段（字符串或 dict）。
+
+    Returns:
+        回填 data 后的 content；无媒体或回查失败时保持原结构。
+    """
+    parsed = _parse_db_content(content)
+    if parsed is None:
+        return content
+
+    media = parsed.get("media")
     if not isinstance(media, list):
-        return str(content)
+        return content
 
-    stripped_media = []
+    restored: list[dict[str, Any]] = []
     for item in media:
         if not isinstance(item, dict):
             continue
-
-        if item.get("type") in _BINARY_MEDIA_TYPES:
-            stripped_media.append(_strip_oversized_media_data(item))
+        media_id = (
+            item.get("image_id") or item.get("voice_id") or item.get("video_id")
+        )
+        # 仅对缺失 data 的二进制媒体回查；已带 data（旧数据）直接保留
+        if item.get("data") is not None or not isinstance(media_id, str) or not media_id:
+            restored.append(item)
             continue
+        try:
+            from src.core.managers.media_manager import get_media_manager
 
-        stripped_media.append(item)
+            data = await get_media_manager().get_media_file(media_id)
+            if data:
+                restored.append({**item, "data": data})
+                continue
+        except Exception as exc:
+            logger.warning(
+                f"回查媒体 base64 失败: media_id={media_id[:8]}, error={exc}"
+            )
+        restored.append(item)
 
-    return str({**content, "media": stripped_media})
+    return {**parsed, "media": restored}
+
+
+def _content_to_plain_text(content: Any) -> str:
+    """从消息 content 提取纯文本，避免把媒体 base64 当作文本。
+
+    含媒体的 content 是结构化 dict：``{"text": ..., "media": [...]}``，其中
+    ``media`` 项可能携带 base64。直接 ``str(content)`` 会把 base64 拼进文本，
+    导致 token 计数严重高估；此函数仅提取 ``text`` 字段，缺失时返回占位符。
+
+    Args:
+        content: 数据库消息的 content 字段（字符串或 dict）。
+
+    Returns:
+        纯文本表示。
+    """
+    if isinstance(content, dict):
+        text = content.get("text")
+        if isinstance(text, str) and text:
+            return text
+        return "（非文本内容）"
+
+    return str(content)
 
 
 class StreamManager:
@@ -207,10 +305,20 @@ class StreamManager:
                 group_id=group_id,
             )
 
+        # 读快速路径：流已存在时直接返回，不抢流级锁。
+        # 高压下大量协程（每条消息）并发获取同一已存在流，若一律串行抢锁会
+        # 使读路径在锁上排队（曾导致 inject_usables 被挤到 30 秒超时）。
+        # 仅当未命中缓存时才进入写路径，锁内二次检查防止并发重复创建。
+        existed = self._streams.get(stream_id)
+        if existed is not None:
+            await self._ensure_stream_bot_identity(existed)
+            logger.debug(f"获取已存在的流实例: {stream_id}")
+            return existed
+
         # 并发保护：同一个 stream_id 的创建/加载必须串行化
         lock = self._get_stream_lock(stream_id)
         async with lock:
-            # 检查，避免等待锁期间已被其他协程创建
+            # 二次检查，避免等待锁期间已被其他协程创建
             existed = self._streams.get(stream_id)
             if existed is not None:
                 await self._ensure_stream_bot_identity(existed)
@@ -310,7 +418,10 @@ class StreamManager:
         stream_id: str,
         max_messages: int | None = None,
     ) -> "StreamContext":
-        """从数据库加载 StreamContext。
+        """按原发送时间加载上下文，并应用上下文清空边界。
+
+        有数量限制时选最近的记录，再按时间正序放入历史。
+        时间相同时按数据库自增主键排序，平台消息 ID 不参与排序。
 
         Args:
             stream_id: 流ID
@@ -337,7 +448,7 @@ class StreamManager:
         query = QueryBuilder(self._Messages).filter(stream_id=stream_id)
         if stream_record.context_cleared_at is not None:
             query = query.filter(time__gt=stream_record.context_cleared_at)
-        query = query.order_by("-id")
+        query = query.order_by("-time", "-id")
         if max_messages is not None:
             query = query.limit(max_messages)
         messages_records = await query.all()
@@ -427,11 +538,14 @@ class StreamManager:
 
             return db_message
 
-    async def add_sent_message_to_history(
+    async def add_message_to_history(
         self,
         message: "Message",
+        direction: str = "outgoing",
+        *,
+        silent: bool = False,
     ) -> "Messages":
-        """添加“已发送消息”到流历史消息。
+        """添加进站/出站历史消息到流。
 
         与 ``add_message`` 不同：
         - 该方法会将消息直接写入 ``history_messages``
@@ -439,22 +553,43 @@ class StreamManager:
 
         Args:
             message: 运行时消息对象
+            direction: 消息方向，``"outgoing"`` 表示出站消息（bot 发送，
+                person_id 固定记为 ``"bot"``），``"incoming"`` 表示进站消息
+                （按消息发送者解析 person_id）
+            silent: 静默补录，不改变未读或活跃时间；按原时间维护历史，
+                清空边界之前的消息只持久化
 
         Returns:
             Messages: 创建或已存在的数据库消息记录
+
+        Raises:
+            ValueError: direction 不是 "incoming" 或 "outgoing"
+
+        Examples:
+            >>> db_msg = await sm.add_message_to_history(message, direction="incoming")
         """
+        if direction not in ("incoming", "outgoing"):
+            raise ValueError(
+                f"direction 必须是 'incoming' 或 'outgoing'，收到: {direction!r}"
+            )
+
         stream_id = message.stream_id
 
         lock = self._get_stream_lock(stream_id)
         async with lock:
 
+            if direction == "outgoing":
+                person_id: str | None = "bot"
+            else:
+                person_id = self._resolve_person_id_from_message(message)
+
             message_data = {
                 "message_id": message.message_id,
                 "stream_id": stream_id,
-                "person_id": "bot",
+                "person_id": person_id,
                 "time": message.time,
                 "message_type": message.message_type.value,
-                "content": str(message.content),
+                "content": _serialize_content_for_db(message.content),
                 "processed_plain_text": message.processed_plain_text,
                 "reply_to": message.reply_to,
                 "platform": message.platform,
@@ -465,10 +600,34 @@ class StreamManager:
                 platform=message.platform,
                 stream_id=stream_id,
             )
+            created = db_message is None
             if not db_message:
                 db_message = await self._messages_crud.create(message_data)
 
             chat_stream = self._streams.get(stream_id)
+            if silent:
+                if chat_stream:
+                    context = chat_stream.context
+                    known = any(
+                        item.message_id == message.message_id
+                        for item in [*context.history_messages, *context.unread_messages]
+                    )
+                    if not known:
+                        stream_record = await self._streams_crud.get_by(stream_id=stream_id)
+                        cleared_at = stream_record.context_cleared_at if stream_record else None
+                        if not created:
+                            message = await self._db_message_to_runtime(
+                                db_message, chat_type=chat_stream.chat_type,
+                            )
+                        if cleared_at is None or message.time > cleared_at:
+                            context.history_messages.append(message)
+                            context.history_messages.sort(key=lambda item: item.time)
+                            if context.max_history_messages > 0:
+                                context.history_messages = context.history_messages[
+                                    -context.max_history_messages:
+                                ]
+                return db_message
+
             if chat_stream:
                 context = chat_stream.context
 
@@ -586,12 +745,15 @@ class StreamManager:
         limit: int = 100,
         offset: int = 0,
     ) -> list["Message"]:
-        """获取流的消息（支持分页）。
+        """按原发送时间查询一页历史，并按正序返回该页。
+
+        先按 time、数据库 id 倒序分页，再反转结果。
+        新增或补录消息可能改变 offset 对应的记录，因此 offset 不是固定游标。
 
         Args:
             stream_id: 流ID
             limit: 最大返回消息数
-            offset: 跳过的消息数
+            offset: 从最新记录开始跳过的消息数
 
         Returns:
             list[Message]: 运行时消息对象列表
@@ -599,14 +761,8 @@ class StreamManager:
         Examples:
             >>> messages = await sm.get_stream_messages("abc123", limit=50, offset=0)
         """
-        messages_records = (
-            await QueryBuilder(self._Messages)
-            .filter(stream_id=stream_id)
-            .order_by("-id")
-            .limit(limit)
-            .offset(offset)
-            .all()
-        )
+        query = QueryBuilder(self._Messages).filter(stream_id=stream_id).order_by("-time", "-id")
+        messages_records = await query.limit(limit).offset(offset).all()
 
         return [
             await self._db_message_to_runtime(msg) for msg in reversed(messages_records) # type: ignore
@@ -942,13 +1098,18 @@ class StreamManager:
 
         normalized_plain_text = db_message.processed_plain_text
         if normalized_plain_text is None:
-            normalized_plain_text = str(db_message.content)
-        
+            normalized_plain_text = _content_to_plain_text(db_message.content)
+
+        # 历史消息入库时已剔除 media 的 base64（见 _serialize_content_for_db），
+        # 此处按 image_id 回查媒体表补回 data 到 content["media"]，
+        # 与运行时消息的属性结构保持一致（多模态内联仍可读 data）。
+        runtime_content = await _restore_media_data_from_db(db_message.content)
+
         return Message(
             message_id=db_message.message_id,
             time=db_message.time,
             reply_to=db_message.reply_to,
-            content=db_message.content,
+            content=runtime_content,
             processed_plain_text=normalized_plain_text,
             message_type=MessageType(db_message.message_type),
             sender_id=sender_id,

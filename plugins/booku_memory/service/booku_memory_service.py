@@ -302,7 +302,6 @@ class BookuMemoryService(BaseService):
 
     name: str = "booku_memory"
     description: str = "Booku 记忆服务，提供写入判重与检索重塑"
-    version: str = "1.0.0"
 
     _repo: BookuMemoryMetadataRepository | None = None
     _repo_initialized: bool = False

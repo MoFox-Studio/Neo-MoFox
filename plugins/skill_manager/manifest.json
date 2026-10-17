@@ -1,7 +1,7 @@
 {
   "name": "skill_manager",
   "display_name": "Skill 管理器",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Skill 管理器：索引本地 skill 目录并按需注入 SKILL.md/引用文档/脚本能力",
   "author": "MoFox Team",
   "dependencies": {
@@ -38,6 +38,7 @@
     "entry_point": "plugin.py",
     "min_core_version": "1.2.0-rc.2",
     "api_version": {
-        "send_api": "1.0.0"
+        "send_api": "1.0.0",
+        "permission_api": "1.0.0"
     }
 }

@@ -76,6 +76,7 @@ reports/
 
 # Ignore temporary files
 *.tmp
+tmp/
 ~*
 
 # Ignore build artifacts from poetry/uv if any
@@ -108,3 +109,4 @@ skills-lock.json
 !plugins/perm_plugin/
 !plugins/utility_commands/
 !plugins/skill_manager/
+!plugins/neo_default_chatter/

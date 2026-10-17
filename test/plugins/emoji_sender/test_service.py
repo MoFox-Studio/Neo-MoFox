@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,15 +12,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from plugins.emoji_sender.config import EmojiSenderConfig
+from plugins.emoji_sender.plugin import EmojiSenderPlugin
 from plugins.emoji_sender.service import EmojiSenderService, MemeCandidate
+from src.core.managers.service_manager import ServiceManager
 
 
 def _make_service(*, temperature: float = 0.12) -> EmojiSenderService:
     """创建一个带最小配置的 EmojiSenderService。"""
     config = EmojiSenderConfig()
     config.vector.temperature = temperature
-    plugin = SimpleNamespace(config=config)
-    return EmojiSenderService(plugin=cast(Any, plugin))
+    return EmojiSenderService(plugin=EmojiSenderPlugin(config=config))
 
 
 def test_select_candidate_returns_best_when_temperature_disabled() -> None:
@@ -173,3 +177,494 @@ async def test_ingest_once_skips_alignment_when_storage_is_full(tmp_path: Any) -
         await service.ingest_once()
 
     align_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ingest_job_advances_past_rejected_meme(
+    ingest_service: EmojiSenderService,
+) -> None:
+    """连续调度应跨服务跳过拒绝素材，重建插件后可重新评估。"""
+    service = ingest_service
+    plugin = cast(EmojiSenderPlugin, service.plugin)
+    ingest_job = cast(Callable[[], Awaitable[None]], plugin._ingest_job)
+    manager = ServiceManager()
+    manual_dir = service._manual_memes_dir()
+    rejected_source = manual_dir / "a_rejected.png"
+    duplicate_source = manual_dir / "b_rejected.png"
+    accepted_source = manual_dir / "c_accepted.png"
+    rejected_source.write_bytes(b"rejected")
+    duplicate_source.write_bytes(b"rejected")
+    accepted_source.write_bytes(b"accepted")
+    config = service._cfg()
+
+    mock_vdb = MagicMock()
+    mock_vdb.get_or_create_collection = AsyncMock()
+    mock_vdb.get = AsyncMock(return_value={"ids": []})
+    mock_vdb.add = AsyncMock()
+    label_mock = AsyncMock(
+        side_effect=[
+            {"keep": False, "description": "", "emotion_tags": []},
+            {"keep": True, "description": "开心的表情", "emotion_tags": ["开心"]},
+        ]
+    )
+
+    with (
+        patch("src.app.plugin_system.api.service_api._get_service_manager", return_value=manager),
+        patch.object(manager, "get_service_class", return_value=EmojiSenderService),
+        patch(
+            "src.core.managers.get_plugin_manager",
+            return_value=SimpleNamespace(get_plugin=lambda plugin_name: plugin),
+        ),
+        patch.object(EmojiSenderService, "_align_data_dir_with_db", new=AsyncMock()),
+        patch.object(EmojiSenderService, "_vlm_decide_and_label", new=label_mock),
+        patch.object(
+            EmojiSenderService,
+            "_compress_image_for_vlm",
+            return_value=(b"vlm-image", "image/png", False),
+        ) as compress_mock,
+        patch("plugins.emoji_sender.service.get_vector_db_service", return_value=mock_vdb),
+        patch("plugins.emoji_sender.service.get_model_set_by_task", return_value=object()),
+        patch(
+            "plugins.emoji_sender.service.create_embedding_request",
+            return_value=_make_embedding_mocks(),
+        ),
+    ):
+        await ingest_job()
+        mock_vdb.add.assert_not_awaited()
+        await ingest_job()
+        another_service = EmojiSenderService(plugin=plugin)
+        assert await another_service._pick_next_manual_meme_file() == accepted_source
+        restarted_service = EmojiSenderService(plugin=EmojiSenderPlugin(config=config))
+        assert await restarted_service._pick_next_manual_meme_file() == rejected_source
+
+    assert [call.args[0] for call in compress_mock.call_args_list] == [b"rejected", b"accepted"]
+    mock_vdb.add.assert_awaited_once()
+    metadata = mock_vdb.add.call_args.kwargs["metadatas"][0]
+    assert metadata["source_hash"] == service._sha256_bytes(b"accepted")
+    assert rejected_source.exists()
+    assert duplicate_source.exists()
+    assert accepted_source.exists()
+
+
+@pytest.fixture
+def ingest_service(tmp_path: Path) -> EmojiSenderService:
+    """创建使用独立素材目录的入库服务。"""
+    service = _make_service()
+    config = service._cfg()
+    config.ingest.manual_memes_dir = str(tmp_path / "manual")
+    config.ingest.sample_from_media_cache = False
+    config.storage.data_dir = str(tmp_path / "memes")
+    config.storage.max_memes = 0
+    return service
+
+
+@pytest.mark.asyncio
+async def test_ingest_once_skips_previously_rejected_media_cache(
+    ingest_service: EmojiSenderService, tmp_path: Path
+) -> None:
+    """随机缓存抽到已拒绝内容时不重复压缩或调用 VLM。"""
+    service = ingest_service
+    service._cfg().ingest.sample_from_media_cache = True
+    source = tmp_path / "cached.png"
+    source.write_bytes(b"cached-rejection")
+
+    with (
+        patch.object(service, "_align_data_dir_with_db", new=AsyncMock()),
+        patch.object(service, "_already_ingested", new=AsyncMock(return_value=False)),
+        patch.object(service, "_pick_random_media_cache_file", new=AsyncMock(return_value=source)),
+        patch.object(
+            service, "_vlm_decide_and_label", new=AsyncMock(return_value={"keep": False})
+        ) as label_mock,
+        patch.object(
+            service, "_compress_image_for_vlm", return_value=(b"image", "image/png", False)
+        ) as compress_mock,
+    ):
+        await service.ingest_once()
+        await service.ingest_once()
+
+    label_mock.assert_awaited_once()
+    compress_mock.assert_called_once()
+    assert source.exists()
+    assert not list(service._data_dir().glob("*"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cache_state", ["pending", "unreadable", "processed", "empty"])
+async def test_ingest_once_selects_pending_media_cache_file(
+    ingest_service: EmojiSenderService, tmp_path: Path, cache_state: str
+) -> None:
+    """缓存选图应跳过已处理内容，单轮只评估一张待处理图片。"""
+    service = ingest_service
+    service._cfg().ingest.sample_from_media_cache = True
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    rejected_source = cache_dir / "a_rejected.png"
+    ingested_source = cache_dir / "b_ingested.png"
+    pending_source = cache_dir / "c_pending.png"
+    candidates: list[Path] = []
+    if cache_state != "empty":
+        rejected_source.write_bytes(b"rejected")
+        ingested_source.write_bytes(b"ingested")
+        candidates.extend([rejected_source, ingested_source])
+        service._rejected_hashes.add(service._sha256_bytes(b"rejected"))
+    if cache_state in ("pending", "unreadable"):
+        pending_source.write_bytes(b"pending")
+        candidates.append(pending_source)
+        another_pending_source = cache_dir / "d_pending.png"
+        another_pending_source.write_bytes(b"another-pending")
+        candidates.append(another_pending_source)
+    if cache_state == "unreadable":
+        candidates.insert(0, cache_dir / "missing.png")
+
+    with (
+        patch.object(service, "_align_data_dir_with_db", new=AsyncMock()),
+        patch.object(service, "_pick_next_manual_meme_file", new=AsyncMock(return_value=None)),
+        patch.object(service, "_media_cache_dir", return_value=cache_dir),
+        patch.object(service, "_list_meme_files", return_value=candidates),
+        patch.object(
+            service,
+            "_already_ingested",
+            new=AsyncMock(side_effect=lambda source_hash: source_hash == service._sha256_bytes(b"ingested")),
+        ),
+        patch("plugins.emoji_sender.service.random.shuffle"),
+        patch("plugins.emoji_sender.service.random.choice", side_effect=lambda files: files[0]),
+        patch.object(
+            service, "_vlm_decide_and_label", new=AsyncMock(return_value={"keep": False})
+        ) as label_mock,
+        patch.object(
+            service, "_compress_image_for_vlm", return_value=(b"image", "image/png", False)
+        ) as compress_mock,
+    ):
+        await service.ingest_once()
+
+    if cache_state in ("pending", "unreadable"):
+        label_mock.assert_awaited_once()
+        compress_mock.assert_called_once_with(b"pending", "image/png")
+    else:
+        label_mock.assert_not_awaited()
+        compress_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_response", "expected_attempts"),
+    [
+        pytest.param('{"keep": false}', 1, id="explicit-rejection"),
+        pytest.param(None, 2, id="model-failure"),
+        pytest.param("not JSON", 2, id="invalid-json"),
+        pytest.param("{}", 2, id="missing-decision"),
+        pytest.param('{"keep": "false"}', 2, id="string-decision"),
+        pytest.param('{"keep": 0}', 2, id="numeric-decision"),
+        pytest.param('{"keep": null}', 2, id="null-decision"),
+        pytest.param(
+            '{"keep": true, "description": "", "emotion_tags": ["开心"]}',
+            2,
+            id="missing-description",
+        ),
+        pytest.param(
+            '{"keep": true, "description": "test meme", "emotion_tags": ["unknown"]}',
+            2,
+            id="invalid-tags",
+        ),
+        pytest.param(
+            '{"keep": true, "description": "test meme", "emotion_tags": "开心"}',
+            2,
+            id="invalid-tag-type",
+        ),
+    ],
+)
+async def test_ingest_once_only_skips_explicit_rejection(
+    ingest_service: EmojiSenderService, raw_response: str | None, expected_attempts: int
+) -> None:
+    """只有明确拒绝才跳过后续评估，失败和不完整标注应重试。"""
+    service = ingest_service
+    source = service._manual_memes_dir() / "candidate.png"
+    source.write_bytes(b"candidate")
+    request = MagicMock()
+    request.send = AsyncMock()
+    if raw_response is None:
+        request.send.side_effect = RuntimeError("test model failure")
+    else:
+        response: Any = asyncio.get_running_loop().create_future()
+        response.message = raw_response
+        response.set_result(None)
+        request.send.return_value = response
+
+    with (
+        patch.object(service, "_align_data_dir_with_db", new=AsyncMock()),
+        patch.object(service, "_already_ingested", new=AsyncMock(return_value=False)),
+        patch.object(service, "_build_persona_prompt", return_value="test persona"),
+        patch.object(service, "_compress_image_for_vlm", return_value=(b"image", "image/png", False)),
+        patch("plugins.emoji_sender.service.get_model_set_by_task", return_value=object()),
+        patch("plugins.emoji_sender.service.create_llm_request", return_value=request),
+    ):
+        await service.ingest_once()
+        await service.ingest_once()
+
+    assert request.send.await_count == expected_attempts
+    rejected_hash = service._sha256_bytes(b"candidate")
+    assert (rejected_hash in service._rejected_hashes) == (expected_attempts == 1)
+    assert source.exists()
+    assert not list(service._data_dir().glob("*"))
+
+
+# ── picker 模式：search_candidates / send_by_id ──────────────────────
+
+
+def _make_vdb_query_mock(records: list[tuple[str, float, dict[str, Any]]]) -> MagicMock:
+    """构建向量库 query mock，records 为 (record_id, distance, metadata) 列表。"""
+    mock_vdb = MagicMock()
+    mock_vdb.get_or_create_collection = AsyncMock()
+    mock_vdb.query = AsyncMock(
+        return_value={
+            "ids": [[record_id for record_id, _, _ in records]],
+            "distances": [[distance for _, distance, _ in records]],
+            "metadatas": [[meta for _, _, meta in records]],
+        }
+    )
+    return mock_vdb
+
+
+def _make_embedding_mocks() -> MagicMock:
+    """构建 embedding 请求 mock。"""
+    embedding_request = MagicMock()
+    embedding_request.send = AsyncMock(return_value=SimpleNamespace(embeddings=[[0.1, 0.2, 0.3]]))
+    return embedding_request
+
+
+@pytest.mark.asyncio
+async def test_search_candidates_dedupes_by_meme_and_truncates_short_id() -> None:
+    """同一 meme 多 tag 记录应去重保留最小距离，short_id 取前 12 位。"""
+    service = _make_service()
+    long_id_a = "a" * 64
+    long_id_b = "b" * 64
+    mock_vdb = _make_vdb_query_mock(
+        [
+            (
+                f"{long_id_a}:开心",
+                0.10,
+                {"meme_id": long_id_a, "tag": "开心", "path": "/tmp/a.png", "description": "A 开心"},
+            ),
+            (
+                f"{long_id_a}:兴奋",
+                0.20,
+                {"meme_id": long_id_a, "tag": "兴奋", "path": "/tmp/a.png", "description": "A 兴奋"},
+            ),
+            (
+                f"{long_id_b}:无语",
+                0.30,
+                {"meme_id": long_id_b, "tag": "无语", "path": "/tmp/b.png", "description": "B 无语"},
+            ),
+        ]
+    )
+
+    with (
+        patch("plugins.emoji_sender.service.get_model_set_by_task", return_value=object()),
+        patch("plugins.emoji_sender.service.create_embedding_request", return_value=_make_embedding_mocks()),
+        patch("plugins.emoji_sender.service.get_vector_db_service", return_value=mock_vdb),
+    ):
+        result = await service.search_candidates("开心地笑", ["开心", "兴奋"])
+
+    assert result is not None
+    candidates = result["candidates"]
+    assert [item["meme_id"] for item in candidates] == [long_id_a, long_id_b]
+    # 去重后 a 的记录保留 tag=开心（距离 0.10 < 0.20）
+    assert candidates[0]["tag"] == "开心"
+    assert candidates[0]["short_id"] == long_id_a[:12]
+    assert result["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_search_candidates_filters_recent_usage_with_fallback() -> None:
+    """使用历史应过滤候选；全被过滤时回退全量。"""
+    service = _make_service()
+    long_id_a = "a" * 64
+    long_id_b = "b" * 64
+    mock_vdb = _make_vdb_query_mock(
+        [
+            (
+                f"{long_id_a}:开心",
+                0.10,
+                {"meme_id": long_id_a, "tag": "开心", "path": "/tmp/a.png", "description": "A"},
+            ),
+            (
+                f"{long_id_b}:开心",
+                0.30,
+                {"meme_id": long_id_b, "tag": "开心", "path": "/tmp/b.png", "description": "B"},
+            ),
+        ]
+    )
+
+    with (
+        patch("plugins.emoji_sender.service.get_model_set_by_task", return_value=object()),
+        patch("plugins.emoji_sender.service.create_embedding_request", return_value=_make_embedding_mocks()),
+        patch("plugins.emoji_sender.service.get_vector_db_service", return_value=mock_vdb),
+    ):
+        # a 已发送过：候选只剩 b
+        service._record_usage("stream1", long_id_a)
+        result = await service.search_candidates("开心地笑", ["开心"], stream_id="stream1")
+        assert result is not None
+        assert [item["meme_id"] for item in result["candidates"]] == [long_id_b]
+
+        # a、b 都发送过：回退全量（a、b 都在候选中）
+        service._record_usage("stream1", long_id_b)
+        result = await service.search_candidates("开心地笑", ["开心"], stream_id="stream1")
+        assert result is not None
+        assert [item["meme_id"] for item in result["candidates"]] == [long_id_a, long_id_b]
+
+
+@pytest.mark.asyncio
+async def test_search_candidates_paginates_without_overlap() -> None:
+    """翻页切片正确且页间无重叠。"""
+    service = _make_service()
+    service._cfg().picker.page_size = 2
+    records = []
+    for i in range(5):
+        meme_id = f"{i:064d}"
+        records.append(
+            (
+                f"{meme_id}:开心",
+                0.10 + i * 0.01,
+                {"meme_id": meme_id, "tag": "开心", "path": f"/tmp/{i}.png", "description": f"第{i}张"},
+            )
+        )
+    mock_vdb = _make_vdb_query_mock(records)
+
+    with (
+        patch("plugins.emoji_sender.service.get_model_set_by_task", return_value=object()),
+        patch("plugins.emoji_sender.service.create_embedding_request", return_value=_make_embedding_mocks()),
+        patch("plugins.emoji_sender.service.get_vector_db_service", return_value=mock_vdb),
+    ):
+        page1 = await service.search_candidates("开心地笑", ["开心"], page=1)
+        page2 = await service.search_candidates("开心地笑", ["开心"], page=2)
+        page3 = await service.search_candidates("开心地笑", ["开心"], page=3)
+        page4 = await service.search_candidates("开心地笑", ["开心"], page=4)
+
+    assert page1 is not None and [c["short_id"] for c in page1["candidates"]] == [f"{0:064d}"[:12], f"{1:064d}"[:12]]
+    assert page2 is not None and [c["short_id"] for c in page2["candidates"]] == [f"{2:064d}"[:12], f"{3:064d}"[:12]]
+    assert page3 is not None and [c["short_id"] for c in page3["candidates"]] == [f"{4:064d}"[:12]]
+    assert page4 is None  # 超出总数
+
+
+@pytest.mark.asyncio
+async def test_send_by_id_prefix_match_and_records_usage(tmp_path: Any) -> None:
+    """send_by_id 应按 id 前缀匹配并发送，成功后记录使用历史。"""
+    service = _make_service()
+    long_id = "c" * 64
+    meme_path = tmp_path / "c.png"
+    meme_path.write_bytes(b"payload")
+
+    mock_vdb = MagicMock()
+    mock_vdb.get_or_create_collection = AsyncMock()
+    mock_vdb.get = AsyncMock(
+        return_value={
+            "ids": [f"{long_id}:开心", f"{'d' * 64}:无语"],
+            "metadatas": [
+                {"meme_id": long_id, "tag": "开心", "path": str(meme_path), "description": "C"},
+                {"meme_id": "d" * 64, "tag": "无语", "path": "/tmp/d.png", "description": "D"},
+            ],
+        }
+    )
+
+    with (
+        patch("plugins.emoji_sender.service.get_vector_db_service", return_value=mock_vdb),
+        patch("plugins.emoji_sender.service.send_emoji", new=AsyncMock(return_value=True)) as send_mock,
+    ):
+        ok, result, reason = await service.send_by_id(
+            short_id=long_id[:12],
+            stream_id="stream1",
+            platform="qq",
+        )
+
+    assert ok is True
+    assert result is not None and result["meme_id"] == long_id
+    assert reason == "发送成功"
+    assert long_id in service._recently_used("stream1")
+    send_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_by_id_unknown_prefix_returns_failure() -> None:
+    """未知 id 前缀应返回失败并提示重新查询。"""
+    service = _make_service()
+    mock_vdb = MagicMock()
+    mock_vdb.get_or_create_collection = AsyncMock()
+    mock_vdb.get = AsyncMock(return_value={"ids": [], "metadatas": []})
+
+    with patch("plugins.emoji_sender.service.get_vector_db_service", return_value=mock_vdb):
+        ok, result, reason = await service.send_by_id(
+            short_id="ffffffffffff",
+            stream_id="stream1",
+            platform="qq",
+        )
+
+    assert ok is False
+    assert result is None
+    assert "未找到" in reason
+
+
+@pytest.mark.asyncio
+async def test_send_best_detailed_records_usage_history() -> None:
+    """direct 模式发送成功后应记录使用历史，且下次检索过滤该表情。"""
+    service = _make_service(temperature=0.0)
+    long_id = "e" * 64
+    searched = {
+        "meme_id": long_id,
+        "tag": "开心",
+        "path": "/tmp/e.png",
+        "description": "E",
+        "distance": 0.1,
+        "fallback_used": False,
+    }
+
+    with (
+        patch.object(service, "search_best", new=AsyncMock(return_value=searched)),
+        patch("plugins.emoji_sender.service.Path", side_effect=lambda p: MagicMock(exists=lambda: True, read_bytes=lambda: b"payload") if str(p) == "/tmp/e.png" else Path(p)),
+        patch("plugins.emoji_sender.service.send_emoji", new=AsyncMock(return_value=True)),
+    ):
+        ok, result, reason = await service.send_best_detailed(
+            stream_id="stream1",
+            platform="qq",
+            description_query="开心地笑",
+        )
+
+    assert ok is True
+    assert reason == "发送成功"
+    assert long_id in service._recently_used("stream1")
+
+
+# ── 插件模式分支 ──────────────────────────────────────────────
+
+
+def test_get_components_returns_picker_components_in_picker_mode() -> None:
+    """picker 模式应返回 Tool + ById Action，而非 direct 的 Action。"""
+    from plugins.emoji_sender.plugin import EmojiSenderPlugin
+
+    config = EmojiSenderConfig()
+    config.plugin.interaction_mode = "picker"
+    plugin = EmojiSenderPlugin(config)
+
+    components = plugin.get_components()
+
+    names = {component.name for component in components}
+    assert "search_emoji_memes" in names
+    assert "send_emoji_meme_by_id" in names
+    assert "send_emoji_meme" not in names
+
+
+def test_get_components_returns_direct_components_by_default() -> None:
+    """默认（及非法值）应返回 direct 模式组件。"""
+    from plugins.emoji_sender.plugin import EmojiSenderPlugin
+
+    plugin = EmojiSenderPlugin(EmojiSenderConfig())
+    names = {component.name for component in plugin.get_components()}
+    assert "send_emoji_meme" in names
+    assert "search_emoji_memes" not in names
+
+    # 非法值按 direct 处理
+    config = EmojiSenderConfig()
+    config.plugin.interaction_mode = "bogus"
+    plugin = EmojiSenderPlugin(config)
+    names = {component.name for component in plugin.get_components()}
+    assert "send_emoji_meme" in names
+    assert "search_emoji_memes" not in names

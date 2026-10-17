@@ -61,10 +61,10 @@ class OneBotAdapterConfig(BaseConfig):
             hint="reverse: 逆向WebSocket; direct: 正向WebSocket"
         )
         host: str = Field(
-            default="localhost",
+            default="127.0.0.1",
             description="OneBot WebSocket 服务地址",
             label="服务地址",
-            placeholder="localhost",
+            placeholder="127.0.0.1",
             tag="network"
         )
         port: int = Field(
@@ -208,6 +208,27 @@ class OneBotAdapterConfig(BaseConfig):
             tag="network",
             depends_on="enable_video_processing",
             depends_value=True
+        )
+        forward_image_threshold: int = Field(
+            default=5,
+            description=(
+                "转发消息内图片数量达到该值时改用占位符代替 base64；"
+                "设为 0 表示始终使用占位符"
+            ),
+            label="转发图片占位阈值",
+            ge=0,
+            le=50,
+            input_type="slider",
+            tag="general"
+        )
+        forward_max_depth: int = Field(
+            default=5,
+            description="转发消息最多递归解析的嵌套层数",
+            label="转发消息最大层数",
+            ge=1,
+            le=10,
+            input_type="slider",
+            tag="general"
         )
 
     plugin: PluginSection = Field(default_factory=PluginSection)

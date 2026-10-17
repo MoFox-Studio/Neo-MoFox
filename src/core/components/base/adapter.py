@@ -13,6 +13,7 @@ from mofox_wire import AdapterBase
 from mofox_wire import CoreSink, MessageEnvelope
 
 from src.core.components.base.component import BaseComponent
+from src.core.components.types import PlatformSendResult
 from src.kernel.concurrency import get_task_manager
 
 if TYPE_CHECKING:
@@ -120,10 +121,13 @@ class BaseAdapter(BaseComponent, AdapterBase):
         # 停止健康检查
         if self._health_check_task_info:
             tm = get_task_manager()
-            try:
-                tm.cancel_task(self._health_check_task_info.task_id)
-            except Exception:
-                pass
+            # 若健康检查任务正是当前任务（由 _health_check_loop 内部触发重连时），
+            # 不能取消自身，否则会中断 stop/start 流程导致适配器停留在已停止状态。
+            if self._health_check_task_info.task is not asyncio.current_task():
+                try:
+                    tm.cancel_task(self._health_check_task_info.task_id)
+                except Exception:
+                    pass
             self._health_check_task_info = None
 
         # 调用父类停止
@@ -163,21 +167,29 @@ class BaseAdapter(BaseComponent, AdapterBase):
         """
         interval = 30  # 默认 30 秒
 
-        while self._running:
+        while True:
             try:
                 await asyncio.sleep(interval)
+
+                # 适配器已被外部停止，退出循环
+                if not self._running:
+                    break
 
                 # 执行健康检查
                 is_healthy = await self.health_check()
 
                 if not is_healthy:
                     await self.reconnect()
+                    # reconnect 内部会 stop + start，而 start 会重新创建健康检查任务，
+                    # 因此重连成功后本任务退出，避免出现并发的重复监控。
+                    break
 
             except asyncio.CancelledError:
                 break
             except Exception:
-                # 忽略健康检查异常
-                pass
+                # 重连过程中可能出现瞬时错误（如端口暂未释放导致 start 失败），
+                # 恢复运行标志以便下一轮继续尝试重连，避免永久失联。
+                self._running = True
 
     async def health_check(self) -> bool:
         """健康检查。
@@ -245,7 +257,7 @@ class BaseAdapter(BaseComponent, AdapterBase):
         """
         ...
 
-    async def _send_platform_message(self, envelope: MessageEnvelope) -> None:
+    async def _send_platform_message(self, envelope: MessageEnvelope) -> PlatformSendResult:
         """发送消息到平台。
 
         如果使用了自动传输配置，此方法会自动处理。
@@ -254,12 +266,15 @@ class BaseAdapter(BaseComponent, AdapterBase):
         Args:
             envelope: 要发送的消息信封
 
+        Returns:
+            PlatformSendResult: 发送结果，包含成功/失败状态与平台消息 ID
+
         Raises:
             NotImplementedError: 如果未配置自动传输且未重写此方法
         """
         # 如果配置了自动传输，调用父类方法
         if hasattr(self, "_transport_config") and self._transport_config:  # type: ignore
-            await super()._send_platform_message(envelope)  # type: ignore
+            return await super()._send_platform_message(envelope)  # type: ignore
         else:
             raise NotImplementedError(
                 f"适配器 {self.name} 未配置自动传输，必须重写 _send_platform_message 方法"

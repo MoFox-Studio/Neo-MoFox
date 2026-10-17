@@ -397,7 +397,14 @@ def test_context_manager_dynamic_once_reminder_is_consumed_per_manager(reminder_
     assert cast(Text, payloads[2].content[0]).text == "second"
 
 
-def test_context_manager_dynamic_once_reminder_isolated_between_managers(reminder_store) -> None:
+def test_context_manager_dynamic_once_reminder_consumed_globally_across_managers(
+    reminder_store,
+) -> None:
+    """once reminder 消费后从 store 删除，新 manager 实例不再读到。
+
+    模拟真实场景：BaseChatter.create_request 每次请求都新建 LLMContextManager，
+    once reminder 必须在消费后从全局 store 删除，而非依赖实例级状态。
+    """
     manager_a = make_manager("actor", wrap_with_system_tag=True)
     manager_b = make_manager("actor", wrap_with_system_tag=True)
 
@@ -414,10 +421,11 @@ def test_context_manager_dynamic_once_reminder_isolated_between_managers(reminde
     payloads_a = manager_a.add_payload(payloads_a, LLMPayload(ROLE.USER, Text("again")))
     payloads_b = manager_b.add_payload([], LLMPayload(ROLE.USER, Text("B")))
 
+    # manager_a：第一次注入后剥离（已从 store 删除），第二次不再注入
     assert cast(Text, payloads_a[0].content[0]).text == "A"
     assert cast(Text, payloads_a[2].content[0]).text == "again"
-    assert cast(Text, payloads_b[0].content[0]).text == "<system_reminder>\n[screen]\none shot\n</system_reminder>"
-    assert cast(Text, payloads_b[0].content[1]).text == "B"
+    # manager_b：新实例读不到已删除的 once reminder
+    assert cast(Text, payloads_b[0].content[0]).text == "B"
 
 
 def test_context_manager_dynamic_once_reminder_reappears_after_content_refresh(reminder_store) -> None:

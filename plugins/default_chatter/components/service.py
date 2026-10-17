@@ -27,7 +27,6 @@ class DefaultChatterService(BaseService):
 
     name = "chat_core"
     description = "Default Chatter 会话工厂和可重用聊天核心"
-    version = "1.0.0"
 
     def create_session(
         self,

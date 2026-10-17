@@ -6,6 +6,7 @@
 - get_config
 - remove_config
 - get_loaded_plugins
+- get_core_config
 """
 
 from __future__ import annotations
@@ -77,3 +78,21 @@ class TestConfigAPI:
             result = config_api.get_loaded_plugins()
             
             assert result == ["plugin1", "plugin2"]
+
+    def test_get_core_config(self) -> None:
+        """测试获取核心配置实例。"""
+        mock_core_config = MagicMock(name="CoreConfig")
+        with patch('src.core.config.get_core_config', return_value=mock_core_config) as mock_get:
+            result = config_api.get_core_config()
+
+            assert result is mock_core_config
+            mock_get.assert_called_once_with()
+
+    def test_get_core_config_not_initialized(self) -> None:
+        """测试核心配置未初始化时抛出 RuntimeError。"""
+        with patch('src.core.config.get_core_config', side_effect=RuntimeError("not init")):
+            try:
+                config_api.get_core_config()
+            except RuntimeError:
+                return
+            raise AssertionError("expected RuntimeError when core config not initialized")

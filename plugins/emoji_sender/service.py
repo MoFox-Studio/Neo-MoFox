@@ -20,6 +20,7 @@ import math
 import random
 import shutil
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -90,12 +91,43 @@ class EmojiSenderService(BaseService):
     对外提供：
     - search_best：按 tag + 向量检索，返回满足阈值并经温度采样的表情包
     - send_best：发送检索到的表情包
+    - search_candidates：按 tag + 向量检索，返回去重分页后的候选列表（picker 模式）
+    - send_by_id：按 meme id 前缀精确发送指定表情包（picker 模式）
     - ingest_once：执行一次入库任务（对齐→抽取→VLM 决策→写入）
     """
 
     name: str = "emoji_sender"
     description: str = "表情包收藏、检索与发送服务"
-    version: str = "1.0.0"
+
+    _SHORT_ID_LENGTH = 12
+
+    def __init__(self, plugin: Any) -> None:
+        """初始化使用历史并共享插件的拒绝哈希集合。"""
+        super().__init__(plugin)
+        self._usage_history: dict[str, deque[str]] = {}
+        self._rejected_hashes: set[str] = plugin._rejected_hashes
+
+    def _dedup_enabled(self) -> bool:
+        """使用历史去重是否开启。"""
+        return bool(self._cfg().dedup.enabled)
+
+    def _recently_used(self, stream_id: str) -> set[str]:
+        """获取指定聊天流最近已发送的表情包 id 集合。"""
+        history = self._usage_history.get(stream_id)
+        if not history:
+            return set()
+        return set(history)
+
+    def _record_usage(self, stream_id: str, meme_id: str) -> None:
+        """记录一次成功的表情包发送（仅当去重开启时记录）。"""
+        if not self._dedup_enabled() or not stream_id or not meme_id:
+            return
+        window = max(1, int(self._cfg().dedup.window))
+        history = self._usage_history.get(stream_id)
+        if history is None:
+            history = deque(maxlen=window)
+            self._usage_history[stream_id] = history
+        history.append(meme_id)
 
     def _selection_temperature(self) -> float:
         """获取检索候选采样温度。"""
@@ -184,19 +216,21 @@ class EmojiSenderService(BaseService):
         Path(path_value).unlink(missing_ok=True)
 
     async def _pick_next_manual_meme_file(self) -> Path | None:
-        """从手动目录获取下一个未入库的表情包文件。"""
+        """从手动目录获取下一个未入库且未被拒绝的表情包文件。"""
         manual_dir = await asyncio.to_thread(self._manual_memes_dir)
         candidates = await asyncio.to_thread(self._list_meme_files, manual_dir, ordered=True)
         if not candidates:
             return None
 
-        # 逐个检查，找到第一个未入库的
+        # 逐个检查，找到第一个未处理的
         for candidate in candidates:
             try:
                 _, meme_id = await asyncio.to_thread(self._read_file_with_hash, candidate)
             except Exception:
                 continue
 
+            if meme_id in self._rejected_hashes:
+                continue
             if not await self._already_ingested(meme_id):
                 return candidate
 
@@ -487,12 +521,25 @@ class EmojiSenderService(BaseService):
                 logger.warning(f"删除孤儿文件失败: {orphan_path} - {e}")
 
     async def _pick_random_media_cache_file(self) -> Path | None:
-        """从 media cache 的 emojis 目录随机挑选一个文件。"""
+        """按随机顺序从 media cache 选择未入库且未被拒绝的图片。"""
         root = self._media_cache_dir()
         candidates = await asyncio.to_thread(self._list_meme_files, root)
         if not candidates:
             return None
-        return random.choice(candidates)
+        random.shuffle(candidates)
+        for candidate in candidates:
+            try:
+                _, meme_id = await asyncio.to_thread(self._read_file_with_hash, candidate)
+            except OSError as error:
+                logger.warning(f"读取缓存表情包失败: {candidate} - {error}")
+                continue
+
+            if meme_id in self._rejected_hashes:
+                continue
+            if not await self._already_ingested(meme_id):
+                return candidate
+
+        return None
 
     async def _already_ingested(self, source_hash: str) -> bool:
         """检查某个表情包（按 hash）是否已入库。"""
@@ -515,7 +562,7 @@ class EmojiSenderService(BaseService):
         mime: str,
         is_gif_collage: bool = False,
     ) -> dict[str, Any] | None:
-        """调用 VLM 对表情包做收藏决策与标注。"""
+        """调用 VLM 做收藏决策与标注，失败或标注不完整时返回 None。"""
         try:
             model_set = get_model_set_by_task("vlm")
         except Exception:
@@ -580,7 +627,11 @@ class EmojiSenderService(BaseService):
             logger.warning("VLM 输出无法解析为 JSON，跳过")
             return None
 
-        keep = bool(obj.get("keep"))
+        keep = obj.get("keep")
+        if not isinstance(keep, bool):
+            logger.warning("VLM 收藏决策必须为布尔值，跳过")
+            return None
+
         description = str(obj.get("description") or "").strip()
         tags = obj.get("emotion_tags")
         if not isinstance(tags, list):
@@ -591,7 +642,8 @@ class EmojiSenderService(BaseService):
         ]
 
         if keep and (not description or not filtered_tags):
-            keep = False
+            logger.warning("VLM 收藏标注缺少有效描述或情感标签，跳过")
+            return None
 
         if len(description) > 200:
             description = description[:197] + "..."
@@ -641,7 +693,7 @@ class EmojiSenderService(BaseService):
                 logger.warning(f"读取候选表情包失败: {source} - {e}")
                 return
 
-            if await self._already_ingested(meme_id):
+            if meme_id in self._rejected_hashes or await self._already_ingested(meme_id):
                 return
 
             # 压缩图片用于 VLM
@@ -663,7 +715,10 @@ class EmojiSenderService(BaseService):
                 mime=vlm_mime,
                 is_gif_collage=is_gif_collage
             )
-            if not labeled or not labeled.get("keep"):
+            if not labeled:
+                return
+            if labeled.get("keep") is False:
+                self._rejected_hashes.add(meme_id)
                 return
 
             description = str(labeled.get("description") or "").strip()
@@ -743,10 +798,80 @@ class EmojiSenderService(BaseService):
             except Exception as e:
                 logger.warning(f"写入向量库失败: {e}")
 
+    async def _embed_query(self, query: str, request_name: str) -> list[float] | None:
+        """生成查询文本的 embedding，失败返回 None。"""
+        try:
+            embedding_model_set = get_model_set_by_task("embedding")
+        except Exception:
+            return None
+
+        try:
+            emb_req = create_embedding_request(
+                model_set=embedding_model_set,
+                request_name=request_name,
+                inputs=[query],
+            )
+            emb_resp = await emb_req.send()
+            return list(emb_resp.embeddings[0])
+        except Exception as e:
+            logger.warning(f"生成查询 embedding 失败: {e}")
+            return None
+
+    async def _query_candidates(
+        self,
+        description_query: str,
+        emotion_tags: list[str] | None,
+        n_results: int,
+    ) -> list[MemeCandidate]:
+        """按描述与 tag 过滤执行向量检索，解析并返回候选列表。"""
+        query = str(description_query or "").strip()
+        if not query:
+            raise ValueError("description_query 不能为空")
+
+        tags: list[str] = []
+        if emotion_tags:
+            tags = [str(t).strip() for t in emotion_tags if str(t).strip() in EMOTION_TAG_PRESET]
+
+        query_embedding = await self._embed_query(query, "emoji_sender_search")
+        if query_embedding is None:
+            return []
+
+        vdb = self._vector_db()
+        collection = self._collection_name()
+        await vdb.get_or_create_collection(collection)
+
+        where: dict[str, Any] | None = None
+        if tags:
+            where = {"tag": tags}
+
+        results = await vdb.query(
+            collection_name=collection,
+            query_embeddings=[query_embedding],
+            n_results=n_results,
+            where=where,
+        )
+
+        ids_list: list[list[str]] = list(results.get("ids") or [])
+        distances_list: list[list[float]] = list(results.get("distances") or [])
+        metadatas_list: list[list[dict[str, Any]]] = list(results.get("metadatas") or [])
+
+        if not ids_list or not ids_list[0]:
+            return []
+
+        candidates: list[MemeCandidate] = []
+        for i, _ in enumerate(ids_list[0]):
+            distance = float(distances_list[0][i]) if distances_list and distances_list[0] and i < len(distances_list[0]) else 999.0
+            meta = metadatas_list[0][i] if metadatas_list and metadatas_list[0] and i < len(metadatas_list[0]) else {}
+            cand = self._build_candidate(distance=distance, metadata=meta)
+            if cand is not None:
+                candidates.append(cand)
+        return candidates
+
     async def search_best(
         self,
         description_query: str,
         emotion_tags: list[str] | None = None,
+        stream_id: str = "",
     ) -> dict[str, Any] | None:
         """按 tag 过滤后执行向量检索，返回温度采样后的候选。"""
         query = str(description_query or "").strip()
@@ -757,62 +882,27 @@ class EmojiSenderService(BaseService):
         if emotion_tags:
             tags = [str(t).strip() for t in emotion_tags if str(t).strip() in EMOTION_TAG_PRESET]
 
-        try:
-            embedding_model_set = get_model_set_by_task("embedding")
-        except Exception:
-            return None
-
-        try:
-            emb_req = create_embedding_request(
-                model_set=embedding_model_set,
-                request_name="emoji_sender_search",
-                inputs=[query],
-            )
-            emb_resp = await emb_req.send()
-            query_embedding = emb_resp.embeddings[0]
-        except Exception as e:
-            logger.warning(f"生成查询 embedding 失败: {e}")
-            return None
-
-        vdb = self._vector_db()
-        collection = self._collection_name()
-        await vdb.get_or_create_collection(collection)
-
-        where: dict[str, Any] | None = None
-        if tags:
-            where = {"tag": tags}
-
         top_n = int(self._cfg().vector.top_n)
         max_distance = float(self._cfg().vector.max_distance)
 
-        results = await vdb.query(
-            collection_name=collection,
-            query_embeddings=[list(query_embedding)],
-            n_results=top_n,
-            where=where,
-        )
-
-        ids_list: list[list[str]] = list(results.get("ids") or [])
-        distances_list: list[list[float]] = list(results.get("distances") or [])
-        metadatas_list: list[list[dict[str, Any]]] = list(results.get("metadatas") or [])
-
-        if not ids_list or not ids_list[0]:
+        all_candidates = await self._query_candidates(query, tags, top_n)
+        if not all_candidates:
             return None
 
-        all_candidates: list[MemeCandidate] = []
+        # 使用历史过滤：阈值内候选全被过滤时回退全量，保持原有 fallback 行为
+        recent: set[str] = set()
+        if self._dedup_enabled() and stream_id:
+            recent = self._recently_used(stream_id)
+            if recent:
+                filtered = [c for c in all_candidates if c.meme_id not in recent]
+                if filtered:
+                    all_candidates = filtered
+
         best_any: MemeCandidate | None = None
         candidates_under_threshold: list[MemeCandidate] = []
-        for i, _ in enumerate(ids_list[0]):
-            distance = float(distances_list[0][i]) if distances_list and distances_list[0] and i < len(distances_list[0]) else 999.0
-            meta = metadatas_list[0][i] if metadatas_list and metadatas_list[0] and i < len(metadatas_list[0]) else {}
-            cand = self._build_candidate(distance=distance, metadata=meta)
-            if cand is None:
-                continue
-
-            all_candidates.append(cand)
+        for cand in all_candidates:
             if best_any is None or cand.distance < best_any.distance:
                 best_any = cand
-
             if cand.distance <= max_distance:
                 candidates_under_threshold.append(cand)
 
@@ -841,6 +931,156 @@ class EmojiSenderService(BaseService):
             "fallback_used": fallback_used,
         }
 
+    async def search_candidates(
+        self,
+        description_query: str,
+        emotion_tags: list[str] | None = None,
+        page: int = 1,
+        stream_id: str = "",
+    ) -> dict[str, Any] | None:
+        """按 tag 过滤后向量检索，返回去重、历史过滤、分页后的候选列表。
+
+        Returns:
+            {candidates: [{meme_id, short_id, tag, description, distance}], page, total}
+            无有效候选时返回 None。
+        """
+        tags: list[str] = []
+        if emotion_tags:
+            tags = [str(t).strip() for t in emotion_tags if str(t).strip() in EMOTION_TAG_PRESET]
+
+        page_size = max(1, int(self._cfg().picker.page_size))
+        page = max(1, int(page))
+
+        # 拉取足够多的候选：页深 × 页大小 × 元余量，上限 60
+        fetch_n = min(60, max(page * page_size * 3, page_size * 3))
+        candidates = await self._query_candidates(description_query, tags, fetch_n)
+        if not candidates:
+            return None
+
+        # 同一 meme 多 tag 多记录：按 meme_id 去重，保留最小距离
+        best_by_meme: dict[str, MemeCandidate] = {}
+        for cand in candidates:
+            existing = best_by_meme.get(cand.meme_id)
+            if existing is None or cand.distance < existing.distance:
+                best_by_meme[cand.meme_id] = cand
+        deduped = sorted(best_by_meme.values(), key=lambda c: c.distance)
+
+        # 使用历史过滤：全被过滤时回退全量，避免无结果可发
+        if self._dedup_enabled() and stream_id:
+            recent = self._recently_used(stream_id)
+            if recent:
+                filtered = [c for c in deduped if c.meme_id not in recent]
+                if filtered:
+                    deduped = filtered
+
+        total = len(deduped)
+        start = (page - 1) * page_size
+        page_items = deduped[start : start + page_size]
+        if not page_items:
+            return None
+
+        return {
+            "candidates": [
+                {
+                    "meme_id": cand.meme_id,
+                    "short_id": cand.meme_id[: self._SHORT_ID_LENGTH],
+                    "tag": cand.tag,
+                    "description": cand.description,
+                    "distance": cand.distance,
+                }
+                for cand in page_items
+            ],
+            "page": page,
+            "total": total,
+        }
+
+    async def send_by_id(
+        self,
+        *,
+        short_id: str,
+        stream_id: str,
+        platform: str | None,
+    ) -> tuple[bool, dict[str, Any] | None, str]:
+        """按 meme id 前缀精确发送指定表情包。
+
+        Returns:
+            (ok, result, reason)，result 含 meme_id/tag/path/description，失败时为 None。
+        """
+        prefix = str(short_id or "").strip().lower()
+        if not prefix:
+            return False, None, "meme_id 不能为空"
+
+        vdb = self._vector_db()
+        collection = self._collection_name()
+        await vdb.get_or_create_collection(collection)
+
+        matched: dict[str, Any] | None = None
+        offset = 0
+        limit = 512
+        while True:
+            data = await vdb.get(
+                collection_name=collection,
+                limit=limit,
+                offset=offset,
+                include=["metadatas"],
+            )
+            ids: list[str] = list(data.get("ids") or [])
+            metadatas: list[dict[str, Any]] = list(data.get("metadatas") or [])
+            if not ids:
+                break
+
+            for i, record_id in enumerate(ids):
+                meme_id = record_id.split(":", 1)[0]
+                if meme_id.startswith(prefix):
+                    meta = metadatas[i] if i < len(metadatas) else {}
+                    matched = meta
+                    break
+            if matched is not None:
+                break
+            offset += len(ids)
+
+        if matched is None:
+            return False, None, f"未找到 id={prefix} 对应的表情包，请重新调用 search_emoji_memes 获取有效候选"
+
+        path_value = str(matched.get("path") or "").strip()
+        description = str(matched.get("description") or "").strip()
+        tag = str(matched.get("tag") or "").strip()
+        meme_id = str(matched.get("meme_id") or "").strip()
+        if not path_value or not meme_id:
+            return False, None, "表情包记录元数据不完整"
+
+        path = Path(path_value)
+        if not path.exists():
+            return False, None, "表情包文件已被删除"
+
+        try:
+            payload = await asyncio.to_thread(self._read_file_bytes, path)
+        except Exception as e:
+            logger.warning(f"读取表情包失败: {path} - {e}")
+            return False, None, "读取表情包文件失败"
+
+        image_base64 = await asyncio.to_thread(base64_encode_bytes, payload)
+        processed_plain_text = f"[表情包:{tag}:{description}]" if description else f"[表情包:{tag}]"
+
+        ok = await send_emoji(
+            emoji_data=image_base64,
+            stream_id=stream_id,
+            platform=platform,
+            processed_plain_text=processed_plain_text,
+        )
+
+        result = {
+            "meme_id": meme_id,
+            "tag": tag,
+            "path": path_value,
+            "description": description,
+            "fallback_used": False,
+        }
+        if ok:
+            self._record_usage(stream_id, meme_id)
+            return True, result, "发送成功"
+        return False, result, "发送失败"
+
     async def send_best_detailed(
         self,
         *,
@@ -860,6 +1100,7 @@ class EmojiSenderService(BaseService):
         result = await self.search_best(
             description_query=description_query,
             emotion_tags=emotion_tags,
+            stream_id=stream_id,
         )
         if not result:
             return False, None, "没有找到满足条件的表情包"
@@ -888,6 +1129,7 @@ class EmojiSenderService(BaseService):
         )
 
         if ok:
+            self._record_usage(stream_id, str(result.get("meme_id") or ""))
             return True, result, "发送成功"
         return False, result, "发送失败"
 

@@ -218,6 +218,42 @@ class TestBaseAdapter:
                     assert mock_reconnect.call_count >= 1
 
     @pytest.mark.asyncio
+    async def test_stop_from_health_check_does_not_cancel_self(self):
+        """健康检查任务内部触发 stop() 时不应取消自身。
+
+        回归测试：重连流程（stop -> start）由健康检查任务自己发起时，
+        若 stop() 取消了当前运行的健康检查任务，会在 start() 之前抛出
+        CancelledError，导致适配器停留在已停止状态、不再自动重连。
+        """
+        mock_sink = MagicMock()
+        adapter = TestAdapter(core_sink=mock_sink)
+        adapter._running = True
+
+        from src.kernel.concurrency import get_task_manager
+
+        tm = get_task_manager()
+        completed = False
+
+        async def inner():
+            nonlocal completed
+            # 模拟重连流程中健康检查任务内部调用 stop()
+            with patch("mofox_wire.AdapterBase.stop", new_callable=AsyncMock):
+                await adapter.stop()
+            completed = True
+
+        # 通过任务管理器创建任务，使其成为当前任务并登记到 _health_check_task_info，
+        # 复现真实场景：健康检查任务触发 reconnect() -> stop()。
+        task_info = tm.create_task(inner(), name="test_health_check_self_stop")
+        adapter._health_check_task_info = task_info
+        assert task_info.task is not None
+        await asyncio.wait_for(task_info.task, timeout=5)
+
+        # 若 stop() 取消了自身，inner 会以 CancelledError 中断，completed 保持 False
+        assert completed is True
+        assert adapter._health_check_task_info is None
+        assert adapter._running is False
+
+    @pytest.mark.asyncio
     async def test_reconnect_default(self):
         """测试默认重连逻辑。"""
         mock_sink = MagicMock()

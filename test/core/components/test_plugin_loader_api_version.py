@@ -4,14 +4,17 @@
 ``_check_api_version_compatibility`` 的逐模块语义化版本校验、
 ``_check_core_version_compatibility`` 的核心版本校验，
 以及 ``_prune_unloadable_plugins`` 在版本不兼容时的剔除行为。
+官方插件的真实清单在当前核心下必须通过版本和依赖校验。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.app.plugin_system.api import PLUGIN_API_VERSIONS
-from src.core.components.loader import PluginLoader, PluginManifest
+from src.core.components.loader import PluginLoader, PluginManifest, load_manifest
 
 
 def _manifest(
@@ -46,8 +49,8 @@ def _patch_api_version(monkeypatch: pytest.MonkeyPatch, api_name: str, version: 
 # =============================================================================
 
 
-def test_plugin_api_versions_contains_all_20_modules() -> None:
-    """PLUGIN_API_VERSIONS 应包含全部 20 个 *_api 模块，且初始版本均为 1.0.0。"""
+def test_plugin_api_versions_contains_all_22_modules() -> None:
+    """PLUGIN_API_VERSIONS 应包含全部 22 个 *_api 模块。"""
     expected = {
         "action_api",
         "adapter_api",
@@ -62,6 +65,7 @@ def test_plugin_api_versions_contains_all_20_modules() -> None:
         "media_api",
         "message_api",
         "permission_api",
+        "person_api",
         "plugin_api",
         "prompt_api",
         "router_api",
@@ -69,11 +73,17 @@ def test_plugin_api_versions_contains_all_20_modules() -> None:
         "service_api",
         "storage_api",
         "stream_api",
+        "tool_api",
     }
     assert set(PLUGIN_API_VERSIONS) == expected
-    assert len(PLUGIN_API_VERSIONS) == 20
+    assert len(PLUGIN_API_VERSIONS) == 22
+    from packaging.version import InvalidVersion, Version
+
     for name, ver in PLUGIN_API_VERSIONS.items():
-        assert ver == "1.0.0", f"{name} 初始版本应为 1.0.0，实际为 {ver}"
+        try:
+            Version(ver)
+        except InvalidVersion:
+            raise AssertionError(f"{name} 版本号格式无效: {ver}")
 
 
 # =============================================================================
@@ -81,12 +91,13 @@ def test_plugin_api_versions_contains_all_20_modules() -> None:
 # =============================================================================
 
 
-def test_string_api_version_full_compatible() -> None:
-    """字符串形式，全部模块 1.0.0，应兼容。"""
+def test_string_api_version_rejected_after_major_bump() -> None:
+    """字符串形式 1.0.0 在 action/agent 升到 2.0.0 后应被拒绝（破坏性变更）。"""
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(_manifest(api_version="1.0.0"))
-    assert ok is True
-    assert "兼容" in reason
+    assert ok is False
+    assert "action_api" in reason
+    assert "agent_api" in reason
 
 
 def test_string_api_version_major_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,14 +125,43 @@ def test_string_api_version_core_too_low(monkeypatch: pytest.MonkeyPatch) -> Non
 # =============================================================================
 
 
-def test_dict_api_version_full_compatible() -> None:
-    """dict 形式，声明模块均为 1.0.0，应兼容。"""
+def test_dict_api_version_current_versions_compatible() -> None:
+    """dict 形式声明当前全部模块版本，应兼容。"""
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(
-        _manifest(api_version={"llm_api": "1.0.0", "send_api": "1.0.0"})
+        _manifest(api_version=dict(PLUGIN_API_VERSIONS))
     )
     assert ok is True
     assert "兼容" in reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "plugin_name",
+    ["default_chatter", "neo_default_chatter", "perm_plugin", "utility_commands"],
+)
+async def test_official_stream_api_plugin_manifests_are_loadable(plugin_name: str) -> None:
+    """官方插件的真实清单应被当前加载器接受，不启动插件或写入数据。"""
+    plugin_path = Path(__file__).resolve().parents[3] / "plugins" / plugin_name
+    manifest = await load_manifest(str(plugin_path))
+    assert manifest is not None
+    assert manifest.name == plugin_name
+    loader = PluginLoader()
+    loadable = loader._prune_unloadable_plugins({plugin_name: manifest})
+    assert plugin_name in loadable, loader.get_failed_plugins()
+    assert loader.get_failed_plugins() == {}
+
+
+def test_send_api_minor_version_accepts_existing_plugins() -> None:
+    """send_api 1.1.0 同时接受要求 1.0.0 和 1.1.0 的插件。"""
+    loader = PluginLoader()
+    assert PLUGIN_API_VERSIONS["send_api"] == "1.1.0"
+    assert loader._check_api_version_compatibility(
+        _manifest(api_version={"send_api": "1.0.0"})
+    )[0] is True
+    assert loader._check_api_version_compatibility(
+        _manifest(api_version={"send_api": "1.1.0"})
+    )[0] is True
 
 
 def test_dict_api_version_major_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,15 +247,15 @@ def test_invalid_version_format_rejected() -> None:
 
 
 def test_string_equivalent_to_full_dict() -> None:
-    """字符串 "1.0.0" 与全 20 模块 dict "1.0.0" 结果一致。"""
+    """字符串 "1.0.0" 与全模块同值 dict "1.0.0" 结果一致（均被拒绝）。"""
     loader = PluginLoader()
     full_dict = {name: "1.0.0" for name in PLUGIN_API_VERSIONS}
     ok_str, reason_str = loader._check_version_compatibility(_manifest(api_version="1.0.0"))
     ok_dict, reason_dict = loader._check_version_compatibility(
         _manifest(api_version=full_dict)
     )
-    assert ok_str is ok_dict is True
-    assert reason_str == reason_dict == "兼容"
+    assert ok_str is ok_dict is False
+    assert reason_str == reason_dict
 
 
 # =============================================================================
@@ -264,7 +304,7 @@ def test_both_declared_both_pass() -> None:
     """两者同时声明且都满足 → 兼容。"""
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(
-        _manifest(api_version="1.0.0", min_core_version="1.0.0")
+        _manifest(api_version={"llm_api": "1.0.0"}, min_core_version="1.0.0")
     )
     assert ok is True
 
@@ -287,7 +327,7 @@ def test_both_declared_core_fails_rejects(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(loader_mod, "CORE_VERSION", "1.0.0")
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(
-        _manifest(api_version="1.0.0", min_core_version="2.0.0")
+        _manifest(api_version={"llm_api": "1.0.0"}, min_core_version="2.0.0")
     )
     assert ok is False
 
@@ -335,7 +375,7 @@ def test_prune_removes_incompatible_plugin(monkeypatch: pytest.MonkeyPatch) -> N
 def test_prune_keeps_compatible_plugin() -> None:
     """版本兼容的插件应保留在可加载集合中。"""
     loader = PluginLoader()
-    manifests = {"good": _manifest("good", api_version="1.0.0")}
+    manifests = {"good": _manifest("good", api_version={"llm_api": "1.0.0"})}
     loadable = loader._prune_unloadable_plugins(manifests)
     assert "good" in loadable
     assert "good" not in loader.get_failed_plugins()

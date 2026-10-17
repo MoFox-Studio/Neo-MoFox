@@ -221,6 +221,9 @@ class PluginManager:
         if not has_config:
             logger.debug(f"插件 '{plugin_name}' 未通过类属性 configs 声明配置，使用空配置")
 
+        # 5.1 以 manifest 为唯一权威来源，注入插件运行时版本号
+        self._inject_manifest_metadata(plugin_instance, manifest)
+
         # 6. 注册组件到全局注册表
         await self._register_components(plugin_instance)
 
@@ -486,6 +489,74 @@ class PluginManager:
                 state_manager.remove_runtime_data(signature)
             except Exception as e:
                 logger.warning(f"更新组件状态失败 '{signature}': {e}")
+
+    def _inject_manifest_metadata(
+        self, plugin_instance: "BasePlugin", manifest: "PluginManifest"
+    ) -> None:
+        """以 manifest 为唯一权威来源，注入插件运行时元数据。
+
+        将 ``manifest.version`` / ``manifest.description`` 写入插件实例的
+        ``plugin_version`` / ``plugin_description``。若插件继承链的用户定义层级
+        在类级别显式声明了
+        ``plugin_version`` / ``plugin_description`` / ``plugin_author``，
+        视为历史遗留冗余，逐项发出弃用警告提醒移除，不影响插件加载运行。
+
+        Args:
+            plugin_instance: 已实例化的插件对象
+            manifest: 该插件的 manifest 数据
+        """
+        import warnings
+
+        from src.core.components.base.plugin import BasePlugin
+
+        manifest_version = manifest.version
+        plugin_instance.plugin_version = manifest_version
+        plugin_instance.plugin_description = manifest.description
+
+        # 按属性解析顺序遍历完整 MRO，覆盖中间基类与后置 mixin 声明
+        metadata_names = (
+            "plugin_version",
+            "plugin_description",
+            "plugin_author",
+        )
+        declared_values: dict[str, object] = {}
+        for cls in type(plugin_instance).__mro__:
+            if cls in (BasePlugin, object):
+                continue
+            class_vars = vars(cls)
+            for name in metadata_names:
+                if name not in declared_values and name in class_vars:
+                    declared_values[name] = class_vars[name]
+
+        if "plugin_version" in declared_values:
+            declared_version = declared_values["plugin_version"]
+            version_hint = (
+                f" ({declared_version}) 与 manifest.version ({manifest_version}) 不一致，"
+                if declared_version is not None
+                and declared_version != manifest_version
+                else ""
+            )
+            warnings.warn(
+                f"插件 '{plugin_instance.plugin_name}' 的类属性 plugin_version"
+                f"{version_hint}"
+                "已弃用；版本号请只保留在 manifest.json",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        if "plugin_description" in declared_values:
+            warnings.warn(
+                f"插件 '{plugin_instance.plugin_name}' 的类属性 plugin_description "
+                "已弃用；描述请只保留在 manifest.json",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        if "plugin_author" in declared_values:
+            warnings.warn(
+                f"插件 '{plugin_instance.plugin_name}' 的类属性 plugin_author "
+                "已弃用；作者信息请只保留在 manifest.json",
+                DeprecationWarning,
+                stacklevel=3,
+            )
 
     async def reload_plugin(self, plugin_name: str) -> bool:
         """重载插件。

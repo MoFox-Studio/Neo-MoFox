@@ -36,7 +36,6 @@ def mock_plugin():
     """创建模拟插件的 fixture。"""
     plugin = MagicMock()
     plugin.plugin_name = "test_plugin"
-    plugin.plugin_description = "Test plugin"
     plugin.plugin_version = "1.0.0"
     plugin.get_components = Mock(return_value=[])
     plugin.on_plugin_loaded = AsyncMock()

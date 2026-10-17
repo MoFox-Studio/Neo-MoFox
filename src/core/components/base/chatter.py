@@ -9,16 +9,18 @@ from __future__ import annotations
 from abc import abstractmethod
 import asyncio
 from datetime import datetime
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, cast
 
 from src.core.components.base.component import BaseComponent
-from src.core.components.types import ChatType
+from src.core.components.types import (
+    ChatterResult,
+    ChatType,
+    WaitResumeEvent,
+)
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
 from src.core.utils.context_compression import default_chat_context_compression_handler
-from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger, COLOR
 
 if TYPE_CHECKING:
@@ -29,97 +31,6 @@ if TYPE_CHECKING:
     from src.core.models.message import Message
     from src.kernel.llm import LLMRequest
     from src.kernel.llm.payload.tooling import LLMUsable, ToolRegistry
-
-
-@dataclass
-class Wait:
-    """等待结果。
-
-    表示 Chatter 需要等待一段时间。
-
-    Attributes:
-        time: 等待时间（秒），如果为 None 则表示无限等待直到有新消息；
-            如果为数字，则表示到期后由框架主动恢复生成器，不依赖新消息
-        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
-    """
-
-    time: float | int | None = None
-    step_data: dict[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class WaitResumeEvent:
-    """Wait/Stop 结束后由框架送回生成器的恢复事件。
-
-    框架内置 source 约定值（不是硬性限制）：
-    - ``"message"`` 新消息唤醒
-    - ``"timer"`` 定时器到期
-    - ``"sub_agent"`` 子代理完成
-    - ``"internal_context"`` 内部上下文到达
-
-    外部插件可以通过 ``trigger_external_resume()`` 注入任意 source 的事件，
-    通过 ``extra`` 字段传递自定义数据。
-    对未知 source 的处理由各 Chatter 自行决定。
-    """
-
-    source: str
-    wait_time: float | int | None = None
-    unread_count: int = 0
-    context_key: str = ""
-    extra: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class Success:
-    """成功结果。
-
-    表示 Chatter 成功完成执行。
-
-    Attributes:
-        message: 成功消息
-        data: 可选的附加数据
-        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
-    """
-
-    message: str
-    data: dict[str, Any] | None = None
-    step_data: dict[str, Any] | None = None
-
-
-@dataclass
-class Failure:
-    """失败结果。
-
-    表示 Chatter 执行失败。
-
-    Attributes:
-        error: 错误消息
-        exception: 可选的异常对象
-        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
-    """
-
-    error: str
-    exception: Exception | None = None
-    step_data: dict[str, Any] | None = None
-
-@dataclass
-class Stop:
-    """停止结果。
-
-    表示 Chatter 将在一段时间后重新开始对话。
-
-    Attributes:
-        time: 停止时间（秒）
-        step_data: 可选的步骤元数据，供框架在步进完成后发布通知事件
-    """
-
-    time: float | int
-    direct_message_wake_enabled: bool = False
-    direct_message_wake_probability: float = 0.0
-    step_data: dict[str, Any] | None = None
-
-# 类型别名
-ChatterResult = Wait | Success | Failure | Stop
 
 
 class BaseChatter(BaseComponent):
@@ -268,7 +179,10 @@ class BaseChatter(BaseComponent):
     ) -> list[type[LLMUsable]]:
         """修改 LLMUsable 组件列表。
 
-        调用其go_activate方法进行激活判定，并核对associate_type，返回最终可用的组件列表。
+        将传入的组件类按 Action/Agent/Tool 分流，委托给各 ``*_api`` 封装
+        的筛选逻辑做上下文过滤（chat_type、chatter_allow、关联类型、
+        激活判定等）。
+        仅对传入列表筛选，不从聊天流或全局注册表获取组件。
 
         Args:
             llm_usables: 原始 LLMUsable 组件列表
@@ -276,130 +190,81 @@ class BaseChatter(BaseComponent):
         Returns:
             list[type[LLMUsable]]: 修改后的组件列表
         """
-
+        from src.app.plugin_system.api import action_api, agent_api, tool_api
         from src.core.managers import get_stream_manager
-        
+
         logger = get_logger("chatter", display="聊天器", color=COLOR.MAGENTA)
+
+        action_classes = cast(
+            list[type["LLMUsable"]],
+            [
+                cls for cls in llm_usables
+                if isinstance(cls, type) and issubclass(cls, BaseAction)
+            ],
+        )
+        agent_classes = cast(
+            list[type["LLMUsable"]],
+            [
+                cls for cls in llm_usables
+                if isinstance(cls, type) and issubclass(cls, BaseAgent)
+            ],
+        )
+        tool_classes = cast(
+            list[type["LLMUsable"]],
+            [
+                cls for cls in llm_usables
+                if isinstance(cls, type) and issubclass(cls, BaseTool)
+            ],
+        )
+
+        known_classes = set(action_classes) | set(agent_classes) | set(tool_classes)
+        others = [cls for cls in llm_usables if cls not in known_classes]
+
+        chatter_signature = self.get_signature() or ""
+
+        # 读取当前流的聊天类型，供筛选判定组件声明的 chat_type；
+        # 缺失时筛选会按 ChatType.ALL 判定，声明了具体类型的组件将被全部剔除
         chat_stream = await get_stream_manager().get_or_create_stream(
             stream_id=self.stream_id
         )
-        chat_context = chat_stream.context
 
-        removals: list[tuple[str, str]] = []
-        filtered: list[type[LLMUsable]] = []
-
-        for usable_cls in llm_usables:
-            usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
-            signature = usable_cls.get_signature() or usable_cls.__name__
-
-            chatter_allow = getattr(usable_cls, "chatter_allow", [])
-            if chatter_allow:
-                chatter_signature = self.get_signature()
-                allowed = self.name in chatter_allow
-                if chatter_signature and not allowed:
-                    allowed = chatter_signature in chatter_allow
-
-                if not allowed:
-                    allow_str = ", ".join(chatter_allow)
-                    reason = f"chatter 不匹配（允许: {allow_str}）"
-                    removals.append((signature, reason))
-                    logger.debug(f"[移除组件] {signature}：{reason}")
-                    continue
-
-            if issubclass(usable_cls, BaseAction):
-                required_types = usable_cls.validate_associated_types()
-                if not chat_context.check_types(required_types):
-                    types_str = ", ".join(required_types)
-                    reason = f"适配器不支持（需要: {types_str}）"
-                    removals.append((signature, reason))
-                    logger.debug(f"[移除组件] {signature}：{reason}")
-                    continue
-
-            filtered.append(usable_cls)
-
-        # 并行执行 go_activate（如果组件提供）
-        tasks = []
-        signatures = []
-        for usable_cls in filtered:
-            usable_cls = cast(type["BaseAction|BaseAgent|BaseTool"], usable_cls)  # 类型提示
-            signature = usable_cls.get_signature() or usable_cls.__name__
-
-            try:
-                component_plugin = self._resolve_component_plugin(signature)
-                instance: BaseAction | BaseAgent | BaseTool
-                if issubclass(usable_cls, BaseAction):
-                    instance = usable_cls(chat_stream=chat_stream, plugin=component_plugin)
-
-                    current_msg = chat_context.current_message
-                    if current_msg:
-                        instance._last_message = (
-                            current_msg.processed_plain_text
-                            if current_msg.processed_plain_text
-                            else str(current_msg.content or "")
-                        )
-                elif issubclass(usable_cls, BaseTool):
-                    instance = usable_cls(plugin=component_plugin)
-                elif issubclass(usable_cls, BaseAgent):
-                    instance = usable_cls(stream_id=self.stream_id, plugin=component_plugin)
-                else:
-                    continue
-
-                go_activate = getattr(instance, "go_activate", None)
-                if not callable(go_activate):
-                    continue
-
-                tasks.append(go_activate())
-                signatures.append(signature)
-
-            except Exception as e:
-                logger.error(f"创建 LLMUsable 实例 {signature} 失败: {e}")
-                removals.append((signature, f"创建实例失败: {e}"))
-
-        if tasks:
-            logger.debug(
-                f"[{chat_stream.stream_id}] 并行执行激活判断，任务数: {len(tasks)}"
-            )
-            try:
-                results = await get_task_manager().gather(
-                    *tasks, return_exceptions=True
-                )
-
-                for signature, result in zip(signatures, results, strict=False):
-                    if isinstance(result, Exception):
-                        logger.error(
-                            f"[{chat_stream.stream_id}] 激活判断 {signature} 时出错: {result}"
-                        )
-                        removals.append((signature, f"激活判断出错: {result}"))
-                    elif not result:
-                        removals.append((signature, "go_activate 返回 False"))
-                        logger.debug(
-                            f"[{chat_stream.stream_id}] 未激活组件: {signature}"
-                        )
-                    else:
-                        logger.debug(f"[{chat_stream.stream_id}] 激活组件: {signature}")
-
-            except Exception as e:
-                logger.error(f"[{chat_stream.stream_id}] 并行激活判断失败: {e}")
-                removals.extend((sig, f"并行判断失败: {e}") for sig in signatures)
-
-        if removals:
-            removals_summary = " | ".join(
-                [f"{name}({reason})" for name, reason in removals]
-            )
-            logger.info(f"[{chat_stream.stream_id}] 移除组件: {removals_summary}")
-
-        removal_names = {name for name, _ in removals}
-        available = [
-            usable_cls
-            for usable_cls in filtered
-            if (usable_cls.get_signature() or usable_cls.__name__) not in removal_names # type: ignore
-        ]
-
-        logger.info(
-            f"[{chat_stream.stream_id}] 可用组件: {len(available)}/{len(llm_usables)}"
+        filtered_actions = await action_api.filter_actions(
+            action_classes,
+            stream_id=self.stream_id,
+            chatter_name=self.name,
+            chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
+        )
+        filtered_agents = await agent_api.filter_agents(
+            agent_classes,
+            stream_id=self.stream_id,
+            chatter_name=self.name,
+            chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
+        )
+        filtered_tools = await tool_api.filter_tools(
+            tool_classes,
+            stream_id=self.stream_id,
+            chatter_name=self.name,
+            chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
         )
 
-        return available
+        logger.info(
+            f"[{self.stream_id}] 可用组件: "
+            f"{len(filtered_actions) + len(filtered_agents) + len(filtered_tools)}"
+            f"/{len(llm_usables)}"
+        )
+
+        return cast(
+            list[type["LLMUsable"]],
+            (
+                list(filtered_actions)
+                + list(filtered_agents)
+                + list(filtered_tools)
+                + others
+            ),
+        )
 
     def _resolve_component_plugin(self, signature: str | None) -> "BasePlugin":
         """根据组件签名解析其所属插件实例。"""
@@ -407,14 +272,14 @@ class BaseChatter(BaseComponent):
             return self.plugin
 
         try:
+            from src.app.plugin_system.api import plugin_api
             from src.core.components.types import parse_signature
-            from src.core.managers import get_plugin_manager
 
             plugin_name = parse_signature(signature)["plugin_name"]
         except Exception:
             return self.plugin
 
-        target_plugin = get_plugin_manager().get_plugin(plugin_name)
+        target_plugin = plugin_api.get_plugin(plugin_name)
         if target_plugin:
             return target_plugin
 
@@ -462,10 +327,10 @@ class BaseChatter(BaseComponent):
         if not issubclass(usable_cls, (BaseTool, BaseAction, BaseAgent)):
             raise ValueError("未知的 LLMUsable 组件类型，无法执行")
 
-        from src.core.utils.llm_tool_call import exec_llm_usable
+        from src.app.plugin_system.api import llm_api
 
         owner_plugin = self._resolve_component_plugin(sig)
-        return await exec_llm_usable(
+        return await llm_api.exec_llm_usable(
             usable_cls,
             plugin=owner_plugin,
             stream_id=self.stream_id,
@@ -506,11 +371,11 @@ class BaseChatter(BaseComponent):
         Raises:
             KeyError: 当 task 在模型配置中不存在时
         """
-        from src.core.config import get_model_config
+        from src.app.plugin_system.api import llm_api
         from src.core.prompt import STREAM_BUCKET_PREFIX
-        from src.kernel.llm import LLMRequest, LLMContextManager, ReminderSourceSpec
+        from src.kernel.llm import LLMContextManager, ReminderSourceSpec
 
-        model_set = get_model_config().get_task(task)
+        model_set = llm_api.get_model_set_by_task(task)
         reminder_sources = None
         if with_reminder is not None:
             bucket = with_reminder
@@ -543,14 +408,12 @@ class BaseChatter(BaseComponent):
                 f"timeout={first.get('timeout')}"
             )
 
-        request = LLMRequest(
+        return llm_api.create_llm_request(
             model_set=model_set,
             request_name=request_name or self.name,
-            meta_data={"stream_id": self.stream_id},
             context_manager=context_manager,
+            stream_id=self.stream_id,
         )
-
-        return request
 
     async def inject_usables(self, request: Any) -> "ToolRegistry":
         """将可用工具过滤后注入 LLM 请求，返回工具注册表。
@@ -564,14 +427,13 @@ class BaseChatter(BaseComponent):
         Returns:
             ToolRegistry: 注册了所有可用工具的注册表
         """
-        from src.kernel.llm import ToolRegistry, LLMPayload, ROLE
+        from src.app.plugin_system.api import llm_api
+        from src.kernel.llm import LLMPayload, ROLE
 
         usables = await self.get_llm_usables()
         usables = await self.modify_llm_usables(usables)
 
-        registry = ToolRegistry()
-        for usable in usables:
-            registry.register(usable)
+        registry = llm_api.create_tool_registry(tools=usables)
 
         if registry.get_all():
             request.add_payload(LLMPayload(ROLE.TOOL, registry.get_all()))  # type: ignore[arg-type]
@@ -602,9 +464,9 @@ class BaseChatter(BaseComponent):
             list[tuple[bool, bool]]: 与 ``calls`` 顺序一致的结果列表。
             每项为 ``(是否已写回 TOOL_RESULT, execute 是否成功)``。
         """
-        from src.core.utils.llm_tool_call import run_tool_call
+        from src.app.plugin_system.api import llm_api
 
-        return await run_tool_call(
+        return await llm_api.run_tool_call(
             calls=calls,
             response=response,
             usable_map=usable_map,
@@ -700,12 +562,11 @@ class BaseChatter(BaseComponent):
         Returns:
             tuple[str, list[Message]]: (格式化后的未读消息文本，每条消息占一行, 未读消息列表)
         """
-        from src.core.managers import get_stream_manager
-        
+        from src.app.plugin_system.api import stream_api
+
         logger = get_logger("chatter")
 
-        sm = get_stream_manager()
-        chat_stream = sm._streams.get(self.stream_id)
+        chat_stream = await stream_api.get_stream(stream_id=self.stream_id)
 
         if not chat_stream:
             logger.warning(
@@ -733,15 +594,14 @@ class BaseChatter(BaseComponent):
         Returns:
             int: 实际 flush 的消息数量
         """
-        from src.core.managers import get_stream_manager
-        
+        from src.app.plugin_system.api import stream_api
+
         logger = get_logger("chatter")
 
         if not unread_messages:
             return 0
 
-        sm = get_stream_manager()
-        chat_stream = sm._streams.get(self.stream_id)
+        chat_stream = await stream_api.get_stream(stream_id=self.stream_id)
 
         if not chat_stream:
             logger.warning(

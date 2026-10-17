@@ -71,11 +71,12 @@ class TestBaseAgent:
     @pytest.fixture(autouse=True)
     def reset_class_attributes(self):
         """在每个测试前重置类属性。"""
+        had_plugin = "_plugin_" in ConcreteAgent.__dict__
         original_plugin_name = getattr(ConcreteAgent, "_plugin_", None)
         yield
-        if original_plugin_name:
-            ConcreteAgent._plugin_ = original_plugin_name
-        elif hasattr(ConcreteAgent, "_plugin_"):
+        if had_plugin:
+            ConcreteAgent._plugin_ = original_plugin_name  # type: ignore[assignment]
+        elif "_plugin_" in ConcreteAgent.__dict__:
             delattr(ConcreteAgent, "_plugin_")
 
     def test_agent_initialization(self, mock_plugin):

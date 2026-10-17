@@ -4,14 +4,16 @@
 双向转换。核心解析逻辑在 ``_parse_segments`` 中实现递归的 ``SegPayload`` 展开。
 
 设计原则：
-- 适配器传入的媒体数据（图片、语音等）**已经是 base64 编码**，转换器不做下载。
+- 适配器传入的媒体数据（图片、语音、视频等）**已经是 base64 编码**，转换器不做下载。
 - 嵌套 seglist 最多递归 3 层，超出以占位符替代。
 - 单个段解析失败不影响整体，用占位符保留位置。
-- 图片和表情包会通过 VLM 识别转换为文字描述。
+- 图片和表情包会通过 VLM 识别转换为文字描述；语音通过 ASR；视频通过事件链
+  交给第三方插件识别（无内置引擎，识别失败保留占位符）。
 """
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -30,6 +32,24 @@ logger = get_logger("message_converter")
 
 # 递归深度硬上限
 _MAX_NESTING_DEPTH: int = 5
+
+
+def _compute_media_hash(data: str) -> str | None:
+    """计算二进制媒体的哈希（SHA256），作为各媒体表的主键回查依据。
+
+    - image/emoji → Images.image_id
+    - voice       → Voices.voice_id
+    - video       → Videos.video_id
+
+    与 MediaManager 识别流程使用相同算法。失败时返回 None，不影响消息解析。
+    """
+    try:
+        from src.core.managers.media_manager import MediaManager
+
+        return MediaManager.compute_media_hash(data)
+    except Exception:
+        logger.warning("媒体哈希计算失败", exc_info=True)
+        return None
 
 
 def _merge_message_extra_with_format_info(
@@ -57,6 +77,57 @@ def _merge_message_extra_with_format_info(
         extra_data["format_info"] = format_info
 
     return extra_data
+
+
+# 预格式化大小文本（如 "1.7MB"），直接透传
+_READABLE_SIZE_RE = re.compile(r"^\d+(?:\.\d+)?\s*[KMGTP]?i?B$", re.IGNORECASE)
+
+
+def _format_file_size(size: Any) -> str:
+    """将字节数格式化为可读大小文本。
+
+    支持数值、数字字符串（含千分位逗号）；无法解析（``None``、空串、
+    负数或非数字）时统一返回空字符串，避免 LLM 文本中出现无意义内容。
+    已是可读格式的字符串（如 ``"1.7MB"``）原样返回。单位以 1024 进制
+    换算（B/KB/MB/GB/TB）。
+
+    Args:
+        size: 文件大小（字节数或字符串）。
+
+    Returns:
+        可读大小文本；无法解析时返回空字符串。
+    """
+    if size is None:
+        return ""
+    if isinstance(size, str):
+        stripped = size.strip()
+        if not stripped:
+            return ""
+        # 已是可读格式（如 "1.7MB"），直接原样使用
+        if _READABLE_SIZE_RE.match(stripped):
+            return stripped
+        # 兼容千分位逗号（如 "1,024"）
+        normalized = stripped.replace(",", "")
+        try:
+            size = int(normalized)
+        except ValueError:
+            return ""
+    try:
+        size = int(size)
+    except (TypeError, ValueError):
+        return ""
+
+    if size < 0:
+        return ""
+    units = ("B", "KB", "MB", "GB", "TB")
+    value = float(size)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)}{unit}"
+            return f"{value:.1f}{unit}"
+        value /= 1024.0
+    return f"{size}B"
 
 
 # ──────────────────────────────────────────────
@@ -120,11 +191,17 @@ class MessageConverter:
 
     # ─── envelope → message ───────────────────
 
-    async def envelope_to_message(self, envelope: MessageEnvelope) -> Message:
+    async def envelope_to_message(
+        self,
+        envelope: MessageEnvelope,
+        *,
+        recognize_media: bool = True,
+    ) -> Message:
         """将 MessageEnvelope 转换为 Message。
 
         Args:
             envelope: mofox-wire 消息信封
+            recognize_media: 是否执行媒体识别、存储与相关事件处理
 
         Returns:
             Message: 核心业务消息对象
@@ -154,16 +231,13 @@ class MessageConverter:
         else:
             segments = list(raw_segments)
 
-        # 递归解析段列表
+        # 递归解析段列表；二进制媒体项的媒体 ID（image_id/voice_id/video_id）
+        # 在各段处理器中直接注入，保证 VLM/ASR 跳过/早退时 ID 仍存在，
+        # 便于后续按哈希回查 Images/Voices/Videos 表。
         result = self._parse_segments(segments, depth=0)
 
-        # 为二进制媒体项注入 image_id（哈希），便于后续按哈希从 Images 表回查图片信息。
-        # 必须在 _recognize_media_with_manager 之前执行，保证 VLM 跳过/早退时 image_id 仍注入。
-        if result.media:
-            self._enrich_media_image_ids(result.media)
-
         # 如果解析过程中发现有媒体资源，则后续需要考虑是否运行视觉语言模型识别
-        if result.media:
+        if result.media and recognize_media:
             # 提前提取 stream_id 以供逐项过滤 VLM
             stream_id = extract_stream_id(message_info)
             result = await self._recognize_media_with_manager(result, stream_id)
@@ -238,27 +312,48 @@ class MessageConverter:
         }
         if message.message_type in _MEDIA_TYPES:
             content = message.content
-            content_data: str
-            if isinstance(content, str):
-                content_data = content
-            elif isinstance(content, dict):
-                # send_file 等 API 传入 dict（如 {"path": "...", "name": "..."}）
-                # FILE 类型取 path 字段作为数据；其他类型取 data/path/url
-                if message.message_type == MessageType.FILE:
-                    content_data = content.get("path", "")
-                else:
-                    content_data = (
-                        content.get("data", "")
-                        or content.get("path", "")
-                        or content.get("url", "")
-                    )
+            # 结构化 content（send_image 等新路径）：{"text", "media": [...]}
+            # 媒体项与接收端 _build_content 产出同构：{type, data, image_id/...}
+            media_items: list[Any] | None = None
+            if isinstance(content, dict):
+                media_items = content.get("media")
+            if isinstance(media_items, list) and media_items:
+                for item in media_items:
+                    if isinstance(item, dict):
+                        seg_data = str(
+                            item.get("data", "")
+                            or item.get("path", "")
+                            or item.get("url", "")
+                        )
+                        seg_type = str(item.get("type") or message.message_type.value)
+                    else:
+                        seg_data = str(item)
+                        seg_type = message.message_type.value
+                    if seg_data:
+                        seg_list.append({"type": seg_type, "data": seg_data})
             else:
-                content_data = ""
-            if content_data:
-                seg_list.append({
-                    "type": message.message_type.value,
-                    "data": content_data,
-                })
+                # 兼容旧形态：裸字符串，或 {path}/{data}/{url} 等 dict
+                content_data: str
+                if isinstance(content, str):
+                    content_data = content
+                elif isinstance(content, dict):
+                    # send_file 等 API 传入 dict（如 {"path": "...", "name": "..."}）
+                    # FILE 类型取 path 字段作为数据；其他类型取 data/path/url
+                    if message.message_type == MessageType.FILE:
+                        content_data = content.get("path", "")
+                    else:
+                        content_data = (
+                            content.get("data", "")
+                            or content.get("path", "")
+                            or content.get("url", "")
+                        )
+                else:
+                    content_data = ""
+                if content_data:
+                    seg_list.append({
+                        "type": message.message_type.value,
+                        "data": content_data,
+                    })
         else:
             # 文本 / 混合消息
             text = message.processed_plain_text or (
@@ -418,6 +513,8 @@ class MessageConverter:
                 self._handle_emoji(data, result)
             case "voice":
                 self._handle_voice(data, result)
+            case "video":
+                self._handle_video(data, result)
             case "file":
                 self._handle_file(data, result)
             case "at":
@@ -454,6 +551,7 @@ class MessageConverter:
             result.media.append({
                 "type": "image",
                 "data": normalized_data,
+                "image_id": _compute_media_hash(normalized_data),
             })
             
             # 添加图片描述占位符，等待异步识别
@@ -474,6 +572,7 @@ class MessageConverter:
             result.media.append({
                 "type": "emoji",
                 "data": normalized_data,
+                "image_id": _compute_media_hash(normalized_data),
             })
             
             # 表情包同样支持 VLM 识别，文本先占位
@@ -486,11 +585,52 @@ class MessageConverter:
     def _handle_voice(data: Any, result: _ParseResult) -> None:
         """处理语音段（适配器已编码为 base64）。"""
         if isinstance(data, str):
+            normalized_data = normalize_base64(data)
             result.media.append({
                 "type": "voice",
-                "data": normalize_base64(data),
+                "data": normalized_data,
+                "voice_id": _compute_media_hash(normalized_data),
             })
             result.text_parts.append("[语音]")
+
+    @staticmethod
+    def _handle_video(data: Any, result: _ParseResult) -> None:
+        """处理视频段（适配器已编码为 base64）。
+
+        data 兼容两种形态：
+        - 字符串：直接的 base64 数据
+        - 字典：OneBot 适配器产出的 ``{"base64": ..., "filename": ..., "size_mb": ...}``，
+          从中提取 ``base64`` 字段参与识别，其余元数据保留在 media 项中。
+        """
+        if isinstance(data, str):
+            normalized_data = normalize_base64(data)
+            result.media.append({
+                "type": "video",
+                "data": normalized_data,
+                "video_id": _compute_media_hash(normalized_data),
+            })
+            result.text_parts.append("[视频]")
+        elif isinstance(data, dict):
+            base64_data = data.get("base64", "")
+            if isinstance(base64_data, str) and base64_data:
+                normalized_data = normalize_base64(base64_data)
+                media_item: dict[str, Any] = {
+                    "type": "video",
+                    "data": normalized_data,
+                    "video_id": _compute_media_hash(normalized_data),
+                }
+                # 保留适配器提供的元数据（filename/size_mb/url 等）
+                for key in ("filename", "size_mb", "url"):
+                    if key in data:
+                        media_item[key] = data[key]
+                result.media.append(media_item)
+                result.text_parts.append("[视频]")
+            else:
+                result.media.append({"type": "video", "data": data})
+                result.text_parts.append("[视频]")
+        elif isinstance(data, list):
+            result.media.append({"type": "video", "data": str(data)})
+            result.text_parts.append("[视频]")
 
     @staticmethod
     def _handle_file(data: Any, result: _ParseResult) -> None:
@@ -503,16 +643,21 @@ class MessageConverter:
             parsed = safe_json_loads(data)
 
         if isinstance(parsed, dict):
+            file_size = parsed.get("size") or parsed.get("file_size")
             result.media.append({
                 "type": "file",
                 "data": {
                     "name": parsed.get("name") or parsed.get("file", ""),
-                    "size": parsed.get("size") or parsed.get("file_size"),
+                    "size": file_size,
                     "id": parsed.get("id") or parsed.get("file_id"),
                 },
             })
             file_name = parsed.get("name") or parsed.get("file", "文件")
-            result.text_parts.append(f"[文件:{file_name}]")
+            size_text = _format_file_size(file_size)
+            # 文本占位符附带可读大小，使 LLM 在 processed_plain_text 中能感知文件大小
+            result.text_parts.append(
+                f"[文件:{file_name}({size_text})]" if size_text else f"[文件:{file_name}]"
+            )
         else:
             # 无法解析结构，保留原始信息
             result.media.append({"type": "file", "data": parsed})
@@ -634,47 +779,24 @@ class MessageConverter:
             "image": MessageType.IMAGE,
             "emoji": MessageType.EMOJI,
             "voice": MessageType.VOICE,
+            "video": MessageType.VIDEO,
             "file": MessageType.FILE,
         }
 
         return type_mapping.get(first_media_type, MessageType.UNKNOWN)
-
-    def _enrich_media_image_ids(self, media_list: list[dict[str, Any]]) -> None:
-        """为二进制媒体项注入 image_id（哈希），与 MediaManager 识别流程一致。
-
-        对 type ∈ {image, emoji, voice} 且 data 为字符串、尚未带 image_id 的媒体项，
-        计算 SHA256 哈希写入 ``image_id`` 字段。后续入库剔除 ``data`` 后 ``image_id``
-        仍保留，可据此从 Images 表回查图片描述/文件路径。
-
-        Args:
-            media_list: 解析得到的媒体项列表，原地修改
-        """
-        try:
-            from src.core.managers.media_manager import MediaManager
-
-            for media in media_list:
-                if media.get("type") not in ("image", "emoji", "voice"):
-                    continue
-                if "image_id" in media:
-                    continue
-                data = media.get("data")
-                if not isinstance(data, str):
-                    continue
-                media["image_id"] = MediaManager.compute_media_hash(data)
-        except Exception:
-            logger.warning("媒体 image_id 注入失败", exc_info=True)
 
     async def _recognize_media_with_manager(
         self,
         result: _ParseResult,
         stream_id: str,
     ) -> _ParseResult:
-        """使用 MediaManager 识别媒体内容（图片、表情包、语音）并更新文本描述。
+        """使用 MediaManager 识别媒体内容（图片、表情包、语音、视频）并更新文本描述。
 
         遍历所有媒体项，对每个项调用 ``recognize_media``：
-        - image/emoji/voice：统一查询 ``should_skip_recognition``，
+        - image/emoji/voice/video：统一查询 ``should_skip_recognition``，
           skip=True 时仅落盘+入库，不识别；
-          否则走事件链（默认引擎处理器 + 第三方可拦截）
+          否则走事件链（默认引擎处理器 + 第三方可拦截）。
+          视频无内置引擎，识别结果可能始终为 None（保留占位符）。
 
         Args:
             result: 解析结果
@@ -690,6 +812,7 @@ class MessageConverter:
 
             descriptions: list[tuple[int, str | None]] = []
             voice_texts: list[tuple[int, str | None]] = []
+            video_texts: list[tuple[int, str | None]] = []
 
             for i, media in enumerate(result.media):
                 media_type = media["type"]
@@ -717,24 +840,45 @@ class MessageConverter:
                             skip_recognition=skip,
                         )
                         voice_texts.append((i, text))
+                    elif media_type == "video":
+                        skip = manager.should_skip_recognition(stream_id, "video")
+                        text = await manager.recognize_media(
+                            data,
+                            "video",
+                            use_cache=True,
+                            stream_id=stream_id,
+                            skip_recognition=skip,
+                        )
+                        video_texts.append((i, text))
                 except Exception as e:
                     logger.warning(f"识别{media_type}失败: {e}")
                     if media_type in ("image", "emoji"):
                         descriptions.append((i, None))
                     elif media_type == "voice":
                         voice_texts.append((i, None))
+                    elif media_type == "video":
+                        video_texts.append((i, None))
 
             # 将识别结果应用回 text_parts，替换占位符
+            # 占位符格式：[图片(media_id):description] / [表情包(media_id):description]
+            #           / [语音(media_id):text] / [视频(media_id):text]
+            # media_id 为该媒体的 sha256 哈希，AI 可据此精确引用历史媒体
             new_text_parts = []
             media_idx = 0
             voice_idx = 0
+            video_idx = 0
             for part in result.text_parts:
                 if part in ("[图片]", "[表情包]"):
                     if media_idx < len(descriptions):
-                        _, description = descriptions[media_idx]
+                        media_i, description = descriptions[media_idx]
                         media_idx += 1
-                        if description:
-                            label = "图片" if part == "[图片]" else "表情包"
+                        label = "图片" if part == "[图片]" else "表情包"
+                        media_id = result.media[media_i].get("image_id", "")
+                        if media_id and description:
+                            new_text_parts.append(f"[{label}({media_id}):{description}]")
+                        elif media_id:
+                            new_text_parts.append(f"[{label}({media_id})]")
+                        elif description:
                             new_text_parts.append(f"[{label}:{description}]")
                         else:
                             new_text_parts.append(part)
@@ -742,10 +886,30 @@ class MessageConverter:
                         new_text_parts.append(part)
                 elif part == "[语音]":
                     if voice_idx < len(voice_texts):
-                        _, text = voice_texts[voice_idx]
+                        voice_i, text = voice_texts[voice_idx]
                         voice_idx += 1
-                        if text:
+                        media_id = result.media[voice_i].get("voice_id", "")
+                        if media_id and text:
+                            new_text_parts.append(f"[语音({media_id}):{text}]")
+                        elif media_id:
+                            new_text_parts.append(f"[语音({media_id})]")
+                        elif text:
                             new_text_parts.append(f"[语音:{text}]")
+                        else:
+                            new_text_parts.append(part)
+                    else:
+                        new_text_parts.append(part)
+                elif part == "[视频]":
+                    if video_idx < len(video_texts):
+                        video_i, text = video_texts[video_idx]
+                        video_idx += 1
+                        media_id = result.media[video_i].get("video_id", "")
+                        if media_id and text:
+                            new_text_parts.append(f"[视频({media_id}):{text}]")
+                        elif media_id:
+                            new_text_parts.append(f"[视频({media_id})]")
+                        elif text:
+                            new_text_parts.append(f"[视频:{text}]")
                         else:
                             new_text_parts.append(part)
                     else:

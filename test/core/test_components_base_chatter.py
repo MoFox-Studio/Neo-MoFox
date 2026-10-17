@@ -1,17 +1,16 @@
 """测试 src.core.components.base.chatter 模块。"""
 
-import json
 from datetime import datetime
 from typing import AsyncGenerator, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.core.components.base.chatter import BaseChatter, ChatterResult, Failure, Success, Wait
+from src.core.components.base.chatter import BaseChatter
 from src.core.components.base.action import BaseAction
 from src.core.components.base.agent import BaseAgent
 from src.core.components.base.tool import BaseTool
-from src.core.components.types import ChatType
+from src.core.components.types import ChatType, ChatterResult, Failure, Success, Wait
 from src.core.models.message import Message
 from src.core.prompt.system_reminder import (
     SystemReminderConsumeType,
@@ -109,7 +108,7 @@ class TestBaseChatter:
         """测试 create_request 默认启用基于 token 的上下文压缩。"""
         chatter = ConcreteChatter("stream_123", mock_plugin)
 
-        with patch("src.core.config.get_model_config") as mock_model_config:
+        with patch("src.app.plugin_system.api.llm_api.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
 
             request = chatter.create_request("actor")
@@ -126,7 +125,7 @@ class TestBaseChatter:
         store = get_system_reminder_store()
         store.set("actor", "goal", "跟随最后一条", insert_type=SystemReminderInsertType.DYNAMIC)
 
-        with patch("src.core.config.get_model_config") as mock_model_config:
+        with patch("src.app.plugin_system.api.llm_api.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
 
             request = chatter.create_request("actor", with_reminder="actor")
@@ -143,7 +142,7 @@ class TestBaseChatter:
         store = get_system_reminder_store()
         store.set("actor", "goal", "先给结论")
 
-        with patch("src.core.config.get_model_config") as mock_model_config:
+        with patch("src.app.plugin_system.api.llm_api.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
 
             request = chatter.create_request("actor", with_reminder="actor")
@@ -172,7 +171,7 @@ class TestBaseChatter:
             consume=SystemReminderConsumeType.ONCE,
         )
 
-        with patch("src.core.config.get_model_config") as mock_model_config:
+        with patch("src.app.plugin_system.api.llm_api.get_model_config") as mock_model_config:
             mock_model_config.return_value.get_task.return_value = []
 
             request = chatter.create_request("actor", with_reminder="actor")
@@ -268,11 +267,12 @@ class TestBaseChatter:
 
         mock_stream = MagicMock()
         mock_stream.stream_id = "stream_123"
+        mock_stream.chat_type = "group"
         mock_stream.context = MagicMock()
         mock_stream.context.current_message = None
 
-        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm, patch(
-            "src.core.components.base.chatter.get_plugin_manager"
+        with patch("src.core.managers.get_stream_manager") as mock_sm, patch(
+            "src.core.managers.get_plugin_manager"
         ) as mock_pm:
             mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
             mock_pm.return_value.get_plugin.return_value = owner_plugin
@@ -313,9 +313,10 @@ class TestBaseChatter:
 
         mock_stream = MagicMock()
         mock_stream.stream_id = "stream_123"
+        mock_stream.chat_type = "group"
         mock_stream.context = MagicMock()
 
-        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm:
+        with patch("src.core.managers.get_stream_manager") as mock_sm:
             mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
 
             result = await chatter.modify_llm_usables([AllowedTool, RejectedTool, OpenTool])
@@ -348,10 +349,12 @@ class TestBaseChatter:
 
         mock_stream = MagicMock()
         mock_stream.stream_id = "stream_123"
+        mock_stream.chat_type = "group"
         mock_stream.context = MagicMock()
         mock_stream.context.current_message = current_message
+        mock_stream.context.check_types.return_value = False
 
-        with patch("src.core.components.base.chatter.get_stream_manager") as mock_sm:
+        with patch("src.core.managers.get_stream_manager") as mock_sm:
             mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
 
             result = await chatter.modify_llm_usables([EmojiAction])
@@ -359,8 +362,59 @@ class TestBaseChatter:
         assert EmojiAction not in result
 
     @pytest.mark.asyncio
+    async def test_modify_llm_usables_keeps_components_of_current_chat_type(self):
+        """声明了当前流聊天类型的组件不应被剔除。
+
+        chatter 未把流的 chat_type 传给筛选时，筛选默认按 ``ChatType.ALL`` 判定，
+        会把声明了 GROUP/PRIVATE 的组件全部剔除；本用例锁定该回归。
+        """
+
+        class GroupAction(BaseAction):
+            name = "group_action"
+            description = "group only"
+            chat_type = ChatType.GROUP
+            associated_types = ["text"]
+
+            async def execute(self) -> tuple[bool, str]:
+                return True, "ok"
+
+        class PrivateTool(BaseTool):
+            name = "private_tool"
+            description = "private only"
+            chat_type = ChatType.PRIVATE
+
+            async def execute(self) -> tuple[bool, str]:
+                return True, "ok"
+
+        class OpenTool(BaseTool):
+            name = "open_tool"
+            description = "no chat_type restriction"
+
+            async def execute(self) -> tuple[bool, str]:
+                return True, "ok"
+
+        chatter_plugin = MagicMock()
+        chatter = ConcreteChatter("stream_123", chatter_plugin)
+
+        mock_stream = MagicMock()
+        mock_stream.stream_id = "stream_123"
+        mock_stream.chat_type = "group"
+        mock_stream.context = MagicMock()
+        mock_stream.context.current_message = None
+        mock_stream.context.check_types.return_value = True
+
+        with patch("src.core.managers.get_stream_manager") as mock_sm:
+            mock_sm.return_value.get_or_create_stream = AsyncMock(return_value=mock_stream)
+
+            result = await chatter.modify_llm_usables([GroupAction, PrivateTool, OpenTool])
+
+        assert GroupAction in result
+        assert OpenTool in result
+        assert PrivateTool not in result
+
+    @pytest.mark.asyncio
     async def test_exec_llm_usable_uses_owner_plugin_instance(self):
-        """测试执行跨插件 Tool 时向管理器传入所属插件实例。"""
+        """跨插件组件经 plugin_api 解析所属插件，并经 llm_api 委托执行。"""
 
         class CrossPluginTool(BaseTool):
             name = "cross_tool"
@@ -386,25 +440,29 @@ class TestBaseChatter:
 
         chatter = CrossPluginChatter("stream_123", chatter_plugin)
 
-        with patch("src.core.components.base.chatter.get_plugin_manager") as mock_pm, patch(
-            "src.core.components.base.chatter.get_tool_use"
-        ) as mock_tool_use:
-            mock_pm.return_value.get_plugin.return_value = owner_plugin
-            mock_tool_use.return_value.execute_tool = AsyncMock(return_value=(True, "ok"))
-
+        with patch(
+            "src.app.plugin_system.api.plugin_api.get_plugin",
+            return_value=owner_plugin,
+        ) as mock_get_plugin, patch(
+            "src.app.plugin_system.api.llm_api.exec_llm_usable",
+            new=AsyncMock(return_value=(True, "ok")),
+        ) as mock_exec:
             ok, payload = await chatter.exec_llm_usable(CrossPluginTool, message)
 
         assert ok is True
         assert payload == "ok"
-        mock_tool_use.return_value.execute_tool.assert_awaited_once_with(
-            "plugin_b:tool:cross_tool",
-            owner_plugin,
-            message,
-        )
+        # 通过 plugin_api 解析组件所属插件
+        mock_get_plugin.assert_called_once_with("plugin_b")
+        # 向 llm_api 传入的是组件所属插件实例，而非 chatter 自身插件
+        mock_exec.assert_awaited_once()
+        _, kwargs = mock_exec.call_args
+        assert kwargs["plugin"] is owner_plugin
+        assert kwargs["stream_id"] == "stream_123"
+        assert kwargs["message"] is message
 
     @pytest.mark.asyncio
-    async def test_exec_llm_usable_agent_without_global_managers(self):
-        """测试执行 Agent 时不通过 Tool/Action 管理器。"""
+    async def test_exec_llm_usable_agent_delegates_to_llm_api(self):
+        """执行 Agent 时同样经 llm_api 委托，且 plugin 为所属插件。"""
 
         class LocalAgent(BaseAgent):
             name = "local_agent"
@@ -430,19 +488,21 @@ class TestBaseChatter:
 
         chatter = CrossPluginChatter("stream_123", chatter_plugin)
 
-        with patch("src.core.components.base.chatter.get_plugin_manager") as mock_pm, patch(
-            "src.core.components.base.chatter.get_tool_use"
-        ) as mock_tool_use, patch(
-            "src.core.components.base.chatter.get_action_manager"
-        ) as mock_action_manager:
-            mock_pm.return_value.get_plugin.return_value = owner_plugin
-
+        with patch(
+            "src.app.plugin_system.api.plugin_api.get_plugin",
+            return_value=owner_plugin,
+        ), patch(
+            "src.app.plugin_system.api.llm_api.exec_llm_usable",
+            new=AsyncMock(return_value=(True, "agent:demo")),
+        ) as mock_exec:
             ok, payload = await chatter.exec_llm_usable(LocalAgent, message, query="demo")
 
         assert ok is True
         assert payload == "agent:demo"
-        mock_tool_use.assert_not_called()
-        mock_action_manager.assert_not_called()
+        mock_exec.assert_awaited_once()
+        _, kwargs = mock_exec.call_args
+        assert kwargs["plugin"] is owner_plugin
+        assert kwargs["stream_id"] == "stream_123"
 
 
 class TestChatterAttributes:
@@ -592,19 +652,21 @@ class TestUnreadsFlow:
             sender_name="Test",
         )
 
-        with patch('src.core.components.base.chatter.get_stream_manager') as mock_sm:
-            mock_stream = MagicMock()
-            mock_stream.context.unread_messages = [msg]
-            mock_stream.context.add_history_message = MagicMock()
-            mock_sm.return_value._streams = {"stream_123": mock_stream}
+        mock_stream = MagicMock()
+        mock_stream.context.unread_messages = [msg]
+        mock_stream.context.add_history_message = MagicMock()
 
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(return_value=mock_stream),
+        ):
             text, messages = await chatter.fetch_unreads()
 
-            payload = json.loads(text)
-            assert len(payload) == 1
-            assert len(messages) == 1
-            assert len(mock_stream.context.unread_messages) == 1
-            mock_stream.context.add_history_message.assert_not_called()
+        assert "Test" in text
+        assert "测试" in text
+        assert len(messages) == 1
+        assert len(mock_stream.context.unread_messages) == 1
+        mock_stream.context.add_history_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_flush_unreads_only_moves_specified_messages(self, mock_plugin):
@@ -614,74 +676,73 @@ class TestUnreadsFlow:
         msg1 = Message(message_id="msg_1", content="1", sender_id="u1", sender_name="A")
         msg2 = Message(message_id="msg_2", content="2", sender_id="u2", sender_name="B")
 
-        with patch('src.core.components.base.chatter.get_stream_manager') as mock_sm:
-            mock_stream = MagicMock()
-            mock_stream.context.unread_messages = [msg1, msg2]
-            mock_stream.context.add_history_message = MagicMock()
-            mock_sm.return_value._streams = {"stream_123": mock_stream}
+        mock_stream = MagicMock()
+        mock_stream.context.unread_messages = [msg1, msg2]
+        mock_stream.context.add_history_message = MagicMock()
 
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(return_value=mock_stream),
+        ):
             flushed = await chatter.flush_unreads([msg1])
 
-            assert flushed == 1
-            assert len(mock_stream.context.unread_messages) == 1
-            assert mock_stream.context.unread_messages[0].message_id == "msg_2"
-            mock_stream.context.add_history_message.assert_called_once_with(msg1)
+        assert flushed == 1
+        assert len(mock_stream.context.unread_messages) == 1
+        assert mock_stream.context.unread_messages[0].message_id == "msg_2"
+        mock_stream.context.add_history_message.assert_called_once_with(msg1)
 
     @pytest.mark.asyncio
     async def test_fetch_empty_unreads(self, mock_plugin):
         """测试获取空的未读消息。"""
         chatter = ConcreteChatter("stream_123", mock_plugin)
 
-        # Mock stream manager
-        with patch('src.core.components.base.chatter.get_stream_manager') as mock_sm:
-            mock_stream = MagicMock()
-            mock_stream.context.unread_messages = []
-            # 确保 _streams 是一个字典，支持 .get() 方法
-            mock_sm.return_value._streams = {"stream_123": mock_stream}
+        mock_stream = MagicMock()
+        mock_stream.context.unread_messages = []
 
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(return_value=mock_stream),
+        ):
             text, messages = await chatter.fetch_unreads()
 
-            assert text == ""
-            assert messages == []
+        assert text == ""
+        assert messages == []
 
     @pytest.mark.asyncio
     async def test_fetch_single_message(self, mock_plugin):
         """测试获取单条消息。"""
         chatter = ConcreteChatter("stream_123", mock_plugin)
 
-        # 创建测试消息
         msg = Message(
             message_id="msg_1",
             time=datetime.now().timestamp(),
             content="你好",
             sender_id="user_1",
-            sender_name="Alice"
+            sender_name="Alice",
         )
 
-        with patch('src.core.components.base.chatter.get_stream_manager') as mock_sm:
-            mock_stream = MagicMock()
-            # 需要让 unread_messages 是一个真实的列表
-            mock_stream.context.unread_messages = [msg]
-            mock_stream.context.add_history_message = MagicMock()
-            # 设置 _streams 为字典
-            mock_sm.return_value._streams = {"stream_123": mock_stream}
+        mock_stream = MagicMock()
+        mock_stream.context.unread_messages = [msg]
+        mock_stream.context.add_history_message = MagicMock()
 
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(return_value=mock_stream),
+        ):
             text, messages = await chatter.fetch_unreads()
             flushed = await chatter.flush_unreads(messages)
 
-            payload = json.loads(text)
-            assert len(payload) == 1
-            assert payload[0]["sender_name"] == "Alice"
-            assert payload[0]["message_id"] == "msg_1"
-            assert payload[0]["message_type"] == "text"
-            assert len(messages) == 1
-            assert flushed == 1
-            mock_stream.context.add_history_message.assert_called_once_with(msg)
-            assert len(mock_stream.context.unread_messages) == 0
+        assert "Alice" in text
+        assert "你好" in text
+        assert "[msg_1]" in text
+        assert len(messages) == 1
+        assert flushed == 1
+        mock_stream.context.add_history_message.assert_called_once_with(msg)
+        assert len(mock_stream.context.unread_messages) == 0
 
     @pytest.mark.asyncio
-    async def test_fetch_multiple_messages_grouped(self, mock_plugin):
-        """测试获取多条消息（分组模式）。"""
+    async def test_fetch_multiple_messages(self, mock_plugin):
+        """测试获取多条消息（每条一行）。"""
         chatter = ConcreteChatter("stream_123", mock_plugin)
 
         messages = [
@@ -690,71 +751,76 @@ class TestUnreadsFlow:
                 time=datetime.now().timestamp(),
                 content=f"消息{i}",
                 sender_id=f"user_{i}",
-                sender_name=f"User{i}"
+                sender_name=f"User{i}",
             )
             for i in range(3)
         ]
 
-        with patch('src.core.components.base.chatter.get_stream_manager') as mock_sm:
-            mock_stream = MagicMock()
-            mock_stream.context.unread_messages = messages
-            mock_stream.context.add_history_message = MagicMock()
-            mock_sm.return_value._streams = {"stream_123": mock_stream}
+        mock_stream = MagicMock()
+        mock_stream.context.unread_messages = messages
+        mock_stream.context.add_history_message = MagicMock()
 
-            text, fetched = await chatter.fetch_unreads(format_as_group=True)
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(return_value=mock_stream),
+        ):
+            text, fetched = await chatter.fetch_unreads()
             flushed = await chatter.flush_unreads(fetched)
 
-            # 验证 JSON 格式
-            payload = json.loads(text)
-            assert len(payload) == 3
-            assert payload[0]["sender_name"] == "User0"
-            assert payload[0]["message_id"] == "msg_0"
-            assert payload[0]["message_type"] == "text"
+        # 每条消息独占一行
+        assert text.count("\n") == 2
+        for i in range(3):
+            assert f"User{i}" in text
+            assert f"msg_{i}" in text
 
-            # 验证flush
-            assert len(fetched) == 3
-            assert flushed == 3
-            assert mock_stream.context.add_history_message.call_count == 3
-            assert len(mock_stream.context.unread_messages) == 0
-
-    @pytest.mark.asyncio
-    async def test_fetch_non_grouped(self, mock_plugin):
-        """测试非分组模式。"""
-        chatter = ConcreteChatter("stream_123", mock_plugin)
-
-        msg = Message(
-            message_id="msg_1",
-            time=datetime.now().timestamp(),
-            content="测试",
-            sender_id="user_1",
-            sender_name="Test"
-        )
-
-        with patch('src.core.components.base.chatter.get_stream_manager') as mock_sm:
-            mock_stream = MagicMock()
-            mock_stream.context.unread_messages = [msg]
-            mock_stream.context.add_history_message = MagicMock()
-            mock_sm.return_value._streams = {"stream_123": mock_stream}
-
-            text, messages = await chatter.fetch_unreads(format_as_group=False)
-            flushed = await chatter.flush_unreads(messages)
-
-            assert text == ""  # 非分组模式不返回格式化文本
-            assert len(messages) == 1
-            assert flushed == 1
+        # 验证 flush
+        assert len(fetched) == 3
+        assert flushed == 3
+        assert mock_stream.context.add_history_message.call_count == 3
+        assert len(mock_stream.context.unread_messages) == 0
 
     @pytest.mark.asyncio
     async def test_fetch_with_missing_stream(self, mock_plugin):
         """测试流不存在的情况。"""
         chatter = ConcreteChatter("stream_123", mock_plugin)
 
-        with patch('src.core.components.base.chatter.get_stream_manager') as mock_sm:
-            mock_sm.return_value._streams.get.return_value = None
-
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(return_value=None),
+        ):
             text, messages = await chatter.fetch_unreads()
 
-            assert text == ""
-            assert messages == []
+        assert text == ""
+        assert messages == []
+
+    @pytest.mark.asyncio
+    async def test_flush_with_missing_stream(self, mock_plugin):
+        """测试流不存在时 flush_unreads 返回 0。"""
+        chatter = ConcreteChatter("stream_123", mock_plugin)
+
+        msg = Message(message_id="msg_1", content="x", sender_id="u1", sender_name="A")
+
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(return_value=None),
+        ):
+            flushed = await chatter.flush_unreads([msg])
+
+        assert flushed == 0
+
+    @pytest.mark.asyncio
+    async def test_flush_empty_unreads_returns_zero(self, mock_plugin):
+        """测试 flush_unreads 对空列表直接返回 0，不访问流。"""
+        chatter = ConcreteChatter("stream_123", mock_plugin)
+
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(),
+        ) as mock_get_stream:
+            flushed = await chatter.flush_unreads([])
+
+        assert flushed == 0
+        mock_get_stream.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_custom_time_format(self, mock_plugin):
@@ -766,18 +832,18 @@ class TestUnreadsFlow:
             time=datetime(2024, 1, 1, 14, 30).timestamp(),
             content="测试",
             sender_id="user_1",
-            sender_name="Test"
+            sender_name="Test",
         )
 
-        with patch('src.core.components.base.chatter.get_stream_manager') as mock_sm:
-            mock_stream = MagicMock()
-            mock_stream.context.unread_messages = [msg]
-            mock_stream.context.add_history_message = MagicMock()
-            mock_sm.return_value._streams = {"stream_123": mock_stream}
+        mock_stream = MagicMock()
+        mock_stream.context.unread_messages = [msg]
+        mock_stream.context.add_history_message = MagicMock()
 
-            # 使用完整时间格式
+        with patch(
+            "src.app.plugin_system.api.stream_api.get_stream",
+            new=AsyncMock(return_value=mock_stream),
+        ):
             text, messages = await chatter.fetch_unreads(time_format="%Y-%m-%d %H:%M")
             await chatter.flush_unreads(messages)
 
-            payload = json.loads(text)
-            assert payload[0]["time"] == "2024-01-01 14:30"
+        assert "2024-01-01 14:30" in text

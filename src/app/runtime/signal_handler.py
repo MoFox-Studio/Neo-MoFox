@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import sys
 import threading
 import time
 from types import FrameType
@@ -101,13 +102,23 @@ class SignalHandler:
                 # 直接写原始 stderr：patch_stdout 期间 sys.stderr 被替换为
                 # StdoutProxy（带缓冲 + 独立 flush 线程），sys.exit(1) 立即
                 # 执行会让缓冲中的提示丢失。
-                import sys
-
                 try:
                     real_stderr = sys.__stderr__
                     if real_stderr is not None:
                         real_stderr.write("正在强制关闭...\n")
                         real_stderr.flush()
+                except Exception:
+                    pass
+                # 同步恢复终端：sys.exit(1) 在主线程抛 SystemExit，finally
+                # 调用的 command_parser.close() 仅通过 call_soon_threadsafe
+                # 调度 EOF 注入，事件循环随进程退出后回调可能永不执行；
+                # 同时输入 worker 是 daemon 线程，会被直接强杀，prompt_toolkit
+                # 自身恢复 TTY 的 finally 来不及运行，导致终端残留 raw 模式
+                # （无回显、无行缓冲）卡死。这里在退出前同步恢复。
+                try:
+                    from .console_input import restore_terminal
+
+                    restore_terminal()
                 except Exception:
                     pass
                 # 强制退出（不执行清理）

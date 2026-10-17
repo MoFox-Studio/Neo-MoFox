@@ -4,10 +4,10 @@
 """
 
 import time
+import json
 import hashlib
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from functools import lru_cache
-from async_lru import alru_cache
 
 from src.kernel.db import CRUDBase, QueryBuilder
 from src.kernel.logger import get_logger
@@ -16,6 +16,52 @@ if TYPE_CHECKING:
     from src.core.models.sql_alchemy import PersonInfo, ChatStreams, Messages
 
 logger = get_logger("user_query", display="UserQuery")
+
+# 历史名字记录的最大保留条数，超出时丢弃最旧的
+_NAME_HISTORY_MAX_ENTRIES = 50
+
+
+def _append_name_history(
+    history_json: str | None,
+    old_name: str | None,
+    now: float,
+    max_entries: int = _NAME_HISTORY_MAX_ENTRIES,
+) -> str:
+    """把旧名字追加到历史 JSON 列表中并返回新的 JSON 字符串。
+
+    历史格式：``[{"name": str, "retired_at": float}, ...]``
+    超过 max_entries 时丢弃最旧的条目。空白名（None 或 strip 后为空）不写入。
+
+    Args:
+        history_json: 现有的历史 JSON 字符串，可为 None
+        old_name: 被替换的旧名字
+        now: 当前时间戳
+        max_entries: 历史列表最大长度
+
+    Returns:
+        更新后的 JSON 字符串
+    """
+    cleaned = (old_name or "").strip()
+    if not cleaned:
+        # 旧名字为空，无需入历史
+        return history_json or "[]"
+
+    try:
+        history: list[dict[str, Any]] = (
+            json.loads(history_json) if history_json else []
+        )
+    except (json.JSONDecodeError, TypeError):
+        history = []
+
+    # 已经存在相同名字的最近一条时，不重复写入
+    if not (history and history[-1].get("name") == cleaned):
+        history.append({"name": cleaned, "retired_at": now})
+
+    # 保留最近 max_entries 条
+    if len(history) > max_entries:
+        history = history[-max_entries:]
+
+    return json.dumps(history, ensure_ascii=False)
 
 
 class UserQueryHelper:
@@ -58,7 +104,6 @@ class UserQueryHelper:
         """
         return hashlib.sha256(f"{platform}_{user_id}".encode()).hexdigest()
 
-    @alru_cache(maxsize=256)
     async def get_or_create_person(
         self,
         platform: str,
@@ -111,8 +156,7 @@ class UserQueryHelper:
         person = await self.person_crud.create(person_data)
         logger.info(f"创建新用户：{person_id} ({nickname})")
         return person, True
-    
-    @alru_cache(maxsize=256)
+
     async def update_person_info(
         self,
         platform: str,
@@ -121,6 +165,10 @@ class UserQueryHelper:
         cardname: str | None = None,
     ) -> bool:
         """更新用户信息
+
+        当传入的 nickname 与数据库中现有值不同（且都不为空）时，
+        自动把旧值推入 nickname_history 列表，再用新值替换当前字段。
+        cardname 仅更新当前值（不再维护历史）。
 
         Args:
             platform: 平台标识
@@ -139,21 +187,114 @@ class UserQueryHelper:
             logger.info(f"用户不存在，已创建新用户：{person_id} ({nickname})")
             return True
 
-        update_data = {
-            "updated_at": time.time(),
-            "nickname": None,
-            "cardname": None
+        now = time.time()
+        update_data: dict[str, Any] = {
+            "updated_at": now,
+            "last_interaction": now,
+            "interaction_count": person.interaction_count + 1,
         }
 
-        if nickname is not None:
-            update_data["nickname"] = nickname
-        if cardname is not None:
-            update_data["cardname"] = cardname
+        new_nickname = (nickname or "").strip() or None
+        new_cardname = (cardname or "").strip() or None
+
+        # nickname 改名检测：仅当传入非空新值且与旧值不同时记录历史并替换
+        if nickname is not None and new_nickname is not None:
+            old_nickname = (person.nickname or "").strip() or None
+            if old_nickname is not None and new_nickname != old_nickname:
+                update_data["nickname_history"] = _append_name_history(
+                    person.nickname_history, old_nickname, now
+                )
+            update_data["nickname"] = new_nickname
+
+        # cardname 直接更新（不再维护历史）
+        if cardname is not None and new_cardname is not None:
+            update_data["cardname"] = new_cardname
 
         await self.person_crud.update(person.id, update_data)
         logger.info(f"更新用户信息：{person_id} ({nickname})")
         return True
-        
+
+    async def get_person(
+        self,
+        platform: str,
+        user_id: str,
+    ) -> "PersonInfo | None":
+        """获取用户信息（只读，不更新任何字段）。
+
+        与 ``get_or_create_person`` 不同，本方法在用户不存在时返回 ``None``，
+        不会创建新记录，也不会刷新 ``last_interaction`` / ``interaction_count``。
+        适合仅查询场景。
+
+        Args:
+            platform: 平台标识
+            user_id: 平台内部用户ID
+
+        Returns:
+            用户信息实例，不存在时返回 None
+        """
+        person_id = self.generate_person_id(platform, user_id)
+        return await self.person_crud.get_by(person_id=person_id)
+
+    async def get_person_by_id(self, person_id: str) -> "PersonInfo | None":
+        """按内部人物 ID 只读查询，不创建记录或刷新交互信息。
+
+        Args:
+            person_id: PersonInfo.person_id 字段的值
+
+        Returns:
+            人物记录，不存在时返回 None
+        """
+        return await self.person_crud.get_by(person_id=person_id)
+
+    async def get_nickname_history(
+        self,
+        platform: str,
+        user_id: str,
+    ) -> list[dict[str, Any]]:
+        """解析并返回 nickname 的历史记录。
+
+        历史 JSON 列表格式：``[{"name": str, "retired_at": float}, ...]``，
+        按时间从旧到新排列。
+
+        Args:
+            platform: 平台标识
+            user_id: 平台内部用户ID
+
+        Returns:
+            历史昵称列表；用户不存在或字段为空时返回空列表
+        """
+        person = await self.get_person(platform, user_id)
+        if person is None:
+            return []
+
+        raw = person.nickname_history
+        if not raw:
+            return []
+
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(f"nickname_history JSON 解析失败: {person.person_id}")
+            return []
+
+        if not isinstance(data, list):
+            return []
+
+        # 仅保留结构合法的条目，按 retired_at 升序
+        cleaned: list[dict[str, Any]] = []
+        for item in data:
+            if isinstance(item, dict) and item.get("name"):
+                cleaned.append(
+                    {
+                        "name": str(item["name"]),
+                        "retired_at": float(item["retired_at"])
+                        if item.get("retired_at") is not None
+                        else None,
+                    }
+                )
+        cleaned.sort(key=lambda x: x["retired_at"] or 0.0)
+        return cleaned
+
     async def get_user_streams(
         self,
         platform: str,

@@ -67,9 +67,23 @@ EventHandlerCallable = Callable[
 
 @dataclass(frozen=True)
 class _Subscriber:
+    """订阅者元数据。
+
+    Attributes:
+        handler: 订阅者回调。
+        priority: 优先级，数值越大越先执行。
+        order: 订阅顺序，用于稳定排序。
+        timeout: 该订阅者的处理器超时秒数。
+
+            - ``None``：沿用全局 ``_event_handler_timeout_seconds``（默认 30s）。
+            - ``> 0``：使用此秒数。
+            - ``<= 0``：禁用超时保护（适用于可能长耗时的处理器，例如 agent 工具调用）。
+    """
+
     handler: EventHandlerCallable
     priority: int
-    order: int           
+    order: int
+    timeout: float | None = None
 
 class EventBus:
     """事件总线，用于发布/订阅模式。
@@ -105,12 +119,16 @@ class EventBus:
         event_name: str,
         handler: EventHandlerCallable,
         priority: int = 0,
+        timeout: float | None = None,
     ) -> Callable[[], None]:
         """订阅事件。
 
         Args:
             event_name: 要订阅的事件名称
             handler: 订阅者处理器，必须支持 handler(event_name, params) 调用
+            priority: 优先级，数值越大越先执行
+            timeout: 该订阅者处理器的超时秒数；``None`` 沿用全局默认，
+                ``<= 0`` 禁用超时保护。适用于声明长耗时的处理器（如 agent 工具调用）。
 
         Returns:
             取消订阅函数，调用可移除此订阅
@@ -123,7 +141,7 @@ class EventBus:
         if not callable(handler):
             raise ValueError("处理器必须是可调用对象")
 
-        # 如果重复订阅同一个 handler，则更新 priority，保持最初 order 以稳定排序
+        # 如果重复订阅同一个 handler，则更新 priority / timeout，保持最初 order 以稳定排序
         existing = self._subscribers[event_name].get(handler)
         if existing is None:
             # 非重复
@@ -132,6 +150,7 @@ class EventBus:
                 handler=handler,
                 priority=int(priority),
                 order=self._subscribe_order,
+                timeout=timeout,
             )
         else:
             # 重复
@@ -139,6 +158,7 @@ class EventBus:
                 handler=handler,
                 priority=int(priority),
                 order=existing.order,
+                timeout=timeout,
             )
 
         self._subscribers[event_name][handler] = sub
@@ -146,7 +166,8 @@ class EventBus:
 
         handler_name = getattr(handler, "__name__", repr(handler))
         logger.debug(
-            f"已将 '{handler_name}' 订阅到事件 '{event_name}' (priority={priority})"
+            f"已将 '{handler_name}' 订阅到事件 '{event_name}' "
+            f"(priority={priority}, timeout={timeout})"
         )
 
         # 返回取消订阅函数
@@ -340,13 +361,22 @@ class EventBus:
         return (decision, next_params)
 
     async def _execute_handler(self, sub: _Subscriber, event_name: str, params: EventParams) -> Any:
-        """执行处理器并返回结果，支持同步和异步处理器。"""
+        """执行处理器并返回结果，支持同步和异步处理器。
+
+        超时取值优先级：``sub.timeout``（订阅者级覆盖）→ 全局
+        ``_event_handler_timeout_seconds``。``<= 0`` 表示禁用超时保护。
+        """
         result = sub.handler(event_name, params)
         if inspect.isawaitable(result):
-            if _event_handler_timeout_seconds > 0:
+            timeout = (
+                sub.timeout
+                if sub.timeout is not None
+                else _event_handler_timeout_seconds
+            )
+            if timeout > 0:
                 return await asyncio.wait_for(
                     result,
-                    timeout=_event_handler_timeout_seconds,
+                    timeout=timeout,
                 )
             return await result
         return result

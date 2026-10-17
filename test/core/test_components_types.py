@@ -51,6 +51,7 @@ class TestEventType:
         """测试 EventType 枚举值。"""
         assert EventType.ON_START.value == "on_start"
         assert EventType.ON_STOP.value == "on_stop"
+        assert EventType.BEFORE_MESSAGE_RECEIVED.value == "before_message_received"
         assert EventType.ON_MESSAGE_RECEIVED.value == "on_message_received"
         assert EventType.ON_MESSAGE_SENT.value == "on_message_sent"
         assert EventType.ON_CHATTER_STEP.value == "on_chatter_step"
@@ -87,6 +88,8 @@ class TestEventType:
 
     def test_new_event_types_are_str_subclass(self):
         """测试新增事件枚举可直接作为事件名称字符串使用。"""
+        assert isinstance(EventType.BEFORE_MESSAGE_RECEIVED, str)
+        assert EventType.BEFORE_MESSAGE_RECEIVED == "before_message_received"
         assert isinstance(EventType.ON_PROMPT_BUILD, str)
         assert EventType.ON_PROMPT_BUILD == "on_prompt_build"
         assert isinstance(EventType.BEFORE_LLM_REQUEST, str)

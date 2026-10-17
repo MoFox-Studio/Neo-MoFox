@@ -198,9 +198,52 @@ class TestEventBusPublish:
             params["x"] = 2
             return (EventDecision.SUCCESS, params)
 
-        monkeypatch.setattr(event_core, "EVENT_HANDLER_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(event_core, "_event_handler_timeout_seconds", 0.01)
 
         bus.subscribe("e", hung, priority=20)
+        bus.subscribe("e", ok, priority=10)
+
+        decision, out = await bus.publish("e", {"x": 1})
+        assert decision == EventDecision.SUCCESS
+        assert out == {"x": 2}
+
+    @pytest.mark.asyncio
+    async def test_publish_subscriber_timeout_overrides_global(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """订阅者级 timeout 优先于全局；``<= 0`` 禁用超时。"""
+        bus = EventBus()
+
+        async def long_running(event_name: str, params: dict):
+            await asyncio.sleep(0.05)
+            params["x"] = 2
+            return (EventDecision.SUCCESS, params)
+
+        # 全局超时设得很短（0.01s），但订阅者级 timeout=0 禁用超时，
+        # 该处理器应能完整跑完。
+        monkeypatch.setattr(event_core, "_event_handler_timeout_seconds", 0.01)
+        bus.subscribe("e", long_running, priority=10, timeout=0)
+
+        decision, out = await bus.publish("e", {"x": 1})
+        assert decision == EventDecision.SUCCESS
+        assert out == {"x": 2}
+
+    @pytest.mark.asyncio
+    async def test_publish_subscriber_timeout_custom_value(self) -> None:
+        """订阅者级正数 timeout 生效；超时即跳过。"""
+        bus = EventBus()
+
+        async def hung(event_name: str, params: dict):
+            await asyncio.Event().wait()
+            return (EventDecision.SUCCESS, params)
+
+        async def ok(event_name: str, params: dict):
+            params["x"] = 2
+            return (EventDecision.SUCCESS, params)
+
+        # 订阅者级 timeout=0.01，足够触发 hung 超时；后续 ok 仍执行
+        bus.subscribe("e", hung, priority=20, timeout=0.01)
         bus.subscribe("e", ok, priority=10)
 
         decision, out = await bus.publish("e", {"x": 1})

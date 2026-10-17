@@ -101,6 +101,10 @@ class CommandParser:
         设停止事件，并尝试让正在阻塞的 prompt() 返回（通过 app.exit 注入
         EOFError），避免终端残留 raw 模式。若 worker 此刻不在 prompt()，
         这些操作也无害。
+
+        另外同步恢复终端属性作为兜底：prompt_toolkit 自身的 finally 在
+        daemon 线程被强杀、事件循环已关闭等极端情况下可能不执行，
+        显式调用 restore_terminal 保证 raw 模式不会残留。
         """
         self._input_stop_event.set()
         try:
@@ -112,6 +116,12 @@ class CommandParser:
                     loop.call_soon_threadsafe(exit_fn)
                 else:
                     exit_fn()
+        except Exception:
+            pass
+        try:
+            from .console_input import restore_terminal
+
+            restore_terminal()
         except Exception:
             pass
 

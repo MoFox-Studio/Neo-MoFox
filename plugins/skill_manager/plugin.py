@@ -9,7 +9,7 @@ from src.core.prompt import SystemReminderInsertType
 from src.kernel.logger import get_logger
 
 from .commands import SkillManagerCommand
-from .config import SkillManagerConfig
+from .config import SkillManagerConfig, resolve_security_section
 from .handlers import SkillManagerLoadHandler
 from .models import SkillEntry
 from .tools import SkillGetReferenceTool, SkillGetScriptTool, SkillGetTool
@@ -68,8 +68,6 @@ class SkillManagerPlugin(BasePlugin):
     """Skill 管理器插件。"""
 
     plugin_name: str = "skill_manager"
-    plugin_description: str = "技能管理器"
-    plugin_version: str = "1.0.0"
 
     configs: list[type] = [SkillManagerConfig]
 
@@ -92,13 +90,21 @@ class SkillManagerPlugin(BasePlugin):
         ):
             logger.info("skill_manager 已在配置中禁用")
             return []
-        return [
+
+        components: list[type] = [
             SkillManagerLoadHandler,
             SkillManagerCommand,
             SkillGetTool,
             SkillGetReferenceTool,
-            SkillGetScriptTool,
         ]
+        if resolve_security_section(self.config).allow_script_execution:
+            components.append(SkillGetScriptTool)
+        else:
+            logger.info(
+                "skill_manager 未开启脚本执行，get_script 工具不会注册；"
+                "如需开启请将 [security].allow_script_execution 设为 true"
+            )
+        return components
 
     async def on_plugin_unloaded(self) -> None:
         """插件卸载时清理 system reminder。"""

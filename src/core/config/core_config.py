@@ -8,7 +8,20 @@ from typing import Literal
 
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
 
-CORE_VERSION = "1.2.0"
+CORE_VERSION = "1.3.0-alpha.1"
+
+
+DEFAULT_REPLY_STYLE = """我顺着当下的关系、气氛与情绪自然表达，保留谈话的温度。日常交流不刻意复述设定，也不机械重复同一种句式、口癖或模板化评价。
+
+普通聊天里，一句简短的感叹、追问、玩笑或朴素回应往往已经足够。我不把聊天记录整理成摘要，不逐条复述别人说过什么，也不为了显得完整而替话题补出起承转合。只有对方确实需要解释、分析、安慰或讲述时，我才随着事情本身展开；长度由这次交流需要多少决定。
+
+日常的一次回应通常只有一个重心：被某件事惊到，就停在惊讶；觉得好笑，就让好笑本身落地；想夸一句，就只夸那一点；想追问，就把问题问出去。我不需要在同一条短回复里同时感叹、分析、赞同、总结和提供建议。轻松的吐槽不必得出结论，简短的评价也不必证明自己理解得很全面。
+
+评价会落在明确的感受或看得见的地方。我喜欢就可以直接说喜欢，觉得不错、好看、好笑、别扭或不合适，也可以朴素地说出来；如果某个颜色、排版、动作、措辞或效果真正引起了我的注意，我就说那一处。没有具体内容可指时，我宁可只表达简单感受，不用“很有灵魂”“氛围感拉满”“很有那个味道”“质感绝了”这类听起来有力却没有说明感受的抽象修辞代替判断。比喻和夸张只在它们真的抓住某个特征时出现。
+
+我的反应跟着事情本身的分量走。普通小事可以只是轻轻接一句；真正荒诞、反差强、离谱、好笑或带有鲜明网络语境的内容，才自然值得更有力的吐槽、夸张或玩笑。我不刻意模仿网络口语，也不为了显得像在网上聊天而堆砌口头禅；合适的表达会在合适的地方自然出现。有时一句短短的感叹、一个玩笑，或一段自然的停顿，就已经完成了这次交流。
+
+聊天消息有自然的呼吸。一个简短意思通常是一条消息；想制造停顿、转折、补一句或抖个包袱时，我可以连续调用多次 action，让它们成为几个自然的聊天气泡。单条消息内部通常使用连贯的短句，不靠连续换行切碎语气，也不把本可分开发送的几层意思挤成一整面文字。"""
 
 class CoreConfig(ConfigBase):
     """Core 层配置类
@@ -16,7 +29,7 @@ class CoreConfig(ConfigBase):
     定义 Core 层的所有配置节。Core 层包含对话管理、用户管理、消息处理等业务逻辑。
     """
     
-    @config_section("bot")
+    @config_section("bot", title="Bot 基础配置", tag="general")
     class BotSection(SectionBase):
         """Bot 配置节
 
@@ -196,7 +209,7 @@ class CoreConfig(ConfigBase):
 
     bot: BotSection = Field(default_factory=BotSection)
 
-    @config_section("chat")
+    @config_section("chat", title="聊天配置", tag="ai")
     class ChatSection(SectionBase):
         """聊天配置节
 
@@ -229,6 +242,16 @@ class CoreConfig(ConfigBase):
             input_type="textarea",
             rows=3,
             placeholder="请描述这个表情包的内容...",
+            hint="留空使用默认提示词",
+        )
+        video_recognition_prompt: str = Field(
+            default="",
+            description="自定义视频识别提示词，留空则使用内置默认提示词",
+            label="视频识别提示词",
+            tag="ai",
+            input_type="textarea",
+            rows=3,
+            placeholder="请描述这个视频的内容...",
             hint="留空使用默认提示词",
         )
 
@@ -296,7 +319,7 @@ class CoreConfig(ConfigBase):
 
     chat: ChatSection = Field(default_factory=ChatSection)
 
-    @config_section("llm")
+    @config_section("llm", title="LLM 配置", tag="ai")
     class LLMSection(SectionBase):
         """LLM 配置节。
 
@@ -315,7 +338,7 @@ class CoreConfig(ConfigBase):
 
     llm: LLMSection = Field(default_factory=LLMSection)
 
-    @config_section("llm_stats")
+    @config_section("llm_stats", title="LLM 统计", tag="performance")
     class LLMStatsSection(SectionBase):
         """LLM 统计配置节。"""
 
@@ -353,7 +376,7 @@ class CoreConfig(ConfigBase):
 
     llm_stats: LLMStatsSection = Field(default_factory=LLMStatsSection)
 
-    @config_section("telemetry")
+    @config_section("telemetry", title="遥测配置", tag="debug")
     class TelemetrySection(SectionBase):
         """通用遥测配置节。"""
 
@@ -450,7 +473,7 @@ class CoreConfig(ConfigBase):
 
     telemetry: TelemetrySection = Field(default_factory=TelemetrySection)
 
-    @config_section("cloud_telemetry")
+    @config_section("cloud_telemetry", title="云端遥测", tag="network")
     class CloudTelemetrySection(SectionBase):
         """云端遥测客户端配置节。"""
 
@@ -504,7 +527,7 @@ class CoreConfig(ConfigBase):
 
     cloud_telemetry: CloudTelemetrySection = Field(default_factory=CloudTelemetrySection)
 
-    @config_section("personality")
+    @config_section("personality", title="人格配置", tag="user")
     class PersonalitySection(SectionBase):
         """Bot 人格配置节
 
@@ -566,12 +589,15 @@ class CoreConfig(ConfigBase):
             hint="不会主动复述，仅作为背景知识",
         )
         reply_style: str = Field(
-            default="自然口语化",
-            description="表达风格，如正式、幽默、简洁等",
+            default=DEFAULT_REPLY_STYLE,
+            description=(
+                "表达风格，如正式、幽默、简洁等。默认示例可以备份后重新生成查看 "
+            ),
             label="表达风格",
             tag="user",
-            input_type="text",
-            placeholder="自然口语化",
+            input_type="textarea",
+            rows=12,
+            placeholder="描述角色如何说话，以及不同场合下的表达方式。",
         )
         safety_guidelines: list[str] = Field(
             default_factory=lambda: [
@@ -607,7 +633,7 @@ class CoreConfig(ConfigBase):
 
     personality: PersonalitySection = Field(default_factory=PersonalitySection)
 
-    @config_section("database")
+    @config_section("database", title="数据库配置", tag="database")
     class DatabaseSection(SectionBase):
         """数据库配置节
 
@@ -775,7 +801,7 @@ class CoreConfig(ConfigBase):
 
     database: DatabaseSection = Field(default_factory=DatabaseSection)
 
-    @config_section("permissions")
+    @config_section("permissions", title="权限配置", tag="security")
     class PermissionSection(SectionBase):
         """权限配置节
 
@@ -886,7 +912,7 @@ class CoreConfig(ConfigBase):
 
     permissions: PermissionSection = Field(default_factory=PermissionSection)
 
-    @config_section("http_router")
+    @config_section("http_router", title="HTTP 路由", tag="network")
     class HttpRouterSection(SectionBase):
         """HTTP 路由配置节
 
@@ -936,7 +962,7 @@ class CoreConfig(ConfigBase):
         )
     http_router: HttpRouterSection = Field(default_factory=HttpRouterSection)
 
-    @config_section("advanced")
+    @config_section("advanced", title="高级配置", tag="advanced")
     class AdvancedSection(SectionBase):
         """高级配置节
 
@@ -980,7 +1006,7 @@ class CoreConfig(ConfigBase):
 
     advanced: AdvancedSection = Field(default_factory=AdvancedSection)
 
-    @config_section("plugin_deps")
+    @config_section("plugin_deps", title="插件依赖安装", tag="plugin")
     class PluginDepsSection(SectionBase):
         """插件依赖自动安装配置节
 
@@ -1015,7 +1041,7 @@ class CoreConfig(ConfigBase):
 
     plugin_deps: PluginDepsSection = Field(default_factory=PluginDepsSection)
 
-    @config_section("plugin_market")
+    @config_section("plugin_market", title="插件市场", tag="plugin")
     class PluginMarketSection(SectionBase):
         """插件市场接入配置节。"""
 

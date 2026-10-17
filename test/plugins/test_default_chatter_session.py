@@ -107,6 +107,7 @@ class _FakeRuntime:
         self._response = response
         self.create_request_calls: list[tuple[str, str | None]] = []
         self.stream_id = "s1"
+        self._fetch_count = 0
 
     def create_request(
         self,
@@ -129,7 +130,12 @@ class _FakeRuntime:
 
     async def fetch_unreads(self, time_format: str = "%H:%M") -> tuple[str, list[Any]]:
         _ = time_format
-        return "", [SimpleNamespace(message_id="m1")]
+        self._fetch_count += 1
+        # 模拟真实消费语义：首次返回一条待处理未读，之后未读被消费置空。
+        # 避免 pass_and_wait 前重新 fetch 恒非空导致状态机无限跳过 Wait 而死循环。
+        if self._fetch_count == 1:
+            return "", [SimpleNamespace(message_id="m1")]
+        return "", []
 
     def format_message_line(self, _msg: Any, _time_format: str = "%H:%M") -> str:
         return "line"
@@ -487,6 +493,7 @@ async def test_session_execute_with_stream_prints_actor_decision_panel_before_pr
     async def _fake_process_tool_calls(**_kwargs: Any) -> Any:
         return SimpleNamespace(
             should_wait=True,
+            wait_seconds=None,
             should_stop=False,
             stop_minutes=0.0,
             has_pending_tool_results=False,

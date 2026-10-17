@@ -133,6 +133,9 @@ class TestLogger:
         # 测试面板输出不会抛出异常
         logger.print_panel("Panel content", title="Test Panel")
         logger.print_panel("Another panel")
+        # 测试包含非法 markup 标签时回退不抛出异常
+        logger.print_panel("Panel with [unclosed tag", title="Markup Test")
+        logger.print_panel("Panel with valid [bold]markup[/bold]")
 
     def test_print_rich(self) -> None:
         """测试直接使用 rich 打印"""

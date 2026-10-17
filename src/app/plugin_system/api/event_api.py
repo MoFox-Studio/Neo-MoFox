@@ -7,9 +7,10 @@ from typing import Any
 
 from src.core.components import EventType, BaseEventHandler
 from src.kernel.event import EventDecision
+from src.kernel.event import set_event_handler_timeout as _set_event_handler_timeout
 from src.core.managers import get_event_manager
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 # =============================================================================
 # 事件发布操作
@@ -148,3 +149,14 @@ def get_event_stats() -> dict[str, int]:
     """
     manager = get_event_manager()
     return manager.get_event_stats()
+
+def set_event_handler_timeout(timeout_seconds: float) -> None:
+    """设置事件处理器的超时时间。
+
+    Args:
+        timeout_seconds: 超时时间（秒），小于等于 0 表示禁用超时检查。
+    examples:
+        >>> set_event_handler_timeout(10)  # 设置超时为 10 秒
+        >>> set_event_handler_timeout(0)   # 禁用超时检查
+    """
+    _set_event_handler_timeout(timeout_seconds)

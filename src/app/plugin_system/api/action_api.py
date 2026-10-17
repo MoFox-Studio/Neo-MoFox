@@ -1,6 +1,6 @@
 """
 Action API模块
-专门负责......
+作为 Action 管理器的薄封装，专门负责 Action 组件的查询、筛选和执行操作。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.core.components.types import ChatType
 
-API_VERSION = "1.0.0"
+API_VERSION = "2.0.0"
 
 if TYPE_CHECKING:
     from src.core.components.base.action import BaseAction
@@ -97,26 +97,40 @@ def get_actions_for_plugin(plugin_name: str) -> dict[str, type["BaseAction"]]:
     return _get_action_manager().get_actions_for_plugin(plugin_name)
 
 
-def get_actions_for_chat(
-    chat_type: ChatType | str = ChatType.ALL,
+async def filter_actions(
+    component_classes: list[type["LLMUsable"]],
+    *,
+    stream_id: str = "",
     chatter_name: str = "",
+    chatter_signature: str = "",
+    chat_type: ChatType | str = ChatType.ALL,
     platform: str = "",
 ) -> list[type["LLMUsable"]]:
-    """获取适用于特定聊天上下文的 Action 组件列表。
+    """筛选传入的 Action 组件类列表。
+
+    仅从 ``component_classes`` 中筛选，不从聊天流或全局注册表获取组件；
+    需要从全局注册表获取时请先调用 :func:`get_all_actions`。
 
     Args:
+        component_classes: 待筛选的 Action 组件类列表
+        stream_id: 聊天流 ID
+        chatter_name: 聊天器名称
+        chatter_signature: 聊天器签名
         chat_type: 聊天类型
-        chatter_name: Chatter 名称
         platform: 平台名称
 
     Returns:
-        Action 组件列表
+        Action 组件类列表
     """
     _validate_optional(chatter_name, "chatter_name")
+    _validate_optional(chatter_signature, "chatter_signature")
     _validate_optional(platform, "platform")
-    return _get_action_manager().get_actions_for_chat(
-        chat_type=_normalize_chat_type(chat_type),
+    return await _get_action_manager().filter_actions(
+        component_classes,
+        stream_id=stream_id,
         chatter_name=chatter_name,
+        chatter_signature=chatter_signature,
+        chat_type=_normalize_chat_type(chat_type),
         platform=platform,
     )
 
@@ -148,27 +162,17 @@ def get_action_schema(signature: str) -> dict[str, Any] | None:
 
 
 def get_action_schemas(
-    chat_type: ChatType | str = ChatType.ALL,
-    chatter_name: str = "",
-    platform: str = "",
+    component_classes: list[type["LLMUsable"]],
 ) -> list[dict[str, Any]]:
-    """获取适用于特定聊天上下文的所有 Action Schema。
+    """获取组件类列表对应的 Action Schema 列表。
 
     Args:
-        chat_type: 聊天类型
-        chatter_name: Chatter 名称
-        platform: 平台名称
+        component_classes: 已筛选的 Action 组件类列表
 
     Returns:
         Tool Schema 列表
     """
-    _validate_optional(chatter_name, "chatter_name")
-    _validate_optional(platform, "platform")
-    return _get_action_manager().get_action_schemas(
-        chat_type=_normalize_chat_type(chat_type),
-        chatter_name=chatter_name,
-        platform=platform,
-    )
+    return _get_action_manager().get_action_schemas(component_classes)
 
 
 async def execute_action(
@@ -215,32 +219,14 @@ def clear_schema_cache(signature: str | None = None) -> None:
     _get_action_manager().clear_schema_cache(signature)
 
 
-async def modify_actions(stream_id: str, message_content: str = "") -> list[str]:
-    """修改动作列表，根据上下文过滤和激活动作。
-
-    Args:
-        stream_id: 聊天流 ID
-        message_content: 消息内容
-
-    Returns:
-        可用 Action 签名列表
-    """
-    _validate_non_empty(stream_id, "stream_id")
-    return await _get_action_manager().modify_actions(
-        stream_id=stream_id,
-        message_content=message_content,
-    )
-
-
 __all__ = [
     "API_VERSION",
     "get_all_actions",
     "get_actions_for_plugin",
-    "get_actions_for_chat",
+    "filter_actions",
     "get_action_class",
     "get_action_schema",
     "get_action_schemas",
     "execute_action",
     "clear_schema_cache",
-    "modify_actions",
 ]

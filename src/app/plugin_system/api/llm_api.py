@@ -26,7 +26,7 @@ from src.core.utils.llm_tool_call import (
     run_tool_call,
 )
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 __all__ = [
     "API_VERSION",
@@ -55,6 +55,8 @@ def create_llm_request(
     request_name: str = "",
     context_manager: LLMContextManager | None = None,
     with_reminder: str | SystemReminderBucket | None = None,
+    stream_id: str | None = None,
+    meta_data: dict[str, Any] | None = None,
 ) -> LLMRequest:
     """创建 LLMRequest 实例
 
@@ -62,7 +64,16 @@ def create_llm_request(
         model_set: 模型集
         request_name: 请求名称（可选）
         context_manager: 上下文管理器（可选）
-        with_reminder: 可选的 system reminder bucket；传入后会自动登记到上下文管理器
+        with_reminder: 可选的 system reminder bucket；传入后会自动登记到上下文管理器。
+            当 ``stream_id`` 也非空时，会同时登记全局桶与流私有桶两个 source，
+            使请求能同时拾取 :func:`prompt_api.add_system_reminder` 写入的全局
+            reminder 与 :func:`prompt_api.add_stream_reminder` 写入的流私有 reminder。
+        stream_id: 聊天流 ID（可选）。非空时自动注入 ``meta_data["stream_id"]``，
+            使 LLM 统计按流聚合（见 :func:`get_llm_stats_by_stream`）。
+            若 ``with_reminder`` 也非空且未显式传入 ``context_manager``，
+            会自动追加形如 ``stream:{stream_id}:{bucket}`` 的流私有 reminder source。
+        meta_data: 额外的 meta_data 字段（可选）。与 ``stream_id`` 自动注入的
+            ``stream_id`` 键合并，调用方传入的同名键优先。
 
     Returns:
         LLMRequest 实例
@@ -74,20 +85,44 @@ def create_llm_request(
         )
 
     if context_manager is None and with_reminder is not None:
-        context_manager = LLMContextManager(
-            reminder_sources=[
+        reminder_sources = [
+            ReminderSourceSpec(
+                bucket=str(with_reminder),
+                wrap_with_system_tag=True,
+            )
+        ]
+        if stream_id:
+            from src.core.prompt import STREAM_BUCKET_PREFIX
+
+            reminder_sources.append(
                 ReminderSourceSpec(
-                    bucket=str(with_reminder),
+                    bucket=f"{STREAM_BUCKET_PREFIX}{stream_id}:{with_reminder}",
                     wrap_with_system_tag=True,
                 )
-            ]
+            )
+        context_manager = LLMContextManager(
+            reminder_sources=reminder_sources,
         )
 
-    request = LLMRequest(
-        model_set=model_set,
-        request_name=request_name,
-        context_manager=context_manager,
-    )
+    final_meta_data: dict[str, Any] | None = None
+    if stream_id:
+        final_meta_data = {"stream_id": stream_id}
+    if meta_data:
+        final_meta_data = {**(final_meta_data or {}), **meta_data}
+
+    if final_meta_data is not None:
+        request = LLMRequest(
+            model_set=model_set,
+            request_name=request_name,
+            context_manager=context_manager,
+            meta_data=final_meta_data,
+        )
+    else:
+        request = LLMRequest(
+            model_set=model_set,
+            request_name=request_name,
+            context_manager=context_manager,
+        )
 
     return request
 
