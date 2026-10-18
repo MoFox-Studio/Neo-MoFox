@@ -181,7 +181,7 @@ class LLMResponse:
 
     @asynccontextmanager
     async def _consumption_scope(self) -> AsyncIterator[None]:
-        """Close provider resources on normal exit, callback failure or cancellation."""
+        """正常退出、回调失败或取消时关闭提供商资源。"""
         try:
             yield
         except BaseException as error:
@@ -192,10 +192,10 @@ class LLMResponse:
             await self.aclose()
 
     async def aclose(self) -> None:
-        """Close without draining, including an unstarted native provider stream.
+        """关闭响应而不读取剩余流内容，也支持尚未开始迭代的原生流。
 
-        Call this in a finally block when stopping iteration early. The observation
-        is cancelled only if it has not already reached an execution terminal state.
+        提前停止迭代时，应在 finally 块中调用本方法。只有观测记录尚未进入
+        执行终态时，才将其标记为取消；重复关闭不会重复释放资源。
         """
         if self._closed:
             return

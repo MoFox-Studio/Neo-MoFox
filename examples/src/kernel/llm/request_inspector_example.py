@@ -1,4 +1,4 @@
-"""Offline inspector example: safe structured input, response and buffer snapshots."""
+"""请求监视器离线示例：安全的结构化输入、响应及缓冲快照。"""
 
 from __future__ import annotations
 
@@ -6,14 +6,14 @@ import json
 import sys
 from pathlib import Path
 
-# Running this file directly does not require installing the application package.
+# 直接运行本文件无需先安装主程序包。
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
 
 from src.kernel.llm.request_inspector import RequestInspector
 
 
 def main() -> None:
-    """Demonstrate inspection only: no SDK, HTTP server, credentials or model calls."""
+    """仅演示请求观测，不使用 SDK、HTTP 服务或凭据，也不调用模型。"""
     inspector = RequestInspector()
     params = {
         "model": "offline-demo",

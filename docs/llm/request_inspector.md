@@ -2,12 +2,12 @@
 
 `RequestInspector` 是 LLM 内核的进程内观测服务，不提供 HTTP 端点，也不依赖
 WebUI。原生适配器直接报告最终 SDK 参数、已解析的响应和 SDK 原始事件；不使用
-SDK 包装器、代理客户端或 monkey patch。WebUI 只负责认证、读取快照和展示。
+SDK 包装器、代理客户端或运行时猴子补丁。WebUI 只负责认证、读取快照和展示。
 
 ## 支持范围
 
 - OpenAI Chat Completions、OpenAI Responses、Anthropic Messages。
-- OpenAI-compatible Embedding 和现有 SDK 原生 Rerank 调用。
+- 兼容 OpenAI 协议的嵌入调用，以及现有 SDK 原生重排序调用。
 - 聊天流式/非流式、框架重试、模型切换、流消费重试、取消及异常。
 - 工具定义、模型返回的调用 ID/名称/参数，以及请求中已有的工具结果。
 
@@ -89,7 +89,7 @@ result = inspector.clear_snapshot()
 
 外层超时记为 `failed`，调用方取消记为 `cancelled`。流错误/取消保留已收到的
 部分响应，清理资源不会吞掉原始异常。观测失败不改变业务返回或重试决策，最多
-按尝试记录一条只含错误类型的诊断，不输出异常正文或 traceback。
+按尝试记录一条只含错误类型的诊断，不输出异常正文或异常堆栈。
 
 ## 提前停止消费
 
@@ -104,7 +104,7 @@ finally:
     await response.aclose()
 ```
 
-`aclose()` 幂等，不主动 drain 流；即使尚未开始迭代，也会关闭已经取得的 SDK
+`aclose()` 幂等，不主动读取剩余流内容；即使尚未开始迭代，也会关闭已经取得的 SDK
 资源。正常消费、消费异常及回调异常会清理资源。普通 `break` 不保证 Python
 立即关闭异步生成器，所以提前停止时应显式调用 `aclose()`。监视器不会启动后台
 任务替调用方消费流，也不会将未消费的调用伪造为成功。
@@ -132,6 +132,6 @@ uv run pytest test/kernel/llm --no-cov
 uv run python examples/src/kernel/llm/request_inspector_example.py
 ```
 
-测试仅使用受控的 SDK-shaped fake，不读取真实密钥、不访问供应商。示例只使用
-内存 inspector，不执行模型调用。WebUI 接口测试可将 `NEO_MOFOX_ROOT` 指向本仓库，
-联合验证真实 inspector、Manager、Router 和 Pydantic 契约。
+测试仅使用受控的模拟 SDK 对象，不读取真实密钥、不访问供应商。示例只使用
+内存监视器，不执行模型调用。WebUI 接口测试可将 `NEO_MOFOX_ROOT` 指向本仓库，
+联合验证真实监视器、管理器、路由及 Pydantic 数据契约。

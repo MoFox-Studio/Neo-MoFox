@@ -588,7 +588,7 @@ def _extract_usage(resp: Any) -> dict[str, Any]:
     return _extract_usage_from_obj(_get_usage_field(resp, "usage", None))
 
 
-# _ClientCacheKey: (api_key, base_url, loop_id, timeout, trust_env, force_ipv4)
+# 客户端缓存键：(api_key, base_url, loop_id, timeout, trust_env, force_ipv4)
 _ClientCacheKey = tuple[str, str | None, int, float | None, bool, bool]
 
 

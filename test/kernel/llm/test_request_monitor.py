@@ -1,4 +1,4 @@
-"""Native request monitor integration tests and SDK-shaped, offline smoke fixtures."""
+"""原生请求监视器集成测试，以及模拟 SDK 对象的离线冒烟测试夹具。"""
 
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ from src.kernel.llm.request_trace import Attempt, LogicalRequest, attempt_scope
 
 
 class JSON(SimpleNamespace):
-    """SDK-shaped object with deterministic JSON serialization, no network access."""
+    """模拟 SDK 对象，提供确定性的 JSON 序列化，不访问网络。"""
 
     def model_dump(self, **_: Any) -> dict[str, Any]:
-        """Convert nested fixtures like SDK Pydantic models."""
+        """像 SDK 的 Pydantic 模型一样转换嵌套测试夹具。"""
 
         def convert(value: Any) -> Any:
-            """Convert recursive fixture contents."""
+            """递归转换测试夹具内容。"""
             if isinstance(value, SimpleNamespace):
                 return {k: convert(v) for k, v in vars(value).items()}
             if isinstance(value, list):
@@ -42,7 +42,7 @@ class JSON(SimpleNamespace):
 
 
 class FakeStream:
-    """Async iterable and Anthropic context manager that records resource closure."""
+    """模拟异步流与 Anthropic 上下文管理器，并记录资源关闭次数。"""
 
     def __init__(self, events: list[Any], error: BaseException | None = None) -> None:
         self.events = events
@@ -50,27 +50,27 @@ class FakeStream:
         self.closed = 0
 
     async def __aiter__(self) -> AsyncIterator[Any]:
-        """Yield controlled events, then optionally fail."""
+        """依次产生受控事件，并按配置在结束后抛出异常。"""
         for event in self.events:
             yield event
         if self.error is not None:
             raise self.error
 
     async def aclose(self) -> None:
-        """Count close calls to assert idempotent resource cleanup."""
+        """记录关闭次数，用于验证资源清理的幂等性。"""
         self.closed += 1
 
     async def __aenter__(self) -> Self:
-        """Enter Anthropic's native stream context."""
+        """进入模拟的 Anthropic 原生流上下文。"""
         return self
 
     async def __aexit__(self, *_: object) -> None:
-        """Close Anthropic's native stream context."""
+        """关闭模拟的 Anthropic 原生流上下文。"""
         await self.aclose()
 
 
 def model(protocol: str = "openai", **overrides: Any) -> dict[str, Any]:
-    """Return a valid offline model configuration."""
+    """返回用于离线测试的有效模型配置。"""
     return {
         "api_provider": "fixture",
         "base_url": "https://offline.invalid/v1",
@@ -90,7 +90,7 @@ def model(protocol: str = "openai", **overrides: Any) -> dict[str, Any]:
 
 
 def sdk_response(protocol: str) -> JSON:
-    """Return a successful non-streaming response for each native chat API."""
+    """为各原生聊天接口构造成功的非流式响应。"""
     if protocol == "openai":
         return JSON(
             choices=[
@@ -143,7 +143,7 @@ def sdk_response(protocol: str) -> JSON:
 
 
 def sdk_events(protocol: str) -> list[JSON]:
-    """Return native events with text, reasoning, fragmented tools and usage."""
+    """构造包含文本、推理、工具参数分片及用量的原生事件。"""
     if protocol == "openai":
         return [
             JSON(choices=[], extension="unrecognized event"),
@@ -262,7 +262,7 @@ def make_client(
     error: BaseException | None = None,
     calls: list[dict[str, Any]] | None = None,
 ) -> Any:
-    """Replace only SDK endpoints; keep the real adapter, parser and inspector."""
+    """仅替换 SDK 调用入口，保留真实适配器、解析器和监视器。"""
     client = {
         "openai": OpenAIChatClient,
         "anthropic": AnthropicChatClient,
@@ -270,7 +270,7 @@ def make_client(
     }[protocol]()
 
     async def create(**kwargs: Any) -> Any:
-        """Record final SDK arguments without contacting a provider."""
+        """记录最终 SDK 参数，不连接真实提供商。"""
         if calls is not None:
             calls.append(kwargs)
         if error is not None:
@@ -278,7 +278,7 @@ def make_client(
         return sdk_stream if kwargs.get("stream") else sdk_response(protocol)
 
     def stream(**kwargs: Any) -> FakeStream:
-        """Build the SDK's deferred Anthropic stream context."""
+        """构造延迟进入的 Anthropic SDK 流上下文。"""
         if calls is not None:
             calls.append(kwargs)
         if error is not None:
@@ -304,7 +304,7 @@ async def invoke(
     error: BaseException | None = None,
     calls: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, ...]:
-    """Invoke a real native adapter (also used by the WebUI offline smoke server)."""
+    """调用真实原生适配器，也供 WebUI 离线冒烟测试服务使用。"""
     client = make_client(
         patch, protocol, sdk_stream=sdk_stream, error=error, calls=calls
     )
@@ -320,7 +320,7 @@ async def invoke(
 
 @pytest.fixture(autouse=True)
 def isolated_inspector(monkeypatch: pytest.MonkeyPatch) -> RequestInspector:
-    """Isolate the process singleton between tests."""
+    """在测试之间隔离进程级监视器单例。"""
     inspector = RequestInspector()
     monkeypatch.setattr(inspector_module, "_inspector", inspector)
     return inspector
@@ -331,7 +331,7 @@ def isolated_inspector(monkeypatch: pytest.MonkeyPatch) -> RequestInspector:
 async def test_native_chat_capture(
     monkeypatch: pytest.MonkeyPatch, protocol: str, stream: bool
 ) -> None:
-    """Real adapters publish exact SDK params, content, tools and original events."""
+    """验证真实适配器记录准确的 SDK 参数、内容、工具与原始事件。"""
     calls: list[dict[str, Any]] = []
     sdk = FakeStream(sdk_events(protocol))
     result = await invoke(
@@ -362,7 +362,7 @@ async def test_native_chat_capture(
 
 @pytest.mark.parametrize("kind", ["embedding", "rerank"])
 async def test_native_vector_calls(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
-    """Vector calls retain their inputs, raw result and actual usage, if present."""
+    """验证向量调用保留输入、原始结果及实际返回的用量。"""
     client = OpenAIChatClient()
     response = (
         JSON(data=[JSON(embedding=[0.1, 0.2])], usage=JSON(prompt_tokens=4))
@@ -371,7 +371,7 @@ async def test_native_vector_calls(monkeypatch: pytest.MonkeyPatch, kind: str) -
     )
 
     async def create(**_: Any) -> JSON:
-        """Return a controlled vector response."""
+        """返回受控的向量响应。"""
         return response
 
     monkeypatch.setattr(
@@ -410,7 +410,7 @@ async def test_native_vector_calls(monkeypatch: pytest.MonkeyPatch, kind: str) -
 async def test_stream_failure_preserves_partial_output(
     monkeypatch: pytest.MonkeyPatch, protocol: str, error: BaseException
 ) -> None:
-    """Failure/cancellation cannot be swallowed by native generator cleanup."""
+    """验证原生生成器清理不会吞掉失败或取消异常。"""
     sdk = FakeStream(sdk_events(protocol), error)
     result = await invoke(monkeypatch, protocol, stream=True, sdk_stream=sdk)
     with pytest.raises(type(error)):
@@ -429,7 +429,7 @@ async def test_stream_failure_preserves_partial_output(
 async def test_response_close_without_draining(
     monkeypatch: pytest.MonkeyPatch, protocol: str, consume_first: bool
 ) -> None:
-    """Closing a response cancels pending observations and closes an open SDK once."""
+    """验证关闭响应会取消未完成的观测，并且仅关闭一次已打开的 SDK 资源。"""
     sdk = FakeStream(sdk_events(protocol))
     client = make_client(monkeypatch, protocol, sdk_stream=sdk)
     registry = ModelClientRegistry(**{protocol: client})
@@ -449,11 +449,11 @@ async def test_response_close_without_draining(
 async def test_creation_timeout_is_failure_not_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """wait_for cancellation belongs to its outer timeout, not user cancellation."""
+    """验证 wait_for 引发的取消归入外层超时，而非用户取消。"""
     client = OpenAIChatClient()
 
     async def blocked(**_: Any) -> None:
-        """Wait for the execution deadline."""
+        """等待请求执行超时。"""
         await asyncio.sleep(30)
 
     monkeypatch.setattr(
@@ -475,12 +475,12 @@ async def test_creation_timeout_is_failure_not_cancellation(
 
 
 async def test_retry_and_switch_link_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Framework retries use separate records but one logical request ID."""
+    """验证框架重试分别建档，但共享同一逻辑请求 ID。"""
     client = OpenAIChatClient()
     calls = 0
 
     async def create(**_: Any) -> JSON:
-        """Fail once before returning an ordinary completion."""
+        """先模拟一次失败，再返回普通补全响应。"""
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -514,14 +514,14 @@ async def test_retry_and_switch_link_attempts(monkeypatch: pytest.MonkeyPatch) -
 async def test_stream_retry_reuses_logical_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """LLMResponse's internal re-send must retain logical ID and increment attempt."""
+    """验证 LLMResponse 内部重发保留逻辑 ID，并递增尝试序号。"""
     streams = [
         FakeStream(sdk_events("openai")[:2], TimeoutError("temporary")),
         FakeStream(sdk_events("openai")),
     ]
 
     async def create(**_: Any) -> FakeStream:
-        """Return failing then successful native streams."""
+        """先返回失败的原生流，再返回成功的原生流。"""
         return streams.pop(0)
 
     monkeypatch.setattr(
@@ -542,7 +542,7 @@ async def test_stream_retry_reuses_logical_context(
 async def test_consumption_in_different_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A native stream's captured handle must not use the consumer's ContextVar."""
+    """验证原生流使用已保存的句柄，不误用消费任务的上下文变量。"""
     result = await invoke(
         monkeypatch, "openai", stream=True, sdk_stream=FakeStream(sdk_events("openai"))
     )
@@ -555,10 +555,10 @@ async def test_consumption_in_different_context(
 
 
 async def test_observation_failure_is_nonfatal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Broken monitoring must not change model result or native resource cleanup."""
+    """验证监视器故障不影响模型结果或原生资源清理。"""
 
     def broken(*_: Any, **__: Any) -> None:
-        """Simulate a failing collector."""
+        """模拟采集器故障。"""
         raise RuntimeError("collector failure")
 
     monkeypatch.setattr(get_inspector(), "capture", broken)
@@ -574,7 +574,7 @@ async def test_observation_failure_is_nonfatal(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_buffer_atomicity_isolation_eviction_and_clear() -> None:
-    """IDs/revisions remain unique under concurrent writers and snapshots detach."""
+    """验证并发写入下 ID 与版本不重复，且快照与内部状态隔离。"""
     inspector = RequestInspector()
     with ThreadPoolExecutor(max_workers=8) as executor:
         ids = list(
@@ -609,7 +609,7 @@ def test_buffer_atomicity_isolation_eviction_and_clear() -> None:
 
 
 def test_credentials_removed_from_all_views_and_error() -> None:
-    """Serialization and derived views cannot reintroduce secrets."""
+    """验证序列化及派生视图不会重新泄露凭据。"""
     inspector = get_inspector()
     secret = "private-credential-123"
     record_id = inspector.capture(
@@ -642,7 +642,7 @@ def test_credentials_removed_from_all_views_and_error() -> None:
 
 @pytest.mark.parametrize("event", [False, True])
 def test_raw_budget_keeps_legal_json_and_normalized_response(event: bool) -> None:
-    """Budget truncation limits serialized bytes without dropping normalized text."""
+    """验证预算截断限制序列化字节数，但不丢弃标准化文本。"""
     inspector = RequestInspector(raw_limit_bytes=128)
     record_id = inspector.capture("test", {}, native=True, stream=event)
     inspector.start(record_id)
@@ -658,10 +658,10 @@ def test_raw_budget_keeps_legal_json_and_normalized_response(event: bool) -> Non
 
 
 def test_unserializable_objects_do_not_use_repr() -> None:
-    """Unknown object conversion must remain safe even if str/repr leak credentials."""
+    """验证未知对象的 str/repr 即使会泄露凭据，也不会在转换时被调用。"""
 
     class Unsafe:
-        """A sentinel that must never be represented."""
+        """用于验证不会调用对象文本表示方法的哨兵对象。"""
 
         def __repr__(self) -> str:
             raise AssertionError("repr called")
@@ -682,7 +682,7 @@ def test_unserializable_objects_do_not_use_repr() -> None:
 
 
 def test_responses_request_structure_and_unknown_fields_are_preserved() -> None:
-    """Responses input and tool results get semantic views without changing params."""
+    """验证 Responses 输入与工具结果生成语义视图，且不改变请求参数。"""
     params = {
         "model": "m",
         "instructions": "system",
@@ -721,7 +721,7 @@ def test_responses_request_structure_and_unknown_fields_are_preserved() -> None:
 async def test_all_response_consumers_finish_and_close(
     monkeypatch: pytest.MonkeyPatch, method: str
 ) -> None:
-    """Every LLMResponse consumption API must complete the same native record."""
+    """验证 LLMResponse 各消费接口均完成同一条原生记录。"""
     sdk = FakeStream(sdk_events("openai"))
     client = make_client(monkeypatch, "openai", sdk_stream=sdk)
     request = LLMRequest(
@@ -731,7 +731,7 @@ async def test_all_response_consumers_finish_and_close(
     response = await request.send(stream=True)
 
     async def callback(_: Any) -> None:
-        """Accept observed chunks without side effects."""
+        """接收观测到的分块，不产生额外副作用。"""
 
     if method == "await":
         await response
@@ -756,7 +756,7 @@ async def test_all_response_consumers_finish_and_close(
 async def test_callback_failure_closes_native_stream(
     monkeypatch: pytest.MonkeyPatch, event_callback: bool
 ) -> None:
-    """Exceptions outside native iteration must not leave provider resources open."""
+    """验证原生迭代之外的异常也不会遗留未关闭的提供商资源。"""
     sdk = FakeStream(sdk_events("openai"))
     client = make_client(monkeypatch, "openai", sdk_stream=sdk)
     request = LLMRequest(
@@ -766,7 +766,7 @@ async def test_callback_failure_closes_native_stream(
     response = await request.send(stream=True)
 
     async def fail(_: Any) -> None:
-        """Simulate user callback failure while a provider stream remains open."""
+        """模拟提供商流尚未关闭时用户回调抛出异常。"""
         raise ValueError("callback failed")
 
     with pytest.raises(ValueError, match="callback failed"):
@@ -783,7 +783,7 @@ async def test_callback_failure_closes_native_stream(
 async def test_native_creation_errors(
     monkeypatch: pytest.MonkeyPatch, protocol: str, cancel: bool
 ) -> None:
-    """Creation exceptions are terminal even when bypassing LLMRequest."""
+    """验证绕过 LLMRequest 直接调用时，创建异常仍使记录进入终态。"""
     error = asyncio.CancelledError() if cancel else RuntimeError("api_key=confidential")
     with pytest.raises(type(error)):
         await invoke(monkeypatch, protocol, error=error)
@@ -794,7 +794,7 @@ async def test_native_creation_errors(
 
 
 async def test_native_preparation_error_is_visible() -> None:
-    """Input conversion failure has a record but no fabricated SDK parameters."""
+    """验证输入转换失败仍有记录，但不伪造 SDK 参数。"""
     with pytest.raises(TypeError):
         await OpenAIChatClient().create(
             model_name="m",
@@ -812,11 +812,11 @@ async def test_native_preparation_error_is_visible() -> None:
 async def test_missing_usage_counter_remains_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Business metrics may default missing usage to zero; inspection must not."""
+    """验证观测不沿用业务统计将缺失用量补零的行为。"""
     client = OpenAIChatClient()
 
     async def create(**_: Any) -> JSON:
-        """Return an embedding result with only input usage."""
+        """返回仅包含输入用量的嵌入结果。"""
         return JSON(data=[JSON(embedding=[1.0])], usage=JSON(prompt_tokens=4))
 
     monkeypatch.setattr(
@@ -833,11 +833,11 @@ async def test_missing_usage_counter_remains_unknown(
 async def test_sdk_parse_error_keeps_raw_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Empty output parser errors must not erase a successfully received SDK body."""
+    """验证空输出解析错误不会抹去已经收到的 SDK 原始响应。"""
     client = OpenAIChatClient()
 
     async def create(**_: Any) -> JSON:
-        """Return a provider-shaped response that the existing parser rejects."""
+        """返回结构模拟提供商、但会被现有解析器拒绝的响应。"""
         return JSON(choices=[], extra="diagnostic body")
 
     monkeypatch.setattr(
@@ -862,7 +862,7 @@ async def test_sdk_parse_error_keeps_raw_response(
 
 
 def test_redaction_of_json_strings_and_url_encoding() -> None:
-    """Serialized function arguments and auth query strings need redaction too."""
+    """验证序列化后的工具参数及认证查询字符串同样经过脱敏。"""
     inspector = get_inspector()
     record_id = inspector.capture(
         "test",
@@ -885,7 +885,7 @@ def test_redaction_of_json_strings_and_url_encoding() -> None:
 
 
 def test_raw_budget_exhaustion_and_terminal_immutability() -> None:
-    """A full buffer rejects further events and terminal data remains unchanged."""
+    """验证原始数据预算耗尽后不再保存事件，终态数据也不会被覆盖。"""
     inspector = RequestInspector(raw_limit_bytes=20)
     record_id = inspector.capture("test", {}, native=True, stream=True)
     inspector.start(record_id)
@@ -906,7 +906,7 @@ def test_raw_budget_exhaustion_and_terminal_immutability() -> None:
     "value", [None, float("nan"), {"number": float("inf")}, {1: "invalid key"}]
 )
 def test_non_json_scalars_have_safe_snapshot(value: Any) -> None:
-    """JSON snapshots never expose NaN, infinity, invalid keys or unsafe repr."""
+    """验证 JSON 快照不包含非数值、无穷值、非法键或不安全的对象文本表示。"""
     record_id = get_inspector().capture("test", {}, native=True)
     get_inspector().raw(record_id, value)
     detail = get_inspector().get_record(record_id)
@@ -916,7 +916,7 @@ def test_non_json_scalars_have_safe_snapshot(value: Any) -> None:
 
 
 def test_cycle_and_deep_input_are_marked_unavailable() -> None:
-    """Self-referential user metadata must not recurse forever or break a request."""
+    """验证自引用元数据不会导致无限递归或中断请求。"""
     circular: dict[str, Any] = {}
     circular["self"] = circular
     deep: dict[str, Any] = {}
@@ -933,7 +933,7 @@ def test_cycle_and_deep_input_are_marked_unavailable() -> None:
 async def test_clear_during_live_native_stream_does_not_resurrect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Eviction/clear affects observations only, never the SDK consumer."""
+    """验证淘汰和清空仅影响观测，不影响 SDK 流消费。"""
     result = await invoke(
         monkeypatch, "openai", stream=True, sdk_stream=FakeStream(sdk_events("openai"))
     )
@@ -944,7 +944,7 @@ async def test_clear_during_live_native_stream_does_not_resurrect(
 
 
 def test_retry_context_is_consumed_before_nested_requests() -> None:
-    """Context-compression or plugin sends nested inside a retry get their own IDs."""
+    """验证重试内部嵌套的上下文压缩或插件发送获得独立逻辑 ID。"""
     from src.kernel.llm.request_trace import new_logical_request, retry_scope
 
     logical = LogicalRequest()

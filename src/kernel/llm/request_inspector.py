@@ -537,19 +537,33 @@ _CREDENTIAL = re.compile(
 
 
 def _sensitive(key: str) -> bool:
-    """Recognize credential keys without masking token usage counters."""
+    """识别凭据字段名，避免误删词元用量计数。
+
+    Args:
+        key: 待检查的字段名。
+
+    Returns:
+        bool: 字段名是否表示敏感凭据。
+    """
     return re.sub(r"[^a-z0-9]", "", key.lower()) in _SENSITIVE
 
 
 def _json_size(value: Any) -> int:
-    """Measure exactly the compact UTF-8 JSON representation exposed by snapshots."""
+    """计算快照中紧凑 UTF-8 JSON 表示的准确字节数。
+
+    Args:
+        value: 待观测或转换的原始数据。
+
+    Returns:
+        int: 紧凑 JSON 编码后的 UTF-8 字节数。
+    """
     return len(
         json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     )
 
 
 class _Sanitizer:
-    """Credential-aware JSON conversion; unknown objects never use repr/str."""
+    """将数据安全转换为脱敏 JSON；未知对象不使用 repr/str 兜底。"""
 
     def __init__(self, secrets: tuple[str, ...] = ()) -> None:
         self.secrets = {value for value in secrets if isinstance(value, str) and value}
@@ -558,7 +572,13 @@ class _Sanitizer:
         self.truncated = False
 
     def learn(self, value: Any, seen: set[int] | None = None, depth: int = 0) -> None:
-        """Discover credential values before converting sibling text fields."""
+        """在转换同级文本字段前收集凭据值，以便统一脱敏。
+
+        Args:
+            value: 待观测或转换的原始数据。
+            seen: 已访问对象的标识集合，用于检测循环引用。
+            depth: 当前递归层级。
+        """
         seen = seen if seen is not None else set()
         if id(value) in seen or depth > 64:
             return
@@ -579,13 +599,27 @@ class _Sanitizer:
                 self.learn(item, seen, depth + 1)
 
     def text(self, value: str) -> str:
-        """Remove known credentials and URL credentials from ordinary text."""
+        """移除普通文本中的已知凭据和 URL 认证信息。
+
+        Args:
+            value: 待观测或转换的原始数据。
+
+        Returns:
+            str: 去除已知凭据和 URL 认证信息后的文本。
+        """
         original = value
         for secret in sorted(self.secrets, key=len, reverse=True):
             value = value.replace(secret, _REDACTED)
 
         def clean_url(match: re.Match[str]) -> str:
-            """Keep non-sensitive URL parameters while removing authentication."""
+            """移除 URL 中的认证信息，同时保留非敏感参数。
+
+            Args:
+                match: 文本中匹配到的 URL。
+
+            Returns:
+                str: 移除认证信息后的 URL；解析失败时返回 [invalid URL] 标记。
+            """
             try:
                 url = urlsplit(match.group())
                 netloc = url.netloc.rsplit("@", 1)[-1]
@@ -605,12 +639,29 @@ class _Sanitizer:
         return value
 
     def convert(self, value: Any, limit: int | None = None) -> Any:
-        """Convert to independent JSON, optionally with an exact bounded output."""
+        """转换为独立的 JSON 兼容数据，并按需严格限制输出字节数。
+
+        Args:
+            value: 待观测或转换的原始数据。
+            limit: 允许保留的 JSON 字节数；为 None 时不设置字节上限。
+
+        Returns:
+            Any: 独立的 JSON 兼容数据，必要时仅保留部分结构或使用不可用标记。
+        """
         self.learn(value)
         seen: set[int] = set()
 
         def visit(item: Any, budget: int | None, depth: int) -> Any:
-            """Traverse only retained children, reserving JSON container overhead."""
+            """仅遍历可保留的子节点，并预留 JSON 容器自身的字节开销。
+
+            Args:
+                item: 当前待转换的节点。
+                budget: 当前节点可使用的 JSON 字节预算。
+                depth: 当前递归层级。
+
+            Returns:
+                Any: 当前节点在预算内转换得到的安全值。
+            """
             if depth > 64 or id(item) in seen:
                 self.unavailable = True
                 item = _UNAVAILABLE
@@ -619,7 +670,7 @@ class _Sanitizer:
                     self.unavailable = True
                     item = None
                 if isinstance(item, str):
-                    # Avoid an unbounded JSON encoding of one giant SDK text delta.
+                    # 避免对单个超大的 SDK 文本增量执行无上限的 JSON 编码。
                     if budget is not None and len(item) > budget:
                         item = item[
                             : budget + max((len(v) for v in self.secrets), default=0)
@@ -695,7 +746,11 @@ class _Sanitizer:
 
 
 def _empty_response() -> dict[str, Any]:
-    """Return all fields of the public normalized response contract."""
+    """创建包含公共标准化响应全部字段的空结果。
+
+    Returns:
+        dict[str, Any]: 具有完整标准化响应字段的空结果。
+    """
     return {
         "kind": None,
         "message": None,
@@ -711,7 +766,7 @@ def _empty_response() -> dict[str, Any]:
 
 @dataclass
 class CapturedRequest:
-    """One bounded-buffer record; public conversion never exposes private fields."""
+    """有界缓冲中的单条记录，对外转换不暴露内部字段。"""
 
     id: int
     ts: float
@@ -748,7 +803,11 @@ class CapturedRequest:
     _secrets: set[str] = field(default_factory=set, repr=False)
 
     def to_summary(self) -> dict[str, Any]:
-        """Return metadata only, without request/response bodies or credential state."""
+        """返回记录摘要，不包含请求正文、响应正文或内部凭据状态。
+
+        Returns:
+            dict[str, Any]: 不含正文与内部凭据的记录摘要。
+        """
         usage = self.response.get("usage") or {}
         return {
             "id": self.id,
@@ -779,7 +838,11 @@ class CapturedRequest:
         }
 
     def to_full(self) -> dict[str, Any]:
-        """Build the detached detail, deriving all views from the sanitized snapshot."""
+        """生成与内部状态隔离的详情，所有展示视图均来自脱敏快照。
+
+        Returns:
+            dict[str, Any]: 包含安全参数、派生视图、响应与采集状态的独立详情。
+        """
         return copy.deepcopy(
             {
                 **self.to_summary(),
@@ -798,7 +861,7 @@ class CapturedRequest:
 
 
 class RequestInspector:
-    """Thread-safe, in-memory lifecycle recorder; never owns model execution."""
+    """线程安全的内存生命周期记录器，不接管模型执行。"""
 
     def __init__(
         self, max_records: int = 200, *, raw_limit_bytes: int = 2 * 1024 * 1024
@@ -814,14 +877,27 @@ class RequestInspector:
         self._lock = threading.RLock()
 
     def _touch(self, record: CapturedRequest) -> None:
-        """Advance buffer and record versions while holding the lock."""
+        """在持锁期间递增缓冲版本与记录版本。
+
+        Args:
+            record: 需要处理的内部记录。
+        """
         record.version += 1
         self._revision += 1
 
     def _safe(
         self, record: CapturedRequest, value: Any, unavailable: str | None = None
     ) -> Any:
-        """Sanitize data before retaining it and remember completeness flags."""
+        """在保留数据前统一脱敏，并更新数据完整性标记。
+
+        Args:
+            record: 需要处理的内部记录。
+            value: 待观测或转换的原始数据。
+            unavailable: 需要更新的不可用标记字段名；为 None 时不更新该标记。
+
+        Returns:
+            Any: 脱敏后的独立 JSON 兼容数据。
+        """
         converter = _Sanitizer(tuple(record._secrets))
         result = converter.convert(value)
         record._secrets.update(converter.secrets)
@@ -842,7 +918,21 @@ class RequestInspector:
         stream: bool = False,
         secrets: tuple[str, ...] = (),
     ) -> int:
-        """Create a capture or native pending record and return its monotonic ID."""
+        """创建手工捕获记录或原生待执行记录，返回单调递增的记录 ID。
+
+        Args:
+            api_name: 用于标识 SDK 调用入口的接口名称。
+            params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+            metadata: 需要合并到记录中的请求元数据。
+            native: 是否创建原生调用的 pending 记录；否则创建 captured 记录。
+            logical_request_id: 关联重试的逻辑请求 ID；未提供时自动生成。
+            attempt: 本逻辑请求的尝试序号，通常从 1 开始。
+            stream: 是否以流式方式执行本次调用。
+            secrets: 已知敏感值，仅用于脱敏，不在公共快照中暴露。
+
+        Returns:
+            int: 新记录的单调递增 ID，清空后也不重复使用。
+        """
         with self._lock:
             self._counter += 1
             record = CapturedRequest(self._counter, time.time(), "", "", {}, {})
@@ -881,7 +971,15 @@ class RequestInspector:
         metadata: dict[str, Any] | None = None,
         secrets: tuple[str, ...] = (),
     ) -> None:
-        """Record the final SDK parameters immediately before the provider call."""
+        """在调用提供商前记录最终 SDK 参数，并将记录设为执行中。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+            api_name: 用于标识 SDK 调用入口的接口名称。
+            metadata: 需要合并到记录中的请求元数据。
+            secrets: 已知敏感值，仅用于脱敏，不在公共快照中暴露。
+        """
         with self._lock:
             record = self._records.get(record_id)
             if record is None or record.status in _TERMINAL:
@@ -906,7 +1004,13 @@ class RequestInspector:
     def update(
         self, record_id: int, response: dict[str, Any], *, content: bool = False
     ) -> None:
-        """Publish a normalized partial result independently of raw-data limits."""
+        """更新标准化部分结果，不受原始数据预算限制。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            response: 已经解析的标准化响应字段。
+            content: 是否收到有效内容增量，用于推进流状态与首个内容耗时。
+        """
         with self._lock:
             record = self._records.get(record_id)
             if record is None or record.status in _TERMINAL:
@@ -919,7 +1023,13 @@ class RequestInspector:
             self._touch(record)
 
     def raw(self, record_id: int, value: Any, *, event: bool = False) -> None:
-        """Retain SDK JSON up to the shared response/events budget, never a repr."""
+        """在响应与事件共用预算内保留 SDK JSON，不使用对象文本表示兜底。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            value: 待观测或转换的原始数据。
+            event: 是否将原始数据作为流事件追加，而非替换原始响应。
+        """
         with self._lock:
             record = self._records.get(record_id)
             if (
@@ -965,7 +1075,14 @@ class RequestInspector:
         error: BaseException | None = None,
         cancelled: bool = False,
     ) -> None:
-        """Commit a terminal state once, retaining partial output on failure."""
+        """幂等地记录执行终态，失败时保留已接收的部分输出。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            response: 已经解析的标准化响应字段。
+            error: 执行或观测过程中捕获的异常。
+            cancelled: 是否因调用方取消而结束。
+        """
         with self._lock:
             record = self._records.get(record_id)
             if record is None or record.status in _TERMINAL:
@@ -973,7 +1090,7 @@ class RequestInspector:
             if response:
                 record.response.update(self._safe(record, response))
             if error is not None:
-                # Exceptions may have unsafe __str__; only string arguments are retained.
+                # 异常的 __str__ 可能不安全，因此仅保留其字符串参数。
                 message = next(
                     (arg for arg in error.args if isinstance(arg, str)),
                     type(error).__name__,
@@ -1005,7 +1122,13 @@ class RequestInspector:
     def mark_unavailable(
         self, record_id: int, *, request: bool = False, raw: bool = False
     ) -> None:
-        """Mark data genuinely unavailable rather than fabricating provider payloads."""
+        """标记确实不可用的数据，不伪造提供商请求或响应。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            request: 是否标记原始请求参数不可用。
+            raw: 是否标记原始 SDK 响应或事件不可用。
+        """
         with self._lock:
             record = self._records.get(record_id)
             if record is None or record.status in _TERMINAL:
@@ -1015,7 +1138,11 @@ class RequestInspector:
             self._touch(record)
 
     def snapshot(self) -> dict[str, Any]:
-        """Return one atomic metadata-only snapshot and current-buffer statistics."""
+        """原子地读取记录摘要及当前缓冲统计，不返回请求或响应正文。
+
+        Returns:
+            dict[str, Any]: 包含 instance_id、revision、capacity、records 和 stats 的快照。
+        """
         with self._lock:
             summaries = [record.to_summary() for record in self._records.values()]
             return {
@@ -1032,11 +1159,22 @@ class RequestInspector:
             }
 
     def list_summaries(self) -> list[dict[str, Any]]:
-        """Keep the original capture-order summary API without exposing bodies."""
+        """保留按捕获顺序返回摘要的原有接口，不暴露正文。
+
+        Returns:
+            list[dict[str, Any]]: 按捕获顺序排列的独立记录摘要。
+        """
         return self.snapshot()["records"]
 
     def get_record(self, record_id: int) -> dict[str, Any] | None:
-        """Return detached detail or None after clear/eviction."""
+        """返回与内部状态隔离的详情；记录已清空或淘汰时返回 None。
+
+        Args:
+            record_id: 需要读取详情的记录 ID。
+
+        Returns:
+            dict[str, Any] | None: 包含实例标识的独立详情；记录不存在时返回 None。
+        """
         with self._lock:
             record = self._records.get(record_id)
             return (
@@ -1046,7 +1184,11 @@ class RequestInspector:
             )
 
     def clear_snapshot(self) -> dict[str, Any]:
-        """Forget retained records, not executions; IDs are never reused."""
+        """清空已保留的记录，不取消实际调用，也不重置记录 ID。
+
+        Returns:
+            dict[str, Any]: 包含实例标识、更新后的缓冲版本及删除数量的结果。
+        """
         with self._lock:
             count = len(self._records)
             self._records.clear()
@@ -1058,11 +1200,22 @@ class RequestInspector:
             }
 
     def clear(self) -> int:
-        """Preserve the old count-only clear API."""
+        """保留仅返回删除数量的原有清空接口。
+
+        Returns:
+            int: 本次删除的记录数量。
+        """
         return self.clear_snapshot()["cleared_count"]
 
     def import_json(self, payload: Any) -> list[CapturedRequest]:
-        """Import captured-only records and return detached, credential-free copies."""
+        """导入为手工捕获状态，返回与内部状态隔离且不含凭据的记录副本。
+
+        Args:
+            payload: 待导入的 JSON 对象、对象列表或包含 requests 的包装对象。
+
+        Returns:
+            list[CapturedRequest]: 导入记录的脱敏副本，状态均为 captured。
+        """
         with self._lock:
             imported = []
             for api_name, params, metadata in _normalize_import_payload(payload):
@@ -1078,7 +1231,11 @@ _inspector_lock = threading.Lock()
 
 
 def get_inspector() -> RequestInspector:
-    """Get the process-wide inspector, including concurrent first access."""
+    """获取进程级监视器单例，并保证并发首次访问安全。
+
+    Returns:
+        RequestInspector: 当前进程共享的线程安全监视器。
+    """
     global _inspector
     with _inspector_lock:
         if _inspector is None:
@@ -1089,7 +1246,16 @@ def get_inspector() -> RequestInspector:
 def capture(
     api_name: str, params: dict[str, Any], metadata: dict[str, Any] | None = None
 ) -> int:
-    """Capture an input without claiming that it has been executed."""
+    """手工捕获请求输入，不表示该请求已经执行。
+
+    Args:
+        api_name: 用于标识 SDK 调用入口的接口名称。
+        params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+        metadata: 需要合并到记录中的请求元数据。
+
+    Returns:
+        int: 新建手工捕获记录的 ID。
+    """
     return get_inspector().capture(api_name, params, metadata)
 
 

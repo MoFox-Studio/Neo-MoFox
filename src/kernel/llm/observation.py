@@ -62,7 +62,7 @@ def capture_provider_request(
         from .request_trace import current_attempt
         trace = current_attempt()
         if trace is not None:
-            # The provider starts capture only after its final stream parameters exist.
+            # 提供商仅在最终流式参数确定后开始采集。
             trace.annotate(metadata)
         else:
             from .request_inspector import capture
