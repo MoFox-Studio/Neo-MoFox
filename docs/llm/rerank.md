@@ -56,7 +56,7 @@ def add_document(self, value: Any) -> Self:
 async def send(self) -> RerankResponse:
 `
 
-发送 rerank 请求，返回 RerankResponse。
+发送 rerank 请求，返回 RerankResponse。OpenAI 客户端不调用 SDK 中并不存在的 `rerank.create` namespace，而是直接发起异步 HTTP 请求：默认 endpoint 为 `{base_url}/rerank`（如 `https://provider.example/v1/rerank`）。若供应商使用不同路由，可在模型级 `rerank_url`（或 `rerank_endpoint`）设置完整 HTTPS URL，也可写在 `extra_params` 中的同名字段；认证头、超时、`headers`/`query`/`body` 沿用模型配置。返回结果按 `score` 降序排序并截断到 `top_n`。
 
 **执行流程：**
 1. 校验 query 和 documents 非空
@@ -66,6 +66,25 @@ async def send(self) -> RerankResponse:
 5. 记录指标
 6. 失败时通过策略进行重试
 7. 将客户端返回的结果转换为 RerankItem 列表
+
+### HTTP endpoint 与错误映射
+
+| 配置项 | 说明 |
+|---|---|
+| `base_url` | 默认 endpoint 为 `{base_url}/rerank`；缺省时使用 `https://api.openai.com/v1/rerank` |
+| `rerank_url` / `rerank_endpoint` | 模型级或 `extra_params` 级的完整 endpoint，优先于 `base_url` 拼接 |
+| `extra_params.headers` / `query` / `body` | 追加请求头、URL 查询参数与请求体字段（endpoint 配置键不会进入请求体） |
+
+| HTTP 情况 | 抛出异常 |
+|---|---|
+| 401 / 403 | `LLMAuthenticationError` |
+| 429 | `LLMRateLimitError` |
+| 其他非 2xx | `LLMAPIError`（带 `status_code`） |
+| 超时 | `LLMTimeoutError` |
+| 网络传输失败 | `ConnectionError` |
+| 2xx 但响应缺少 `results`/`data`、条目字段类型不符或非 JSON | `LLMAPIError` |
+
+客户端解析失败（例如模型声明了尚未注册的 gemini/bedrock provider）也会进入策略的 failover 流程，从而自动切换到 model_set 中的下一个模型。
 
 ---
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from ..exceptions import LLMConfigurationError
 from .base import ASRModelClient, ChatModelClient, EmbeddingModelClient, RerankModelClient
@@ -11,6 +12,24 @@ from .anthropic_client import AnthropicChatClient
 from .openai_client import OpenAIChatClient
 from .responses_client import OpenAIResponsesClient
 from ..types import ModelEntry
+
+# 已经识别、但本仓库尚未提供实现的 provider 别名集合。
+# 这些别名一旦出现就必须显式报错，禁止静默回退到 OpenAI：
+# 用 OpenAI 协议去请求 Gemini/Bedrock 只会产生难以定位的 404/400。
+_GEMINI_CLIENT_TYPES = frozenset(
+    {"gemini", "aiohttp_gemini", "gemini_v2", "google", "vertex_ai"}
+)
+_BEDROCK_CLIENT_TYPES = frozenset(
+    {"bedrock", "amazon_bedrock", "bedrock_converse"}
+)
+
+
+def _normalize_client_type(client_type: Any) -> str | None:
+    """把 client_type 归一化为小写下划线形式，非字符串返回 None。"""
+    if not isinstance(client_type, str):
+        return None
+    return client_type.casefold().replace("-", "_")
+
 
 @dataclass(slots=True)
 class ModelClientRegistry:
@@ -37,19 +56,32 @@ class ModelClientRegistry:
         """根据单个模型配置决定使用哪个 provider。
 
         当前阶段以 `client_type` 为准：openai/anthropic/gemini/bedrock。
+        client_type 统一做大小写与连字符归一化；已识别但尚未注册的
+        provider（gemini/bedrock 系列别名）直接抛出 LLMConfigurationError，
+        不会回退到 OpenAI；真正未知的 client_type 仍回退到 OpenAI。
         """
 
-        client_type = model.get("client_type")
-        if isinstance(client_type, str):
-            if client_type == "openai" and self.openai is not None:
+        normalized_type = _normalize_client_type(model.get("client_type"))
+        if normalized_type:
+            if normalized_type == "openai" and self.openai is not None:
                 return self.openai
-            if client_type == "anthropic" and self.anthropic is not None:
+            if normalized_type == "anthropic" and self.anthropic is not None:
                 return self.anthropic
-            if client_type in {"openai_response", "responses", "openai.responses"} and self.responses is not None:
+            if normalized_type in {"openai_response", "responses", "openai.responses"} and self.responses is not None:
                 return self.responses
-            if client_type in {"gemini", "aiohttp_gemini"} and self.gemini is not None:
+            if normalized_type in _GEMINI_CLIENT_TYPES:
+                if self.gemini is None:
+                    raise LLMConfigurationError(
+                        f"Gemini client 未注册（client_type={normalized_type}），"
+                        "不能将 Gemini 请求回退到 OpenAI"
+                    )
                 return self.gemini
-            if client_type == "bedrock" and self.bedrock is not None:
+            if normalized_type in _BEDROCK_CLIENT_TYPES:
+                if self.bedrock is None:
+                    raise LLMConfigurationError(
+                        f"Bedrock client 未注册（client_type={normalized_type}），"
+                        "不能将 Bedrock 请求回退到 OpenAI"
+                    )
                 return self.bedrock
 
         if self.openai is None:

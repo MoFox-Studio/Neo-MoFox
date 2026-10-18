@@ -24,7 +24,14 @@ from src.kernel.llm.tool_call_compat import (
     parse_tool_call_compat_response,
 )
 
-from ..exceptions import LLMConfigurationError, LLMContentFilterError
+from ..exceptions import (
+    LLMAPIError,
+    LLMAuthenticationError,
+    LLMConfigurationError,
+    LLMContentFilterError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+)
 from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResult, Video
 from ..roles import ROLE
 from ..token_counter import count_payload_tokens
@@ -1248,16 +1255,23 @@ class OpenAIChatClient:
         request_name: str,
         model_set: Any,
     ) -> list[dict[str, Any]]:
-        """发起 rerank 请求，返回按相关性降序排列的结果。
+        """通过兼容 rerank HTTP 契约的 endpoint 发起排序请求。
 
-        仅支持提供商 SDK 原生 ``rerank`` 接口。
-        若 SDK 不存在该接口，抛出 ``LLMConfigurationError`` 交由上级处理。
+        OpenAI SDK 并没有通用的 ``rerank`` namespace，调用 ``client.rerank.create``
+        永远走不通，因此这里直接发起异步 HTTP 请求：endpoint 依次取模型配置中的
+        ``rerank_url`` / ``rerank_endpoint``（模型级或 ``extra_params`` 级），
+        否则由 ``base_url`` 拼接 ``/rerank``。
+
+        请求体固定为 ``{model, query, documents, top_n?}``，并按 OpenAI 兼容的
+        rerank 契约解析响应（``results`` 或 ``data``，``relevance_score`` 或
+        ``score``），最终按 score 降序排序并截断到 ``top_n``。认证、限流、超时、
+        传输失败和协议错误都映射为标准 LLM 异常，便于上层 policy 决定是否 failover。
 
         Args:
             model_name: rerank 模型名称。
             query: 查询文本，不能为空。
             documents: 待排序的文档列表（str 或 dict），不能为空。
-            top_n: 返回结果数量上限，None 表示全部返回。
+            top_n: 返回结果数量上限，None 或非正数表示全部返回。
             request_name: 请求名称，用于追踪，此处不使用。
             model_set: 单个模型配置 dict。
 
@@ -1268,7 +1282,11 @@ class OpenAIChatClient:
         Raises:
             TypeError: model_set 不是 dict 时抛出。
             ValueError: query/documents 为空或 extra_params 非 dict 时抛出。
-            LLMConfigurationError: 当前 SDK 不支持原生 rerank 接口时抛出。
+            LLMAuthenticationError: API key 被 provider 拒绝（HTTP 401/403）。
+            LLMRateLimitError: provider 限流（HTTP 429）。
+            LLMTimeoutError: 请求超时。
+            ConnectionError: 网络传输层失败。
+            LLMAPIError: 其他 HTTP 错误或响应协议错误。
         """
         del request_name
 
@@ -1279,75 +1297,167 @@ class OpenAIChatClient:
         if not documents:
             raise ValueError("documents 不能为空")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, _extra_params, extra_headers, extra_query, explicit_body = (
+        api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = (
             self._extract_model_params(model_set)
         )
-        client = self._get_client(
-            api_key=api_key,
+        limited_top_n = self._normalize_rerank_top_n(top_n)
+
+        params: dict[str, Any] = {
+            "model": model_name,
+            "query": query,
+            "documents": documents,
+        }
+        if limited_top_n is not None:
+            params["top_n"] = limited_top_n
+        # rerank 请求体字段集合固定，只允许 extra_params.body 覆盖/补充字段。
+        params.update(explicit_body)
+        # endpoint 配置只用于路由，不应泄漏到请求体里。
+        params.pop("rerank_url", None)
+        params.pop("rerank_endpoint", None)
+
+        endpoint = self._resolve_rerank_endpoint(
+            model_set=model_set,
             base_url=base_url,
-            timeout=timeout,
-            trust_env=trust_env,
-            force_ipv4=force_ipv4,
+            extra_params=extra_params,
         )
 
-        # 尝试调用 SDK 原生 rerank 接口
-        rerank_api = getattr(client, "rerank", None)
-        rerank_create = (
-            getattr(rerank_api, "create", None) if rerank_api is not None else None
+        log_provider_request_body(
+            "rerank.create",
+            params,
+            token_counter=count_payload_tokens,
         )
-        if callable(rerank_create):
-            params: dict[str, Any] = {
-                "model": model_name,
-                "query": query,
-                "documents": documents,
-            }
-            if isinstance(top_n, int) and top_n > 0:
-                params["top_n"] = top_n
 
-            # 应用 extra_params 中的特殊键：headers/query/body
-            # rerank 接口参数集合有限，普通 extra_params 不透传，仅这三个 HTTP 层特殊键生效
-            if explicit_body:
-                params["extra_body"] = explicit_body
-            if extra_headers:
-                params["extra_headers"] = extra_headers
-            if extra_query:
-                params["extra_query"] = extra_query
+        import httpx
 
-            log_provider_request_body(
-                "rerank.create",
-                params,
-                token_counter=count_payload_tokens,
-            )
-            maybe_resp = rerank_create(**params)
-            if inspect.isawaitable(maybe_resp):
-                resp = await maybe_resp
-            else:
-                resp = maybe_resp
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        headers.update(extra_headers)
 
-            data = (
-                getattr(resp, "results", None)
-                or getattr(resp, "data", None)
-                or []
-            )
-            out: list[dict[str, Any]] = []
-            for rec in data:
-                idx = getattr(rec, "index", None)
-                score = getattr(rec, "relevance_score", None)
-                if score is None:
-                    score = getattr(rec, "score", None)
-                index = int(idx) if isinstance(idx, int) else 0
-                out.append(
-                    {
-                        "index": index,
-                        "score": float(score) if isinstance(score, (int, float)) else 0.0,
-                        "document": documents[index] if 0 <= index < len(documents) else None,
-                    }
+        # 统一复用共享 timeout builder，与其他 provider 客户端保持同一套超时策略。
+        timeout_config = build_httpx_timeout(timeout)
+        transport = (
+            httpx.AsyncHTTPTransport(local_address="0.0.0.0") if force_ipv4 else None
+        )
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout_config,
+                trust_env=trust_env,
+                transport=transport,
+            ) as http_client:
+                response = await http_client.post(
+                    endpoint,
+                    params=extra_query,
+                    headers=headers,
+                    json=params,
                 )
-            return out
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(
+                "Rerank API request timed out", timeout=timeout, model=model_name
+            ) from exc
+        except httpx.TransportError as exc:
+            raise ConnectionError(
+                f"Rerank API transport failed: {type(exc).__name__}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LLMConfigurationError(
+                f"Rerank API request configuration failed: {type(exc).__name__}"
+            ) from exc
 
-        raise LLMConfigurationError(
-            f"当前 SDK 客户端不支持原生 rerank 接口，模型：{model_name}"
-        )
+        self._raise_for_rerank_status(response, model_name=model_name)
+        ranked = self._parse_rerank_payload(response, model_name=model_name)
+        for item in ranked:
+            index = item["index"]
+            item["document"] = documents[index] if 0 <= index < len(documents) else None
+        ranked.sort(key=lambda item: item["score"], reverse=True)
+        if limited_top_n is not None:
+            ranked = ranked[:limited_top_n]
+        return ranked
+
+    @staticmethod
+    def _normalize_rerank_top_n(top_n: int | None) -> int | None:
+        """把 top_n 归一化为正整数，bool 与非正数视为“不限制”。"""
+        if isinstance(top_n, bool) or not isinstance(top_n, int) or top_n <= 0:
+            return None
+        return top_n
+
+    @staticmethod
+    def _resolve_rerank_endpoint(
+        *,
+        model_set: dict[str, Any],
+        base_url: str | None,
+        extra_params: dict[str, Any],
+    ) -> str:
+        """解析 rerank endpoint：显式 URL 优先，其次 base_url 拼接 /rerank。"""
+        configured = model_set.get("rerank_url") or model_set.get("rerank_endpoint")
+        if not configured:
+            configured = extra_params.get("rerank_url") or extra_params.get(
+                "rerank_endpoint"
+            )
+        if configured:
+            return str(configured)
+        return f"{(base_url or 'https://api.openai.com/v1').rstrip('/')}/rerank"
+
+    @staticmethod
+    def _raise_for_rerank_status(response: Any, *, model_name: str) -> None:
+        """把 rerank HTTP 状态码映射为标准 LLM 异常。"""
+        status_code = response.status_code
+        if status_code in {401, 403}:
+            raise LLMAuthenticationError(
+                f"Rerank API authentication failed (HTTP {status_code})",
+                model=model_name,
+            )
+        if status_code == 429:
+            raise LLMRateLimitError(
+                "Rerank API rate limit exceeded",
+                model=model_name,
+            )
+        if not response.is_success:
+            raise LLMAPIError(
+                f"Rerank API returned HTTP {status_code}",
+                status_code=status_code,
+                model=model_name,
+            )
+
+    @staticmethod
+    def _parse_rerank_payload(response: Any, *, model_name: str) -> list[dict[str, Any]]:
+        """校验并解析 rerank 响应体，返回未排序的 index/score 列表。"""
+
+        def protocol_error(message: str) -> LLMAPIError:
+            return LLMAPIError(
+                message, status_code=response.status_code, model=model_name
+            )
+
+        try:
+            payload = response.json()
+        except (ValueError, TypeError) as exc:
+            raise protocol_error("Rerank API response must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise protocol_error("Rerank API response must be a JSON object")
+        if "results" not in payload and "data" not in payload:
+            raise protocol_error("Rerank API response lacks results/data")
+
+        data = payload.get("results", payload.get("data"))
+        if data is None:
+            data = []
+        if not isinstance(data, list):
+            raise protocol_error("Rerank API response results must be a list")
+
+        ranked: list[dict[str, Any]] = []
+        for record in data:
+            if not isinstance(record, dict):
+                raise protocol_error("Rerank API result item must be an object")
+            index = record.get("index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise protocol_error("Rerank API result index must be an integer")
+            score = record.get("relevance_score")
+            if score is None:
+                score = record.get("score")
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                raise protocol_error("Rerank API result score must be numeric")
+            ranked.append({"index": index, "score": float(score), "document": None})
+        return ranked
 
     async def create_transcription(
         self,

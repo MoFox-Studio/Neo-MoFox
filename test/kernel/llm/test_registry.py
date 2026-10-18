@@ -106,6 +106,31 @@ def test_registry_get_aiohttp_gemini_client():
     assert isinstance(client, FakeGeminiClient)
 
 
+@pytest.mark.parametrize(
+    "client_type",
+    ["gemini", "Gemini", "GEMINI", "gemini_v2", "Gemini-V2", "google", "vertex_ai"],
+)
+def test_registry_unregistered_gemini_does_not_fallback_to_openai(client_type: str):
+    """已识别的 Gemini 别名未注册时必须报错，不能回退到 OpenAI。"""
+    registry = ModelClientRegistry()
+    model = _model_entry(client_type=client_type, api_provider="Google")
+
+    with pytest.raises(LLMConfigurationError, match="Gemini client 未注册"):
+        registry.get_client_for_model(model)
+
+
+@pytest.mark.parametrize(
+    "client_type", ["bedrock", "Bedrock", "amazon_bedrock", "bedrock_converse"]
+)
+def test_registry_unregistered_bedrock_does_not_fallback_to_openai(client_type: str):
+    """已识别的 Bedrock 别名未注册时必须报错，不能回退到 OpenAI。"""
+    registry = ModelClientRegistry()
+    model = _model_entry(client_type=client_type, api_provider="AWS")
+
+    with pytest.raises(LLMConfigurationError, match="Bedrock client 未注册"):
+        registry.get_client_for_model(model)
+
+
 def test_registry_get_bedrock_client():
     """测试获取Bedrock客户端（当配置时）。"""
     # 创建一个假的bedrock客户端
