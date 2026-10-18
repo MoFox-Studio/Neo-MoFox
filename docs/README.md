@@ -28,6 +28,7 @@
 - [db](./db/README.md)
 - [event](./event/README.md)
 - [llm](./llm/README.md)
+- [jev](./jev/README.md)
 - [logger](./logger/README.md)
 - [scheduler](./scheduler/README.md)
 - [storage](./storage/README.md)
