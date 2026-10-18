@@ -253,44 +253,29 @@ cache_rate = await collector.get_cache_hit_rate()
 
 ### 9. 请求检视器（RequestInspector）
 
-在**进程内**记录每次 LLM 调用的完整请求体到内存环形缓冲（默认保留最近 200 条），
-并提供只读查询接口。本模块**不提供任何 HTTP 端点**——框架本体不内置可视化后台
-（见根目录 README「WebUI 安装提示」），可视化调试请使用官方 WebUI。
-
-写入侧由 model_client 自动完成（`chat.completions.create` / `messages.create` /
-`responses.create` / `embeddings.create` / `rerank.create` 都会捕获），
-以下为读取侧的公共接口：
+在进程内记录原生模型调用的最终 SDK 参数、标准化响应和原始 SDK JSON，
+默认保留最近 200 条。覆盖 Chat Completions、Responses、Anthropic、Embedding、Rerank，
+包含流式、重试、失败和取消；不内置 HTTP 端点、SDK 包装器或 monkey patch。
 
 ```python
 from src.kernel.llm import get_inspector
 
-inspector = get_inspector()          # 进程内单例
-
-inspector.list_summaries()          # 按捕获顺序返回摘要列表
-inspector.get_record(record_id)      # 返回单条完整记录；不存在返回 None
-inspector.clear()                    # 清空缓冲，返回被清除的条数
+inspector = get_inspector()
+snapshot = inspector.snapshot()          # 原子摘要 + 当前缓冲统计，无正文
+record = inspector.get_record(record_id) # 独立详情；不存在返回 None
+result = inspector.clear_snapshot()      # 清空数量 + 实例/缓冲版本
 ```
 
-要点：
+- `instance_id / revision / version` 区分重启、缓冲变化和单条记录更新。
+- `logical_request_id / attempt` 关联框架重试、模型切换和流消费重试。
+- `params` 保留实际 SDK 参数层级，可直接用于请求结构树；`rendered` 提供消息/工具视图。
+- 保存前脱敏；原始响应/事件默认共享 2 MiB 预算，截断会显式标记，不停止标准化响应采集。
+- 清空、淘汰不取消实际调用，迟到更新不会复活记录；ID 不重置。
+- 旧 `capture/import_json/list_summaries/clear` 入口保留；手工捕获/导入使用 `captured` 状态。
+- 线程安全并返回隔离快照；不支持的对象使用不可用标记，不再以任意 `str/repr` 降级。
+- 提示词与普通消息仍属敏感业务内容，外部读取必须认证。
 
-- **只读快照语义**：`get_record()` 返回的 `params` / `metadata` 是深拷贝，
-  调用方就地修改不会污染缓冲中的原始记录；`import_json()` 返回的同样是
-  与缓冲隔离的 `CapturedRequest` 副本。`capture()` 会深拷贝传入的 metadata，
-  记录与调用方不共享嵌套对象。
-- **降级约定**：`params` 无法 JSON 序列化、或 `metadata` 无法深拷贝时，
-  对应字段降级为 `{"_raw": str(...)}`，`capture()` 不会因入参抛异常。
-  两类入参共用同一套约定，便于事后回查原始值。
-- **ID 语义**：`id` 由捕获顺序单调递增，`clear()` **不重置**计数器——
-  清空后新记录的 ID 会接着旧值继续，不会从 1 重新开始。
-- **环形缓冲淘汰**：`max_records` 超出后最旧的记录会被挤出，
-  此时 `get_record()` 对被淘汰的 ID 返回 `None`。
-- **并发模型**：所有方法均为同步、无 `await`。读取前会对 deque 取快照，
-  因此可安全地与其他线程的 `capture()` 并发调用，不会抛
-  `RuntimeError: deque mutated during iteration`。
-  但写入侧的自增不是原子操作，**多线程并发 `capture()` 时 ID 不保证唯一**，
-  按 ID 查询在这种情况下可能命中非预期记录；本模块设计用于单事件循环内使用。
-- 捕获内容包含完整 system prompt、用户消息、工具定义与返回，**属敏感数据**，
-  接入方需自行控制暴露范围。
+完整字段、生命周期、安全边界与流关闭用法见 [原生请求监视器](./request_inspector.md)。
 
 ## 详细文档索引
 
@@ -358,7 +343,7 @@ A: 框架本体不再内置调试 WebUI，请安装官方 WebUI：
 
 `src/kernel/llm/request_inspector.py` 仅在**进程内**保留请求捕获与结构化视图构造，
 不对外提供任何 HTTP 端点。需要程序内调试时用 `get_inspector()` 获取实例，
-再调用 `list_summaries()` / `get_record()` 读取记录，
+再调用 `snapshot()` / `get_record()` 读取记录，
 详见 [第 9 节](#9-请求检视器requestinspector)。
 
 ## 相关资源

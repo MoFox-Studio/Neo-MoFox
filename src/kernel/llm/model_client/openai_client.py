@@ -29,6 +29,7 @@ from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResu
 from ..roles import ROLE
 from ..token_counter import count_payload_tokens
 from .base import StreamEvent
+from ..request_trace import provider_attempt, start_provider
 from .shared import (
     build_httpx_timeout,
     callable_accepts_reason,
@@ -849,140 +850,141 @@ class OpenAIChatClient:
             ValueError: api_key 为空或 extra_params 非 dict 时抛出。
             LLMContentFilterError: 模型返回空 choices 时抛出。
         """
-        del tools  # 通过 payloads 中 ROLE.TOOL 传入，此参数保持协议兼容
+        with provider_attempt("chat.completions.create", model_set, request_name, kind="chat", stream=stream):
+            del tools  # 通过 payloads 中 ROLE.TOOL 传入，此参数保持协议兼容
 
-        if not isinstance(model_set, dict):
-            raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
+            if not isinstance(model_set, dict):
+                raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = (
-            self._extract_model_params(model_set)
-        )
-        # force_sync_http 已废弃，移除后不传给 API
-        extra_params.pop("force_sync_http", None)
-        # 控制是否向兼容供应商发送 reasoning_content 历史字段
-        reasoning_history_mode = extra_params.pop("reasoning_history_mode", True)
+            api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = (
+                self._extract_model_params(model_set)
+            )
+            # force_sync_http 已废弃，移除后不传给 API
+            extra_params.pop("force_sync_http", None)
+            # 控制是否向兼容供应商发送 reasoning_content 历史字段
+            reasoning_history_mode = extra_params.pop("reasoning_history_mode", True)
 
-        client = self._get_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            trust_env=trust_env,
-            force_ipv4=force_ipv4,
-        )
-        messages, openai_tools = _payloads_to_openai_messages(payloads)
-        # 默认不向 OpenAI-compatible provider 发送非标准 reasoning_content 历史字段，
-        # 避免污染请求结构；需要时通过 reasoning_history_mode 显式开启。
-        allow_reasoning_history = ( reasoning_history_mode == True )
-
-        if not allow_reasoning_history:
-            for msg in messages:
-                if msg.get("role") == "assistant":
-                    msg.pop("reasoning_content", None)
-
-        tool_call_compat = bool(model_set.get("tool_call_compat", False))
-
-        if tool_call_compat and openai_tools:
-            compat_prompt = build_tool_call_compat_prompt(openai_tools)
-            messages = [*messages, {"role": "user", "content": compat_prompt}]
-
-        max_tokens = model_set.get("max_tokens")
-        temperature = model_set.get("temperature")
-
-        params: dict[str, Any] = {
-            "model": model_name,
-            "messages": messages,
-        }
-        if isinstance(max_tokens, int):
-            params["max_tokens"] = max_tokens
-        if isinstance(temperature, (int, float)):
-            params["temperature"] = float(temperature)
-
-        # 允许每模型注入额外参数（如 top_p/response_format/tool_choice 等）
-        # 注意：tool_choice 的默认策略会在 tools 分支中补齐。
-        params.update(extra_params)
-        if openai_tools and not tool_call_compat:
-            params["tools"] = openai_tools
-        else:
-            params.pop("tool_choice", None)
-
-        # 区分标准参数与非标准参数（统一走 extra_body，避免 openai SDK 因未知参数报错）
-        # extra_headers/extra_query 是 OpenAI SDK 原生支持的 HTTP 层透传键，不要被
-        # 当成非标准参数塞进 extra_body。
-        standard_params = {
-            "model", "messages", "max_tokens", "temperature", "top_p", "n", "stream",
-            "stop", "presence_penalty", "frequency_penalty", "logit_bias", "user",
-            "tools", "tool_choice", "response_format", "seed", "parallel_tool_calls",
-            "functions", "function_call", "extra_body", "stream_options",
-            "reasoning_effort", "extra_headers", "extra_query",
-        }
-        non_standard_body: dict[str, Any] = {}
-        for key in list(params.keys()):
-            if key not in standard_params:
-                non_standard_body[key] = params.pop(key)
-
-        # 合并非标准参数与用户显式声明的 body 字段：
-        # 用户显式声明的 body 优先级高于非标准参数（即同名时以用户 body 为准），
-        # 这样可以保证用户对请求体的精确控制。
-        merged_body: dict[str, Any] = {}
-        if non_standard_body:
-            merged_body.update(non_standard_body)
-        if explicit_body:
-            merged_body.update(explicit_body)
-
-        if merged_body:
-            existing = params.get("extra_body")
-            if isinstance(existing, dict):
-                # 程序化设置的 extra_body 优先级最高，避免被用户配置覆盖
-                params["extra_body"] = {**merged_body, **existing}
-            else:
-                params["extra_body"] = merged_body
-
-        # 应用 HTTP 层参数：headers 走 extra_headers、query 走 extra_query，
-        # 由 OpenAI SDK 在底层注入到实际 HTTP 请求中。
-        if extra_headers:
-            params["extra_headers"] = extra_headers
-        if extra_query:
-            params["extra_query"] = extra_query
-
-        # 仅在显式允许 reasoning 历史模式时，才为缺失字段的 assistant 历史回填
-        # reasoning_content；默认模式下前面已经清理过该字段。
-        if allow_reasoning_history and (
-            _thinking_enabled(model_set)
-            or _should_backfill_reasoning_content(messages)
-        ):
-            for msg in messages:
-                if (
-                    msg.get("role") == "assistant"
-                    and "reasoning_content" not in msg
-                ):
-                    content = msg.get("content")
-                    msg["reasoning_content"] = content if isinstance(content, str) else ""
-
-        # 请求检查和 token 估算统一走共享观测 seam，这里只负责上报原始请求体。
-        log_provider_request_body(
-            "chat.completions.create",
-            params,
-            model_set=model_set,
-            payloads=payloads,
-            request_name=request_name,
-            token_counter=count_payload_tokens,
-        )
-
-        if not stream:
-            return await self._create_non_stream(
-                client=client,
-                params=params,
-                tool_call_compat=tool_call_compat,
-                openai_tools=openai_tools,
+            client = self._get_client(
                 api_key=api_key,
                 base_url=base_url,
                 timeout=timeout,
                 trust_env=trust_env,
                 force_ipv4=force_ipv4,
-                model_name=model_name,
+            )
+            messages, openai_tools = _payloads_to_openai_messages(payloads)
+            # 默认不向 OpenAI-compatible provider 发送非标准 reasoning_content 历史字段，
+            # 避免污染请求结构；需要时通过 reasoning_history_mode 显式开启。
+            allow_reasoning_history = ( reasoning_history_mode == True )
+
+            if not allow_reasoning_history:
+                for msg in messages:
+                    if msg.get("role") == "assistant":
+                        msg.pop("reasoning_content", None)
+
+            tool_call_compat = bool(model_set.get("tool_call_compat", False))
+
+            if tool_call_compat and openai_tools:
+                compat_prompt = build_tool_call_compat_prompt(openai_tools)
+                messages = [*messages, {"role": "user", "content": compat_prompt}]
+
+            max_tokens = model_set.get("max_tokens")
+            temperature = model_set.get("temperature")
+
+            params: dict[str, Any] = {
+                "model": model_name,
+                "messages": messages,
+            }
+            if isinstance(max_tokens, int):
+                params["max_tokens"] = max_tokens
+            if isinstance(temperature, (int, float)):
+                params["temperature"] = float(temperature)
+
+            # 允许每模型注入额外参数（如 top_p/response_format/tool_choice 等）
+            # 注意：tool_choice 的默认策略会在 tools 分支中补齐。
+            params.update(extra_params)
+            if openai_tools and not tool_call_compat:
+                params["tools"] = openai_tools
+            else:
+                params.pop("tool_choice", None)
+
+            # 区分标准参数与非标准参数（统一走 extra_body，避免 openai SDK 因未知参数报错）
+            # extra_headers/extra_query 是 OpenAI SDK 原生支持的 HTTP 层透传键，不要被
+            # 当成非标准参数塞进 extra_body。
+            standard_params = {
+                "model", "messages", "max_tokens", "temperature", "top_p", "n", "stream",
+                "stop", "presence_penalty", "frequency_penalty", "logit_bias", "user",
+                "tools", "tool_choice", "response_format", "seed", "parallel_tool_calls",
+                "functions", "function_call", "extra_body", "stream_options",
+                "reasoning_effort", "extra_headers", "extra_query",
+            }
+            non_standard_body: dict[str, Any] = {}
+            for key in list(params.keys()):
+                if key not in standard_params:
+                    non_standard_body[key] = params.pop(key)
+
+            # 合并非标准参数与用户显式声明的 body 字段：
+            # 用户显式声明的 body 优先级高于非标准参数（即同名时以用户 body 为准），
+            # 这样可以保证用户对请求体的精确控制。
+            merged_body: dict[str, Any] = {}
+            if non_standard_body:
+                merged_body.update(non_standard_body)
+            if explicit_body:
+                merged_body.update(explicit_body)
+
+            if merged_body:
+                existing = params.get("extra_body")
+                if isinstance(existing, dict):
+                    # 程序化设置的 extra_body 优先级最高，避免被用户配置覆盖
+                    params["extra_body"] = {**merged_body, **existing}
+                else:
+                    params["extra_body"] = merged_body
+
+            # 应用 HTTP 层参数：headers 走 extra_headers、query 走 extra_query，
+            # 由 OpenAI SDK 在底层注入到实际 HTTP 请求中。
+            if extra_headers:
+                params["extra_headers"] = extra_headers
+            if extra_query:
+                params["extra_query"] = extra_query
+
+            # 仅在显式允许 reasoning 历史模式时，才为缺失字段的 assistant 历史回填
+            # reasoning_content；默认模式下前面已经清理过该字段。
+            if allow_reasoning_history and (
+                _thinking_enabled(model_set)
+                or _should_backfill_reasoning_content(messages)
+            ):
+                for msg in messages:
+                    if (
+                        msg.get("role") == "assistant"
+                        and "reasoning_content" not in msg
+                    ):
+                        content = msg.get("content")
+                        msg["reasoning_content"] = content if isinstance(content, str) else ""
+
+            # 请求检查和 token 估算统一走共享观测 seam，这里只负责上报原始请求体。
+            log_provider_request_body(
+                "chat.completions.create",
+                params,
+                model_set=model_set,
+                payloads=payloads,
+                request_name=request_name,
+                token_counter=count_payload_tokens,
             )
 
-        return await self._create_stream(client=client, params=params)
+            if not stream:
+                return await self._create_non_stream(
+                    client=client,
+                    params=params,
+                    tool_call_compat=tool_call_compat,
+                    openai_tools=openai_tools,
+                    api_key=api_key,
+                    base_url=base_url,
+                    timeout=timeout,
+                    trust_env=trust_env,
+                    force_ipv4=force_ipv4,
+                    model_name=model_name,
+                )
+
+            return await self._create_stream(client=client, params=params)
 
     async def _create_non_stream(
         self,
@@ -1020,6 +1022,7 @@ class OpenAIChatClient:
         Raises:
             LLMContentFilterError: 模型返回空 choices 时抛出。
         """
+        trace = start_provider("chat.completions.create", params)
         try:
             resp = await client.chat.completions.create(**params)
         except Exception as e:
@@ -1043,6 +1046,7 @@ class OpenAIChatClient:
                         pass
             raise
 
+        trace.raw(resp)
         if not resp.choices:
             raise LLMContentFilterError(
                 f"模型返回空响应（可能触发了安全过滤器）。Response: {resp}",
@@ -1057,9 +1061,14 @@ class OpenAIChatClient:
             parsed_message, parsed_calls = parse_tool_call_compat_response(
                 message_content
             )
-            return parsed_message, parsed_calls, None, reasoning_content, _extract_usage(resp)
+            usage = _extract_usage(resp)
+            trace.result(message=parsed_message, tool_calls=parsed_calls, reasoning_content=reasoning_content,
+                         usage=usage, stop_reason=getattr(resp.choices[0], "finish_reason", None))
+            return parsed_message, parsed_calls, None, reasoning_content, usage
 
         usage = _extract_usage(resp)
+        trace.result(message=message_content, tool_calls=tool_calls, reasoning_content=reasoning_content,
+                     usage=usage, stop_reason=getattr(resp.choices[0], "finish_reason", None))
         return message_content, tool_calls, None, reasoning_content, usage
 
     async def _create_stream(
@@ -1080,7 +1089,9 @@ class OpenAIChatClient:
         stream_params = dict(params)
         stream_params["stream"] = True
         stream_params.setdefault("stream_options", {"include_usage": True})
+        trace = start_provider("chat.completions.create", stream_params, stream=True)
         stream_resp = await client.chat.completions.create(**stream_params)
+        trace.opened(stream_resp)
 
         async def iter_events() -> AsyncIterator[StreamEvent]:
             """逐块迭代流式响应，产出 StreamEvent。
@@ -1088,76 +1099,67 @@ class OpenAIChatClient:
             OpenAI 标准流格式：首包携带 tool_call id，后续增量包 id 为 None，
             通过 index 归属。使用 ``index_to_id`` 维护映射关系。
             """
-            index_to_id: dict[int, str] = {}
+            with trace.consume():
+                index_to_id: dict[int, str] = {}
 
-            try:
-                async for chunk in stream_resp:
-                    usage = _extract_usage_from_obj(_get_usage_field(chunk, "usage", None))
-                    if usage:
-                        yield StreamEvent(usage=usage)
+                try:
+                    async for chunk in stream_resp:
+                        trace.raw(chunk, event=True)
+                        usage = _extract_usage_from_obj(_get_usage_field(chunk, "usage", None))
+                        if usage:
+                            yield trace.event(StreamEvent(usage=usage))
 
-                    if not chunk.choices:
-                        continue
-                    choice = chunk.choices[0]
-                    finish_reason = getattr(choice, "finish_reason", None)
-                    if isinstance(finish_reason, str) and finish_reason:
-                        yield StreamEvent(finish_reason=finish_reason)
+                        if not chunk.choices:
+                            continue
+                        choice = chunk.choices[0]
+                        finish_reason = getattr(choice, "finish_reason", None)
+                        if isinstance(finish_reason, str) and finish_reason:
+                            yield trace.event(StreamEvent(finish_reason=finish_reason))
 
-                    delta = choice.delta
+                        delta = choice.delta
 
-                    content = getattr(delta, "content", None)
-                    if content:
-                        yield StreamEvent(text_delta=content)
+                        content = getattr(delta, "content", None)
+                        if content:
+                            yield trace.event(StreamEvent(text_delta=content))
 
-                    reasoning_content = _extract_reasoning_content(delta)
-                    if reasoning_content:
-                        yield StreamEvent(reasoning_delta=reasoning_content)
+                        reasoning_content = _extract_reasoning_content(delta)
+                        if reasoning_content:
+                            yield trace.event(StreamEvent(reasoning_delta=reasoning_content))
 
-                    tool_calls_delta = getattr(delta, "tool_calls", None)
-                    if tool_calls_delta:
-                        for tc in tool_calls_delta:
-                            fn = getattr(tc, "function", None)
-                            tc_id: str | None = getattr(tc, "id", None)
-                            tc_index: int | None = getattr(tc, "index", None)
+                        tool_calls_delta = getattr(delta, "tool_calls", None)
+                        if tool_calls_delta:
+                            for tc in tool_calls_delta:
+                                fn = getattr(tc, "function", None)
+                                tc_id: str | None = getattr(tc, "id", None)
+                                tc_index: int | None = getattr(tc, "index", None)
 
-                            if tc_index is not None:
-                                effective_id = index_to_id.get(tc_index)
-                                if effective_id is None:
-                                    effective_id = tc_id or f"call_stream_{tc_index}"
-                                    index_to_id[tc_index] = effective_id
-                            else:
-                                effective_id = tc_id or "call_stream_0"
+                                if tc_index is not None:
+                                    effective_id = index_to_id.get(tc_index)
+                                    if effective_id is None:
+                                        effective_id = tc_id or f"call_stream_{tc_index}"
+                                        index_to_id[tc_index] = effective_id
+                                else:
+                                    effective_id = tc_id or "call_stream_0"
 
-                            yield StreamEvent(
-                                tool_call_id=effective_id,
-                                tool_name=getattr(fn, "name", None) if fn else None,
-                                tool_args_delta=(
-                                    getattr(fn, "arguments", None) if fn else None
+                                yield trace.event(StreamEvent(
+                                    tool_call_id=effective_id,
+                                    tool_name=getattr(fn, "name", None) if fn else None,
+                                    tool_args_delta=(
+                                        getattr(fn, "arguments", None) if fn else None
+                                    ),
+                                ))
+
+                        function_call_delta = getattr(delta, "function_call", None)
+                        if function_call_delta and not tool_calls_delta:
+                            yield trace.event(StreamEvent(
+                                tool_call_id="function_call",
+                                tool_name=getattr(function_call_delta, "name", None),
+                                tool_args_delta=getattr(
+                                    function_call_delta, "arguments", None
                                 ),
-                            )
-
-                    function_call_delta = getattr(delta, "function_call", None)
-                    if function_call_delta and not tool_calls_delta:
-                        yield StreamEvent(
-                            tool_call_id="function_call",
-                            tool_name=getattr(function_call_delta, "name", None),
-                            tool_args_delta=getattr(
-                                function_call_delta, "arguments", None
-                            ),
-                        )
-            finally:
-                close = getattr(stream_resp, "aclose", None)
-                if callable(close):
-                    maybe_awaitable = close()
-                    if inspect.isawaitable(maybe_awaitable):
-                        await maybe_awaitable
-                    return
-
-                close_sync = getattr(stream_resp, "close", None)
-                if callable(close_sync):
-                    maybe_awaitable = close_sync()
-                    if inspect.isawaitable(maybe_awaitable):
-                        await maybe_awaitable
+                            ))
+                finally:
+                    await trace.close_resource()
 
         return None, None, iter_events(), None, None
 
@@ -1184,59 +1186,64 @@ class OpenAIChatClient:
             TypeError: model_set 不是 dict 时抛出。
             ValueError: api_key 为空、inputs 为空或 extra_params 非 dict 时抛出。
         """
-        del request_name
+        with provider_attempt("embeddings.create", model_set, request_name, kind="embedding", stream=False):
 
-        if not isinstance(model_set, dict):
-            raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
-        if not inputs:
-            raise ValueError("inputs 不能为空")
+            if not isinstance(model_set, dict):
+                raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
+            if not inputs:
+                raise ValueError("inputs 不能为空")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = (
-            self._extract_model_params(model_set)
-        )
-        client = self._get_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            trust_env=trust_env,
-            force_ipv4=force_ipv4,
-        )
+            api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = (
+                self._extract_model_params(model_set)
+            )
+            client = self._get_client(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                trust_env=trust_env,
+                force_ipv4=force_ipv4,
+            )
 
-        params: dict[str, Any] = {
-            "model": model_name,
-            "input": inputs,
-        }
-        params.update(extra_params)
+            params: dict[str, Any] = {
+                "model": model_name,
+                "input": inputs,
+            }
+            params.update(extra_params)
 
-        # 应用 extra_params 中的特殊键：headers/query/body
-        # 与 chat completions 一致，body 走 extra_body，headers/query 走 SDK 透传。
-        if explicit_body:
-            existing = params.get("extra_body")
-            if isinstance(existing, dict):
-                params["extra_body"] = {**explicit_body, **existing}
-            else:
-                params["extra_body"] = explicit_body
-        if extra_headers:
-            params["extra_headers"] = extra_headers
-        if extra_query:
-            params["extra_query"] = extra_query
+            # 应用 extra_params 中的特殊键：headers/query/body
+            # 与 chat completions 一致，body 走 extra_body，headers/query 走 SDK 透传。
+            if explicit_body:
+                existing = params.get("extra_body")
+                if isinstance(existing, dict):
+                    params["extra_body"] = {**explicit_body, **existing}
+                else:
+                    params["extra_body"] = explicit_body
+            if extra_headers:
+                params["extra_headers"] = extra_headers
+            if extra_query:
+                params["extra_query"] = extra_query
 
-        log_provider_request_body(
-            "embeddings.create",
-            params,
-            token_counter=count_payload_tokens,
-        )
-        resp = await client.embeddings.create(**params)
-        data = getattr(resp, "data", None)
-        if not data:
-            return []
+            log_provider_request_body(
+                "embeddings.create",
+                params,
+                model_set=model_set, request_name=request_name,
+                token_counter=count_payload_tokens,
+            )
+            trace = start_provider("embeddings.create", params, kind="embedding")
+            resp = await client.embeddings.create(**params)
+            trace.raw(resp)
+            data = getattr(resp, "data", None)
+            if not data:
+                trace.result(embeddings=[], usage=_extract_usage(resp))
+                return []
 
-        out: list[list[float]] = []
-        for item in data:
-            vec = getattr(item, "embedding", None)
-            if isinstance(vec, list):
-                out.append([float(v) for v in vec])
-        return out
+            out: list[list[float]] = []
+            for item in data:
+                vec = getattr(item, "embedding", None)
+                if isinstance(vec, list):
+                    out.append([float(v) for v in vec])
+            trace.result(embeddings=out, usage=_extract_usage(resp))
+            return out
 
     async def create_rerank(
         self,
@@ -1270,84 +1277,88 @@ class OpenAIChatClient:
             ValueError: query/documents 为空或 extra_params 非 dict 时抛出。
             LLMConfigurationError: 当前 SDK 不支持原生 rerank 接口时抛出。
         """
-        del request_name
+        with provider_attempt("rerank.create", model_set, request_name, kind="rerank", stream=False):
 
-        if not isinstance(model_set, dict):
-            raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
-        if not query:
-            raise ValueError("query 不能为空")
-        if not documents:
-            raise ValueError("documents 不能为空")
+            if not isinstance(model_set, dict):
+                raise TypeError("OpenAIChatClient 期望 model_set 为单个模型配置 dict")
+            if not query:
+                raise ValueError("query 不能为空")
+            if not documents:
+                raise ValueError("documents 不能为空")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, _extra_params, extra_headers, extra_query, explicit_body = (
-            self._extract_model_params(model_set)
-        )
-        client = self._get_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            trust_env=trust_env,
-            force_ipv4=force_ipv4,
-        )
-
-        # 尝试调用 SDK 原生 rerank 接口
-        rerank_api = getattr(client, "rerank", None)
-        rerank_create = (
-            getattr(rerank_api, "create", None) if rerank_api is not None else None
-        )
-        if callable(rerank_create):
-            params: dict[str, Any] = {
-                "model": model_name,
-                "query": query,
-                "documents": documents,
-            }
-            if isinstance(top_n, int) and top_n > 0:
-                params["top_n"] = top_n
-
-            # 应用 extra_params 中的特殊键：headers/query/body
-            # rerank 接口参数集合有限，普通 extra_params 不透传，仅这三个 HTTP 层特殊键生效
-            if explicit_body:
-                params["extra_body"] = explicit_body
-            if extra_headers:
-                params["extra_headers"] = extra_headers
-            if extra_query:
-                params["extra_query"] = extra_query
-
-            log_provider_request_body(
-                "rerank.create",
-                params,
-                token_counter=count_payload_tokens,
+            api_key, base_url, timeout, trust_env, force_ipv4, _extra_params, extra_headers, extra_query, explicit_body = (
+                self._extract_model_params(model_set)
             )
-            maybe_resp = rerank_create(**params)
-            if inspect.isawaitable(maybe_resp):
-                resp = await maybe_resp
-            else:
-                resp = maybe_resp
-
-            data = (
-                getattr(resp, "results", None)
-                or getattr(resp, "data", None)
-                or []
+            client = self._get_client(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                trust_env=trust_env,
+                force_ipv4=force_ipv4,
             )
-            out: list[dict[str, Any]] = []
-            for rec in data:
-                idx = getattr(rec, "index", None)
-                score = getattr(rec, "relevance_score", None)
-                if score is None:
-                    score = getattr(rec, "score", None)
-                index = int(idx) if isinstance(idx, int) else 0
-                out.append(
-                    {
-                        "index": index,
-                        "score": float(score) if isinstance(score, (int, float)) else 0.0,
-                        "document": documents[index] if 0 <= index < len(documents) else None,
-                    }
+
+            # 尝试调用 SDK 原生 rerank 接口
+            rerank_api = getattr(client, "rerank", None)
+            rerank_create = (
+                getattr(rerank_api, "create", None) if rerank_api is not None else None
+            )
+            if callable(rerank_create):
+                params: dict[str, Any] = {
+                    "model": model_name,
+                    "query": query,
+                    "documents": documents,
+                }
+                if isinstance(top_n, int) and top_n > 0:
+                    params["top_n"] = top_n
+
+                # 应用 extra_params 中的特殊键：headers/query/body
+                # rerank 接口参数集合有限，普通 extra_params 不透传，仅这三个 HTTP 层特殊键生效
+                if explicit_body:
+                    params["extra_body"] = explicit_body
+                if extra_headers:
+                    params["extra_headers"] = extra_headers
+                if extra_query:
+                    params["extra_query"] = extra_query
+
+                log_provider_request_body(
+                    "rerank.create",
+                    params,
+                    model_set=model_set, request_name=request_name,
+                    token_counter=count_payload_tokens,
                 )
-            return out
+                trace = start_provider("rerank.create", params, kind="rerank")
+                maybe_resp = rerank_create(**params)
+                if inspect.isawaitable(maybe_resp):
+                    resp = await maybe_resp
+                else:
+                    resp = maybe_resp
 
-        raise LLMConfigurationError(
-            f"当前 SDK 客户端不支持原生 rerank 接口，模型：{model_name}"
-        )
+                trace.raw(resp)
+                data = (
+                    getattr(resp, "results", None)
+                    or getattr(resp, "data", None)
+                    or []
+                )
+                out: list[dict[str, Any]] = []
+                for rec in data:
+                    idx = getattr(rec, "index", None)
+                    score = getattr(rec, "relevance_score", None)
+                    if score is None:
+                        score = getattr(rec, "score", None)
+                    index = int(idx) if isinstance(idx, int) else 0
+                    out.append(
+                        {
+                            "index": index,
+                            "score": float(score) if isinstance(score, (int, float)) else 0.0,
+                            "document": documents[index] if 0 <= index < len(documents) else None,
+                        }
+                    )
+                trace.result(results=out, usage=_extract_usage(resp))
+                return out
+
+            raise LLMConfigurationError(
+                f"当前 SDK 客户端不支持原生 rerank 接口，模型：{model_name}"
+            )
 
     async def create_transcription(
         self,
