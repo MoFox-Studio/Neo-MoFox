@@ -22,6 +22,7 @@ _GEMINI_CLIENT_TYPES = frozenset(
 _BEDROCK_CLIENT_TYPES = frozenset(
     {"bedrock", "amazon_bedrock", "bedrock_converse"}
 )
+_JEV_CLIENT_TYPES = frozenset({"jev", "typesafe", "type_safe"})
 
 
 def _normalize_client_type(client_type: Any) -> str | None:
@@ -69,6 +70,11 @@ class ModelClientRegistry:
                 return self.anthropic
             if normalized_type in {"openai_response", "responses", "openai.responses"} and self.responses is not None:
                 return self.responses
+            if normalized_type in _JEV_CLIENT_TYPES:
+                raise LLMConfigurationError(
+                    "Jev 是独立 typed-evaluation provider，请通过 src.app.plugin_system.api.jev_api 调用，"
+                    "不能作为传统 LLM ChatModelClient 使用"
+                )
             if normalized_type in _GEMINI_CLIENT_TYPES:
                 if self.gemini is None:
                     raise LLMConfigurationError(
