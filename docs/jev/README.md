@@ -9,12 +9,13 @@
 ```python
 import asyncio
 
-from src.kernel.jev import JevClient, choice, noul, score
+from src.app.plugin_system.api.jev_api import evaluate_jev
+from src.kernel.jev import choice, noul, score
 
 
 async def main() -> None:
-    client = JevClient.from_env(model="jev-latest")
-    result = await client.evaluate(
+    result = await evaluate_jev(
+        configured_model_name="jev-prod",
         state={"message": "生产服务对所有用户不可用"},
         questions={
             "urgent": noul("这条消息是否描述了需要立即处理的线上故障？"),
@@ -45,7 +46,7 @@ asyncio.run(main())
 
 ## 客户端行为
 
-- `JevClient` 走独立的异步 HTTP 路径，不构造 LLM payload，也不经过传统 LLM 客户端注册表；可通过 `transport=` 注入自定义 `httpx` 传输层。
+- 插件应优先通过 `src.app.plugin_system.api.jev_api.evaluate_jev` 或 `create_jev_client` 调用；该公共 API 可按 `configured_model_name`/`provider_name` 复用 Core 模型配置中的 key、endpoint、timeout 和代理字段。底层仍走独立的异步 HTTP 路径，不构造 LLM payload，也不经过传统 LLM 客户端注册表；可通过 `transport=` 注入自定义 `httpx` 传输层。
 - base URL 默认为 `https://api.typesafe.ai`；可以覆盖成企业网关地址，也可以直接传入完整 `/v1/systemone` 路由（尾部 query 会保留）。默认模型 `jev-latest`，可在每次 `evaluate()` 调用时覆盖。
 - Choice 的 `criteria` 必须是非空对象；Score 的有序 criteria 数量为 2 到 10；Noul 的 criteria 可省略。不符合约定的定义在本地就报 `JevConfigurationError`。
 - 默认最多重试 2 次，只对 HTTP 429、529、超时和传输层异常重试，采用带抖动的有上限指数退避；响应带合法 `Retry-After` 时优先使用它。401、400、422 等请求本身有问题的状态不重试。
@@ -63,6 +64,25 @@ TypeSafe 的 typed answer 保证响应形状，不保证判断为真。Choice/Sc
 - TypeSafe HTTP API：<https://docs.typesafe.ai/api>
 - TypeSafe primitives：<https://docs.typesafe.ai/primitives>
 - Confidence：<https://docs.typesafe.ai/confidence>
+
+## 插件侧调用
+
+插件不应把 Jev 当作聊天 LLM 发送 `LLMPayload`；应通过版本化的 `jev_api` 公共入口调用：
+
+```python
+from src.app.plugin_system.api.jev_api import evaluate_jev
+from src.kernel.jev import noul
+
+result = await evaluate_jev(
+    configured_model_name="jev-prod",
+    state={"message": incoming_text},
+    questions={"is_relevant": noul("这条消息是否与当前任务相关？")},
+)
+if result.answer("is_relevant").noul is not None:
+    ...
+```
+
+`configured_model_name` 会复用 Core 的模型配置：API key、HTTPS endpoint、timeout、代理与模型标识；也可以传入 `provider_name` 或显式 `JevClientConfig`。这只是配置复用，不会把 Jev 注册为 `ChatModelClient`，也不会改变传统 LLM 的 failover/stream/tool-call 语义。
 
 ## 相关文档
 

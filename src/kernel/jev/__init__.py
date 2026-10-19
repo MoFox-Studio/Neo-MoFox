@@ -28,7 +28,14 @@ from .exceptions import (
     JevUnsupportedMediaTypeError,
     JevValidationError,
 )
-from .types import JevAnswer, JevQuestion, JevResponse, JevUsage
+from .types import (
+    JevAnswer,
+    JevInstruction,
+    JevQuestion,
+    JevResponse,
+    JevState,
+    JevUsage,
+)
 
 __all__ = [
     "API_KEY_ENV",
@@ -43,11 +50,13 @@ __all__ = [
     "JevError",
     "JevOverloadedError",
     "JevPayloadTooLargeError",
+    "JevInstruction",
     "JevQuestion",
     "JevRateLimitError",
     "JevResponse",
     "JevResponseError",
     "JevTimeoutError",
+    "JevState",
     "JevTransportError",
     "JevUnsupportedMediaTypeError",
     "JevUsage",

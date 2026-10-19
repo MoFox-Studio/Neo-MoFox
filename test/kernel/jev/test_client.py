@@ -19,7 +19,6 @@ from src.kernel.jev import (
     JevConfigurationError,
     JevOverloadedError,
     JevPayloadTooLargeError,
-    JevRateLimitError,
     JevResponseError,
     JevTimeoutError,
     JevTransportError,

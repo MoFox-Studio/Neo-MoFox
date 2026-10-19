@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any, AsyncIterator, cast
 
 from src.kernel.llm.payload.tooling import LLMUsable
+from src.kernel.network import build_httpx_transport
 
 from ..exceptions import LLMConfigurationError
 from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResult
@@ -203,8 +204,6 @@ def _payloads_to_anthropic_messages(
     system_blocks: list[_ProviderPayload] = []
     messages: list[_ProviderPayload] = []
     tools: list[_ProviderPayload] = []
-    previous_role: ROLE | None = None
-
     for payload in payloads:
         if payload.role == ROLE.TOOL:
             for item in payload.content:
@@ -214,7 +213,6 @@ def _payloads_to_anthropic_messages(
                         tools.append(_to_openai_compatible_tool(tool))
                     else:
                         tools.append(_to_anthropic_tool(tool))
-            previous_role = payload.role
             continue
 
         if payload.role == ROLE.SYSTEM:
@@ -223,7 +221,6 @@ def _payloads_to_anthropic_messages(
                     system_blocks.append({"type": "text", "text": part.text})
                 else:
                     system_blocks.append({"type": "text", "text": str(part)})
-            previous_role = payload.role
             continue
 
         if payload.role == ROLE.TOOL_RESULT:
@@ -250,14 +247,11 @@ def _payloads_to_anthropic_messages(
                 "role": "user",
                 "content": content_blocks or [{"type": "text", "text": ""}],
             })
-            previous_role = payload.role
             continue
 
         role = "assistant" if payload.role == ROLE.ASSISTANT else "user"
         content_blocks: list[_ProviderPayload] = []
         text_chunks: list[str] = []
-        has_reasoning_block = False
-
         for index, part in enumerate(payload.content):
             if isinstance(part, Text):
                 content_blocks.append({"type": "text", "text": part.text})
@@ -305,7 +299,6 @@ def _payloads_to_anthropic_messages(
                     reasoning_block = _reasoning_part_to_anthropic_block(part)
                     if reasoning_block is not None:
                         content_blocks.append(reasoning_block)
-                        has_reasoning_block = True
                 continue
 
             to_text = getattr(part, "to_text", None)
@@ -323,7 +316,6 @@ def _payloads_to_anthropic_messages(
             "role": role,
             "content": content_blocks or [{"type": "text", "text": ""}],
         })
-        previous_role = payload.role
 
     return messages, tools, system_blocks
 
@@ -460,11 +452,9 @@ class AnthropicChatClient:
         # 统一复用共享 timeout builder，确保所有 provider 客户端应用同一套
         # httpx timeout 策略。
         timeout_config = build_httpx_timeout(timeout)
-        transport = (
-            httpx.AsyncHTTPTransport(local_address="0.0.0.0")
-            if force_ipv4
-            else httpx.AsyncHTTPTransport()
-        )
+        transport = build_httpx_transport(force_ipv4=force_ipv4)
+        if transport is None:
+            transport = httpx.AsyncHTTPTransport()
         http_client_kwargs: dict[str, Any] = {
             "transport": transport,
             "trust_env": trust_env,

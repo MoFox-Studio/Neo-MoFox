@@ -49,8 +49,8 @@ def _patch_api_version(monkeypatch: pytest.MonkeyPatch, api_name: str, version: 
 # =============================================================================
 
 
-def test_plugin_api_versions_contains_all_22_modules() -> None:
-    """PLUGIN_API_VERSIONS 应包含全部 22 个 *_api 模块。"""
+def test_plugin_api_versions_contains_all_23_modules() -> None:
+    """PLUGIN_API_VERSIONS 应包含全部 23 个 *_api 模块。"""
     expected = {
         "action_api",
         "adapter_api",
@@ -61,6 +61,7 @@ def test_plugin_api_versions_contains_all_22_modules() -> None:
         "database_api",
         "event_api",
         "llm_api",
+        "jev_api",
         "log_api",
         "media_api",
         "message_api",
@@ -76,7 +77,7 @@ def test_plugin_api_versions_contains_all_22_modules() -> None:
         "tool_api",
     }
     assert set(PLUGIN_API_VERSIONS) == expected
-    assert len(PLUGIN_API_VERSIONS) == 22
+    assert len(PLUGIN_API_VERSIONS) == 23
     from packaging.version import InvalidVersion, Version
 
     for name, ver in PLUGIN_API_VERSIONS.items():

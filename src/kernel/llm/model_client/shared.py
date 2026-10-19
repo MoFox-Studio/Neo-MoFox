@@ -17,25 +17,10 @@ from ..observation import capture_provider_request
 
 
 def build_httpx_timeout(timeout: float | None) -> Any:
-    """根据标量超时配置构造相对保守的 ``httpx.Timeout`` 对象。"""
-    import httpx
+    """兼容旧导入路径，转发到 kernel.network 的统一实现。"""
+    from src.kernel.network import build_httpx_timeout as _build_httpx_timeout
 
-    if not isinstance(timeout, (int, float)):
-        return None
-
-    total = float(timeout)
-    if total <= 0:
-        return None
-
-    connect_timeout = min(total, 10.0)
-    pool_timeout = min(total, 5.0)
-    return httpx.Timeout(
-        timeout=total,
-        connect=connect_timeout,
-        read=total,
-        write=total,
-        pool=pool_timeout,
-    )
+    return _build_httpx_timeout(timeout)
 
 
 def callable_accepts_reason(callable_obj: Any) -> bool:

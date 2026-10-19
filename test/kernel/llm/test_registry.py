@@ -55,6 +55,14 @@ def test_registry_custom_openai_client():
     assert registry.openai is custom_client
 
 
+@pytest.mark.parametrize("client_type", ["jev", "typesafe", "type-safe"])
+def test_registry_rejects_jev_as_chat_provider(client_type: str) -> None:
+    """Jev 必须走 typed-evaluation API，不能伪装成聊天 provider。"""
+    registry = ModelClientRegistry()
+    with pytest.raises(LLMConfigurationError, match="独立 typed-evaluation"):
+        registry.get_client_for_model(_model_entry(client_type=client_type))
+
+
 def test_registry_get_openai_client():
     """测试获取OpenAI客户端。"""
     registry = ModelClientRegistry()

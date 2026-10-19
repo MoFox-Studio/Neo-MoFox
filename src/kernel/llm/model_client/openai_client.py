@@ -23,6 +23,7 @@ from src.kernel.llm.tool_call_compat import (
     build_tool_call_compat_prompt,
     parse_tool_call_compat_response,
 )
+from src.kernel.network import build_httpx_transport
 
 from ..exceptions import (
     LLMAPIError,
@@ -711,11 +712,9 @@ class OpenAIChatClient:
         # 统一复用共享 timeout builder，确保所有 provider 客户端应用同一套
         # httpx timeout 策略。
         timeout_config = build_httpx_timeout(timeout)
-        base_transport = (
-            httpx.AsyncHTTPTransport(local_address="0.0.0.0")
-            if force_ipv4
-            else httpx.AsyncHTTPTransport()
-        )
+        base_transport = build_httpx_transport(force_ipv4=force_ipv4)
+        if base_transport is None:
+            base_transport = httpx.AsyncHTTPTransport()
         http_client_kwargs: dict[str, Any] = {
             "transport": base_transport,
             "trust_env": trust_env,
@@ -879,7 +878,7 @@ class OpenAIChatClient:
         messages, openai_tools = _payloads_to_openai_messages(payloads)
         # 默认不向 OpenAI-compatible provider 发送非标准 reasoning_content 历史字段，
         # 避免污染请求结构；需要时通过 reasoning_history_mode 显式开启。
-        allow_reasoning_history = ( reasoning_history_mode == True )
+        allow_reasoning_history = bool(reasoning_history_mode)
 
         if not allow_reasoning_history:
             for msg in messages:
@@ -1337,9 +1336,7 @@ class OpenAIChatClient:
 
         # 统一复用共享 timeout builder，与其他 provider 客户端保持同一套超时策略。
         timeout_config = build_httpx_timeout(timeout)
-        transport = (
-            httpx.AsyncHTTPTransport(local_address="0.0.0.0") if force_ipv4 else None
-        )
+        transport = build_httpx_transport(force_ipv4=force_ipv4)
         try:
             async with httpx.AsyncClient(
                 timeout=timeout_config,

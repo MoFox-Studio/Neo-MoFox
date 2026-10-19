@@ -25,6 +25,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from src.kernel.network import build_httpx_timeout, build_httpx_transport
+
 from .exceptions import (
     JevAPIError,
     JevAuthenticationError,
@@ -100,6 +102,8 @@ class JevClientConfig:
     max_retry_backoff_seconds: float = 8.0
     trust_env: bool = True
     force_ipv4: bool = False
+    extra_headers: dict[str, str] = field(default_factory=dict, repr=False)
+    extra_query: dict[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """校验配置边界值，非法配置在建立连接前就失败。
@@ -207,14 +211,15 @@ class JevClient:
         expected_ids = set(body["questions"])
 
         async with httpx.AsyncClient(
-            timeout=httpx.Timeout(self.config.timeout_seconds),
+            timeout=build_httpx_timeout(self.config.timeout_seconds),
             trust_env=self.config.trust_env,
             transport=self._transport or self._build_transport(),
         ) as client:
-            headers = {
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json",
-            }
+            headers = dict(self.config.extra_headers)
+            # Provider-specific headers may be added, but cannot replace the
+            # authentication and media-type contract of System One.
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+            headers["Content-Type"] = "application/json"
             for attempt in range(self.config.max_retries + 1):
                 retry_error, response = await self._post_once(client, headers, body)
                 if response is not None:
@@ -239,20 +244,23 @@ class JevClient:
     ) -> tuple[Exception | None, httpx.Response | None]:
         """发起一次请求，把传输层异常转换成可重试的 Jev 异常。"""
         try:
-            return None, await client.post(self.config.endpoint, headers=headers, json=body)
+            return None, await client.post(
+                self.config.endpoint,
+                params=self.config.extra_query,
+                headers=headers,
+                json=body,
+            )
         except (TypeError, ValueError) as exc:
             # httpx 用 TypeError/ValueError 表示请求体无法序列化。
             raise JevConfigurationError("Jev state/questions 必须可序列化为 JSON") from exc
-        except httpx.TimeoutException as exc:
+        except httpx.TimeoutException:
             return JevTimeoutError("Jev 请求超时"), None
         except httpx.TransportError as exc:
             return JevTransportError(f"Jev 网络请求失败：{type(exc).__name__}"), None
 
     def _build_transport(self) -> httpx.AsyncBaseTransport | None:
-        """按配置选择传输层，force_ipv4 时固定本地地址。"""
-        if self.config.force_ipv4:
-            return httpx.AsyncHTTPTransport(local_address="0.0.0.0")
-        return None
+        """按配置选择共享的传输层。"""
+        return build_httpx_transport(force_ipv4=self.config.force_ipv4)
 
     def _build_request_body(
         self,

@@ -15,20 +15,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent))
 
-from src.kernel.jev import (
-    JevClient,
-    JevConfigurationError,
-    choice,
-    noul,
-    score,
-)
+from src.app.plugin_system.api.jev_api import evaluate_jev
+from src.kernel.jev import JevConfigurationError, choice, noul, score
 
 
 async def main() -> None:
     """对一个工单同时评估紧急度、负责团队和严重等级。"""
-    client = JevClient.from_env(model="jev-latest")
-
-    response = await client.evaluate(
+    response = await evaluate_jev(
         state={
             "ticket": "所有客户的生产 API 请求都返回 500，订单无法处理。",
             "service": "order-api",
