@@ -5,18 +5,40 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import tempfile
-from contextlib import closing
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, closing
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.app.plugin_system.api.storage_api import PluginDatabase
 
+from .async_utils import await_cancellation_safe
 from .models import ALL_MODELS, SchemaVersionModel
 from .schema_version import SCHEMA_KEY, SCHEMA_VERSION
+
+
+class _MnemosynePluginDatabase(PluginDatabase):
+    """确保插件会话在任务取消时先完成回滚和连接清理。"""
+
+    @asynccontextmanager
+    async def session(self) -> AsyncGenerator[AsyncSession, None]:
+        """取消期间不打断事务回滚或会话关闭。"""
+        session = self._require_initialized()()
+        try:
+            yield session
+            if session.is_active:
+                await session.commit()
+        except BaseException:
+            if session.is_active:
+                await await_cancellation_safe(session.rollback())
+            raise
+        finally:
+            await await_cancellation_safe(session.close())
 
 
 def create_episode_tables(connection: sqlite3.Connection) -> None:
@@ -242,7 +264,7 @@ class VNextSchema:
     def __init__(self, db_path: str) -> None:
         """创建 Schema 管理器。"""
         self._db_path = Path(db_path)
-        self.database = PluginDatabase(db_path, list(ALL_MODELS))
+        self.database = _MnemosynePluginDatabase(db_path, list(ALL_MODELS))
 
     @property
     def db_path(self) -> Path:

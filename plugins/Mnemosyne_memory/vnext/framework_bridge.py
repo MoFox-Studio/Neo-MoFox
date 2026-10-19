@@ -22,6 +22,8 @@ from src.kernel.concurrency import TaskNotFoundError, get_task_manager
 from src.kernel.db import get_db_session
 from src.kernel.vector_db import get_vector_db_service
 
+from .async_utils import await_cancellation_safe
+
 
 @dataclass(frozen=True, slots=True)
 class ManagedTaskHandle:
@@ -109,12 +111,26 @@ async def _read_only_db_session() -> AsyncIterator[Any]:
     """为单次来源查询启用只读事务，并复位 SQLite 连接级开关。"""
     async with get_db_session() as session:
         is_sqlite = str(session.get_bind().dialect.name) == "sqlite"
-        await _set_transaction_read_only(session)
         try:
+            await _set_transaction_read_only(session)
             yield session
-        finally:
             if is_sqlite:
                 await session.execute(text("PRAGMA query_only=OFF"))
+            if session.is_active:
+                await session.commit()
+        except BaseException:
+            try:
+                if is_sqlite:
+                    await await_cancellation_safe(
+                        session.execute(text("PRAGMA query_only=OFF"))
+                    )
+                if session.is_active:
+                    await await_cancellation_safe(session.rollback())
+            finally:
+                await await_cancellation_safe(session.close())
+            raise
+        else:
+            await await_cancellation_safe(session.close())
 
 
 async def read_migration_person_candidates(
