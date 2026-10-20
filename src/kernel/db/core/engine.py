@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from src.kernel.logger import get_logger
 from src.kernel.db.telemetry import record_db_lifecycle_event
+from src.kernel.concurrency.cleanup import await_cancellation_safe
 
 from .exceptions import DatabaseInitializationError
 
@@ -166,27 +167,35 @@ async def get_engine() -> AsyncEngine:
             )
 
             # 创建异步引擎
-            _engine = create_async_engine(
+            engine = create_async_engine(
                 _engine_config.url,
                 **(_engine_config.engine_kwargs or {}),
             )
 
-            # 应用数据库特定的优化
-            if _engine_config.apply_optimizations:
-                if db_type == "sqlite":
-                    await _enable_sqlite_optimizations(_engine)
-                elif db_type == "postgresql":
-                    await _enable_postgresql_optimizations(_engine)
+            async def initialize_engine() -> None:
+                """保护引擎初始化中的原始连接及其连接池回收。"""
+                if _engine_config.apply_optimizations:
+                    if db_type == "sqlite":
+                        await _enable_sqlite_optimizations(engine)
+                    elif db_type == "postgresql":
+                        await _enable_postgresql_optimizations(engine)
+                await record_db_lifecycle_event(
+                    event_name="engine_initialized",
+                    summary="database engine initialized",
+                    attributes={
+                        "db_type": db_type or "unknown",
+                        "apply_optimizations": _engine_config.apply_optimizations,
+                        "duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
+                    },
+                )
 
-            await record_db_lifecycle_event(
-                event_name="engine_initialized",
-                summary="database engine initialized",
-                attributes={
-                    "db_type": db_type or "unknown",
-                    "apply_optimizations": _engine_config.apply_optimizations,
-                    "duration_ms": round((time.perf_counter() - started_at) * 1000, 3),
-                },
-            )
+            try:
+                await await_cancellation_safe(initialize_engine(), name="database_engine_initialize")
+            except BaseException:
+                await await_cancellation_safe(engine.dispose(), name="database_engine_dispose")
+                raise
+
+            _engine = engine
             logger.info(f"{(db_type or 'UNKNOWN').upper()} 数据库引擎初始化成功")
             return _engine
 
@@ -474,13 +483,22 @@ async def close_engine() -> None:
 
     释放所有连接池资源
     """
-    global _engine
+    async def close() -> None:
+        """与初始化互斥，并将连接池释放和单例状态复位作为同一次收尾。"""
+        global _engine, _engine_lock
+        if _engine_lock is None:
+            _engine_lock = asyncio.Lock()
+        async with _engine_lock:
+            if _engine is not None:
+                from .session import dispose_engine_safely, reset_session_factory
 
-    if _engine is not None:
-        logger.info("正在关闭数据库引擎...")
-        await _engine.dispose()
-        _engine = None
-        logger.info("数据库引擎已关闭")
+                logger.info("正在关闭数据库引擎...")
+                await dispose_engine_safely(_engine)
+                await reset_session_factory()
+                _engine = None
+                logger.info("数据库引擎已关闭")
+
+    await await_cancellation_safe(close(), name="database_engine_close")
 
 
 async def _enable_sqlite_optimizations(engine: AsyncEngine) -> None:

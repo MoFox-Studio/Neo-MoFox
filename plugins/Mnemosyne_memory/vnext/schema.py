@@ -5,40 +5,22 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, closing
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.app.plugin_system.api.storage_api import PluginDatabase
 
-from .async_utils import await_cancellation_safe
 from .models import ALL_MODELS, SchemaVersionModel
 from .schema_version import SCHEMA_KEY, SCHEMA_VERSION
 
 
 class _MnemosynePluginDatabase(PluginDatabase):
-    """确保插件会话在任务取消时先完成回滚和连接清理。"""
-
-    @asynccontextmanager
-    async def session(self) -> AsyncGenerator[AsyncSession, None]:
-        """取消期间不打断事务回滚或会话关闭。"""
-        session = self._require_initialized()()
-        try:
-            yield session
-            if session.is_active:
-                await session.commit()
-        except BaseException:
-            if session.is_active:
-                await await_cancellation_safe(session.rollback())
-            raise
-        finally:
-            await await_cancellation_safe(session.close())
+    """沿用框架统一事务管理，避免插件副本再次遗漏提交或失败 flush 的清理。"""
 
 
 def create_episode_tables(connection: sqlite3.Connection) -> None:
@@ -275,7 +257,9 @@ class VNextSchema:
         """在副本上识别已知结构，拒绝未知版本及缺少版本记录的已有库。"""
         if not self._db_path.is_file():
             return
-        with tempfile.TemporaryDirectory(prefix="mnemosyne-schema-") as directory:
+        with tempfile.TemporaryDirectory(
+            prefix="mnemosyne-schema-", dir=self._db_path.parent
+        ) as directory:
             probe = Path(directory) / "probe.db"
             shutil.copyfile(self._db_path, probe)
             for suffix in ("-wal", "-shm", "-journal"):

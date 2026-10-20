@@ -1,7 +1,7 @@
 {
   "name": "mnemosyne_memory",
   "display_name": "Mnemosyne 记忆",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "可追溯的正式记忆写入、修订与作废，支持检索、人物印象与自然闪回",
   "author": "MoFox Team",
   "license": "AGPL-3.0-only",
@@ -50,7 +50,7 @@
     "person_api": "1.1.0",
     "prompt_api": "1.0.0",
     "router_api": "1.0.0",
-    "storage_api": "1.0.0",
+    "storage_api": "1.1.0",
     "log_api": "1.0.0",
     "service_api": "1.0.0"
   },

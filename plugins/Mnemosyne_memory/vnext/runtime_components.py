@@ -801,6 +801,10 @@ class VNextFlashbackEventHandler(BaseEventHandler):
         self, event_name: str, params: dict[str, Any]
     ) -> tuple[EventDecision, dict[str, Any]]:
         """收到消息时预取，生成回复前注入仍有效的记忆。"""
+        if getattr(self.plugin, "_unloading", False) or not getattr(
+            self.plugin, "runtime_owner", None
+        ):
+            return EventDecision.SUCCESS, params
         owner = _owner(self.plugin)
         if event_name == EventType.ON_MESSAGE_RECEIVED:
             message = params.get("message")

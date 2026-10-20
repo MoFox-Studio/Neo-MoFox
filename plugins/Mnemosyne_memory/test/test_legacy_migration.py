@@ -9,6 +9,7 @@ import subprocess
 import sys
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -18,9 +19,39 @@ from ..scripts.migrate_legacy import (
     MigrationError, PREFIX, connect, fingerprint, initialize, migrate, quote, stable_id,
 )
 from ..vnext.models import MemoryModel, MemoryRevisionModel
+from ..vnext.schema import VNextSchema
+from ..vnext.schema_version import SCHEMA_KEY, SCHEMA_VERSION
 
 FIXTURES = Path(__file__).parent / "fixtures"
 STAMP = "2026-01-01T00:00:00Z"
+
+
+def test_schema_version_probe_uses_database_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """已有数据库的 Schema 预检不应依赖系统临时盘空间。"""
+    database_path = tmp_path / "vnext.db"
+    with closing(sqlite3.connect(database_path)) as database:
+        database.execute(
+            "CREATE TABLE mnemosyne_vnext_schema_version "
+            "(schema_key TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+        )
+        database.execute(
+            "INSERT INTO mnemosyne_vnext_schema_version(schema_key, version) "
+            "VALUES (?, ?)",
+            (SCHEMA_KEY, SCHEMA_VERSION),
+        )
+        database.commit()
+
+    from ..vnext import schema as schema_module
+
+    temporary_directory = Mock(wraps=schema_module.tempfile.TemporaryDirectory)
+    monkeypatch.setattr(
+        schema_module.tempfile, "TemporaryDirectory", temporary_directory
+    )
+
+    assert VNextSchema(str(database_path))._check_existing_version() == SCHEMA_VERSION
+    assert temporary_directory.call_args.kwargs["dir"] == database_path.parent
 
 
 def put(db: sqlite3.Connection, table: str, **values):

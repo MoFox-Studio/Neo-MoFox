@@ -821,3 +821,23 @@ async def test_feedforward_skips_sub_agent_and_internal_prompts(
             {"name": template_name, "values": {"stream_id": "stream-a"}},
         )
     consume.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unloading", [False, True])
+async def test_flashback_skips_plugin_lifecycle_gap(unloading: bool) -> None:
+    """插件未就绪或卸载期间，闪回事件应安静跳过。"""
+    from src.app.plugin_system.api.event_api import EventDecision
+    from src.core.components.types import EventType
+
+    from .. import plugin as plugin_module
+
+    plugin = plugin_module.MnemosyneMemoryPlugin(MnemosyneMemoryConfig())
+    plugin._unloading = unloading
+    handler = VNextFlashbackEventHandler(cast(BasePlugin, plugin))
+    params: dict[str, object] = {"message": {"content": "测试"}}
+
+    decision, result = await handler.execute(EventType.ON_MESSAGE_RECEIVED, params)
+
+    assert decision is EventDecision.SUCCESS
+    assert result is params

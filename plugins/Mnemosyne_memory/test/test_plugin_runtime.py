@@ -745,7 +745,7 @@ def test_host_discovers_and_initializes_plugin(
             source = Path(release_package).resolve()
             assert source.is_file(), f"Release package missing: {source}"
         else:
-            source = tmp_path / "mnemosyne_memory-2.1.0.mfp"
+            source = tmp_path / "mnemosyne_memory-2.1.2.mfp"
             with zipfile.ZipFile(source, "w") as archive:
                 for path in plugin_dir.rglob("*"):
                     relative = path.relative_to(plugin_dir)
@@ -770,7 +770,7 @@ async def main():
     assert str(source) in await loader.discover_plugins(str(source.parent))
     manifest = await load_manifest(str(source))
     assert manifest is not None
-    assert manifest.version == "2.1.0"
+    assert manifest.version == "2.1.2"
     assert loader._check_version_compatibility(manifest)[0]
     configure_engine("sqlite+aiosqlite:///core.db", apply_optimizations=False)
     engine = await get_engine()
@@ -780,7 +780,7 @@ async def main():
     try:
         assert await manager.load_plugin_from_manifest(str(source), manifest)
         plugin = manager.get_plugin("mnemosyne_memory")
-        assert plugin is not None and plugin.plugin_version == "2.1.0"
+        assert plugin is not None and plugin.plugin_version == manifest.version
         owner = plugin.runtime_owner
         assert owner is not None and owner._initialized and owner.diary.ready
         assert owner.config.vnext.learning.enabled is False
@@ -822,7 +822,7 @@ def test_manifest_matches_runtime_components_and_current_api() -> None:
     from ..plugin import MnemosyneMemoryPlugin
 
     manifest = json.loads((Path(__file__).resolve().parents[1] / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "2.1.0"
+    assert manifest["version"] == "2.1.2"
     assert manifest["categories"] == ["tool"]
     assert manifest["min_core_version"] == "1.2.0-rc.2"
     assert all(PLUGIN_API_VERSIONS[name] == version for name, version in manifest["api_version"].items())

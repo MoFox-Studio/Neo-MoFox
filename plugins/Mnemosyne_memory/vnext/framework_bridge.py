@@ -114,23 +114,11 @@ async def _read_only_db_session() -> AsyncIterator[Any]:
         try:
             await _set_transaction_read_only(session)
             yield session
+        finally:
             if is_sqlite:
-                await session.execute(text("PRAGMA query_only=OFF"))
-            if session.is_active:
-                await session.commit()
-        except BaseException:
-            try:
-                if is_sqlite:
-                    await await_cancellation_safe(
-                        session.execute(text("PRAGMA query_only=OFF"))
-                    )
-                if session.is_active:
-                    await await_cancellation_safe(session.rollback())
-            finally:
-                await await_cancellation_safe(session.close())
-            raise
-        else:
-            await await_cancellation_safe(session.close())
+                await await_cancellation_safe(
+                    session.execute(text("PRAGMA query_only=OFF"))
+                )
 
 
 async def read_migration_person_candidates(

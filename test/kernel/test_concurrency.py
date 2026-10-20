@@ -598,10 +598,10 @@ class TestTaskInfoEdgeCases:
 class TestTaskManagerEdgeCases:
     """测试 TaskManager 边界情况"""
 
-    def test_task_manager_double_init(self) -> None:
-        """测试 TaskManager 重复初始化（单例保护）"""
-        tm = TaskManager()
-        tm2 = TaskManager()
+    def test_global_task_manager_reuses_instance(self) -> None:
+        """全局入口应返回单例，直接构造的 TaskManager 允许独立实例。"""
+        tm = get_task_manager()
+        tm2 = get_task_manager()
         assert tm is tm2
 
     def test_create_task_not_in_async_context(self) -> None:

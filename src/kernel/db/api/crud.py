@@ -23,7 +23,7 @@ from src.kernel.db.core.cache import (
 from src.kernel.logger import get_logger
 
 from ..telemetry import record_db_operation_event
-from ..core.session import get_db_session
+from ..core.session import get_db_session, transaction_session
 
 logger = get_logger("database.crud", display="CRUD")
 
@@ -46,17 +46,8 @@ async def _get_session_ctx(
         AsyncSession 实例（自动处理提交/回滚）。
     """
     if session_factory is not None:
-        async with session_factory() as session:
-            try:
-                yield session
-                if session.is_active:
-                    await session.commit()
-            except Exception:
-                if session.is_active:
-                    await session.rollback()
-                raise
-            finally:
-                await session.close()
+        async with transaction_session(session_factory) as session:
+            yield session
     else:
         async with get_db_session() as session:
             yield session

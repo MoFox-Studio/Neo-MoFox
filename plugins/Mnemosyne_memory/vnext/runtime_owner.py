@@ -555,31 +555,24 @@ class VNextRuntimeOwner:
 
     def observe_message(self, message: object) -> None:
         """记录新消息并安排该流的闪回预取。"""
-        stream_id = str(self._message_value(message, "stream_id") or "").strip()
-        if not stream_id:
+        try:
+            snapshot = message_to_snapshot(message)  # type: ignore[arg-type]
+        except ValueError:
+            # 图片、语音等没有可用文本的消息不能形成 Episode 或闪回查询。
             return
-        message_id = str(
-            self._message_value(message, "message_id")
-            or self._message_value(message, "id")
-            or ""
-        ).strip()
-        if message_id:
-            recent = self._recent_messages.setdefault(stream_id, {})
-            recent[message_id] = message
-            while len(recent) > self.config.vnext.flashback.context_turns:
-                recent.pop(next(iter(recent)))
+        stream_id = snapshot.stream_id
+        message_id = snapshot.message_id
+        recent = self._recent_messages.setdefault(stream_id, {})
+        recent[message_id] = message
+        while len(recent) > self.config.vnext.flashback.context_turns:
+            recent.pop(next(iter(recent)))
         if self.config.vnext.feedforward.enabled:
-            try:
-                snapshot = message_to_snapshot(message)  # type: ignore[arg-type]
-            except ValueError:
-                snapshot = None
-            if snapshot is not None:
-                self.feedforward.perceive(
-                    stream_id,
-                    snapshot.text,
-                    person_id=snapshot.snapshot.get("person_id"),  # type: ignore[arg-type]
-                    observed_at=snapshot.time,
-                )
+            self.feedforward.perceive(
+                stream_id,
+                snapshot.text,
+                person_id=snapshot.snapshot.get("person_id"),  # type: ignore[arg-type]
+                observed_at=snapshot.time,
+            )
         if self._initialized:
             self._schedule_flashback_prefetch(stream_id)
 
@@ -682,14 +675,28 @@ class VNextRuntimeOwner:
             return message.get(field)
         return getattr(message, field, None)
 
-    def _schedule_flashback_prefetch(self, stream_id: str) -> None:
-        """取消当前流的过期闪回预取并安排新任务。"""
-        generation = self._flashback_generations.get(stream_id, 0) + 1
-        self._flashback_generations[stream_id] = generation
-        self._flashback_results.pop(stream_id, None)
-        previous_id = self._flashback_task_ids.pop(stream_id, None)
+    def _schedule_flashback_prefetch(
+        self, stream_id: str, *, increment_generation: bool = True
+    ) -> None:
+        """合并同一流的预取请求，不取消可能正在使用数据库的任务。"""
+        if increment_generation:
+            generation = self._flashback_generations.get(stream_id, 0) + 1
+            self._flashback_generations[stream_id] = generation
+            self._flashback_results.pop(stream_id, None)
+        else:
+            generation = self._flashback_generations.get(stream_id, 0)
+
+        previous_id = self._flashback_task_ids.get(stream_id)
         if previous_id is not None:
-            cancel_managed_task(previous_id)
+            try:
+                previous_task = get_managed_task(previous_id).task
+            except TaskNotFoundError:
+                self._flashback_task_ids.pop(stream_id, None)
+            else:
+                if previous_task is not None and not previous_task.done():
+                    return
+                self._flashback_task_ids.pop(stream_id, None)
+
         task_info = create_managed_task(
             self._prefetch_flashback_task(stream_id, generation),
             name=f"mnemosyne_vnext_flashback_{stream_id[:16]}",
@@ -747,6 +754,13 @@ class VNextRuntimeOwner:
             return ()
         finally:
             self._forget_current_task()
+            if (
+                self._initialized
+                and self._flashback_generations.get(stream_id) != generation
+            ):
+                self._schedule_flashback_prefetch(
+                    stream_id, increment_generation=False
+                )
 
     def _forget_current_task(self) -> None:
         """移除已完成任务的句柄，不影响当前流的新预取任务。"""
@@ -894,8 +908,7 @@ class VNextRuntimeOwner:
             try:
                 result = await asyncio.wait_for(asyncio.shield(task), timeout=budget)
             except TimeoutError:
-                cancel_managed_task(task_id)
-                await asyncio.gather(task, return_exceptions=True)
+                # 预取可能正在提交 Episode；让它在后台完成，避免取消数据库事务。
                 return ()
             except asyncio.CancelledError:
                 current_task = asyncio.current_task()
@@ -903,13 +916,12 @@ class VNextRuntimeOwner:
                     raise
                 return ()
             except Exception as error:  # noqa: BLE001
+                if self._flashback_task_ids.get(stream_id) == task_id:
+                    self._flashback_task_ids.pop(stream_id, None)
                 logger.warning(
                     f"vNext Flashback 预取失败: {type(error).__name__}: {error}"
                 )
                 return ()
-            finally:
-                if self._flashback_task_ids.get(stream_id) == task_id:
-                    self._flashback_task_ids.pop(stream_id, None)
             if not isinstance(result, tuple):
                 return ()
             stored = self._flashback_results.pop(stream_id, None)

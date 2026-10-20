@@ -15,6 +15,10 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from src.core.config import CORE_VERSION
+from src.kernel.concurrency.cleanup import (
+    await_cancellation_safe, cancel_and_wait_tasks, cleanup_ancestors,
+    drain_cleanup_tasks, is_cleanup_task,
+)
 
 from .console_ui import ConsoleUIManager
 from .exceptions import BotInitializationError, BotRuntimeError, BotShutdownError
@@ -1094,6 +1098,24 @@ class Bot:
         self._stats["plugins_failed"] = 0
 
     async def shutdown(self, timeout: float = 30.0) -> None:
+        """等待完整停机完成，即使调用者在收尾期间再次被取消。"""
+        await await_cancellation_safe(self._shutdown(timeout), name="bot_shutdown")
+
+    async def _drain_runtime_tasks(self) -> None:
+        """关闭存储前清理所有业务任务，保留其清理任务和停机调用链。"""
+        excluded = cleanup_ancestors() | {asyncio.current_task()}
+        while True:
+            # 已开始的库操作先完成，避免扫到 SQLAlchemy 内部派生的 close 任务。
+            await drain_cleanup_tasks()
+            pending = {
+                task for task in asyncio.all_tasks()
+                if task not in excluded and not task.done() and not is_cleanup_task(task)
+            }
+            if not pending:
+                return
+            await cancel_and_wait_tasks(pending)
+
+    async def _shutdown(self, timeout: float = 30.0) -> None:
         """优雅关闭 Bot
 
         Args:
@@ -1123,6 +1145,27 @@ class Bot:
             if self.logger:
                 self.logger.info("停止接受新任务...")
 
+            # 先停止流循环和重启监控，确保插件卸载时不再使用插件数据库。
+            if self.watchdog:
+                self.watchdog.stop()
+
+            # 关闭入口和生产者，避免卸载插件或等待数据库清理时继续产生新任务。
+            if self.http_server and self.http_server.is_running():
+                await self.http_server.stop()
+            if self._stop_logger_cleanup is not None:
+                await self._stop_logger_cleanup()
+            if self.scheduler:
+                await self.scheduler.stop()
+                self._stats["scheduler_running"] = False
+
+            from src.core.transport.distribution.stream_loop_manager import (
+                get_stream_loop_manager,
+            )
+
+            stream_loop_manager = get_stream_loop_manager()
+            if stream_loop_manager.is_running:
+                await stream_loop_manager.stop()
+
             # 2. 触发 ON_STOP 事件（让事件处理器在插件卸载前执行清理）
             try:
                 from src.core.components.types import EventType
@@ -1137,47 +1180,31 @@ class Bot:
             # 3. 卸载插件
             await self._unload_all_plugins()
 
-            # 4. 停止日志自动清理任务（由 logger 模块统一管理，需在调度器停止前移除）
-            if self._stop_logger_cleanup is not None:
-                try:
-                    await self._stop_logger_cleanup()
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"停止日志自动清理失败: {e}")
-
-            # 5. 停止调度器
-            if self.scheduler:
-                await self.scheduler.stop()
-                self._stats["scheduler_running"] = False
-
-            # 5. 停止 HTTP 服务器
-            if self.http_server and self.http_server.is_running():
-                if self.logger:
-                    self.logger.info("停止 HTTP 服务器...")
-                await self.http_server.stop()
-
             # 6. 关闭 MCP 客户端连接
             if self.mcp_manager:
                 if self.logger:
                     self.logger.info("关闭 MCP 客户端连接...")
                 await self.mcp_manager.cleanup()
 
-            # 7. 停止 WatchDog
-            if self.watchdog:
-                self.watchdog.stop()
+            # 8. 停止任务管理器，等待包括守护任务在内的数据库收尾。
+            from src.kernel.logger import stop_logger_event_broadcast
 
-            # 8. 停止任务管理器（取消所有活动任务）
+            stop_logger_event_broadcast()
             if self.task_manager:
-                active_tasks = self.task_manager.get_active_tasks()
-                for task_info in active_tasks:
-                    self.task_manager.cancel_task(task_info.task_id)
-
-                # 等待所有非守护任务完成
-                await self.task_manager.wait_all_tasks()
+                active_tasks = [
+                    info for info in self.task_manager.get_active_tasks()
+                    if info.task is not asyncio.current_task()
+                ]
+                await cancel_and_wait_tasks(
+                    info.task for info in active_tasks if info.task is not None
+                )
 
                 # 清理已完成的任务
                 self.task_manager.cleanup_tasks()
                 self.task_manager.shutdown_process_pool(wait=False)
+
+            # 包括未登记到 TaskManager 的任务，必须在数据库关闭前退出。
+            await self._drain_runtime_tasks()
 
             # 9. 关闭数据库
             from src.kernel.db import close_engine
@@ -1198,14 +1225,6 @@ class Bot:
             # 10.6 关闭 LLM 统计数据库
             from src.kernel.llm.stats import close_llm_stats_db
             await close_llm_stats_db()
-
-            # 10.6.1 停止 StreamLoopManager
-            from src.core.transport.distribution.stream_loop_manager import (
-                get_stream_loop_manager,
-            )
-            stream_loop_manager = get_stream_loop_manager()
-            if stream_loop_manager.is_running:
-                await stream_loop_manager.stop()
 
             # 10.6.2 恢复 DNS patch 并关闭 DNS 线程池
             loop = asyncio.get_running_loop()
@@ -1241,12 +1260,8 @@ class Bot:
 
             shutdown_logger_system()
 
-            # 12. 取消并等待所有剩余 asyncio 任务
-            remaining = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-            if remaining:
-                for t in remaining:
-                    t.cancel()
-                await asyncio.wait(remaining, timeout=5.0)
+            # 12. 等待资源关闭期间产生的任务，不直接取消资源收尾任务。
+            await self._drain_runtime_tasks()
 
             self.ui.display_success("关闭完成")
 
