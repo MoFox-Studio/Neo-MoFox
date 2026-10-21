@@ -84,6 +84,38 @@ if result.answer("is_relevant").noul is not None:
 
 `configured_model_name` 会复用 Core 的模型配置：API key、HTTPS endpoint、timeout、代理与模型标识；也可以传入 `provider_name` 或显式 `JevClientConfig`。这只是配置复用，不会把 Jev 注册为 `ChatModelClient`，也不会改变传统 LLM 的 failover/stream/tool-call 语义。
 
+## 生命周期事件
+
+Jev 与 LLM 一样提供请求生命周期事件，插件可以在事件处理器里介入。事件名定义在 `src/kernel/jev/events.py`，`src.core.components.types.EventType` 中提供同名枚举（两侧取值由测试锁定一致）。
+
+| 事件 | 时机 | 可改写 |
+| --- | --- | --- |
+| `before_jev_request` | 发送前 | `state`、`questions` |
+| `after_jev_request` | 成功后 | `answers`、`usage` |
+| `on_jev_request_failed` | 失败时 | 无（只读） |
+
+```python
+from src.core.components.types import EventType
+from src.kernel.event import EventDecision, get_event_bus
+
+
+async def on_before_jev(event_name: str, params: dict):
+    # 裁剪 state，避免把无关上下文送出去
+    params["state"] = {k: v for k, v in params["state"].items() if k != "debug"}
+    return (EventDecision.SUCCESS, params)
+
+
+get_event_bus().subscribe(EventType.BEFORE_JEV_REQUEST.value, on_before_jev)
+```
+
+要点：
+
+- 事件参数中固定包含 `request_name`、`model_identifier`、`state`、`questions`、`retry_count`、`meta_data`；成功事件额外含 `answers` 与 `usage`，失败事件额外含 `error`、`error_type`、`error_message`。
+- `after_jev_request` 的 `answers` 允许改写，语义与 LLM 的 `after_llm_request` 一致：订阅者返回的 `next_params` 会成为最终结果。改写为原始 dict 形态时会重新解析为 typed answer；解析失败则保留原始答案。
+- 失败事件在**每次尝试失败**时发布（含可重试的 429/529 与传输错误），与 LLM 链路一致；`retry_count` 标明当前是第几次尝试。
+- 事件发布链路本身出错（订阅者抛异常等）不会影响 Jev 请求本身。
+- Jev 调用**不进入** LLM 统计（`llm_requests` 表）与请求检视器；`usage` 只在 `JevResponse.usage` 中返回。
+
 ## 相关文档
 
 - [LLM 主文档](../llm/README.md)

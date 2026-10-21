@@ -97,12 +97,17 @@ async def evaluate_jev(
     questions: dict[str, JevQuestion | dict[str, Any]],
     client: JevClient | None = None,
     model: str | None = None,
+    request_name: str = "jev",
+    meta_data: dict[str, Any] | None = None,
     **client_overrides: Any,
 ) -> JevResponse:
     """通过插件公共 API 执行一次 Jev typed evaluation。
 
     传入 ``client`` 时复用调用方客户端；否则按 ``client_overrides`` 和
     ``TYPESAFE_API_KEY`` 创建一次短生命周期客户端。
+
+    ``request_name`` 与 ``meta_data`` 会随 Jev 生命周期事件透传，便于插件
+    在事件处理器中按场景聚合。
     """
     if client is not None and client_overrides:
         raise ValueError("client 不能与 Jev 客户端 overrides 同时传入")
@@ -111,6 +116,8 @@ async def evaluate_jev(
         state=state,
         questions=questions,
         model=model,
+        request_name=request_name,
+        meta_data=meta_data,
     )
 
 

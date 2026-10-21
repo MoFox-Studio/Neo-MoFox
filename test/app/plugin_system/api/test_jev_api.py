@@ -94,4 +94,6 @@ async def test_evaluate_jev_reuses_caller_client() -> None:
         state="test",
         questions={"q": {"type": "noul", "instructions": "true?"}},
         model=None,
+        request_name="jev",
+        meta_data=None,
     )

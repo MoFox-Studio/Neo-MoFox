@@ -72,6 +72,11 @@ class EventType(str, Enum):
     AFTER_LLM_REQUEST = "after_llm_request"
     ON_LLM_REQUEST_FAILED = "on_llm_request_failed"
 
+    # Jev 请求生命周期事件（取值与 kernel.jev.events 中的常量一致）
+    BEFORE_JEV_REQUEST = "before_jev_request"
+    AFTER_JEV_REQUEST = "after_jev_request"
+    ON_JEV_REQUEST_FAILED = "on_jev_request_failed"
+
     # 工具调用生命周期事件
     BEFORE_TOOL_CALL = "before_tool_call"
     AFTER_TOOL_CALL = "after_tool_call"

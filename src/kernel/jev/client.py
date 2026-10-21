@@ -27,6 +27,11 @@ import httpx
 
 from src.kernel.network import build_httpx_timeout, build_httpx_transport
 
+from .events import (
+    AFTER_JEV_REQUEST,
+    BEFORE_JEV_REQUEST,
+    ON_JEV_REQUEST_FAILED,
+)
 from .exceptions import (
     JevAPIError,
     JevAuthenticationError,
@@ -188,13 +193,21 @@ class JevClient:
         state: JevState,
         questions: Mapping[str, JevQuestion | Mapping[str, Any]],
         model: str | None = None,
+        request_name: str = "jev",
+        meta_data: Mapping[str, Any] | None = None,
     ) -> JevResponse:
         """把一个 state 与一组 typed question 发送到 System One。
+
+        请求生命周期会发布 Jev 事件：``before_jev_request``（可改写 state 与
+        questions）、``after_jev_request``（可改写 answers 与 usage）、
+        ``on_jev_request_failed``（只读）。事件发布失败不会影响请求本身。
 
         Args:
             state: 被评估状态，string / object / array 皆可。
             questions: question ID 到 JevQuestion 或原始 dict 的映射。
             model: 覆盖配置中的默认模型。
+            request_name: 请求名称，用于事件与日志标识。
+            meta_data: 附带的调用方元数据，随事件透传。
 
         Returns:
             校验通过的 JevResponse。
@@ -207,6 +220,13 @@ class JevClient:
             JevTimeoutError/JevTransportError: 超过重试预算的传输层失败。
             JevResponseError: 响应不符合契约。
         """
+        state, questions = await self._publish_before_request(
+            state=state,
+            questions=questions,
+            model=model,
+            request_name=request_name,
+            meta_data=meta_data,
+        )
         body = self._build_request_body(state=state, questions=questions, model=model)
         expected_ids = set(body["questions"])
 
@@ -226,15 +246,167 @@ class JevClient:
                     if response.status_code in RETRYABLE_STATUS:
                         retry_error = self._status_error(response)
                     elif not response.is_success:
-                        raise self._status_error(response)
+                        error = self._status_error(response)
+                        await self._publish_failed(
+                            error=error,
+                            state=state,
+                            questions=questions,
+                            request_name=request_name,
+                            meta_data=meta_data,
+                            retry_count=attempt,
+                        )
+                        raise error
                     else:
-                        return self._parse_response(response, expected_ids=expected_ids)
+                        parsed = self._parse_response(response, expected_ids=expected_ids)
+                        return await self._publish_after_request(
+                            response=parsed,
+                            state=state,
+                            questions=questions,
+                            request_name=request_name,
+                            meta_data=meta_data,
+                            retry_count=attempt,
+                        )
 
+                if retry_error is not None:
+                    # 与 LLM 链路一致：每次尝试失败都发布失败事件，
+                    # 订阅者可通过 retry_count 自行判断是否已耗尽预算。
+                    await self._publish_failed(
+                        error=retry_error,
+                        state=state,
+                        questions=questions,
+                        request_name=request_name,
+                        meta_data=meta_data,
+                        retry_count=attempt,
+                    )
                 if attempt >= self.config.max_retries:
                     raise retry_error or JevResponseError("Jev 请求未产生响应")
                 await asyncio.sleep(self._retry_delay(attempt, response))
 
         raise JevResponseError("Jev 请求未产生响应")  # pragma: no cover - 循环必然返回或抛出
+
+    async def _publish_before_request(
+        self,
+        *,
+        state: JevState,
+        questions: Mapping[str, JevQuestion | Mapping[str, Any]],
+        model: str | None,
+        request_name: str,
+        meta_data: Mapping[str, Any] | None,
+    ) -> tuple[JevState, Mapping[str, JevQuestion | Mapping[str, Any]]]:
+        """发布发送前事件，允许订阅者改写 state 与 questions。"""
+        params: dict[str, Any] = {
+            "request_name": request_name,
+            "model_identifier": model or self.config.model,
+            "state": state,
+            "questions": dict(questions),
+            "retry_count": 0,
+            "meta_data": dict(meta_data or {}),
+        }
+        final = await self._publish(BEFORE_JEV_REQUEST, params)
+        new_state = final.get("state", state)
+        new_questions = final.get("questions", questions)
+        if not isinstance(new_questions, Mapping):
+            new_questions = questions
+        return new_state, new_questions
+
+    async def _publish_after_request(
+        self,
+        *,
+        response: JevResponse,
+        state: JevState,
+        questions: Mapping[str, JevQuestion | Mapping[str, Any]],
+        request_name: str,
+        meta_data: Mapping[str, Any] | None,
+        retry_count: int,
+    ) -> JevResponse:
+        """发布成功事件，允许订阅者改写 answers 与 usage。"""
+        params: dict[str, Any] = {
+            "request_name": request_name,
+            "model_identifier": response.model,
+            "state": state,
+            "questions": dict(questions),
+            "answers": dict(response.answers),
+            "usage": {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": response.usage.output_tokens,
+            },
+            "retry_count": retry_count,
+            "meta_data": dict(meta_data or {}),
+        }
+        final = await self._publish(AFTER_JEV_REQUEST, params)
+
+        answers = final.get("answers", response.answers)
+        parsed_answers: dict[str, JevAnswer] = response.answers
+        if isinstance(answers, Mapping) and answers is not response.answers:
+            # 订阅者可能给出原始 dict 形态，需要重新解析为 typed answer。
+            try:
+                parsed_answers = {
+                    str(key): (
+                        value
+                        if isinstance(value, JevAnswer)
+                        else JevAnswer.from_payload(value)
+                    )
+                    for key, value in answers.items()
+                }
+            except ValueError:
+                # 改写后的 answers 不合法时保留原始答案，避免把脏数据交给业务。
+                parsed_answers = response.answers
+
+        usage = final.get("usage")
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        if isinstance(usage, Mapping):
+            raw_input = usage.get("input_tokens")
+            raw_output = usage.get("output_tokens")
+            if isinstance(raw_input, int) and not isinstance(raw_input, bool):
+                input_tokens = raw_input
+            if isinstance(raw_output, int) and not isinstance(raw_output, bool):
+                output_tokens = raw_output
+
+        return JevResponse(
+            model=response.model,
+            answers=parsed_answers,
+            usage=JevUsage(input_tokens=input_tokens, output_tokens=output_tokens),
+        )
+
+    async def _publish_failed(
+        self,
+        *,
+        error: BaseException,
+        state: JevState,
+        questions: Mapping[str, JevQuestion | Mapping[str, Any]],
+        request_name: str,
+        meta_data: Mapping[str, Any] | None,
+        retry_count: int,
+    ) -> None:
+        """发布失败事件；该事件只读，不允许改写任何字段。"""
+        await self._publish(
+            ON_JEV_REQUEST_FAILED,
+            {
+                "request_name": request_name,
+                "model_identifier": self.config.model,
+                "state": state,
+                "questions": dict(questions),
+                "error": error,
+                "error_type": type(error).__name__,
+                "error_message": str(error),
+                "retry_count": retry_count,
+                "meta_data": dict(meta_data or {}),
+            },
+        )
+
+    @staticmethod
+    async def _publish(event_name: str, params: dict[str, Any]) -> dict[str, Any]:
+        """发布事件并返回最终参数；事件链路故障不影响主请求。"""
+        try:
+            from src.kernel.event import get_event_bus
+
+            _, final_params = await get_event_bus().publish(event_name, params)
+            if isinstance(final_params, dict):
+                return final_params
+        except Exception:
+            pass
+        return params
 
     async def _post_once(
         self,
