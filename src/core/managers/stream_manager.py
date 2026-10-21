@@ -519,13 +519,11 @@ class StreamManager:
             }
 
             # 持久化到数据库
-            db_message = await self._messages_crud.get_by(
+            db_message, _created = await self._messages_crud.get_or_create(
+                defaults=message_data,
                 message_id=message.message_id, 
-                platform=message.platform,
                 stream_id=stream_id
             )
-            if not db_message:
-                db_message = await self._messages_crud.create(message_data)
 
             # 更新流实例内容
             chat_stream = self._streams.get(stream_id)
@@ -595,14 +593,11 @@ class StreamManager:
                 "platform": message.platform,
             }
 
-            db_message = await self._messages_crud.get_by(
+            db_message, created = await self._messages_crud.get_or_create(
+                defaults=message_data,
                 message_id=message.message_id,
-                platform=message.platform,
                 stream_id=stream_id,
             )
-            created = db_message is None
-            if not db_message:
-                db_message = await self._messages_crud.create(message_data)
 
             chat_stream = self._streams.get(stream_id)
             if silent:

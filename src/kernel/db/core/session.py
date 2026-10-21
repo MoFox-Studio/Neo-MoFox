@@ -9,11 +9,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Coroutine
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
-from weakref import WeakSet
+from weakref import WeakKeyDictionary, WeakSet
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -37,6 +37,26 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 _sessions: WeakSet[CancellationSafeAsyncSession] = WeakSet()
 _closing_engines: WeakSet[Any] = WeakSet()
+_pending_writers: WeakKeyDictionary[Any, WeakSet[asyncio.Task[Any]]] = WeakKeyDictionary()
+
+
+@contextmanager
+def track_engine_writer(factory: async_sessionmaker) -> Iterator[None]:
+    """登记尚未取得连接的写入等待者，让关闭引擎能取消并等待整条写队列。"""
+    bind = factory.kw.get("bind")
+    engine = getattr(bind, "sync_engine", None)
+    task = asyncio.current_task()
+    if engine is None or task is None:
+        yield
+        return
+    if engine in _closing_engines:
+        raise RuntimeError("数据库正在关闭，不能开始新写入")
+    pending = _pending_writers.setdefault(engine, WeakSet())
+    pending.add(task)
+    try:
+        yield
+    finally:
+        pending.discard(task)
 
 
 async def _await_transaction_operation(operation: Coroutine[Any, Any, None]) -> None:
@@ -115,6 +135,7 @@ async def dispose_engine_safely(engine: Any) -> None:
                 session._owner_task for session in sessions
                 if session._owner_task is not None and session._owner_task not in excluded
             }
+            owners.update(task for task in _pending_writers.get(bind, ()) if task not in excluded)
             await cancel_and_wait_tasks(owners)
             # 使用者也可能是受保护的提交任务；等待它结束后才能关闭同一会话。
             await asyncio.gather(*owners, return_exceptions=True)

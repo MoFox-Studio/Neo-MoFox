@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import base64
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -35,6 +34,7 @@ from src.core.managers.media_manager.utils import (
     extract_image_mime_type,
 )
 from src.core.models.sql_alchemy import Base, Images, Voices
+from src.kernel.db.api.write import run_write_transaction
 
 
 # ──────────────────────────────────────────
@@ -431,12 +431,9 @@ class TestMediaManagerSaveAndGetMediaInfo:
         manager = make_manager()
 
         with patch(
-            "src.core.managers.media_manager.repository.get_db_session"
+            "src.core.managers.media_manager.repository.run_write_transaction",
+            new_callable=AsyncMock,
         ) as mock_session:
-            mock_session_ctx = MagicMock()
-            mock_session_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
-            mock_session_ctx.__aexit__ = AsyncMock()
-            mock_session.return_value = mock_session_ctx
 
             await manager.save_media_info(
                 media_hash="abc123",
@@ -445,6 +442,7 @@ class TestMediaManagerSaveAndGetMediaInfo:
                 description="Test image",
                 vlm_processed=True,
             )
+            mock_session.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_get_media_info_exists(self, make_manager) -> None:
@@ -739,25 +737,15 @@ class TestMediaManagerSaveUniquePathRegression:
 
     @staticmethod
     def _patch_session(factory):
-        """把 _repository.get_db_session 替换为使用真实 factory 的实现。"""
+        """将短写事务接到真实测试工厂。"""
 
-        @asynccontextmanager
-        async def _real_session():
-            async with factory() as session:
-                try:
-                    yield session
-                    if session.is_active:
-                        await session.commit()
-                except Exception:
-                    if session.is_active:
-                        await session.rollback()
-                    raise
-                finally:
-                    await session.close()
+        async def _write(operation):
+            """运行实际写事务管理器，不模拟数据库行为。"""
+            return await run_write_transaction(operation, session_factory=factory)
 
         return patch(
-            "src.core.managers.media_manager.repository.get_db_session",
-            lambda: _real_session(),
+            "src.core.managers.media_manager.repository.run_write_transaction",
+            _write,
         )
 
     @pytest.mark.asyncio

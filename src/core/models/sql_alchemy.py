@@ -131,7 +131,6 @@ class Messages(Base):
     message_id: Mapped[str] = mapped_column(
         get_string_field(100),
         nullable=False,
-        unique=True,
         index=True,
         comment="平台原始消息ID"
     )
@@ -190,6 +189,7 @@ class Messages(Base):
     )
 
     __table_args__ = (
+        Index("idx_messages_stream_message_id", "stream_id", "message_id", unique=True),
         Index("idx_messages_stream_time", "stream_id", "time"),
         Index("idx_messages_person_id", "person_id"),
     )
@@ -286,6 +286,7 @@ class Images(Base):
 
     __table_args__ = (
         Index("idx_images_path", "path"),
+        Index("idx_images_image_id", "image_id"),
     )
 
 
@@ -322,6 +323,7 @@ class Voices(Base):
 
     __table_args__ = (
         Index("idx_voices_path", "path"),
+        Index("idx_voices_voice_id", "voice_id"),
     )
 
 
@@ -358,6 +360,7 @@ class Videos(Base):
 
     __table_args__ = (
         Index("idx_videos_path", "path"),
+        Index("idx_videos_video_id", "video_id"),
     )
 
 

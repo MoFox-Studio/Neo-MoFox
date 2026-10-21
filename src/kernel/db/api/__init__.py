@@ -5,9 +5,11 @@
 
 from src.kernel.db.api.crud import CRUDBase
 from src.kernel.db.api.query import AggregateQuery, QueryBuilder
+from src.kernel.db.api.write import run_write_transaction
 
 __all__ = [
     "CRUDBase",
     "QueryBuilder",
     "AggregateQuery",
+    "run_write_transaction",
 ]

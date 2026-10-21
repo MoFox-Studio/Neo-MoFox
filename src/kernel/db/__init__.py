@@ -34,6 +34,7 @@ from src.kernel.db.api import (
     AggregateQuery,
     CRUDBase,
     QueryBuilder,
+    run_write_transaction,
 )
 
 # 异常
@@ -64,6 +65,7 @@ __all__ = [
     "CRUDBase",
     "QueryBuilder",
     "AggregateQuery",
+    "run_write_transaction",
     # 异常
     "DatabaseError",
     "DatabaseInitializationError",

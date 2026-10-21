@@ -15,11 +15,13 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import case, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.models.sql_alchemy import Images, Videos, Voices
-from src.kernel.db import QueryBuilder, invalidate_model_cache
-from src.kernel.db.core.session import get_db_session
+from src.kernel.db import QueryBuilder, invalidate_model_cache, run_write_transaction
 from src.kernel.logger import get_logger
 
 logger = get_logger("media_manager")
@@ -27,6 +29,81 @@ logger = get_logger("media_manager")
 
 class MediaRepository:
     """媒体信息数据库读写。"""
+
+    async def _save_info(
+        self,
+        model: type[Images] | type[Voices] | type[Videos],
+        hash_field: str,
+        processed_field: str,
+        media_hash: str,
+        media_type: str,
+        file_path: str | None,
+        description: str | None,
+        processed: bool,
+    ) -> None:
+        """在短写事务内协调 hash/path 两种身份，保留已有描述与识别结果。"""
+        effective_path = file_path or media_hash
+
+        async def save(session: AsyncSession) -> None:
+            """路径命中优先，避免 hash 和 path 分别指向两行时改坏唯一键。"""
+            result = await session.execute(
+                select(model)
+                .where(
+                    (getattr(model, hash_field) == media_hash)
+                    | (model.path == effective_path)
+                )
+                .order_by(
+                    (model.path == effective_path).desc(),
+                    model.timestamp.desc(), model.id.desc(),
+                )
+                .limit(1)
+                .with_for_update()
+            )
+            existing = result.scalars().first()
+            if existing is not None:
+                existing.count += 1
+                if getattr(existing, hash_field) != media_hash:
+                    setattr(existing, hash_field, media_hash)
+                    # 身份变更后按 hash 回查应选中本次实际写入的路径。
+                    existing.timestamp = time.time()
+                if file_path:
+                    existing.path = file_path
+                if description:
+                    existing.description = description
+                if processed:
+                    setattr(existing, processed_field, True)
+            else:
+                dialect = session.get_bind().dialect.name
+                if dialect == "sqlite":
+                    insert = sqlite_insert(model)
+                elif dialect == "postgresql":
+                    insert = postgresql_insert(model)
+                else:
+                    raise ValueError(f"不支持的媒体数据库类型: {dialect}")
+                # PostgreSQL 的并发首次插入也由唯一键协调，不能只依赖 SELECT。
+                insert = insert.values(**{
+                    hash_field: media_hash, "path": effective_path,
+                    "type": media_type, "description": description,
+                    "timestamp": time.time(), processed_field: processed, "count": 1,
+                })
+                updates = {
+                    hash_field: media_hash, "count": model.count + 1,
+                    "timestamp": case(
+                        (getattr(model, hash_field) != media_hash, insert.excluded.timestamp),
+                        else_=model.timestamp,
+                    ),
+                }
+                if description:
+                    updates["description"] = description
+                if processed:
+                    updates[processed_field] = True
+                await session.execute(insert.on_conflict_do_update(
+                    index_elements=[model.path], set_=updates,
+                ))
+
+        await run_write_transaction(save)
+        invalidate_model_cache(model)
+        logger.debug(f"已保存{media_type}记录: {media_hash[:8]}...")
 
     async def save_recognized_media(
         self,
@@ -86,60 +163,12 @@ class MediaRepository:
             vlm_processed: 是否已经过 VLM 处理
         """
         try:
-            changed = False
-            async with get_db_session() as session:
-                # 查找现有记录：image_id 与 path 都是唯一相关字段，需同时校验。
-                # 之所以同时按 path 查询，是因为 images.path 上有 UNIQUE 约束，
-                # 若只按 image_id 查询，同一 file_path 以不同 media_hash 写入时会触发
-                # "UNIQUE constraint failed: images.path"。
-                effective_path = file_path or media_hash
-                stmt = (
-                    select(Images)
-                    .where(
-                        (Images.image_id == media_hash)
-                        | (Images.path == effective_path)
-                    )
-                    .order_by(Images.timestamp.desc())
-                    .limit(1)
-                )
-                result = await session.execute(stmt)
-                existing = result.scalars().first()
-
-                if existing:
-                    existing.count += 1
-                    if existing.image_id != media_hash:
-                        existing.image_id = media_hash
-                    if file_path and existing.path != file_path:
-                        existing.path = file_path
-                    if description:
-                        existing.description = description
-                    if vlm_processed:
-                        existing.vlm_processed = True
-                    changed = True
-                    logger.debug(
-                        f"更新媒体记录: {media_hash[:8]}... count={existing.count}"
-                    )
-                else:
-                    new_image = Images(
-                        image_id=media_hash,
-                        path=effective_path,
-                        type=media_type,
-                        description=description,
-                        timestamp=time.time(),
-                        vlm_processed=vlm_processed,
-                        count=1,
-                    )
-                    session.add(new_image)
-                    changed = True
-                    logger.debug(f"创建新媒体记录: {media_hash[:8]}...")
-
-                await session.commit()
-
-            if changed:
-                invalidate_model_cache(Images)
-
-        except Exception as e:
-            logger.error(f"保存媒体信息失败: {e}", exc_info=True)
+            await self._save_info(
+                Images, "image_id", "vlm_processed",
+                media_hash, media_type, file_path, description, vlm_processed,
+            )
+        except Exception as exc:
+            logger.error(f"保存媒体信息失败: {exc}", exc_info=True)
 
     async def get_media_info(self, media_hash: str) -> dict[str, Any] | None:
         """根据哈希值获取媒体信息。
@@ -193,58 +222,12 @@ class MediaRepository:
             asr_processed: 是否已经过 ASR 识别
         """
         try:
-            changed = False
-            async with get_db_session() as session:
-                # 同 save_media_info：voices.path 上有 UNIQUE 约束，
-                # 需同时按 voice_id 与 path 校验，避免同一 file_path 不同 voice_hash
-                # 写入时触发 "UNIQUE constraint failed: voices.path"。
-                effective_path = file_path or voice_hash
-                stmt = (
-                    select(Voices)
-                    .where(
-                        (Voices.voice_id == voice_hash)
-                        | (Voices.path == effective_path)
-                    )
-                    .order_by(Voices.timestamp.desc())
-                    .limit(1)
-                )
-                result = await session.execute(stmt)
-                existing = result.scalars().first()
-
-                if existing:
-                    existing.count += 1
-                    if existing.voice_id != voice_hash:
-                        existing.voice_id = voice_hash
-                    if file_path and existing.path != file_path:
-                        existing.path = file_path
-                    if description:
-                        existing.description = description
-                    if asr_processed:
-                        existing.asr_processed = True
-                    changed = True
-                    logger.debug(
-                        f"更新语音记录: {voice_hash[:8]}... count={existing.count}"
-                    )
-                else:
-                    new_voice = Voices(
-                        voice_id=voice_hash,
-                        path=effective_path,
-                        type="voice",
-                        description=description,
-                        timestamp=time.time(),
-                        asr_processed=asr_processed,
-                        count=1,
-                    )
-                    session.add(new_voice)
-                    changed = True
-                    logger.debug(f"创建新语音记录: {voice_hash[:8]}...")
-
-                await session.commit()
-            if changed:
-                invalidate_model_cache(Voices)
-
-        except Exception as e:
-            logger.error(f"保存语音信息失败: {e}", exc_info=True)
+            await self._save_info(
+                Voices, "voice_id", "asr_processed",
+                voice_hash, "voice", file_path, description, asr_processed,
+            )
+        except Exception as exc:
+            logger.error(f"保存语音信息失败: {exc}", exc_info=True)
 
     async def get_voice_info(self, voice_hash: str) -> dict[str, Any] | None:
         """根据哈希值获取语音信息。
@@ -298,55 +281,12 @@ class MediaRepository:
             video_processed: 是否已经过视频识别
         """
         try:
-            changed = False
-            async with get_db_session() as session:
-                effective_path = file_path or video_hash
-                stmt = (
-                    select(Videos)
-                    .where(
-                        (Videos.video_id == video_hash)
-                        | (Videos.path == effective_path)
-                    )
-                    .order_by(Videos.timestamp.desc())
-                    .limit(1)
-                )
-                result = await session.execute(stmt)
-                existing = result.scalars().first()
-
-                if existing:
-                    existing.count += 1
-                    if existing.video_id != video_hash:
-                        existing.video_id = video_hash
-                    if file_path and existing.path != file_path:
-                        existing.path = file_path
-                    if description:
-                        existing.description = description
-                    if video_processed:
-                        existing.video_processed = True
-                    changed = True
-                    logger.debug(
-                        f"更新视频记录: {video_hash[:8]}... count={existing.count}"
-                    )
-                else:
-                    new_video = Videos(
-                        video_id=video_hash,
-                        path=effective_path,
-                        type="video",
-                        description=description,
-                        timestamp=time.time(),
-                        video_processed=video_processed,
-                        count=1,
-                    )
-                    session.add(new_video)
-                    changed = True
-                    logger.debug(f"创建新视频记录: {video_hash[:8]}...")
-
-                await session.commit()
-            if changed:
-                invalidate_model_cache(Videos)
-
-        except Exception as e:
-            logger.error(f"保存视频信息失败: {e}", exc_info=True)
+            await self._save_info(
+                Videos, "video_id", "video_processed",
+                video_hash, "video", file_path, description, video_processed,
+            )
+        except Exception as exc:
+            logger.error(f"保存视频信息失败: {exc}", exc_info=True)
 
     async def get_video_info(self, video_hash: str) -> dict[str, Any] | None:
         """根据哈希值获取视频信息。

@@ -8,7 +8,8 @@ import asyncio
 from contextlib import suppress
 from pathlib import Path
 
-from sqlalchemy import Boolean, Integer, String, Text
+from sqlalchemy import Boolean, Integer, String, Text, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column, declarative_base
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent))
@@ -21,6 +22,7 @@ from src.kernel.db import (
     configure_engine,
     get_engine,
     get_db_session,
+    run_write_transaction,
 )
 from src.kernel.logger import get_logger, COLOR
 
@@ -317,6 +319,20 @@ async def demo_cancelled_transaction() -> None:
     logger.info("取消任务的未提交写入已回滚，连接已归还")
 
 
+async def demo_short_write_transaction() -> None:
+    """查询后更新必须放在短写事务内，回调只包含可整体重试的数据库操作。"""
+    async def increment_age(session: AsyncSession) -> None:
+        """SQLite 在读取前排队取得写锁，避免并发读取后覆盖彼此的更新。"""
+        result = await session.execute(select(User).order_by(User.id).limit(1))
+        user = result.scalars().first()
+        if user is not None:
+            user.age += 1
+
+    await run_write_transaction(increment_age)
+    # 网络请求、文件操作和日志等外部副作用放在已提交的事务之外。
+    logger.info("短写事务已提交")
+
+
 async def main():
     """主函数"""
     logger.info("=" * 50)
@@ -337,6 +353,7 @@ async def main():
         await demo_bulk_operations()
         await demo_stream_iteration()
         await demo_cancelled_transaction()
+        await demo_short_write_transaction()
 
         logger.info("\n" + "=" * 50)
         logger.info("示例运行完成！")
