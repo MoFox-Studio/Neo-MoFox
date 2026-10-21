@@ -452,9 +452,9 @@ class AnthropicChatClient:
         # 统一复用共享 timeout builder，确保所有 provider 客户端应用同一套
         # httpx timeout 策略。
         timeout_config = build_httpx_timeout(timeout)
+        # 传 None 让 httpx 继续装载 trust_env 解析出的环境代理；只有强制 IPv4
+        # 时才显式指定 transport（显式 transport 会禁用环境代理）。
         transport = build_httpx_transport(force_ipv4=force_ipv4)
-        if transport is None:
-            transport = httpx.AsyncHTTPTransport()
         http_client_kwargs: dict[str, Any] = {
             "transport": transport,
             "trust_env": trust_env,

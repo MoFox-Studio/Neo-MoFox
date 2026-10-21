@@ -24,7 +24,13 @@ def build_httpx_timeout(timeout: float | None) -> Any:
 
 
 def build_httpx_transport(*, force_ipv4: bool) -> Any:
-    """构造统一的 AsyncHTTPTransport；默认保留 httpx 的环境代理行为。"""
+    """构造统一的传输层；未强制 IPv4 时返回 None 以保留 ``trust_env`` 代理。
+
+    httpx 0.28 的 ``AsyncClient`` 仅在 ``transport is None`` 时才装载
+    ``trust_env`` 解析出的环境代理（``allow_env_proxies = trust_env and
+    transport is None``）。因此这里不能返回显式 transport，否则
+    ``HTTPS_PROXY`` / ``HTTP_PROXY`` 会被静默忽略。
+    """
     import httpx
 
     if force_ipv4:
