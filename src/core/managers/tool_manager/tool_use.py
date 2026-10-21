@@ -137,8 +137,15 @@ class ToolUse:
         if not tool_cls or not issubclass(tool_cls, BaseTool):
             raise ValueError(f"Tool 类未找到: {signature}")
 
-        # 创建 Tool 实例
+        # 创建 Tool 实例，并绑定运行时上下文。
+        # 与 create_llm_usable_execution 保持一致：Tool 通过
+        # get_current_stream_id() / trigger_message 访问调用上下文，
+        # 未绑定时只能拿到空串（Manager 路径此前遗漏了这一步）。
         tool_instance = tool_cls(plugin)
+        tool_instance._bind_runtime_context(
+            stream_id=str(getattr(message, "stream_id", "") or "").strip(),
+            message=message,
+        )
 
         # 检查缓存
         cached_result: dict[str, Any] | None = None
