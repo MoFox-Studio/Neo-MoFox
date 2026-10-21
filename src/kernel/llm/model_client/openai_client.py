@@ -1308,8 +1308,16 @@ class OpenAIChatClient:
         }
         if limited_top_n is not None:
             params["top_n"] = limited_top_n
-        # rerank 请求体字段集合固定，只允许 extra_params.body 覆盖/补充字段。
-        params.update(explicit_body)
+        # rerank 请求体字段集合固定：extra_params.body 只能补充额外字段，
+        # 不能覆盖 model/query/documents 这三个由调用方决定的核心字段。
+        reserved_body_fields = {"model", "query", "documents"}
+        params.update(
+            {
+                key: value
+                for key, value in explicit_body.items()
+                if key not in reserved_body_fields
+            }
+        )
         # endpoint 配置只用于路由，不应泄漏到请求体里。
         params.pop("rerank_url", None)
         params.pop("rerank_endpoint", None)

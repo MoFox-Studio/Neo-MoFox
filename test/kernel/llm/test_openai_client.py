@@ -1659,6 +1659,43 @@ class TestCreateRerank:
             "return_documents": False,
         }
 
+    async def test_body_cannot_override_core_rerank_fields(self):
+        """extra_params.body 不能覆盖 model/query/documents。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"results": []})
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["python"],
+                top_n=None,
+                request_name="test",
+                model_set=self._model_set(
+                    extra_params={
+                        "body": {
+                            "model": "hijacked",
+                            "query": "hijacked",
+                            "documents": ["hijacked"],
+                            "return_documents": False,
+                        }
+                    }
+                ),
+            )
+
+        assert seen["body"] == {
+            "model": "rerank-v1",
+            "query": "python",
+            "documents": ["python"],
+            "return_documents": False,
+        }
+
     async def test_reads_endpoint_from_extra_params(self):
         """endpoint 也可以写在 extra_params 中。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
