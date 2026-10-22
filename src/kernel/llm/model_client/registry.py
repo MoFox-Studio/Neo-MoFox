@@ -6,12 +6,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..exceptions import LLMConfigurationError
+from ..exceptions import LLMConfigurationError, LLMProviderUnavailableError
 from .base import ASRModelClient, ChatModelClient, EmbeddingModelClient, RerankModelClient
 from .anthropic_client import AnthropicChatClient
 from .openai_client import OpenAIChatClient
 from .responses_client import OpenAIResponsesClient
 from ..types import ModelEntry
+from src.kernel.jev import JEV_CLIENT_TYPES
 
 # 已经识别、但本仓库尚未提供实现的 provider 别名集合。
 # 这些别名一旦出现就必须显式报错，禁止静默回退到 OpenAI：
@@ -22,7 +23,21 @@ _GEMINI_CLIENT_TYPES = frozenset(
 _BEDROCK_CLIENT_TYPES = frozenset(
     {"bedrock", "amazon_bedrock", "bedrock_converse"}
 )
-_JEV_CLIENT_TYPES = frozenset({"jev", "typesafe", "type_safe"})
+_JEV_CLIENT_TYPES = JEV_CLIENT_TYPES
+
+# JEv 相关别名的「宽松匹配」集合：这些名字都是 JEv 的常见拼写变体。
+# 与 :data:`_JEV_CLIENT_TYPES` 的区别在于，宽松集合里还包含可能由拼写错误
+# 产生的近似名（例如 ``jev_api`` / ``typesafe-ai``），命中后会给出明确的
+# 提示，而不是静默回退到 OpenAI 把请求发到错误的 provider。
+_JEV_LOOSE_CLIENT_TYPES = frozenset(
+    {
+        *_JEV_CLIENT_TYPES,
+        "jev_api",
+        "jev_client",
+        "typesafe_ai",
+        "typesafe_system_one",
+    }
+)
 
 
 def _normalize_client_type(client_type: Any) -> str | None:
@@ -58,8 +73,9 @@ class ModelClientRegistry:
 
         当前阶段以 `client_type` 为准：openai/anthropic/gemini/bedrock。
         client_type 统一做大小写与连字符归一化；已识别但尚未注册的
-        provider（gemini/bedrock 系列别名）直接抛出 LLMConfigurationError，
-        不会回退到 OpenAI；真正未知的 client_type 仍回退到 OpenAI。
+        provider（gemini/bedrock 系列别名）直接抛出 LLMProviderUnavailableError，
+        不会回退到 OpenAI；JEv 系列别名（含常见拼写变体）同样明确报错，
+        引导使用 ``jev_api``；真正未知的 client_type 仍回退到 OpenAI。
         """
 
         normalized_type = _normalize_client_type(model.get("client_type"))
@@ -70,21 +86,21 @@ class ModelClientRegistry:
                 return self.anthropic
             if normalized_type in {"openai_response", "responses", "openai.responses"} and self.responses is not None:
                 return self.responses
-            if normalized_type in _JEV_CLIENT_TYPES:
-                raise LLMConfigurationError(
+            if normalized_type in _JEV_LOOSE_CLIENT_TYPES:
+                raise LLMProviderUnavailableError(
                     "Jev 是独立 typed-evaluation provider，请通过 src.app.plugin_system.api.jev_api 调用，"
                     "不能作为传统 LLM ChatModelClient 使用"
                 )
             if normalized_type in _GEMINI_CLIENT_TYPES:
                 if self.gemini is None:
-                    raise LLMConfigurationError(
+                    raise LLMProviderUnavailableError(
                         f"Gemini client 未注册（client_type={normalized_type}），"
                         "不能将 Gemini 请求回退到 OpenAI"
                     )
                 return self.gemini
             if normalized_type in _BEDROCK_CLIENT_TYPES:
                 if self.bedrock is None:
-                    raise LLMConfigurationError(
+                    raise LLMProviderUnavailableError(
                         f"Bedrock client 未注册（client_type={normalized_type}），"
                         "不能将 Bedrock 请求回退到 OpenAI"
                     )
@@ -99,7 +115,7 @@ class ModelClientRegistry:
 
         client = self.get_client_for_model(model)
         if not hasattr(client, "create_embedding"):
-            raise LLMConfigurationError("当前 client 不支持 embeddings 请求")
+            raise LLMProviderUnavailableError("当前 client 不支持 embeddings 请求")
         return client  # type: ignore[return-value]
 
     def get_rerank_client_for_model(self, model: ModelEntry) -> RerankModelClient:
@@ -107,7 +123,7 @@ class ModelClientRegistry:
 
         client = self.get_client_for_model(model)
         if not hasattr(client, "create_rerank"):
-            raise LLMConfigurationError("当前 client 不支持 rerank 请求")
+            raise LLMProviderUnavailableError("当前 client 不支持 rerank 请求")
         return client  # type: ignore[return-value]
 
     def get_asr_client_for_model(self, model: ModelEntry) -> ASRModelClient:
@@ -115,5 +131,5 @@ class ModelClientRegistry:
 
         client = self.get_client_for_model(model)
         if not hasattr(client, "create_transcription"):
-            raise LLMConfigurationError("当前 client 不支持 ASR 请求")
+            raise LLMProviderUnavailableError("当前 client 不支持 ASR 请求")
         return client  # type: ignore[return-value]

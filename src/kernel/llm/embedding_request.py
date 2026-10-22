@@ -66,10 +66,12 @@ class EmbeddingRequest:
                 await asyncio.sleep(step.delay_seconds)
 
             assert self.clients is not None
-            client = self.clients.get_embedding_client_for_model(model)
             timer = RequestTimer()
 
             try:
+                # 客户端解析也放进 try：未注册 provider、Jev provider 误入这类
+                # 配置错误必须走 policy 的 failover，否则会直接中断整个重试链。
+                client = self.clients.get_embedding_client_for_model(model)
                 with timer:
                     timeout_seconds = model.get("timeout")
                     create_task = client.create_embedding(

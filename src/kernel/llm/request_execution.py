@@ -159,13 +159,17 @@ async def execute_request(
             request.context_manager.validate_for_send(list(trimmed_payloads))
 
         assert request.clients is not None
-        client = request.clients.get_client_for_model(model)
 
         from .monitor import RequestTimer
 
         timer = RequestTimer()
 
         try:
+            # 客户端解析也放进 try：未注册 provider、Jev provider 误入这类
+            # 配置错误必须走 policy 的 failover，否则会直接中断整个重试链，
+            # 也拿不到失败统计与失败事件。
+            client = request.clients.get_client_for_model(model)
+
             with timer:
                 timeout_seconds = model.get("timeout")
 
