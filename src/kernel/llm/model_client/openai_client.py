@@ -17,6 +17,7 @@ import json
 import threading
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 
 from src.kernel.llm.payload.tooling import LLMUsable
 from src.kernel.llm.tool_call_compat import (
@@ -32,6 +33,7 @@ from ..exceptions import (
     LLMContentFilterError,
     LLMRateLimitError,
     LLMTimeoutError,
+    parse_retry_after,
 )
 from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResult, Video
 from ..roles import ROLE
@@ -1340,7 +1342,15 @@ class OpenAIChatClient:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        headers.update(extra_headers)
+        # extra_headers 只能补充请求头，不能覆盖认证与内容类型契约：
+        # 允许覆盖 Authorization 等于允许把 API key 发往攻击者指定的主机。
+        headers.update(
+            {
+                key: value
+                for key, value in extra_headers.items()
+                if key.casefold() not in {"authorization", "content-type"}
+            }
+        )
 
         # 统一复用共享 timeout builder，与其他 provider 客户端保持同一套超时策略。
         timeout_config = build_httpx_timeout(timeout)
@@ -1394,14 +1404,32 @@ class OpenAIChatClient:
         base_url: str | None,
         extra_params: dict[str, Any],
     ) -> str:
-        """解析 rerank endpoint：显式 URL 优先，其次 base_url 拼接 /rerank。"""
+        """解析 rerank endpoint：显式 URL 优先，其次 base_url 拼接 /rerank。
+
+        显式 URL 必须是合法的 HTTP(S) 地址且不含 userinfo：
+        rerank 请求会携带 Authorization 头，允许 ``file://`` 之类的地址或
+        内嵌凭据会导致密钥被发往非预期目标。
+
+        Raises:
+            LLMConfigurationError: endpoint 格式非法时抛出。
+        """
         configured = model_set.get("rerank_url") or model_set.get("rerank_endpoint")
         if not configured:
             configured = extra_params.get("rerank_url") or extra_params.get(
                 "rerank_endpoint"
             )
         if configured:
-            return str(configured)
+            endpoint = str(configured)
+            parsed = urlsplit(endpoint)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise LLMConfigurationError(
+                    "rerank endpoint 必须是合法的 http(s) URL"
+                )
+            if parsed.username or parsed.password:
+                raise LLMConfigurationError(
+                    "rerank endpoint 不允许包含用户名或密码"
+                )
+            return endpoint
         return f"{(base_url or 'https://api.openai.com/v1').rstrip('/')}/rerank"
 
     @staticmethod
@@ -1416,6 +1444,7 @@ class OpenAIChatClient:
         if status_code == 429:
             raise LLMRateLimitError(
                 "Rerank API rate limit exceeded",
+                retry_after=parse_retry_after(getattr(response, "headers", None)),
                 model=model_name,
             )
         if not response.is_success:

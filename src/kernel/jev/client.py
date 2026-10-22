@@ -64,6 +64,26 @@ ENDPOINT_PATH = "/v1/systemone"
 API_KEY_ENV = "TYPESAFE_API_KEY"
 #: 允许重试的 HTTP 状态码；其余 4xx 属于请求本身有问题，重试无意义。
 RETRYABLE_STATUS = frozenset({429, 529})
+#: Core ``api_providers.client_type`` 中代表 Jev provider 的合法取值。
+#: 三个名字完全等价，配置层、registry 与插件 API 共用这一份定义，
+#: 避免各处各写一份集合导致「配置能过、运行时却不认」的错位。
+JEV_CLIENT_TYPES = frozenset({"jev", "typesafe", "type_safe"})
+
+#: 上游 error 字段回显到异常消息时的最大长度。
+#: 上游返回的 error 字符串属于不可信输入：无限制地拼进异常消息会把它带进
+#: 日志、失败事件和上层监控，因此这里截断并清洗控制字符。
+MAX_UPSTREAM_ERROR_LENGTH = 200
+
+
+def _sanitize_upstream_detail(value: str) -> str:
+    """清洗上游返回的 error 字符串：截断长度并去掉控制字符。"""
+    cleaned = "".join(
+        char for char in value if char.isprintable() or char == " "
+    )
+    cleaned = cleaned.strip()
+    if len(cleaned) > MAX_UPSTREAM_ERROR_LENGTH:
+        cleaned = cleaned[:MAX_UPSTREAM_ERROR_LENGTH] + "…"
+    return cleaned or "provider rejected request"
 
 
 def _validate_number(name: str, value: Any, *, allow_zero: bool = False) -> float:
@@ -512,7 +532,11 @@ class JevClient:
         error_type = payload.get("error") if isinstance(payload, dict) else None
         if isinstance(error_type, dict):
             error_type = error_type.get("type") or error_type.get("code")
-        detail = f"error={error_type}" if isinstance(error_type, str) else "provider rejected request"
+        detail = (
+            f"error={_sanitize_upstream_detail(error_type)}"
+            if isinstance(error_type, str)
+            else "provider rejected request"
+        )
         message = f"Jev API HTTP {status}: {detail}"
 
         if status in {401, 403}:

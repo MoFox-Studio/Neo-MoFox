@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.kernel.jev import (
+    JEV_CLIENT_TYPES,
     JevClient,
     JevClientConfig,
     JevQuestion,
@@ -62,11 +63,7 @@ def create_jev_client(
             provider_name = configured_model.api_provider
         assert provider_name is not None
         provider = model_config.get_provider(provider_name)
-        if str(getattr(provider, "client_type", "")).casefold() not in {
-            "jev",
-            "typesafe",
-            "type_safe",
-        }:
+        if str(getattr(provider, "client_type", "")).casefold() not in JEV_CLIENT_TYPES:
             raise ValueError(
                 "Core provider 的 client_type 必须是 jev/typesafe，不能用传统聊天 provider"
             )
@@ -85,6 +82,15 @@ def create_jev_client(
             "extra_headers": extra_headers if isinstance(extra_headers, dict) else {},
             "extra_query": extra_query if isinstance(extra_query, dict) else {},
         }
+        # 运维配置里的 base_url 与 API key 是绑定的：把 key 发往另一个 host
+        # 等同于凭据泄漏。因此这里禁止 overrides 改写 base_url，需要换地址时
+        # 必须改 Core 的 provider 配置。
+        if "base_url" in overrides:
+            raise ValueError(
+                "复用 Core provider 配置时不允许覆盖 base_url："
+                "API key 与该地址绑定，改写会把密钥发往非预期主机；"
+                "请直接修改 Core 的 provider 配置"
+            )
         derived.update(overrides)
         return JevClient(JevClientConfig(**derived))
 
