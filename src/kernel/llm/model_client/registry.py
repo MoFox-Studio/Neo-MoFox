@@ -90,12 +90,16 @@ class ModelClientRegistry:
                 raise LLMProviderUnavailableError(
                     "Jev 是独立 typed-evaluation provider，请通过 src.app.plugin_system.api.jev_api 调用，"
                     "不能作为传统 LLM ChatModelClient 使用"
+                    f"（api_provider={model.get('api_provider')!r}, "
+                    f"model_identifier={model.get('model_identifier')!r}）"
                 )
             if normalized_type in _GEMINI_CLIENT_TYPES:
                 if self.gemini is None:
                     raise LLMProviderUnavailableError(
                         f"Gemini client 未注册（client_type={normalized_type}），"
                         "不能将 Gemini 请求回退到 OpenAI"
+                        f"（api_provider={model.get('api_provider')!r}, "
+                        f"model_identifier={model.get('model_identifier')!r}）"
                     )
                 return self.gemini
             if normalized_type in _BEDROCK_CLIENT_TYPES:
@@ -103,6 +107,8 @@ class ModelClientRegistry:
                     raise LLMProviderUnavailableError(
                         f"Bedrock client 未注册（client_type={normalized_type}），"
                         "不能将 Bedrock 请求回退到 OpenAI"
+                        f"（api_provider={model.get('api_provider')!r}, "
+                        f"model_identifier={model.get('model_identifier')!r}）"
                     )
                 return self.bedrock
 

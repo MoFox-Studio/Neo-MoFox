@@ -484,6 +484,7 @@ class Bot:
         assert self.logger is not None
 
         from src.core.config import get_model_config
+        from src.kernel.jev import JEV_CLIENT_TYPES
         import httpx
         import time
 
@@ -499,6 +500,16 @@ class Bot:
 
         async with httpx.AsyncClient(timeout=timeout) as client:
             async def _check_provider(provider) -> None:
+                # JEv 是独立的 typed-evaluation provider，只提供 /v1/systemone，
+                # 没有 /models 路由；按聊天 provider 探测只会得到无意义的 404。
+                client_type = str(getattr(provider, "client_type", "") or "").casefold()
+                if client_type in JEV_CLIENT_TYPES:
+                    logger.info(
+                        "LLM 预检: 跳过 Jev provider %s（非聊天 provider，无 /models 路由）",
+                        provider.name,
+                    )
+                    return
+
                 base_url = str(provider.base_url).rstrip("/")
                 url = f"{base_url}/models"
                 headers: dict[str, str] = {}
