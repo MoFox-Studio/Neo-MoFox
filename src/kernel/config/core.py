@@ -97,6 +97,7 @@ def Field(  # noqa: N802
     # === Pydantic 其他参数 ===
     title: str | None = None,
     examples: list[Any] | None = None,
+    strict_choices: bool = False,
     **extra: Any,
 ) -> Any:
     """增强的配置字段定义函数。
@@ -158,6 +159,11 @@ def Field(  # noqa: N802
         depends_on: 依赖的字段名（如 "use_proxy"）
         depends_value: 依赖字段的期望值（如 True）
 
+        # 严格取值校验
+        strict_choices: True 表示该字段是枚举字段，用户填了非法值时直接报错，
+            而不是静默回退到默认值。用于 ``client_type`` 这类「写错就等于换了一个
+            provider」的字段：静默回退会把请求发到完全错误的 provider。
+
     Returns:
         Pydantic FieldInfo 对象
 
@@ -218,6 +224,8 @@ def Field(  # noqa: N802
         "rows": rows,
         "step": step,
         "choices": choices,
+        # 严格取值校验：枚举字段非法时不静默回退默认值
+        "strict_choices": strict_choices,
         # 列表配置
         "item_type": item_type,
         "item_fields": item_fields,
@@ -534,6 +542,33 @@ def _eval_default_factory(factory: Any) -> Any:
         return factory({})  # 部分旧形态的 factory 需要一个空字典作为 validated_data
 
 
+class _InvalidEnumValueError(ValueError):
+    """枚举字段取值非法。
+
+    仅用于配置加载阶段：用户填了非法枚举值时立即失败，而不是静默回退到
+    默认值导致请求被发往错误的 provider。
+    """
+
+
+def _is_strict_choices_field(field: Any) -> bool:
+    """判断字段是否声明了 ``strict_choices=True``。"""
+    extra = getattr(field, "json_schema_extra", None)
+    if not isinstance(extra, dict):
+        return False
+    return bool(extra.get("strict_choices"))
+
+
+def _allowed_literal_values(annotation: Any) -> list[str]:
+    """提取 Literal 注解的合法取值，用于报错提示。"""
+    values: list[str] = []
+    for arg in get_args(annotation):
+        if isinstance(arg, str):
+            values.append(arg)
+        elif isinstance(arg, (int, float, bool)):
+            values.append(str(arg))
+    return values
+
+
 def _iter_sections(config_model: type[ConfigBase]) -> list[_SectionInfo]:
     """遍历 ConfigBase 模型的所有配置节字段，返回有序的 ``_SectionInfo`` 列表。
 
@@ -729,6 +764,15 @@ def _merge_section_fields(
                 section_out[key] = TypeAdapter(annotation).validate_python(candidate)
                 continue
             except Exception:
+                # 严格枚举字段：非法取值必须报错，不能静默回退默认值。
+                # 典型场景是 client_type 写错时被改成 openai，请求会被发到
+                # 完全错误的 provider 上，且没有任何报错线索。
+                if _is_strict_choices_field(field):
+                    raise _InvalidEnumValueError(
+                        f"配置节 {section_model.__name__} 的字段 {key!r} "
+                        f"取值非法：{candidate!r}；"
+                        f"合法取值为 {_allowed_literal_values(annotation)}"
+                    ) from None
                 pass  # 校验失败：用户值类型不符，回落到下方的默认值/占位值逻辑
 
         if default_value is not None:

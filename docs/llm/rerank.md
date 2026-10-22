@@ -6,7 +6,7 @@ rerank_request.py 和 rerank_response.py 提供了文档重排序（Rerank）能
 
 ## RerankRequest
 
-`python
+```python
 @dataclass(slots=True)
 class RerankRequest:
     model_set: ModelSet
@@ -18,7 +18,7 @@ class RerankRequest:
     clients: ModelClientRegistry | None = None
     enable_metrics: bool = True
     request_type: RequestType = RequestType.RERANK
-`
+```
 
 ### 核心属性
 
@@ -36,25 +36,25 @@ class RerankRequest:
 
 #### set_query
 
-`python
+```python
 def set_query(self, value: str) -> Self:
-`
+```
 
 设置 rerank 查询文本。支持链式调用。
 
 #### add_document
 
-`python
+```python
 def add_document(self, value: Any) -> Self:
-`
+```
 
 追加待排序文档。支持链式调用。
 
 #### send
 
-`python
+```python
 async def send(self) -> RerankResponse:
-`
+```
 
 发送 rerank 请求，返回 RerankResponse。OpenAI 客户端不调用 SDK 中并不存在的 `rerank.create` namespace，而是直接发起异步 HTTP 请求：默认 endpoint 为 `{base_url}/rerank`（如 `https://provider.example/v1/rerank`）。若供应商使用不同路由，可在模型级 `rerank_url`（或 `rerank_endpoint`）设置完整 HTTPS URL，也可写在 `extra_params` 中的同名字段；认证头、超时、`headers`/`query`/`body` 沿用模型配置。返回结果按 `score` 降序排序并截断到 `top_n`。
 
@@ -90,13 +90,13 @@ async def send(self) -> RerankResponse:
 
 ## RerankItem
 
-`python
+```python
 @dataclass(slots=True)
 class RerankItem:
     index: int
     score: float
     document: Any
-`
+```
 
 ### 属性
 
@@ -110,13 +110,13 @@ class RerankItem:
 
 ## RerankResponse
 
-`python
+```python
 @dataclass(slots=True)
 class RerankResponse:
     results: list[RerankItem]
     model_name: str
     request_name: str = ""
-`
+```
 
 ### 属性
 
@@ -132,7 +132,7 @@ class RerankResponse:
 
 ### 基础用法
 
-`python
+```python
 from src.kernel.llm import RerankRequest
 
 model_set = [
@@ -153,11 +153,11 @@ request.add_document({"title": "Python 高级", "content": "..."})
 response = await request.send()
 for item in response.results:
     print(f"Index {item.index}: score={item.score:.4f}, doc={item.document['title']}")
-`
+```
 
 ### 限制返回数量
 
-`python
+```python
 request = RerankRequest(model_set=model_set, top_n=3)
 
 request.set_query("机器学习")
@@ -166,11 +166,11 @@ for doc in documents:
 
 response = await request.send()
 print(f"返回前 {len(response.results)} 个结果")
-`
+```
 
 ### 链式调用
 
-`python
+```python
 response = await (
     RerankRequest(model_set=model_set, request_name="rerank_demo")
     .set_query("深度学习框架对比")
@@ -182,11 +182,11 @@ response = await (
 
 for item in response.results:
     print(f"{item.document['title']}: {item.score:.4f}")
-`
+```
 
 ### 多模型故障转移
 
-`python
+```python
 model_set = [
     {"client_type": "openai", "model_identifier": "rerank-v3", "api_key": "key1", "max_retry": 2},
     {"client_type": "openai", "model_identifier": "rerank-v2", "api_key": "key2", "max_retry": 3},
@@ -201,13 +201,13 @@ try:
     response = await request.send()
 except Exception as e:
     print(f"所有模型失败: {e}")
-`
+```
 
 ---
 
 ## 错误处理
 
-`python
+```python
 from src.kernel.llm import LLMConfigurationError
 
 try:
@@ -216,7 +216,7 @@ except LLMConfigurationError as e:
     print(f"配置错误: {e}")
 except Exception as e:
     print(f"请求失败: {e}")
-`
+```
 
 ---
 
@@ -224,7 +224,7 @@ except Exception as e:
 
 Rerank 请求通过 ModelClientRegistry.get_rerank_client_for_model() 获取客户端。客户端需实现 create_rerank 方法：
 
-`python
+```python
 class MyRerankClient:
     async def create_rerank(
         self,
@@ -238,7 +238,7 @@ class MyRerankClient:
     ) -> list[dict[str, Any]]:
         # 返回格式：[{"index": 0, "score": 0.95, "document": ...}, ...]
         pass
-`
+```
 
 ---
 

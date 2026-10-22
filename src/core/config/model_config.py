@@ -66,9 +66,16 @@ class APIProviderSection(SectionBase):
         "aiohttp_gemini",
         "bedrock",
         "jev",
+        "typesafe",
+        "type_safe",
     ] = Field(
         default="openai",
-        description="客户端类型（openai/openai_response/anthropic/gemini/bedrock/jev 等）",
+        description=(
+            "客户端类型（openai/openai_response/anthropic/gemini/bedrock/jev 等）。"
+            "jev/typesafe/type_safe 三个名字等价，都指向独立的 Jev System One provider，"
+            "必须通过插件 API jev_api 调用，不能作为传统聊天 provider 使用"
+        ),
+        strict_choices=True,
     )
     max_retry: int = Field(
         default=2,

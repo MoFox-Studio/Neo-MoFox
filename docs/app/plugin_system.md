@@ -24,7 +24,7 @@ src/app/plugin_system/base/__init__.py 暴露核心基类：
 
 ## API 层能力分类
 
-src/app/plugin_system/api/__init__.py 聚合 20 个 API 子模块：
+src/app/plugin_system/api/__init__.py 聚合 23 个 API 子模块：
 
 - 交互与消息：message_api、send_api、stream_api、chat_api。
 - 插件与配置：plugin_api、config_api、permission_api。
