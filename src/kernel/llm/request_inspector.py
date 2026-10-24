@@ -545,7 +545,9 @@ def _sensitive(key: str) -> bool:
     Returns:
         bool: 字段名是否表示敏感凭据。
     """
-    return re.sub(r"[^a-z0-9]", "", key.lower()) in _SENSITIVE
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    # 同时覆盖 x-goog-api-key 等厂商前缀，不匹配 token 计数或 api_key_count。
+    return normalized in _SENSITIVE or normalized.endswith("apikey")
 
 
 def _json_size(value: Any) -> int:

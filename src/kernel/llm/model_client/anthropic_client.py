@@ -607,16 +607,19 @@ class AnthropicChatClient:
         两者合并后通过 StreamEvent(usage=...) 产出。
         """
         trace = start_provider("messages.stream", {**params, "stream": True}, stream=True)
-        stream_manager = client.messages.stream(**params)
         trace.opened()
 
         async def iter_events() -> AsyncIterator[StreamEvent]:
+            """逐事件解析原生流，内部启动占位仅用于激活关闭逻辑。"""
             with trace.consume():
+                # 返回前激活终态处理，尚未消费就关闭时也能记录取消。
+                yield StreamEvent()
                 tool_block_meta: dict[int, tuple[str | None, str | None]] = {}
                 # Anthropic 流式 usage 分两处：message_start 给 input，message_delta 给 output
                 input_usage: dict[str, Any] = {}
 
-                async with stream_manager as stream:
+                # 真正消费时才创建管理器，避免遗留未等待的 SDK 请求协程。
+                async with client.messages.stream(**params) as stream:
                     async for event in stream:
                         trace.raw(event, event=True)
                         event_type = _get_attr(event, "type")
@@ -704,7 +707,9 @@ class AnthropicChatClient:
                                 tool_args_delta=str(_get_attr(delta, "partial_json", "")),
                             ))
 
-        return None, None, iter_events(), None, None
+        stream_iter = iter_events()
+        await anext(stream_iter)  # 仅消费内部启动占位，不进入 SDK 流上下文。
+        return None, None, stream_iter, None, None
 
 
 __all__ = [

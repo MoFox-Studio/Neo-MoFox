@@ -109,10 +109,21 @@ finally:
 立即关闭异步生成器，所以提前停止时应显式调用 `aclose()`。监视器不会启动后台
 任务替调用方消费流，也不会将未消费的调用伪造为成功。
 
+直接调用原生适配器时，返回五元组中的第三项仍是原生异步生成器。调用方同样
+应在 `finally` 中执行 `await stream.aclose()`；即使尚未消费任何事件，也会结束
+记录并关闭已打开的 SDK 流，重复关闭不会重复释放资源。
+
+适配器返回前仅进入生成器的清理作用域，并消耗一个内部启动占位，不读取 SDK
+事件、不向调用方输出空事件，也不新增 SDK 或迭代器包装器。Anthropic 的流管理器
+延迟到真正消费时创建；未消费就关闭时，不创建请求协程或进入传输上下文。
+
 ## 安全与容量
 
 - 数据进入缓冲前脱敏；认证头、API Key、Cookie、敏感 URL 参数、已知凭据值和
   JSON 字符串中的常见凭据字段不会原样出现在快照中。
+- API Key 字段按忽略大小写及分隔符后的名称识别，包含 `x-goog-api-key` 等
+  以 `apikey` 结尾的厂商前缀字段；独立于模型密钥的值也会脱敏，手工捕获和导入
+  使用同一规则。普通请求头、token 用量和 `api_key_count` 等计数字段保持不变。
 - 展示、复制、导出应使用同一快照，不能另取未脱敏 SDK 对象。
 - 不支持的对象使用 `[unavailable]`，并标记不完整；不调用任意对象 `repr/str`
   兜底。其他可序列化字段仍然保留。
@@ -127,7 +138,7 @@ finally:
 
 ```shell
 uv sync --locked
-uv run pytest test/kernel/llm/test_request_monitor.py test/kernel/llm/test_request_inspector.py --no-cov
+uv run pytest test/kernel/llm/test_request_monitor.py test/kernel/llm/test_request_inspector.py test/kernel/llm/test_request_monitor_regressions.py --no-cov
 uv run pytest test/kernel/llm --no-cov
 uv run python examples/src/kernel/llm/request_inspector_example.py
 ```

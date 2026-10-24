@@ -781,6 +781,8 @@ class OpenAIResponsesClient(OpenAIChatClient):
                 function_call_meta: dict[str, tuple[str | None, str | None]] = {}
 
                 try:
+                    # 内部启动占位使清理作用域先于返回生效，不读取任何 SDK 事件。
+                    yield StreamEvent()
                     async for event in stream_resp:
                         trace.raw(event, event=True)
                         event_type = _get_attr(event, "type")
@@ -850,7 +852,9 @@ class OpenAIResponsesClient(OpenAIChatClient):
                 finally:
                     await trace.close_resource()
 
-        return None, None, iter_events(), None, None
+        stream_iter = iter_events()
+        await anext(stream_iter)  # 仅消费内部启动占位，不向调用方产出空事件。
+        return None, None, stream_iter, None, None
 
 
 __all__ = [

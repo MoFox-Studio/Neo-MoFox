@@ -1103,6 +1103,8 @@ class OpenAIChatClient:
                 index_to_id: dict[int, str] = {}
 
                 try:
+                    # 内部启动占位使清理作用域先于返回生效，不读取任何 SDK 事件。
+                    yield StreamEvent()
                     async for chunk in stream_resp:
                         trace.raw(chunk, event=True)
                         usage = _extract_usage_from_obj(_get_usage_field(chunk, "usage", None))
@@ -1161,7 +1163,9 @@ class OpenAIChatClient:
                 finally:
                     await trace.close_resource()
 
-        return None, None, iter_events(), None, None
+        stream_iter = iter_events()
+        await anext(stream_iter)  # 仅消费内部启动占位，不向调用方产出空事件。
+        return None, None, stream_iter, None, None
 
     async def create_embedding(
         self,

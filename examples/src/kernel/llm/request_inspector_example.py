@@ -30,7 +30,11 @@ def main() -> None:
                 },
             }
         ],
-        "extra_headers": {"Authorization": "Bearer demo-not-a-real-key"},
+        "extra_headers": {
+            "Authorization": "Bearer demo-not-a-real-key",
+            # 独立的厂商凭据同样脱敏，不依赖模型配置中的 API Key。
+            "x-goog-api-key": "demo-independent-vendor-key",
+        },
     }
     record_id = inspector.capture("chat.completions.create", params, native=True)
     inspector.start(record_id, params)
