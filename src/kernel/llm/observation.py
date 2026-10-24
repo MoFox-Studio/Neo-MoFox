@@ -45,7 +45,7 @@ def capture_provider_request(
     """捕获 provider 请求输入，供调试和检查工具使用。"""
     metadata: dict[str, Any] = {}
     if isinstance(model_set, Mapping):
-        provider = model_set.get("base_url")
+        provider = model_set.get("api_provider") or model_set.get("base_url")
         if provider is not None:
             metadata["api_provider"] = str(provider)
     if request_name:
@@ -59,9 +59,14 @@ def capture_provider_request(
         except Exception:
             pass
     try:
-        from .request_inspector import capture
-
-        capture(api_name, params, metadata)
+        from .request_trace import current_attempt
+        trace = current_attempt()
+        if trace is not None:
+            # 提供商仅在最终流式参数确定后开始采集。
+            trace.annotate(metadata)
+        else:
+            from .request_inspector import capture
+            capture(api_name, params, metadata)
     except Exception:
         pass
 

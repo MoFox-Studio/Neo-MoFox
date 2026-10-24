@@ -10,6 +10,7 @@ from .exceptions import LLMConfigurationError, classify_exception
 from .model_client import ModelClientRegistry
 from .monitor import RequestMetrics, RequestTimer, get_global_collector
 from .policy import create_default_policy
+from .request_trace import Attempt, attempt_scope, new_logical_request
 from .policy.base import Policy
 from .request import _validate_model_entry, _validate_model_set
 from .rerank_response import RerankItem, RerankResponse
@@ -59,6 +60,7 @@ class RerankRequest:
 
         last_error: BaseException | None = None
         retry_count = 0
+        logical = new_logical_request()
         step = session.first()
 
         while step.model is not None:
@@ -73,25 +75,27 @@ class RerankRequest:
             assert self.clients is not None
             client = self.clients.get_rerank_client_for_model(model)
             timer = RequestTimer()
+            trace = Attempt(logical, model, self.request_name, kind="rerank")
 
             try:
                 with timer:
                     timeout_seconds = model.get("timeout")
-                    create_task = client.create_rerank(
-                        model_name=model_identifier,
-                        query=self.query,
-                        documents=list(self.documents),
-                        top_n=self.top_n,
-                        request_name=self.request_name,
-                        model_set=model,
-                    )
-                    if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0:
-                        results = await asyncio.wait_for(
-                            create_task,
-                            timeout=float(timeout_seconds),
+                    with attempt_scope(trace):
+                        create_task = client.create_rerank(
+                            model_name=model_identifier,
+                            query=self.query,
+                            documents=list(self.documents),
+                            top_n=self.top_n,
+                            request_name=self.request_name,
+                            model_set=model,
                         )
-                    else:
-                        results = await create_task
+                        if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0:
+                            results = await asyncio.wait_for(
+                                create_task,
+                                timeout=float(timeout_seconds),
+                            )
+                        else:
+                            results = await create_task
 
                 if self.enable_metrics:
                     metrics = RequestMetrics(
@@ -105,6 +109,9 @@ class RerankRequest:
                     )
                     get_global_collector().record_request(metrics)
 
+                if not trace.bound:
+                    trace.result(results=results)
+                trace.finish()
                 session.record_success(latency=timer.elapsed)
                 items = [
                     RerankItem(
@@ -120,6 +127,7 @@ class RerankRequest:
                     request_name=self.request_name,
                 )
             except BaseException as e:
+                trace.finish(e)
                 if isinstance(e, asyncio.CancelledError):
                     raise
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator, Self
 
@@ -29,6 +30,7 @@ from .exceptions import (
 from .model_client import StreamEvent
 from .payload import LLMPayload, ReasoningText, Text, ToolCall
 from .roles import ROLE
+from .request_trace import Attempt, retry_scope
 from .stream_state import (
     LLMStreamReducer,
     drain_stream,
@@ -88,6 +90,8 @@ class LLMResponse:
     _appended_to_context: bool = False
 
     _original_payloads: list[LLMPayload] | None = None
+    _inspection: Attempt | None = None
+    _closed: bool = False
 
     def __post_init__(self) -> None:
         """规范化可选状态，并继承上游的 context manager。"""
@@ -146,12 +150,18 @@ class LLMResponse:
             self.model_set,
             request_name=getattr(self._upper, "request_name", ""),
             meta_data=dict(getattr(self._upper, "meta_data", {})),
+            enable_metrics=getattr(self._upper, "enable_metrics", True),
             context_manager=self.context_manager,
         )
         req.payloads = list(self.payloads)
-        return await req.send(
-            auto_append_response=self._auto_append_response, stream=True
-        )
+        with retry_scope(self._inspection.logical if self._inspection else None):
+            response = await req.send(
+                auto_append_response=self._auto_append_response, stream=True
+            )
+        self._inspection = response._inspection
+        self._stream_stats_recorder = response._stream_stats_recorder
+        self._stream_started_at = response._stream_started_at
+        return response
 
     def _maybe_apply_tool_call_compat(self) -> None:
         """在兼容模式启用时，从纯文本中回填工具调用。"""
@@ -169,6 +179,37 @@ class LLMResponse:
             for call in parsed_calls
         ]
 
+    @asynccontextmanager
+    async def _consumption_scope(self) -> AsyncIterator[None]:
+        """正常退出、回调失败或取消时关闭提供商资源。"""
+        try:
+            yield
+        except BaseException as error:
+            if self._inspection is not None:
+                self._inspection.finish(error)
+            raise
+        finally:
+            await self.aclose()
+
+    async def aclose(self) -> None:
+        """关闭响应而不读取剩余流内容，也支持尚未开始迭代的原生流。
+
+        提前停止迭代时，应在 finally 块中调用本方法。只有观测记录尚未进入
+        执行终态时，才将其标记为取消；重复关闭不会重复释放资源。
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._consumed = True
+        try:
+            close = getattr(self._stream, "aclose", None)
+            if callable(close):
+                await close()
+        finally:
+            if self._inspection is not None:
+                self._inspection.finish(cancelled=True)
+                await self._inspection.close_resource()
+
     def __await__(self):
         return self._collect_full_response().__await__()
 
@@ -181,57 +222,61 @@ class LLMResponse:
             raise LLMResponseConsumedError("Response has already been consumed.")
         self._consumed = True
 
-        if self._stream is None:
-            self._maybe_apply_tool_call_compat()
-            if self.message:
-                yield StreamEvent(text_delta=self.message)
-            return
+        async with self._consumption_scope():
 
-        retries = self._get_stream_retries()
-        delay = self._get_stream_retry_delay()
+            if self._stream is None:
+                self._maybe_apply_tool_call_compat()
+                if self.message:
+                    yield StreamEvent(text_delta=self.message)
+                return
 
-        while True:
-            reducer = LLMStreamReducer()
-            stream_error: Exception | None = None
-            try:
-                async for event in self._stream:
-                    reducer.apply(event)
-                    snapshot = reducer.finalize()
-                    self.message = snapshot.message or None
-                    self.reasoning_parts = snapshot.reasoning_parts or []
-                    self.reasoning_content = snapshot.reasoning_content
-                    self.call_list = snapshot.call_list
-                    yield event
-            except Exception as exc:
-                stream_error = exc
+            retries = self._get_stream_retries()
+            delay = self._get_stream_retry_delay()
 
-            self._apply_stream_result(reducer.finalize(stream_error))
+            while True:
+                reducer = LLMStreamReducer()
+                stream_error: Exception | None = None
+                try:
+                    async for event in self._stream:
+                        reducer.apply(event)
+                        snapshot = reducer.finalize()
+                        self.message = snapshot.message or None
+                        self.reasoning_parts = snapshot.reasoning_parts or []
+                        self.reasoning_content = snapshot.reasoning_content
+                        self.call_list = snapshot.call_list
+                        yield event
+                except Exception as exc:
+                    stream_error = exc
 
-            if stream_error is None:
-                return  # 成功
+                self._apply_stream_result(reducer.finalize(stream_error))
 
-            if isinstance(stream_error, asyncio.CancelledError):
-                raise
+                if stream_error is None:
+                    return  # 成功
 
-            if not _is_retryable_stream_error(stream_error) or retries <= 0:
-                raise stream_error
+                if isinstance(stream_error, asyncio.CancelledError):
+                    raise
 
-            retries -= 1
-            logger.warning(
-                "LLM 流式中断，正在重试（剩余 %d 次）: %s",
-                retries,
-                type(stream_error).__name__,
-            )
-            await asyncio.sleep(delay)
-            self._retry_reset()
-            new_resp = await self._retry_send()
-            self._stream = new_resp._stream
+                if not _is_retryable_stream_error(stream_error) or retries <= 0:
+                    raise stream_error
+
+                retries -= 1
+                logger.warning(
+                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(stream_error).__name__}"
+                )
+                await asyncio.sleep(delay)
+                self._retry_reset()
+                new_resp = await self._retry_send()
+                self._stream = new_resp._stream
 
     async def __aiter__(self):
         """以严格单次消费的方式产出流式文本增量。"""
-        async for event in self.stream_events():
-            if event.text_delta:
-                yield event.text_delta
+        events = self.stream_events()
+        try:
+            async for event in events:
+                if event.text_delta:
+                    yield event.text_delta
+        finally:
+            await events.aclose()
 
     async def _collect_full_response(self) -> str:
         """以严格单次消费的方式收集完整响应文本。
@@ -242,38 +287,38 @@ class LLMResponse:
             raise LLMResponseConsumedError("Response has already been consumed.")
         self._consumed = True
 
-        if self._stream is None:
-            self._maybe_apply_tool_call_compat()
-            self._maybe_append_response_to_context()
-            return self.message or ""
+        async with self._consumption_scope():
 
-        retries = self._get_stream_retries()
-        delay = self._get_stream_retry_delay()
-
-        while True:
-            result = await drain_stream(self._stream)
-            self._apply_stream_result(result)
-
-            if result.error is None:
+            if self._stream is None:
+                self._maybe_apply_tool_call_compat()
+                self._maybe_append_response_to_context()
                 return self.message or ""
 
-            error = result.error
-            if isinstance(error, asyncio.CancelledError):
-                raise
+            retries = self._get_stream_retries()
+            delay = self._get_stream_retry_delay()
 
-            if not _is_retryable_stream_error(error) or retries <= 0:
-                raise error
+            while True:
+                result = await drain_stream(self._stream)
+                self._apply_stream_result(result)
 
-            retries -= 1
-            logger.warning(
-                "LLM 流式中断，正在重试（剩余 %d 次）: %s",
-                retries,
-                type(error).__name__,
-            )
-            await asyncio.sleep(delay)
-            self._retry_reset()
-            new_resp = await self._retry_send()
-            self._stream = new_resp._stream
+                if result.error is None:
+                    return self.message or ""
+
+                error = result.error
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+
+                if not _is_retryable_stream_error(error) or retries <= 0:
+                    raise error
+
+                retries -= 1
+                logger.warning(
+                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
+                )
+                await asyncio.sleep(delay)
+                self._retry_reset()
+                new_resp = await self._retry_send()
+                self._stream = new_resp._stream
 
     def _apply_stream_result(self, result) -> None:
         """把归并后的流状态应用到当前响应对象。"""
@@ -407,6 +452,7 @@ class LLMResponse:
             self.model_set,
             request_name=getattr(self._upper, "request_name", ""),
             meta_data=dict(getattr(self._upper, "meta_data", {})),
+            enable_metrics=getattr(self._upper, "enable_metrics", True),
             context_manager=self.context_manager,
         )
         req.payloads = list(self.payloads)
@@ -423,41 +469,41 @@ class LLMResponse:
             raise LLMResponseConsumedError("Response has already been consumed.")
         self._consumed = True
 
-        if self._stream is None:
-            self._maybe_apply_tool_call_compat()
-            content = self.message or ""
-            if content:
-                await on_chunk(content)
-            self._maybe_append_response_to_context()
-            return content
+        async with self._consumption_scope():
 
-        retries = self._get_stream_retries()
-        delay = self._get_stream_retry_delay()
+            if self._stream is None:
+                self._maybe_apply_tool_call_compat()
+                content = self.message or ""
+                if content:
+                    await on_chunk(content)
+                self._maybe_append_response_to_context()
+                return content
 
-        while True:
-            result = await drain_stream(self._stream, on_text_delta=on_chunk)
-            self._apply_stream_result(result)
+            retries = self._get_stream_retries()
+            delay = self._get_stream_retry_delay()
 
-            if result.error is None:
-                return self.message or ""
+            while True:
+                result = await drain_stream(self._stream, on_text_delta=on_chunk)
+                self._apply_stream_result(result)
 
-            error = result.error
-            if isinstance(error, asyncio.CancelledError):
-                raise
+                if result.error is None:
+                    return self.message or ""
 
-            if not _is_retryable_stream_error(error) or retries <= 0:
-                raise error
+                error = result.error
+                if isinstance(error, asyncio.CancelledError):
+                    raise
 
-            retries -= 1
-            logger.warning(
-                "LLM 流式中断，正在重试（剩余 %d 次）: %s",
-                retries,
-                type(error).__name__,
-            )
-            await asyncio.sleep(delay)
-            self._retry_reset()
-            new_resp = await self._retry_send()
-            self._stream = new_resp._stream
+                if not _is_retryable_stream_error(error) or retries <= 0:
+                    raise error
+
+                retries -= 1
+                logger.warning(
+                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
+                )
+                await asyncio.sleep(delay)
+                self._retry_reset()
+                new_resp = await self._retry_send()
+                self._stream = new_resp._stream
 
     async def stream_events_with_callback(
         self,
@@ -475,47 +521,47 @@ class LLMResponse:
             raise LLMResponseConsumedError("Response has already been consumed.")
         self._consumed = True
 
-        if self._stream is None:
-            self._maybe_apply_tool_call_compat()
-            self._maybe_append_response_to_context()
-            return self.message or ""
+        async with self._consumption_scope():
 
-        retries = self._get_stream_retries()
-        delay = self._get_stream_retry_delay()
-
-        while True:
-            reducer = LLMStreamReducer()
-            stream_error: Exception | None = None
-
-            try:
-                async for event in self._stream:
-                    reducer.apply(event)
-                    await on_event(event)
-            except Exception as exc:
-                stream_error = exc
-
-            self._apply_stream_result(reducer.finalize(stream_error))
-
-            if stream_error is None:
+            if self._stream is None:
+                self._maybe_apply_tool_call_compat()
+                self._maybe_append_response_to_context()
                 return self.message or ""
 
-            error = stream_error
-            if isinstance(error, asyncio.CancelledError):
-                raise
+            retries = self._get_stream_retries()
+            delay = self._get_stream_retry_delay()
 
-            if not _is_retryable_stream_error(error) or retries <= 0:
-                raise error
+            while True:
+                reducer = LLMStreamReducer()
+                stream_error: Exception | None = None
 
-            retries -= 1
-            logger.warning(
-                "LLM 流式中断，正在重试（剩余 %d 次）: %s",
-                retries,
-                type(error).__name__,
-            )
-            await asyncio.sleep(delay)
-            self._retry_reset()
-            new_resp = await self._retry_send()
-            self._stream = new_resp._stream
+                try:
+                    async for event in self._stream:
+                        reducer.apply(event)
+                        await on_event(event)
+                except Exception as exc:
+                    stream_error = exc
+
+                self._apply_stream_result(reducer.finalize(stream_error))
+
+                if stream_error is None:
+                    return self.message or ""
+
+                error = stream_error
+                if isinstance(error, asyncio.CancelledError):
+                    raise
+
+                if not _is_retryable_stream_error(error) or retries <= 0:
+                    raise error
+
+                retries -= 1
+                logger.warning(
+                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
+                )
+                await asyncio.sleep(delay)
+                self._retry_reset()
+                new_resp = await self._retry_send()
+                self._stream = new_resp._stream
 
     async def stream_with_buffer(self, buffer_size: int = 10) -> AsyncIterator[str]:
         """以缓冲方式产出流式文本块。
@@ -526,60 +572,60 @@ class LLMResponse:
             raise LLMResponseConsumedError("Response has already been consumed.")
         self._consumed = True
 
-        if self._stream is None:
-            self._maybe_apply_tool_call_compat()
-            content = self.message or ""
-            if content:
-                yield content
-            self._maybe_append_response_to_context()
-            return
+        async with self._consumption_scope():
 
-        retries = self._get_stream_retries()
-        delay = self._get_stream_retry_delay()
+            if self._stream is None:
+                self._maybe_apply_tool_call_compat()
+                content = self.message or ""
+                if content:
+                    yield content
+                self._maybe_append_response_to_context()
+                return
 
-        while True:
-            reducer = LLMStreamReducer()
-            buffer: list[str] = []
-            buffer_len = 0
-            stream_error: Exception | None = None
-            try:
-                async for event in self._stream:
-                    text_delta = reducer.apply(event)
-                    if not text_delta:
-                        continue
-                    buffer.append(text_delta)
-                    buffer_len += len(text_delta)
-                    if buffer_len >= buffer_size:
-                        yield "".join(buffer)
-                        buffer.clear()
-                        buffer_len = 0
-            except Exception as exc:
-                stream_error = exc
+            retries = self._get_stream_retries()
+            delay = self._get_stream_retry_delay()
 
-            if buffer:
-                yield "".join(buffer)
+            while True:
+                reducer = LLMStreamReducer()
+                buffer: list[str] = []
+                buffer_len = 0
+                stream_error: Exception | None = None
+                try:
+                    async for event in self._stream:
+                        text_delta = reducer.apply(event)
+                        if not text_delta:
+                            continue
+                        buffer.append(text_delta)
+                        buffer_len += len(text_delta)
+                        if buffer_len >= buffer_size:
+                            yield "".join(buffer)
+                            buffer.clear()
+                            buffer_len = 0
+                except Exception as exc:
+                    stream_error = exc
 
-            self._apply_stream_result(reducer.finalize(stream_error))
+                if buffer:
+                    yield "".join(buffer)
 
-            if stream_error is None:
-                return  # 成功
+                self._apply_stream_result(reducer.finalize(stream_error))
 
-            if isinstance(stream_error, asyncio.CancelledError):
-                raise
+                if stream_error is None:
+                    return  # 成功
 
-            if not _is_retryable_stream_error(stream_error) or retries <= 0:
-                raise stream_error
+                if isinstance(stream_error, asyncio.CancelledError):
+                    raise
 
-            retries -= 1
-            logger.warning(
-                "LLM 流式中断，正在重试（剩余 %d 次）: %s",
-                retries,
-                type(stream_error).__name__,
-            )
-            await asyncio.sleep(delay)
-            self._retry_reset()
-            new_resp = await self._retry_send()
-            self._stream = new_resp._stream
+                if not _is_retryable_stream_error(stream_error) or retries <= 0:
+                    raise stream_error
+
+                retries -= 1
+                logger.warning(
+                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(stream_error).__name__}"
+                )
+                await asyncio.sleep(delay)
+                self._retry_reset()
+                new_resp = await self._retry_send()
+                self._stream = new_resp._stream
 
     def _maybe_record_stream_stats(self) -> None:
         if self._stream_stats_recorder is None:

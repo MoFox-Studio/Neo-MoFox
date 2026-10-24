@@ -1,7 +1,7 @@
-"""LLM 请求体调试检视器。
+"""LLM 原生调用生命周期检视器。
 
-本模块在进程内记录每次 OpenAI 兼容 API 的完整请求体，并把请求体转换为
-结构化渲染模型（role、工具调用、工具结果与 Markdown 文本），便于调试 payload 结构。
+本模块以线程安全的内存缓冲保存脱敏请求、标准化响应和 SDK 原始 JSON。
+原生适配器直接报告生命周期，不包装 SDK、不提供 HTTP 端点。
 
 **本模块是纯进程内工具，不对外提供任何 HTTP 端点。** 可视化调试请使用官方 WebUI：
 https://github.com/MoFox-Studio/MoFox-Core-Webui
@@ -23,8 +23,15 @@ from __future__ import annotations
 import copy
 import json
 import time
-from collections import deque
-from dataclasses import dataclass, replace
+import math
+import re
+import threading
+import uuid
+from collections import Counter
+from dataclasses import field, fields, is_dataclass
+from types import SimpleNamespace
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -54,8 +61,8 @@ def _json_dumps(value: Any) -> str:
     """将值安全序列化为 JSON 字符串。"""
     try:
         return json.dumps(value, ensure_ascii=False, indent=2)
-    except Exception:
-        return str(value)
+    except (TypeError, ValueError, RecursionError):
+        return "[unavailable]"
 
 
 def _format_scalar(value: Any) -> str:
@@ -328,9 +335,47 @@ def _get_inspector_messages(params: dict[str, Any]) -> list[Any]:
     elif isinstance(system, list):
         rendered_messages.append({"role": "system", "content": system})
 
-    messages = params.get("messages", [])
+    instructions = params.get("instructions")
+    if isinstance(instructions, str):
+        rendered_messages.append({"role": "system", "content": instructions})
+    messages = params.get("messages", params.get("input", []))
+    if isinstance(messages, str):
+        messages = [{"role": "user", "content": messages}]
     if isinstance(messages, list):
-        rendered_messages.extend(messages)
+        for message in messages:
+            if isinstance(message, str):
+                rendered_messages.append({"role": "user", "content": message})
+            elif (
+                isinstance(message, dict)
+                and message.get("type") == "function_call_output"
+            ):
+                rendered_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": message.get("call_id"),
+                        "content": message.get("output"),
+                    }
+                )
+            elif isinstance(message, dict) and message.get("type") == "function_call":
+                rendered_messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": message.get("call_id"),
+                                "name": message.get("name"),
+                                "args": message.get("arguments"),
+                            }
+                        ],
+                    }
+                )
+            else:
+                rendered_messages.append(message)
+    if "query" in params:
+        rendered_messages.append({"role": "user", "content": params["query"]})
+    if isinstance(params.get("documents"), list):
+        for document in params["documents"]:
+            rendered_messages.append({"role": "user", "content": document})
 
     return rendered_messages
 
@@ -455,9 +500,275 @@ def build_render_view(
     }
 
 
+_TERMINAL = frozenset({"captured", "succeeded", "failed", "cancelled"})
+_REDACTED = "[REDACTED]"
+_UNAVAILABLE = "[unavailable]"
+_SENSITIVE = frozenset(
+    {
+        "authorization",
+        "proxyauthorization",
+        "apikey",
+        "xapikey",
+        "key",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "idtoken",
+        "password",
+        "passwd",
+        "secret",
+        "clientsecret",
+        "cookie",
+        "setcookie",
+        "credential",
+        "credentials",
+        "xamzsignature",
+        "xgoogsignature",
+        "xauthtoken",
+        "subscriptionkey",
+        "ocpapimsubscriptionkey",
+    }
+)
+_URL = re.compile(r"https?://[^\s\"'<>]+")
+_CREDENTIAL = re.compile(
+    r"(?i)(\b(?:authorization|proxy-authorization)[\"']?\s*[:=]\s*[\"']?)(?:bearer\s+|basic\s+)?[^\s,;\"']+"
+    r"|(\b(?:api[_-]?key|access[_-]?token|password|client[_-]?secret)[\"']?\s*[:=]\s*[\"']?)[^\s,;\"']+"
+)
+
+
+def _sensitive(key: str) -> bool:
+    """识别凭据字段名，避免误删词元用量计数。
+
+    Args:
+        key: 待检查的字段名。
+
+    Returns:
+        bool: 字段名是否表示敏感凭据。
+    """
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    # 同时覆盖 x-goog-api-key 等厂商前缀，不匹配 token 计数或 api_key_count。
+    return normalized in _SENSITIVE or normalized.endswith("apikey")
+
+
+def _json_size(value: Any) -> int:
+    """计算快照中紧凑 UTF-8 JSON 表示的准确字节数。
+
+    Args:
+        value: 待观测或转换的原始数据。
+
+    Returns:
+        int: 紧凑 JSON 编码后的 UTF-8 字节数。
+    """
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
+class _Sanitizer:
+    """将数据安全转换为脱敏 JSON；未知对象不使用 repr/str 兜底。"""
+
+    def __init__(self, secrets: tuple[str, ...] = ()) -> None:
+        self.secrets = {value for value in secrets if isinstance(value, str) and value}
+        self.redacted = False
+        self.unavailable = False
+        self.truncated = False
+
+    def learn(self, value: Any, seen: set[int] | None = None, depth: int = 0) -> None:
+        """在转换同级文本字段前收集凭据值，以便统一脱敏。
+
+        Args:
+            value: 待观测或转换的原始数据。
+            seen: 已访问对象的标识集合，用于检测循环引用。
+            depth: 当前递归层级。
+        """
+        seen = seen if seen is not None else set()
+        if id(value) in seen or depth > 64:
+            return
+        if isinstance(value, (dict, list, tuple)):
+            seen.add(id(value))
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(key, str) and _sensitive(key):
+                    candidates = item if isinstance(item, (list, tuple)) else [item]
+                    for candidate in candidates:
+                        if isinstance(candidate, str) and candidate:
+                            self.secrets.add(candidate)
+                            if candidate.lower().startswith(("bearer ", "basic ")):
+                                self.secrets.add(candidate.split(" ", 1)[1])
+                self.learn(item, seen, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                self.learn(item, seen, depth + 1)
+
+    def text(self, value: str) -> str:
+        """移除普通文本中的已知凭据和 URL 认证信息。
+
+        Args:
+            value: 待观测或转换的原始数据。
+
+        Returns:
+            str: 去除已知凭据和 URL 认证信息后的文本。
+        """
+        original = value
+        for secret in sorted(self.secrets, key=len, reverse=True):
+            value = value.replace(secret, _REDACTED)
+
+        def clean_url(match: re.Match[str]) -> str:
+            """移除 URL 中的认证信息，同时保留非敏感参数。
+
+            Args:
+                match: 文本中匹配到的 URL。
+
+            Returns:
+                str: 移除认证信息后的 URL；解析失败时返回 [invalid URL] 标记。
+            """
+            try:
+                url = urlsplit(match.group())
+                netloc = url.netloc.rsplit("@", 1)[-1]
+                pairs = parse_qsl(url.query, keep_blank_values=True)
+                query = [(k, _REDACTED if _sensitive(k) else v) for k, v in pairs]
+                if netloc == url.netloc and query == pairs:
+                    return match.group()
+                return urlunsplit(
+                    (url.scheme, netloc, url.path, urlencode(query), url.fragment)
+                )
+            except ValueError:
+                return "[invalid URL]"
+
+        value = _URL.sub(clean_url, value)
+        value = _CREDENTIAL.sub(lambda m: (m.group(1) or m.group(2)) + _REDACTED, value)
+        self.redacted |= value != original
+        return value
+
+    def convert(self, value: Any, limit: int | None = None) -> Any:
+        """转换为独立的 JSON 兼容数据，并按需严格限制输出字节数。
+
+        Args:
+            value: 待观测或转换的原始数据。
+            limit: 允许保留的 JSON 字节数；为 None 时不设置字节上限。
+
+        Returns:
+            Any: 独立的 JSON 兼容数据，必要时仅保留部分结构或使用不可用标记。
+        """
+        self.learn(value)
+        seen: set[int] = set()
+
+        def visit(item: Any, budget: int | None, depth: int) -> Any:
+            """仅遍历可保留的子节点，并预留 JSON 容器自身的字节开销。
+
+            Args:
+                item: 当前待转换的节点。
+                budget: 当前节点可使用的 JSON 字节预算。
+                depth: 当前递归层级。
+
+            Returns:
+                Any: 当前节点在预算内转换得到的安全值。
+            """
+            if depth > 64 or id(item) in seen:
+                self.unavailable = True
+                item = _UNAVAILABLE
+            if item is None or isinstance(item, (bool, int, float, str)):
+                if isinstance(item, float) and not math.isfinite(item):
+                    self.unavailable = True
+                    item = None
+                if isinstance(item, str):
+                    # 避免对单个超大的 SDK 文本增量执行无上限的 JSON 编码。
+                    if budget is not None and len(item) > budget:
+                        item = item[
+                            : budget + max((len(v) for v in self.secrets), default=0)
+                        ]
+                        self.truncated = True
+                    item = self.text(item)
+                if budget is None or _json_size(item) <= budget:
+                    return item
+                self.truncated = True
+                if not isinstance(item, str):
+                    return None
+                lo, hi = 0, len(item)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if _json_size(item[:mid]) <= budget:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                return item[:lo]
+            seen.add(id(item))
+            original_id = id(item)
+            try:
+                if not isinstance(item, (dict, list, tuple)):
+                    if is_dataclass(item) and not isinstance(item, type):
+                        item = {f.name: getattr(item, f.name) for f in fields(item)}
+                    elif isinstance(item, SimpleNamespace):
+                        item = vars(item)
+                    elif callable(getattr(item, "model_dump", None)):
+                        item = item.model_dump(mode="json")
+                    else:
+                        self.unavailable = True
+                        return visit(_UNAVAILABLE, budget, depth + 1)
+                    self.learn(item)
+                    return visit(item, budget, depth + 1)
+                out: Any = {} if isinstance(item, dict) else []
+                used = 2
+                entries = item.items() if isinstance(item, dict) else enumerate(item)
+                for key, child in entries:
+                    if isinstance(out, dict) and not isinstance(key, str):
+                        self.unavailable = True
+                        continue
+                    safe_key = self.text(key) if isinstance(out, dict) else key
+                    overhead = (1 if out else 0) + (
+                        _json_size(safe_key) + 1 if isinstance(out, dict) else 0
+                    )
+                    remaining = None if budget is None else budget - used - overhead
+                    if remaining is not None and remaining < 4:
+                        self.truncated = True
+                        break
+                    if isinstance(key, str) and _sensitive(key):
+                        self.redacted = True
+                        child = _REDACTED
+                    result = visit(child, remaining, depth + 1)
+                    size = _json_size(result)
+                    if budget is not None and used + overhead + size > budget:
+                        self.truncated = True
+                        break
+                    if isinstance(out, dict):
+                        out[safe_key] = result
+                    else:
+                        out.append(result)
+                    used += overhead + size
+                    if self.truncated:
+                        break
+                return out
+            except Exception:
+                self.unavailable = True
+                return visit(_UNAVAILABLE, budget, depth + 1)
+            finally:
+                seen.discard(original_id)
+
+        return visit(value, limit, 0)
+
+
+def _empty_response() -> dict[str, Any]:
+    """创建包含公共标准化响应全部字段的空结果。
+
+    Returns:
+        dict[str, Any]: 具有完整标准化响应字段的空结果。
+    """
+    return {
+        "kind": None,
+        "message": None,
+        "reasoning_content": None,
+        "reasoning_parts": [],
+        "tool_calls": [],
+        "usage": None,
+        "stop_reason": None,
+        "embeddings": [],
+        "results": [],
+    }
+
+
 @dataclass
 class CapturedRequest:
-    """单条捕获记录。"""
+    """有界缓冲中的单条记录，对外转换不暴露内部字段。"""
 
     id: int
     ts: float
@@ -465,196 +776,489 @@ class CapturedRequest:
     model: str
     params: dict[str, Any]
     metadata: dict[str, Any]
+    version: int = 1
+    status: str = "captured"
+    logical_request_id: str = ""
+    attempt: int = 1
+    stream: bool = False
+    started_at: float | None = None
+    finished_at: float | None = None
+    duration_ms: float | None = None
+    first_token_ms: float | None = None
+    response: dict[str, Any] = field(default_factory=_empty_response)
+    raw_response: Any = None
+    raw_events: list[Any] = field(default_factory=list)
+    error: dict[str, Any] | None = None
+    capture_info: dict[str, Any] = field(
+        default_factory=lambda: {
+            "redacted": False,
+            "raw_bytes": 0,
+            "raw_limit_bytes": 2 * 1024 * 1024,
+            "raw_truncated": False,
+            "raw_unavailable": False,
+            "request_unavailable": False,
+            "metadata_unavailable": False,
+        }
+    )
+    _clock: float | None = field(default=None, repr=False)
+    _raw_response_bytes: int = field(default=0, repr=False)
+    _secrets: set[str] = field(default_factory=set, repr=False)
 
     def to_summary(self) -> dict[str, Any]:
-        """返回列表展示用的摘要。"""
-        msg_count = len(self.params.get("messages", []))
-        tool_count = len(self.params.get("tools", []))
+        """返回记录摘要，不包含请求正文、响应正文或内部凭据状态。
+
+        Returns:
+            dict[str, Any]: 不含正文与内部凭据的记录摘要。
+        """
+        usage = self.response.get("usage") or {}
         return {
             "id": self.id,
+            "version": self.version,
             "ts": self.ts,
             "ts_str": time.strftime("%H:%M:%S", time.localtime(self.ts)),
             "api_name": self.api_name,
             "model": self.model,
             "api_provider": str(self.metadata.get("api_provider", "-")),
             "request_name": str(self.metadata.get("request_name", "")),
-            "estimated_input_tokens": copy.deepcopy(self.metadata.get("estimated_input_tokens")),
-            "msg_count": msg_count,
-            "tool_count": tool_count,
+            "estimated_input_tokens": copy.deepcopy(
+                self.metadata.get("estimated_input_tokens")
+            ),
+            "msg_count": len(_get_inspector_messages(self.params)),
+            "tool_count": len(self.params.get("tools", []))
+            if isinstance(self.params.get("tools"), list)
+            else 0,
+            "status": self.status,
+            "logical_request_id": self.logical_request_id,
+            "attempt": self.attempt,
+            "stream": self.stream,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "duration_ms": self.duration_ms,
+            "first_token_ms": self.first_token_ms,
+            "tokens_in": usage.get("prompt_tokens", usage.get("input_tokens")),
+            "tokens_out": usage.get("completion_tokens", usage.get("output_tokens")),
         }
 
     def to_full(self) -> dict[str, Any]:
-        """返回完整记录与结构化渲染模型。"""
-        summary = self.to_summary()
-        summary["params"] = self.params
-        summary["metadata"] = self.metadata
-        summary["rendered"] = build_render_view(
-            self.api_name, self.model, self.params, self.metadata
+        """生成与内部状态隔离的详情，所有展示视图均来自脱敏快照。
+
+        Returns:
+            dict[str, Any]: 包含安全参数、派生视图、响应与采集状态的独立详情。
+        """
+        return copy.deepcopy(
+            {
+                **self.to_summary(),
+                "params": self.params,
+                "metadata": self.metadata,
+                "rendered": build_render_view(
+                    self.api_name, self.model, self.params, self.metadata
+                ),
+                "response": self.response,
+                "raw_response": self.raw_response,
+                "raw_events": self.raw_events,
+                "error": self.error,
+                "capture_info": self.capture_info,
+            }
         )
-        return summary
 
 
 class RequestInspector:
-    """LLM 请求体检视器，保存最近 N 条请求记录供进程内调试。
+    """线程安全的内存生命周期记录器，不接管模型执行。"""
 
-    并发说明：所有方法均为同步且内部无 ``await``。读取前会对 deque 取快照，
-    因此可与任意线程的 ``capture()`` 并发调用，不会因 deque 扩容触发
-    ``RuntimeError: deque mutated during iteration``。
-    """
-
-    def __init__(self, max_records: int = 200) -> None:
+    def __init__(
+        self, max_records: int = 200, *, raw_limit_bytes: int = 2 * 1024 * 1024
+    ) -> None:
+        if max_records < 1 or raw_limit_bytes < 4:
+            raise ValueError("max_records must be positive and raw_limit_bytes >= 4")
         self._max_records = max_records
-        self._records: deque[CapturedRequest] = deque(maxlen=max_records)
-        self._counter: int = 0
+        self._raw_limit = raw_limit_bytes
+        self._records: dict[int, CapturedRequest] = {}
+        self._counter = 0
+        self._revision = 0
+        self._instance_id = uuid.uuid4().hex
+        self._lock = threading.RLock()
+
+    def _touch(self, record: CapturedRequest) -> None:
+        """在持锁期间递增缓冲版本与记录版本。
+
+        Args:
+            record: 需要处理的内部记录。
+        """
+        record.version += 1
+        self._revision += 1
+
+    def _safe(
+        self, record: CapturedRequest, value: Any, unavailable: str | None = None
+    ) -> Any:
+        """在保留数据前统一脱敏，并更新数据完整性标记。
+
+        Args:
+            record: 需要处理的内部记录。
+            value: 待观测或转换的原始数据。
+            unavailable: 需要更新的不可用标记字段名；为 None 时不更新该标记。
+
+        Returns:
+            Any: 脱敏后的独立 JSON 兼容数据。
+        """
+        converter = _Sanitizer(tuple(record._secrets))
+        result = converter.convert(value)
+        record._secrets.update(converter.secrets)
+        record.capture_info["redacted"] |= converter.redacted
+        if unavailable:
+            record.capture_info[unavailable] |= converter.unavailable
+        return result
 
     def capture(
         self,
         api_name: str,
         params: dict[str, Any],
         metadata: dict[str, Any] | None = None,
-    ) -> None:
-        """捕获一条请求体，存入内存环形缓冲。
-
-        ``params`` 不可 JSON 序列化、``metadata`` 不可深拷贝时，
-        两者都降级为 ``{"_raw": str(...)}``，本方法不会因入参而抛异常。
-        """
-        try:
-            copied = json.loads(json.dumps(params, default=str))
-        except Exception:
-            copied = {"_raw": str(params)}
-        try:
-            effective_metadata = copy.deepcopy(metadata) if isinstance(metadata, dict) else {}
-        except Exception:
-            effective_metadata = {"_raw": str(metadata)}
-
-        model = str(copied.get("model", "—"))
-        # 全部准备工作成功后再自增：id 空洞会让 list_summaries() 的 id 序列断裂
-        self._counter += 1
-        record = CapturedRequest(
-            id=self._counter,
-            ts=time.time(),
-            api_name=api_name,
-            model=model,
-            params=copied,
-            metadata=effective_metadata,
-        )
-        self._records.append(record)
-
-    def import_json(self, payload: Any) -> list[CapturedRequest]:
-        """导入外部 JSON，并转换为可渲染的捕获记录。
-
-        返回的是与内部缓冲隔离的副本，调用方就地修改不会污染缓冲。
-
-        Returns:
-            导入后的记录副本列表。
-        """
-        imported: list[CapturedRequest] = []
-        for api_name, params, metadata in _normalize_import_payload(payload):
-            next_id = self._counter + 1
-            self.capture(api_name, params, metadata)
-            record = self._records[-1]
-            if record.id != next_id:
-                raise RuntimeError("导入记录 ID 不连续")
-            imported.append(_copy_record(record))
-        return imported
-
-    def list_summaries(self) -> list[dict[str, Any]]:
-        """返回按捕获顺序排列的请求摘要列表。
-
-        遍历前对 deque 取快照，避免与其他线程的 ``capture()`` 并发时
-        触发 ``RuntimeError: deque mutated during iteration``。
-
-        Returns:
-            每条记录的摘要字典，字段见 :meth:`CapturedRequest.to_summary`；
-            无记录时返回空列表。
-        """
-        return [record.to_summary() for record in list(self._records)]
-
-    def get_record(self, record_id: int) -> dict[str, Any] | None:
-        """返回指定 ID 的完整请求体。
-
-        遍历前对 deque 取快照，避免与其他线程的 ``capture()`` 并发时
-        触发 ``RuntimeError: deque mutated during iteration``。
+        *,
+        native: bool = False,
+        logical_request_id: str | None = None,
+        attempt: int = 1,
+        stream: bool = False,
+        secrets: tuple[str, ...] = (),
+    ) -> int:
+        """创建手工捕获记录或原生待执行记录，返回单调递增的记录 ID。
 
         Args:
-            record_id: :meth:`CapturedRequest.to_summary` 中的 ``id``。
+            api_name: 用于标识 SDK 调用入口的接口名称。
+            params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+            metadata: 需要合并到记录中的请求元数据。
+            native: 是否创建原生调用的 pending 记录；否则创建 captured 记录。
+            logical_request_id: 关联重试的逻辑请求 ID；未提供时自动生成。
+            attempt: 本逻辑请求的尝试序号，通常从 1 开始。
+            stream: 是否以流式方式执行本次调用。
+            secrets: 已知敏感值，仅用于脱敏，不在公共快照中暴露。
 
         Returns:
-            完整记录（含 ``params`` / ``metadata`` / ``rendered``）；
-            不存在或已被环形缓冲淘汰时返回 ``None``。
+            int: 新记录的单调递增 ID，清空后也不重复使用。
         """
-        for record in reversed(list(self._records)):
-            if record.id == record_id:
-                return _snapshot_record(record)
-        return None
+        with self._lock:
+            self._counter += 1
+            record = CapturedRequest(self._counter, time.time(), "", "", {}, {})
+            record._secrets.update(secrets)
+            learner = _Sanitizer(tuple(secrets))
+            learner.learn(params)
+            learner.learn(metadata)
+            record._secrets.update(learner.secrets)
+            record.api_name = self._safe(record, api_name)
+            record.params = self._safe(record, params, "request_unavailable")
+            record.metadata = self._safe(record, metadata or {}, "metadata_unavailable")
+            if not isinstance(record.params, dict):
+                record.params = {"_unavailable": True}
+                record.capture_info["request_unavailable"] = True
+            if not isinstance(record.metadata, dict):
+                record.metadata = {"_unavailable": True}
+                record.capture_info["metadata_unavailable"] = True
+            record.model = str(record.params.get("model", "—"))
+            record.status = "pending" if native else "captured"
+            record.logical_request_id = logical_request_id or uuid.uuid4().hex
+            record.attempt = attempt
+            record.stream = stream or record.params.get("stream") is True
+            record.capture_info["raw_limit_bytes"] = self._raw_limit
+            self._records[record.id] = record
+            if len(self._records) > self._max_records:
+                del self._records[next(iter(self._records))]
+            self._revision += 1
+            return record.id
+
+    def start(
+        self,
+        record_id: int,
+        params: dict[str, Any] | None = None,
+        *,
+        api_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        secrets: tuple[str, ...] = (),
+    ) -> None:
+        """在调用提供商前记录最终 SDK 参数，并将记录设为执行中。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+            api_name: 用于标识 SDK 调用入口的接口名称。
+            metadata: 需要合并到记录中的请求元数据。
+            secrets: 已知敏感值，仅用于脱敏，不在公共快照中暴露。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status in _TERMINAL:
+                return
+            record._secrets.update(secrets)
+            if params is not None:
+                record.params = self._safe(record, params, "request_unavailable")
+                record.model = str(record.params.get("model", record.model))
+                record.stream = record.params.get("stream") is True or record.stream
+            if api_name is not None:
+                record.api_name = self._safe(record, api_name)
+            if metadata:
+                record.metadata.update(
+                    self._safe(record, metadata, "metadata_unavailable")
+                )
+            if record.started_at is None:
+                record.started_at = time.time()
+                record._clock = time.perf_counter()
+            record.status = "running"
+            self._touch(record)
+
+    def update(
+        self, record_id: int, response: dict[str, Any], *, content: bool = False
+    ) -> None:
+        """更新标准化部分结果，不受原始数据预算限制。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            response: 已经解析的标准化响应字段。
+            content: 是否收到有效内容增量，用于推进流状态与首个内容耗时。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status in _TERMINAL:
+                return
+            record.response.update(self._safe(record, response))
+            if record.stream and (content or record.raw_events):
+                record.status = "streaming"
+            if content and record.first_token_ms is None and record._clock is not None:
+                record.first_token_ms = (time.perf_counter() - record._clock) * 1000
+            self._touch(record)
+
+    def raw(self, record_id: int, value: Any, *, event: bool = False) -> None:
+        """在响应与事件共用预算内保留 SDK JSON，不使用对象文本表示兜底。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            value: 待观测或转换的原始数据。
+            event: 是否将原始数据作为流事件追加，而非替换原始响应。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if (
+                record is None
+                or record.status in _TERMINAL
+                or record.capture_info["raw_truncated"]
+            ):
+                return
+            info = record.capture_info
+            overhead = (1 if record.raw_events else 2) if event else 0
+            available = (
+                self._raw_limit
+                - info["raw_bytes"]
+                - overhead
+                + (0 if event else record._raw_response_bytes)
+            )
+            if available < 4:
+                info["raw_truncated"] = True
+                self._touch(record)
+                return
+            converter = _Sanitizer(tuple(record._secrets))
+            data = converter.convert(value, available)
+            record._secrets.update(converter.secrets)
+            info["redacted"] |= converter.redacted
+            info["raw_unavailable"] |= converter.unavailable
+            info["raw_truncated"] |= converter.truncated
+            size = _json_size(data)
+            if event:
+                record.raw_events.append(data)
+                record.status = "streaming"
+                info["raw_bytes"] += overhead + size
+            else:
+                record.raw_response = data
+                info["raw_bytes"] += size - record._raw_response_bytes
+                record._raw_response_bytes = size
+            self._touch(record)
+
+    def finish(
+        self,
+        record_id: int,
+        response: dict[str, Any] | None = None,
+        *,
+        error: BaseException | None = None,
+        cancelled: bool = False,
+    ) -> None:
+        """幂等地记录执行终态，失败时保留已接收的部分输出。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            response: 已经解析的标准化响应字段。
+            error: 执行或观测过程中捕获的异常。
+            cancelled: 是否因调用方取消而结束。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status in _TERMINAL:
+                return
+            if response:
+                record.response.update(self._safe(record, response))
+            if error is not None:
+                # 异常的 __str__ 可能不安全，因此仅保留其字符串参数。
+                message = next(
+                    (arg for arg in error.args if isinstance(arg, str)),
+                    type(error).__name__,
+                )
+                code = getattr(error, "status_code", None)
+                record.error = self._safe(
+                    record,
+                    {
+                        "type": type(error).__name__,
+                        "message": message,
+                        "status_code": code if isinstance(code, int) else None,
+                    },
+                )
+            record.status = (
+                "cancelled"
+                if cancelled
+                else "failed"
+                if error is not None
+                else "succeeded"
+            )
+            record.finished_at = time.time()
+            record.duration_ms = (
+                (time.perf_counter() - record._clock) * 1000
+                if record._clock is not None
+                else None
+            )
+            self._touch(record)
+
+    def mark_unavailable(
+        self, record_id: int, *, request: bool = False, raw: bool = False
+    ) -> None:
+        """标记确实不可用的数据，不伪造提供商请求或响应。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            request: 是否标记原始请求参数不可用。
+            raw: 是否标记原始 SDK 响应或事件不可用。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status in _TERMINAL:
+                return
+            record.capture_info["request_unavailable"] |= request
+            record.capture_info["raw_unavailable"] |= raw
+            self._touch(record)
+
+    def snapshot(self) -> dict[str, Any]:
+        """原子地读取记录摘要及当前缓冲统计，不返回请求或响应正文。
+
+        Returns:
+            dict[str, Any]: 包含 instance_id、revision、capacity、records 和 stats 的快照。
+        """
+        with self._lock:
+            summaries = [record.to_summary() for record in self._records.values()]
+            return {
+                "instance_id": self._instance_id,
+                "revision": self._revision,
+                "capacity": self._max_records,
+                "records": summaries,
+                "stats": {
+                    "total": len(summaries),
+                    "by_status": dict(Counter(r["status"] for r in summaries)),
+                    "tokens_in": sum(r["tokens_in"] or 0 for r in summaries),
+                    "tokens_out": sum(r["tokens_out"] or 0 for r in summaries),
+                },
+            }
+
+    def list_summaries(self) -> list[dict[str, Any]]:
+        """保留按捕获顺序返回摘要的原有接口，不暴露正文。
+
+        Returns:
+            list[dict[str, Any]]: 按捕获顺序排列的独立记录摘要。
+        """
+        return self.snapshot()["records"]
+
+    def get_record(self, record_id: int) -> dict[str, Any] | None:
+        """返回与内部状态隔离的详情；记录已清空或淘汰时返回 None。
+
+        Args:
+            record_id: 需要读取详情的记录 ID。
+
+        Returns:
+            dict[str, Any] | None: 包含实例标识的独立详情；记录不存在时返回 None。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            return (
+                {"instance_id": self._instance_id, **record.to_full()}
+                if record is not None
+                else None
+            )
+
+    def clear_snapshot(self) -> dict[str, Any]:
+        """清空已保留的记录，不取消实际调用，也不重置记录 ID。
+
+        Returns:
+            dict[str, Any]: 包含实例标识、更新后的缓冲版本及删除数量的结果。
+        """
+        with self._lock:
+            count = len(self._records)
+            self._records.clear()
+            self._revision += 1
+            return {
+                "instance_id": self._instance_id,
+                "revision": self._revision,
+                "cleared_count": count,
+            }
 
     def clear(self) -> int:
-        """清空已捕获的全部请求。
+        """保留仅返回删除数量的原有清空接口。
 
         Returns:
-            被清除的记录条数。
+            int: 本次删除的记录数量。
         """
-        count = len(self._records)
-        self._records.clear()
-        return count
+        return self.clear_snapshot()["cleared_count"]
 
+    def import_json(self, payload: Any) -> list[CapturedRequest]:
+        """导入为手工捕获状态，返回与内部状态隔离且不含凭据的记录副本。
 
-def _copy_record(record: CapturedRequest) -> CapturedRequest:
-    """构造与内部缓冲隔离的 :class:`CapturedRequest` 副本。
+        Args:
+            payload: 待导入的 JSON 对象、对象列表或包含 requests 的包装对象。
 
-    :meth:`RequestInspector.import_json` 返回内部记录对象本身会让调用方
-    直接改写缓冲内容，这里返回等值但独立的实例。
-
-    Args:
-        record: 源记录。
-
-    Returns:
-        独立副本，``params`` / ``metadata`` 为深拷贝。
-    """
-    return replace(
-        record,
-        params=copy.deepcopy(record.params),
-        metadata=copy.deepcopy(record.metadata),
-    )
-
-
-def _snapshot_record(record: CapturedRequest) -> dict[str, Any]:
-    """构造与内部状态隔离的记录副本。
-
-    :meth:`CapturedRequest.to_full` 会把 ``params`` / ``metadata`` 以引用形式挂进
-    返回值，调用方若就地修改会污染缓冲中的原始记录。这里对两者做深拷贝，
-    使只读接口对调用方只暴露快照。
-
-    Args:
-        record: 源记录。
-
-    Returns:
-        完整记录字典，其中 ``params`` / ``metadata`` 为深拷贝。
-    """
-    data = record.to_full()
-    data["params"] = copy.deepcopy(record.params)
-    data["metadata"] = copy.deepcopy(record.metadata)
-    return data
+        Returns:
+            list[CapturedRequest]: 导入记录的脱敏副本，状态均为 captured。
+        """
+        with self._lock:
+            imported = []
+            for api_name, params, metadata in _normalize_import_payload(payload):
+                record_id = self.capture(api_name, params, metadata)
+                record = copy.deepcopy(self._records[record_id])
+                record._secrets.clear()
+                imported.append(record)
+            return imported
 
 
 _inspector: RequestInspector | None = None
+_inspector_lock = threading.Lock()
 
 
 def get_inspector() -> RequestInspector:
-    """获取全局 RequestInspector 单例。"""
+    """获取进程级监视器单例，并保证并发首次访问安全。
+
+    Returns:
+        RequestInspector: 当前进程共享的线程安全监视器。
+    """
     global _inspector
-    if _inspector is None:
-        _inspector = RequestInspector()
-    return _inspector
+    with _inspector_lock:
+        if _inspector is None:
+            _inspector = RequestInspector()
+        return _inspector
 
 
 def capture(
-    api_name: str,
-    params: dict[str, Any],
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    """捕获一条 OpenAI 请求体。"""
-    get_inspector().capture(api_name, params, metadata)
+    api_name: str, params: dict[str, Any], metadata: dict[str, Any] | None = None
+) -> int:
+    """手工捕获请求输入，不表示该请求已经执行。
+
+    Args:
+        api_name: 用于标识 SDK 调用入口的接口名称。
+        params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+        metadata: 需要合并到记录中的请求元数据。
+
+    Returns:
+        int: 新建手工捕获记录的 ID。
+    """
+    return get_inspector().capture(api_name, params, metadata)
 
 
 def _normalize_import_payload(
@@ -695,14 +1299,16 @@ def _normalize_import_entries(
     metadata = metadata_raw.copy() if isinstance(metadata_raw, dict) else {}
     metadata.setdefault("imported", True)
 
-    api_name = str(payload.get("api_name") or payload.get("api") or "imported.request")
+    api_name = payload.get("api_name") or payload.get("api") or "imported.request"
+    if not isinstance(api_name, str):
+        raise ValueError("api_name must be a string")
 
     if "params" in payload:
         params = payload.get("params")
         if not isinstance(params, dict):
             raise ValueError("params 字段必须是对象")
         if "source" in payload and "import_source" not in metadata:
-            metadata["import_source"] = str(payload.get("source"))
+            metadata["import_source"] = payload.get("source")
         return [(api_name, params, metadata)]
 
     if any(key in payload for key in ("messages", "tools", "model", "input")):
@@ -713,5 +1319,3 @@ def _normalize_import_entries(
     raise ValueError(
         "无法识别导入 JSON 结构；请提供原始请求体、包含 params 的对象，或 requests 数组"
     )
-
-
