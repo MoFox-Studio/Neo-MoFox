@@ -17,7 +17,11 @@ from src.core.components import BasePlugin, register_plugin
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
 
-from .action import SendEmojiMemeAction, SendEmojiMemeByIdAction
+from .action import (
+    DeleteEmojiMemeByIdAction,
+    SendEmojiMemeAction,
+    SendEmojiMemeByIdAction,
+)
 from .config import EmojiSenderConfig
 from .service import EmojiSenderService
 from .tool import SearchEmojiMemesTool
@@ -120,7 +124,12 @@ class EmojiSenderPlugin(BasePlugin):
         if isinstance(config, EmojiSenderConfig) and not config.plugin.enabled:
             return []
         if _get_interaction_mode(self) == MODE_PICKER:
-            return [EmojiSenderService, SearchEmojiMemesTool, SendEmojiMemeByIdAction]
+            return [
+                EmojiSenderService,
+                SearchEmojiMemesTool,
+                SendEmojiMemeByIdAction,
+                DeleteEmojiMemeByIdAction,
+            ]
         return [EmojiSenderService, SendEmojiMemeAction]
 
     async def on_plugin_loaded(self) -> None:

@@ -7,7 +7,8 @@
 - 若收藏：复制源文件到 `data/emoji_sender/memes/`，并将描述 embedding 写入 `data/emoji_sender/vector_db/`
 - 对外暴露：
   - Action：根据“目标描述 + 情感 tag”发送表情包
-  - Service：供其他插件以编程方式检索/发送
+  - Action：按完整 meme_id 彻底删除表情包（picker 模式）
+  - Service：供其他插件以编程方式检索/发送/删除
 - 检索阶段支持通过 `config/plugins/emoji_sender/config.toml` 中的 `vector.temperature` 控制采样强度，避免代表性表情反复被固定选中
 
 说明：情感 tag 预设为插件内置常量，不进入配置。用户手动删除 `data/emoji_sender/memes/` 中不想要的表情后，会在下一次入库任务开始时自动清理数据库对应条目。
@@ -32,13 +33,23 @@
 
 ### picker——查询挑选（AI 亲自挑选）
 
-注册 Tool `search_emoji_memes` + Action `send_emoji_meme_by_id`，两段式流程：
+注册 Tool `search_emoji_memes` + Action `send_emoji_meme_by_id` + Action `delete_emoji_meme_by_id`，两段式流程：
 
-1. AI 调用 `search_emoji_memes(描述, [情感tag], page)` 查看候选列表（每项含 id、标签、描述、距离，距离越小越贴切，同一表情多标签已去重）
+1. AI 调用 `search_emoji_memes(描述, [情感tag], page)` 查看候选列表（每项含 id、标签、描述、距离，距离越小越贴切，同一表情多标签已去重；同时给出完整 `meme_id`）
 2. AI 从中挑选最契合的一张，调用 `send_emoji_meme_by_id(id)` 发送；不满意可换描述重查或翻页
+3. 若某张候选明确不合适（或用户要求清理），调用 `delete_emoji_meme_by_id(meme_id)` 彻底删除
 
 - 适合：希望 AI 对发什么表情有更高控制力、表达更精准的场景
 - 每页数量由 `picker.page_size` 控制（默认 6）
+
+### 删除表情包（picker 模式）
+
+`delete_emoji_meme_by_id` 按**完整 meme_id** 彻底删除一张表情包：
+
+- 删除范围：向量库中该表情包的**全部记录**（每个情感 tag 一条）+ 插件 data 目录中的**表情包文件**
+- 只接受完整 meme_id（64 位十六进制），**不接受前缀**，避免误删
+- 不可恢复
+- 完整 meme_id 由 `search_emoji_memes` 的候选列表给出；`id`（短 id）仅用于发送
 
 ### 使用历史去重（两种模式共通）
 
