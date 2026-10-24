@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import shlex
 from typing import Annotated, Any
 
 from src.app.plugin_system.api import log_api
@@ -73,38 +72,117 @@ def _split_segments(command: str) -> list[str]:
     return [part.strip() for part in command.split("&&") if part.strip()]
 
 
-def _parse_segment(segment: str) -> tuple[str, dict[str, list[str]]]:
-    """解析单条命令段为操作名和参数表。"""
+def _tokenize(segment: str) -> list[tuple[str, int, int]]:
+    """切词并保留每个词在原文中的位置区间。
 
-    tokens = shlex.split(segment)
+    与 shlex.split 的差异：
+    - 不成对的引号按普通字符处理，不抛异常；
+    - 反斜杠不做转义，Windows 路径原样保留；
+    - 成对引号剥离内容，但位置区间仍覆盖引号本身。
+
+    Args:
+        segment: 待切词的命令段文本。
+
+    Returns:
+        (词文本, 起始位置, 结束位置) 列表，结束位置不含。
+    """
+
+    tokens: list[tuple[str, int, int]] = []
+    buffer: list[str] = []
+    start = -1
+    index = 0
+    length = len(segment)
+
+    def flush(end: int) -> None:
+        """把缓冲区内容落成带位置区间的词。"""
+
+        nonlocal start
+        if buffer:
+            tokens.append(("".join(buffer), start, end))
+            buffer.clear()
+            start = -1
+
+    while index < length:
+        char = segment[index]
+        if char.isspace():
+            flush(end=index)
+            index += 1
+            continue
+        if char in {'"', "'"}:
+            close = segment.find(char, index + 1)
+            if close != -1:
+                if start < 0:
+                    start = index
+                buffer.append(segment[index + 1 : close])
+                index = close + 1
+                continue
+        if start < 0:
+            start = index
+        buffer.append(char)
+        index += 1
+
+    flush(end=length)
+    return tokens
+
+
+def _parse_segment(segment: str) -> tuple[str, dict[str, list[str]]]:
+    """解析单条命令段为操作名和参数表。
+
+    参数值会一直收集到下一个 ``-key`` 为止，因此含空格的标题/正文无需引号；
+    引号成对时剥离、不成对时按普通字符处理；反斜杠不做转义。
+    无值开关仍解析为 "true"，同 key 多次出现仍各自成值。
+
+    Args:
+        segment: 单条命令段文本。
+
+    Returns:
+        (操作名, 参数表) 二元组，参数表按键聚合为值列表。
+
+    Raises:
+        ValueError: 命令段为空时抛出。
+    """
+
+    tokens = _tokenize(segment)
     if not tokens:
         raise ValueError("空命令段")
 
-    operation = tokens[0].strip().lower()
+    operation = tokens[0][0].strip().lower()
     options: dict[str, list[str]] = {}
+    key: str | None = None
+    value_start: int | None = None
+    value_end: int | None = None
 
-    index = 1
-    while index < len(tokens):
-        token = tokens[index]
-        if not token.startswith("-"):
-            index += 1
-            continue
+    def commit() -> None:
+        """把当前收集中的键值对写入参数表。"""
 
-        key = token.lstrip("-").strip().lower()
-        if not key:
-            index += 1
-            continue
-
-        value: str
-        if index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
-            value = tokens[index + 1]
-            index += 2
+        nonlocal key, value_start, value_end
+        if key is None:
+            return
+        if value_start is None or value_end is None:
+            options.setdefault(key, []).append("true")
         else:
-            value = "true"
-            index += 1
+            raw = segment[value_start:value_end].strip()
+            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+                raw = raw[1:-1].strip()
+            options.setdefault(key, []).append(raw)
+        key = None
+        value_start = None
+        value_end = None
 
-        options.setdefault(key, []).append(value)
+    for text, begin, finish in tokens[1:]:
+        if text.startswith("-") and len(text) > 1:
+            new_key = text.lstrip("-").strip().lower()
+            if new_key:
+                commit()
+                key = new_key
+                continue
+        if key is None:
+            continue
+        if value_start is None:
+            value_start = begin
+        value_end = finish
 
+    commit()
     return operation, options
 
 
