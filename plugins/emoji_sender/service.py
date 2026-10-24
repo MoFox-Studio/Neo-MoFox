@@ -76,9 +76,21 @@ _INGEST_LOCK = asyncio.Lock()
 # 完整 meme_id 为文件内容的 sha256 十六进制，长度固定 64
 _MEME_ID_LENGTH = 64
 
+# 完整 meme_id 允许的字符集：严格十六进制，不接受下划线、符号或 0x 前缀
+_MEME_ID_HEX_CHARS = frozenset("0123456789abcdefABCDEF")
+
+# 收集与扫描向量库时的分页上限（512 条/页），避免异常分页导致无界扫描
+_MAX_SCAN_PAGES = 1000
+
+# 扫描向量库时的单页条数
+_SCAN_PAGE_LIMIT = 512
+
 
 def _is_full_meme_id(value: str) -> bool:
     """判断是否为完整 meme_id（64 位十六进制）。
+
+    仅接受长度为 64 的十六进制字符串；不使用 ``int(text, 16)`` 判定，
+    因为后者会接受下划线、正负号与 ``0x`` 前缀等非摘要表示形式。
 
     Args:
         value: 待判断的字符串。
@@ -89,11 +101,33 @@ def _is_full_meme_id(value: str) -> bool:
     text = str(value or "").strip()
     if len(text) != _MEME_ID_LENGTH:
         return False
-    try:
-        int(text, 16)
-    except ValueError:
-        return False
-    return True
+    return all(char in _MEME_ID_HEX_CHARS for char in text)
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetRecord:
+    """已核实的目标表情包向量库记录。
+
+    记录 ID 是权威的删除键；metadata 中的 meme_id 仅作为交叉校验来源。
+    """
+
+    record_id: str
+    meme_id: str
+    tag: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CollectResult:
+    """收集阶段结果。
+
+    Attributes:
+        records: 已核实的目标记录集合。
+        error: 失败原因；为 None 表示收集成功（records 为空表示库中无目标）。
+    """
+
+    records: tuple[_TargetRecord, ...]
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +270,103 @@ class EmojiSenderService(BaseService):
     def _delete_file(path_value: str) -> None:
         """删除指定路径的文件。"""
         Path(path_value).unlink(missing_ok=True)
+
+    @staticmethod
+    def _extract_ids(data: Any) -> list[str] | None:
+        """从向量库响应中提取记录 ID 列表。
+
+        向量库包装层在查询失败时返回空字典，而成功响应必定包含 ``ids`` 键。
+        因此可以据此区分「查询成功但无结果」与「查询失败、无法确认」。
+
+        Args:
+            data: 向量库 get 的原始响应。
+
+        Returns:
+            list[str] | None: 记录 ID 列表；None 表示响应无效、无法确认。
+        """
+        if not isinstance(data, dict):
+            return None
+        if "ids" not in data:
+            return None
+        ids = data["ids"]
+        if not isinstance(ids, list):
+            return None
+        return [str(item) for item in ids]
+
+    @staticmethod
+    def _extract_metadatas(data: Any) -> list[dict[str, Any]] | None:
+        """从向量库响应中提取 metadata 列表。
+
+        Args:
+            data: 向量库 get 的原始响应。
+
+        Returns:
+            list[dict[str, Any]] | None: metadata 列表；None 表示响应无效、无法确认。
+        """
+        if not isinstance(data, dict):
+            return None
+        if "metadatas" not in data:
+            return None
+        metadatas = data["metadatas"]
+        if metadatas is None:
+            return None
+        if not isinstance(metadatas, list):
+            return None
+        for item in metadatas:
+            if not isinstance(item, dict):
+                return None
+        return [dict(item) for item in metadatas]
+
+    async def _locate_meme_files(self, meme_id: str) -> tuple[list[Path], str | None]:
+        """在插件 data 目录内定位属于目标表情包的文件并校验归属。
+
+        文件名由入库时的 meme_id 与后缀拼成，且 meme_id 为文件内容的 sha256，
+        因此以 meme_id 推导候选并重新计算哈希即可确认文件归属，无需信任
+        向量库 metadata 中的 path。
+
+        Args:
+            meme_id: 目标表情包的完整 ID。
+
+        Returns:
+            tuple[list[Path], str | None]: (候选文件列表, 失败原因)。
+                失败原因为 None 表示校验通过；文件不存在时返回空列表且无失败。
+        """
+        data_dir = self._data_dir()
+        try:
+            resolved_dir = data_dir.resolve()
+        except OSError as e:
+            return [], f"无法解析表情包存储目录: {e}"
+
+        candidates: list[Path] = []
+        for suffix in sorted(_ALLOWED_SUFFIXES):
+            candidate = data_dir / f"{meme_id}{suffix}"
+            try:
+                if not candidate.exists():
+                    continue
+                if candidate.is_symlink():
+                    return [], f"表情包文件是符号链接，拒绝删除: {candidate}"
+                if not candidate.is_file():
+                    continue
+                if candidate.parent.resolve() != resolved_dir:
+                    return [], f"表情包文件不在存储目录内，拒绝删除: {candidate}"
+            except OSError as e:
+                return [], f"检查表情包文件失败: {candidate} - {e}"
+            candidates.append(candidate)
+
+        if not candidates:
+            return [], None
+
+        for candidate in candidates:
+            try:
+                _, file_hash = await asyncio.to_thread(self._read_file_with_hash, candidate)
+            except OSError as e:
+                return [], f"读取表情包文件失败: {candidate} - {e}"
+            if file_hash != meme_id:
+                return [], (
+                    f"表情包文件内容与目标 ID 不一致，拒绝删除: {candidate}"
+                )
+
+        return candidates, None
 
     async def _pick_next_manual_meme_file(self) -> Path | None:
         """从手动目录获取下一个未入库且未被拒绝的表情包文件。"""
@@ -1118,6 +1249,9 @@ class EmojiSenderService(BaseService):
         只接受完整 meme_id（文件内容的 sha256 十六进制），不接受前缀，
         避免误删。meme_id 不是合法十六进制时直接拒绝。
 
+        失败关闭原则：只要目标记录身份不明确、向量库查询结果无法确认，
+        或文件归属校验不通过，就在写入前中止，不会删除文件，也不会报告成功。
+
         Args:
             meme_id: 完整 meme_id。
 
@@ -1132,7 +1266,7 @@ class EmojiSenderService(BaseService):
             return (
                 False,
                 None,
-                "meme_id 必须是完整 ID（64 位十六进制），不接受前缀；"
+                "meme_id 必须是完整 ID（64 位十六进制，仅限 0-9a-f），不接受前缀；"
                 "请使用 search_emoji_memes 返回的完整 meme_id",
             )
 
@@ -1140,108 +1274,156 @@ class EmojiSenderService(BaseService):
         collection = self._collection_name()
         await vdb.get_or_create_collection(collection)
 
-        # 先查证记录是否存在：向量库的 delete 内部会吞掉异常，
-        # 若不先确认存在性，删除失败会表现为静默成功。
-        records = await self._collect_records_by_meme_id(vdb, collection, normalized)
-        if not records:
-            return False, None, f"未找到 id={normalized} 对应的表情包"
+        # 阶段 A：识别目标记录（无副作用）
+        collected = await self._collect_target_records(vdb, collection, normalized)
+        if collected.error is not None:
+            return False, None, collected.error
 
-        path_value = str(records[0].get("path") or "").strip()
-        tags = sorted({str(item.get("tag") or "").strip() for item in records if item.get("tag")})
-        description = str(records[0].get("description") or "").strip()
+        target_records = collected.records
+        tags = sorted({record.tag for record in target_records if record.tag})
+        description = target_records[0].description if target_records else ""
 
-        # 1) 删除向量库记录
-        await vdb.delete(collection_name=collection, where={"meme_id": normalized})
+        # 阶段 B：定位并校验目标文件（无副作用）
+        files, file_error = await self._locate_meme_files(normalized)
+        if file_error is not None:
+            return False, None, file_error
 
-        # 确认记录确实消失；未消失说明删除未生效。
-        # 这里用服务端 where 查询而非客户端翻页过滤：where 查询结果由
-        # 向量库保证，不会因分页截断而误判残留。
-        remaining = await self._count_records_by_meme_id(vdb, collection, normalized)
-        if remaining:
+        if not target_records:
+            # 向量库中已无该表情包的记录。若文件仍在，说明上次删除只完成了
+            # 向量库部分，属于可补齐的部分完成状态，继续清理文件。
+            if not files:
+                return False, None, f"未找到 id={normalized} 对应的表情包"
+            deleted_files = await self._delete_meme_files(files)
+            if deleted_files is None:
+                return (
+                    False,
+                    None,
+                    "向量库记录已不存在，但表情包文件删除失败，请重试",
+                )
+            detail = {
+                "meme_id": normalized,
+                "tags": [],
+                "description": "",
+                "path": str(files[0]),
+                "deleted_records": 0,
+                "file_deleted": True,
+                "deleted_files": deleted_files,
+            }
+            logger.info(
+                f"已补齐表情包文件删除: {normalized[:8]}... 文件数={len(deleted_files)}"
+            )
+            return True, detail, "删除成功"
+
+        # 阶段 C：删除向量库记录（使用收集阶段核实的记录 ID）
+        record_ids = [record.record_id for record in target_records]
+        try:
+            await vdb.delete(collection_name=collection, ids=record_ids)
+        except Exception as e:
+            # 向量库实现通常会吞掉内部异常，但其他后端可能直接抛出；
+            # 无论哪种情况，都不能在未确认删除结果时继续删除文件。
+            logger.warning(f"删除向量库记录失败: {e}")
             return (
                 False,
                 None,
-                f"删除向量库记录失败：仍有 {remaining} 条记录残留",
+                "删除向量库记录失败，已保留表情包文件，请稍后重试",
             )
 
-        # 2) 删除磁盘文件
-        file_deleted = False
-        if path_value:
-            path = Path(path_value)
-            if path.exists():
-                try:
-                    await asyncio.to_thread(self._delete_file, path_value)
-                    file_deleted = True
-                except Exception as e:
-                    logger.warning(f"删除表情包文件失败: {path_value} - {e}")
-                    return (
-                        False,
-                        None,
-                        f"已删除向量库记录，但删除文件失败：{path_value}",
-                    )
-            else:
-                # 文件已被手动删除，视为已删除
-                file_deleted = True
+        # 阶段 D：确认删除结果（必须能区分「确认无残留」与「无法确认」）
+        confirm_ids = self._extract_ids(
+            await self._get_records_by_ids(vdb, collection, record_ids)
+        )
+        if confirm_ids is None:
+            return (
+                False,
+                None,
+                "无法确认向量库删除结果，已保留表情包文件，请稍后重试",
+            )
+        if confirm_ids:
+            return (
+                False,
+                None,
+                f"删除向量库记录失败：仍有 {len(confirm_ids)} 条记录残留",
+            )
+
+        # 阶段 E：删除磁盘文件
+        deleted_files = await self._delete_meme_files(files)
+        if deleted_files is None:
+            return (
+                False,
+                None,
+                f"已删除向量库记录，但删除文件失败：{files[0] if files else normalized}",
+            )
 
         detail = {
             "meme_id": normalized,
             "tags": tags,
             "description": description,
-            "path": path_value,
-            "deleted_records": len(records),
-            "file_deleted": file_deleted,
+            "path": str(files[0]) if files else "",
+            "deleted_records": len(target_records),
+            "file_deleted": True,
+            "deleted_files": deleted_files,
         }
         logger.info(
             f"已删除表情包: {normalized[:8]}... 标签={tags} "
-            f"记录数={len(records)} 文件已删={file_deleted}"
+            f"记录数={len(target_records)} 文件数={len(deleted_files)}"
         )
         return True, detail, "删除成功"
 
     @staticmethod
-    async def _count_records_by_meme_id(
+    async def _get_records_by_ids(
         vdb: Any,
         collection: str,
-        meme_id: str,
-    ) -> int:
-        """统计向量库中属于指定 meme_id 的记录数。
-
-        优先使用服务端 where 过滤；若后端不支持，退回客户端扫描。
+        record_ids: list[str],
+    ) -> Any:
+        """按记录 ID 查询向量库记录。
 
         Args:
             vdb: 向量数据库服务。
             collection: 集合名。
-            meme_id: 完整 meme_id。
+            record_ids: 目标记录 ID 列表。
 
         Returns:
-            int: 记录数量。
+            Any: 向量库原始响应；由调用方判定有效性。
         """
         try:
-            data = await vdb.get(
+            return await vdb.get(
                 collection_name=collection,
-                where={"meme_id": meme_id},
+                ids=record_ids,
                 include=["metadatas"],
             )
         except Exception as e:
-            logger.debug(f"按 meme_id 查询记录失败，改用客户端扫描: {e}")
-            return 0
+            logger.warning(f"按记录 ID 查询向量库失败: {e}")
+            return None
 
-        ids = list(data.get("ids") or [])
-        if ids:
-            return len(ids)
+    async def _delete_meme_files(self, files: list[Path]) -> list[str] | None:
+        """删除已校验归属的表情包文件。
 
-        # where 查询无结果时，再以客户端扫描兜底（覆盖后端忽略 where 的情况）
-        metadatas = list(data.get("metadatas") or [])
-        if metadatas:
-            return len(metadatas)
-        return 0
+        Args:
+            files: 已通过哈希与目录校验的文件列表。
+
+        Returns:
+            list[str] | None: 已删除文件的路径列表；None 表示删除失败。
+        """
+        deleted: list[str] = []
+        for path in files:
+            try:
+                await asyncio.to_thread(self._delete_file, str(path))
+            except Exception as e:
+                logger.warning(f"删除表情包文件失败: {path} - {e}")
+                return None
+            deleted.append(str(path))
+        return deleted
 
     @staticmethod
-    async def _collect_records_by_meme_id(
+    async def _collect_target_records(
         vdb: Any,
         collection: str,
         meme_id: str,
-    ) -> list[dict[str, Any]]:
-        """收集向量库中属于指定 meme_id 的全部记录元数据。
+    ) -> _CollectResult:
+        """收集并核实属于指定 meme_id 的向量库记录。
+
+        记录身份以 record ID 为权威删除键，metadata 中的 meme_id 用于交叉校验：
+        两者都存在却不相等时视为身份冲突，整个收集失败，不选择其中之一继续。
 
         Args:
             vdb: 向量数据库服务。
@@ -1249,41 +1431,74 @@ class EmojiSenderService(BaseService):
             meme_id: 完整 meme_id。
 
         Returns:
-            list[dict[str, Any]]: 记录元数据列表。
+            _CollectResult: 收集结果；error 非 None 表示无法确认或数据异常。
         """
-        matched: list[dict[str, Any]] = []
+        matched: list[_TargetRecord] = []
+        seen_record_ids: set[str] = set()
         offset = 0
-        limit = 512
-        # 记录上一页返回的 id 集合：若某次 get 返回重复页，说明分页未推进，
-        # 继续翻页会死循环，此处直接收敛。
-        previous_ids: set[str] = set()
-        while True:
-            data = await vdb.get(
-                collection_name=collection,
-                limit=limit,
-                offset=offset,
-                include=["metadatas"],
-            )
-            ids: list[str] = list(data.get("ids") or [])
-            metadatas: list[dict[str, Any]] = list(data.get("metadatas") or [])
+
+        for _page in range(_MAX_SCAN_PAGES):
+            try:
+                data = await vdb.get(
+                    collection_name=collection,
+                    limit=_SCAN_PAGE_LIMIT,
+                    offset=offset,
+                    include=["metadatas"],
+                )
+            except Exception as e:
+                return _CollectResult((), f"查询向量库失败，无法确认表情包记录: {e}")
+
+            ids = EmojiSenderService._extract_ids(data)
+            if ids is None:
+                return _CollectResult((), "查询向量库响应无效，无法确认表情包记录")
             if not ids:
-                break
+                return _CollectResult(tuple(matched))
 
-            current_ids = {str(item) for item in ids}
-            if current_ids and current_ids == previous_ids:
-                logger.warning("向量库分页未推进，停止收集表情包记录")
-                break
-            previous_ids = current_ids
+            metadatas = EmojiSenderService._extract_metadatas(data)
+            if metadatas is None:
+                return _CollectResult((), "查询向量库响应无效，无法确认表情包元数据")
+            if len(metadatas) != len(ids):
+                return _CollectResult((), "查询向量库响应无效，元数据与记录数量不一致")
 
-            for i, record_id in enumerate(ids):
-                meta = metadatas[i] if i < len(metadatas) else {}
-                # 记录 ID 形如 "<meme_id>:<tag>"，metadata 中的 meme_id 为准
-                if str(meta.get("meme_id") or "").strip().lower() == meme_id:
-                    matched.append(dict(meta))
-                elif str(record_id).split(":", 1)[0].lower() == meme_id:
-                    matched.append(dict(meta))
+            for index, record_id in enumerate(ids):
+                if record_id in seen_record_ids:
+                    return _CollectResult(
+                        (),
+                        "向量库分页未推进，无法确认表情包记录是否完整",
+                    )
+                seen_record_ids.add(record_id)
+
+                meta = metadatas[index]
+                record_id_meme_id = record_id.split(":", 1)[0].strip().lower()
+                meta_meme_id = str(meta.get("meme_id") or "").strip().lower()
+
+                if record_id_meme_id and meta_meme_id and record_id_meme_id != meta_meme_id:
+                    return _CollectResult(
+                        (),
+                        f"表情包记录身份冲突，拒绝删除: {record_id}",
+                    )
+                if not record_id_meme_id and not meta_meme_id:
+                    return _CollectResult(
+                        (),
+                        f"表情包记录缺少 meme_id，拒绝删除: {record_id}",
+                    )
+
+                resolved_meme_id = meta_meme_id or record_id_meme_id
+                if resolved_meme_id != meme_id:
+                    continue
+
+                matched.append(
+                    _TargetRecord(
+                        record_id=record_id,
+                        meme_id=resolved_meme_id,
+                        tag=str(meta.get("tag") or "").strip(),
+                        description=str(meta.get("description") or "").strip(),
+                    )
+                )
+
             offset += len(ids)
-        return matched
+
+        return _CollectResult((), "表情包记录数量超出扫描上限，无法确认是否完整")
 
     async def send_best_detailed(
         self,

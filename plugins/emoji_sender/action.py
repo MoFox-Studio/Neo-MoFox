@@ -129,7 +129,8 @@ class DeleteEmojiMemeByIdAction(BaseAction):
     name: str = "delete_emoji_meme_by_id"
     description: str = (
         "从表情包库中彻底删除一张表情包，同时移除磁盘文件与向量库记录，删除后不可恢复。"
-        "meme_id 必须是 search_emoji_memes 返回的完整 meme_id（64 位十六进制），不接受前缀。"
+        "meme_id 必须是 search_emoji_memes 返回的完整 meme_id"
+        "（64 位十六进制，仅限 0-9a-f），不接受前缀。"
         "仅在你明确不想再使用这张表情包时调用，例如候选列表里的表情明显不合适、"
         "或用户要求清理某张表情包。"
     )
