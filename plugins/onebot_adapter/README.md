@@ -20,7 +20,7 @@ NEW_onebot_adapter/
 ├── _manifest.json                 # 插件清单
 │
 └── src/
-    ├── event_models.py            # ✅ OneBot事件类型常量
+    ├── event_models.py            # OneBot 事件与请求种类枚举
     ├── common/
     │   └── core_sink.py           # ✅ 全局CoreSink访问点
     │
@@ -39,7 +39,8 @@ NEW_onebot_adapter/
     └── handlers/
         ├── to_core/               # Napcat → MessageEnvelope 方向
         │   ├── message_handler.py # ⏳ 消息处理（部分完成）
-        │   ├── notice_handler.py  # ⏳ 通知处理（待完成）
+        │   ├── event_handler.py   # 统一处理请求、元事件和未识别事件
+        │   ├── notice_handler.py  # 通知处理与原始事件透传
         │   └── meta_event_handler.py  # ⏳ 元事件（待完成）
         │
         └── to_napcat/             # MessageEnvelope → Napcat API 方向
