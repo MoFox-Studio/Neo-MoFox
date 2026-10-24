@@ -213,6 +213,13 @@ class ToolUse:
                 # 事件触发失败不中断工具执行，静默降级
                 pass
 
+            # 绑定运行时上下文。
+            # 必须在 BEFORE_TOOL_CALL 之后执行，因为事件处理器可能替换 message。
+            tool_instance._bind_runtime_context(
+                stream_id=str(getattr(message, "stream_id", "") or "").strip(),
+                message=message,
+            )
+
             # 调用 Tool 的 execute 方法
             from src.kernel.llm.usable_execution import execute_usable_instance
 
