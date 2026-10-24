@@ -317,6 +317,44 @@ class EmojiSenderService(BaseService):
                 return None
         return [dict(item) for item in metadatas]
 
+    @staticmethod
+    def _collect_meme_candidates(
+        data_dir: Path,
+        meme_id: str,
+        resolved_dir: Path,
+    ) -> tuple[list[Path], str | None]:
+        """探测属于目标表情包的候选文件（同步，在线程中调用）。
+
+        文件系统探测包含 exists/is_symlink/is_file/resolve 等同步调用，
+        放到线程中执行以免阻塞事件循环。
+
+        Args:
+            data_dir: 插件表情包存储目录。
+            meme_id: 目标表情包的完整 ID。
+            resolved_dir: 存储目录解析后的真实路径。
+
+        Returns:
+            tuple[list[Path], str | None]: (候选文件列表, 失败原因)。
+                失败原因为 None 表示校验通过。
+        """
+        candidates: list[Path] = []
+        for suffix in sorted(_ALLOWED_SUFFIXES):
+            candidate = data_dir / f"{meme_id}{suffix}"
+            try:
+                if not candidate.exists():
+                    continue
+                if candidate.is_symlink():
+                    return [], f"表情包文件是符号链接，拒绝删除: {candidate}"
+                if not candidate.is_file():
+                    continue
+                # 用解析后的真实父目录比对，才能识别指向存储目录外的软链
+                if candidate.resolve().parent != resolved_dir:
+                    return [], f"表情包文件不在存储目录内，拒绝删除: {candidate}"
+            except OSError as e:
+                return [], f"检查表情包文件失败: {candidate} - {e}"
+            candidates.append(candidate)
+        return candidates, None
+
     async def _locate_meme_files(self, meme_id: str) -> tuple[list[Path], str | None]:
         """在插件 data 目录内定位属于目标表情包的文件并校验归属。
 
@@ -333,26 +371,18 @@ class EmojiSenderService(BaseService):
         """
         data_dir = self._data_dir()
         try:
-            resolved_dir = data_dir.resolve()
+            resolved_dir = await asyncio.to_thread(data_dir.resolve)
         except OSError as e:
             return [], f"无法解析表情包存储目录: {e}"
 
-        candidates: list[Path] = []
-        for suffix in sorted(_ALLOWED_SUFFIXES):
-            candidate = data_dir / f"{meme_id}{suffix}"
-            try:
-                if not candidate.exists():
-                    continue
-                if candidate.is_symlink():
-                    return [], f"表情包文件是符号链接，拒绝删除: {candidate}"
-                if not candidate.is_file():
-                    continue
-                if candidate.parent.resolve() != resolved_dir:
-                    return [], f"表情包文件不在存储目录内，拒绝删除: {candidate}"
-            except OSError as e:
-                return [], f"检查表情包文件失败: {candidate} - {e}"
-            candidates.append(candidate)
-
+        candidates, probe_error = await asyncio.to_thread(
+            self._collect_meme_candidates,
+            data_dir,
+            meme_id,
+            resolved_dir,
+        )
+        if probe_error is not None:
+            return [], probe_error
         if not candidates:
             return [], None
 
@@ -1309,6 +1339,8 @@ class EmojiSenderService(BaseService):
                 "file_deleted": True,
                 "deleted_files": deleted_files,
             }
+            # 同样抑制后续入库重新收录，否则补齐后表情包会再次出现。
+            self._rejected_hashes.add(normalized)
             logger.info(
                 f"已补齐表情包文件删除: {normalized[:8]}... 文件数={len(deleted_files)}"
             )
@@ -1363,6 +1395,10 @@ class EmojiSenderService(BaseService):
             "file_deleted": True,
             "deleted_files": deleted_files,
         }
+        # 抑制后续入库重新收录同一张表情包：向量记录已删除，若源文件仍留在
+        # media cache 或手动目录，下一轮入库会把它当作新表情包重新复制回库，
+        # 使「彻底删除」失效。此处与 VLM 拒收走同一套抑制机制。
+        self._rejected_hashes.add(normalized)
         logger.info(
             f"已删除表情包: {normalized[:8]}... 标签={tags} "
             f"记录数={len(target_records)} 文件数={len(deleted_files)}"
@@ -1472,20 +1508,28 @@ class EmojiSenderService(BaseService):
                 record_id_meme_id = record_id.split(":", 1)[0].strip().lower()
                 meta_meme_id = str(meta.get("meme_id") or "").strip().lower()
 
-                if record_id_meme_id and meta_meme_id and record_id_meme_id != meta_meme_id:
-                    return _CollectResult(
-                        (),
-                        f"表情包记录身份冲突，拒绝删除: {record_id}",
-                    )
+                # 身份校验只针对目标记录：无关记录的异常不应阻断删除目标。
+                # 但当一条记录完全无法判断归属（记录 ID 前缀与元数据都缺少
+                # meme_id）时，仍按失败关闭处理，避免漏删目标记录。
                 if not record_id_meme_id and not meta_meme_id:
                     return _CollectResult(
                         (),
                         f"表情包记录缺少 meme_id，拒绝删除: {record_id}",
                     )
 
-                resolved_meme_id = meta_meme_id or record_id_meme_id
-                if resolved_meme_id != meme_id:
+                record_id_matches = record_id_meme_id == meme_id
+                meta_matches = meta_meme_id == meme_id
+                if not record_id_matches and not meta_matches:
+                    # 该记录明确属于其它表情包，与本次删除无关。
                     continue
+
+                if record_id_meme_id and meta_meme_id and record_id_meme_id != meta_meme_id:
+                    return _CollectResult(
+                        (),
+                        f"表情包记录身份冲突，拒绝删除: {record_id}",
+                    )
+
+                resolved_meme_id = meta_meme_id or record_id_meme_id
 
                 matched.append(
                     _TargetRecord(

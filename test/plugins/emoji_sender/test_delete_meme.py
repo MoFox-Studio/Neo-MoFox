@@ -53,6 +53,7 @@ class _FakeVectorDB:
         fail_get: bool = False,
         fail_delete: bool = False,
         fail_ids_get: bool = False,
+        empty_dict_on_get: bool = False,
         empty_dict_on_ids_get: bool = False,
         ids_not_list: bool = False,
         missing_ids_key: bool = False,
@@ -65,21 +66,23 @@ class _FakeVectorDB:
 
         Args:
             records: 记录列表，每项含 record_id 与 metadata。
-            fail_get: 查询是否整体抛异常。
+            fail_get: 任意查询是否抛异常。
             fail_delete: 删除是否抛异常。
             fail_ids_get: 按 ids 的复查查询是否抛异常。
-            empty_dict_on_ids_get: 按 ids 的复查查询是否返回空字典。
+            empty_dict_on_get: 任意查询是否返回空字典（真实后端的失败形态）。
+            empty_dict_on_ids_get: 仅按 ids 的复查查询是否返回空字典。
             ids_not_list: 复查查询是否返回 ids 非列表。
             missing_ids_key: 复查查询是否缺少 ids 键。
             metadatas_missing_key: 响应是否缺少 metadatas 键。
             metadatas_with_none: metadatas 中是否含 None 元素。
             metadatas_short: metadatas 是否比 ids 短。
-            page_sequence: 强制分页返回的记录 ID 序列。
+            page_sequence: 强制分页返回的记录 ID 序列，按调用顺序逐页下发。
         """
         self.records = [dict(item) for item in records]
         self.fail_get = fail_get
         self.fail_delete = fail_delete
         self.fail_ids_get = fail_ids_get
+        self.empty_dict_on_get = empty_dict_on_get
         self.empty_dict_on_ids_get = empty_dict_on_ids_get
         self.ids_not_list = ids_not_list
         self.missing_ids_key = missing_ids_key
@@ -89,6 +92,8 @@ class _FakeVectorDB:
         self.page_sequence = page_sequence
         self.deleted_ids: list[str] = []
         self.get_calls: list[dict[str, Any]] = []
+        self.delete_calls: list[dict[str, Any]] = []
+        self.scan_call_count = 0
 
     def _rows(self) -> list[tuple[str, dict[str, Any]]]:
         """返回 (record_id, metadata) 列表。"""
@@ -120,13 +125,18 @@ class _FakeVectorDB:
                 "where": kwargs.get("where"),
                 "ids": kwargs.get("ids"),
                 "offset": kwargs.get("offset"),
+                "collection_name": kwargs.get("collection_name"),
             }
         )
         if self.fail_get:
             raise RuntimeError("注入的查询失败")
+        if kwargs.get("ids") is not None and self.fail_ids_get:
+            raise RuntimeError("注入的复查查询失败")
+        if self.empty_dict_on_get:
+            # 真实后端在任何查询异常下都返回空字典，插件据此区分
+            # 「查询成功但无结果」与「查询失败、无法确认」。
+            return {}
         if kwargs.get("ids") is not None:
-            if self.fail_ids_get:
-                raise RuntimeError("注入的复查查询失败")
             if self.empty_dict_on_ids_get:
                 return {}
             if self.ids_not_list:
@@ -140,7 +150,10 @@ class _FakeVectorDB:
         offset = kwargs.get("offset") or 0
 
         if self.page_sequence is not None:
-            index = offset // int(limit or 512)
+            # 按调用次数取页：服务每页只推进 offset += len(ids)，
+            # 用 offset // limit 索引会永远停在第一页。
+            index = self.scan_call_count
+            self.scan_call_count += 1
             if index >= len(self.page_sequence):
                 return {"ids": [], "metadatas": []}
             page_ids = self.page_sequence[index]
@@ -171,8 +184,15 @@ class _FakeVectorDB:
                 return meta
         return {}
 
-    async def delete(self, **kwargs: Any) -> None:
+    async def delete(self, **kwargs: Any) -> dict[str, Any]:
         """模拟向量库删除。"""
+        self.delete_calls.append(
+            {
+                "ids": kwargs.get("ids"),
+                "where": kwargs.get("where"),
+                "collection_name": kwargs.get("collection_name"),
+            }
+        )
         if self.fail_delete:
             raise RuntimeError("注入的删除失败")
         ids = kwargs.get("ids")
@@ -927,3 +947,337 @@ class TestDeleteAction:
 
         assert results[-1][0] is False
         assert "未找到" in results[-1][1]
+
+
+class TestUnrelatedRecordsDoNotBlockDelete:
+    """无关记录的异常不应阻断删除目标表情包。"""
+
+    @pytest.mark.asyncio
+    async def test_unrelated_conflicting_record_does_not_block(self, tmp_path: Path) -> None:
+        """与目标无关的身份冲突记录不应阻断删除目标表情包。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+
+        records = [
+            _record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file)),
+            # 记录 ID 前缀与元数据不一致，且与目标无关
+            _record(f"{OTHER_ID}:开心", "c" * 64, path=str(meme_file)),
+        ]
+        vdb = _make_vdb(records)
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is True
+        assert reason == "删除成功"
+        assert result is not None
+        # 只删除目标记录，无关记录保留
+        assert [item["record_id"] for item in vdb.records] == [f"{OTHER_ID}:开心"]
+        assert not meme_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_unrelated_missing_meme_id_record_does_not_block(
+        self, tmp_path: Path
+    ) -> None:
+        """与目标无关且缺少 meme_id 的记录不应阻断删除目标表情包。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+
+        records = [
+            _record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file)),
+            # 记录 ID 前缀指向其它表情包，元数据没有 meme_id
+            _record(f"{OTHER_ID}:开心", None, path=str(meme_file)),
+        ]
+        vdb = _make_vdb(records)
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, _, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is True
+        assert reason == "删除成功"
+        assert not meme_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_target_record_with_conflicting_identity_still_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """目标记录自身身份矛盾时仍必须失败关闭。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+
+        # 记录 ID 前缀指向目标，元数据却指向别的表情包
+        records = [_record(f"{MEME_ID}:开心", OTHER_ID, path=str(meme_file))]
+        vdb = _make_vdb(records)
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is False
+        assert result is None
+        assert "身份冲突" in reason
+        assert meme_file.exists()
+
+
+class TestDeleteSuppressesReingest:
+    """删除后应抑制后续入库重新收录同一张表情包。"""
+
+    @pytest.mark.asyncio
+    async def test_deleted_meme_id_added_to_rejected_hashes(self, tmp_path: Path) -> None:
+        """删除成功后 meme_id 进入拒绝集合，阻止再次入库。"""
+        config = EmojiSenderConfig()
+        rejected: set[str] = set()
+        plugin = SimpleNamespace(config=config, _rejected_hashes=rejected)
+        service = EmojiSenderService(plugin=cast(Any, plugin))
+
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))])
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, _, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is True
+        assert reason == "删除成功"
+        assert MEME_ID in rejected
+
+    @pytest.mark.asyncio
+    async def test_completion_path_also_suppresses_reingest(self, tmp_path: Path) -> None:
+        """补齐文件删除的路径同样要抑制重新入库。"""
+        config = EmojiSenderConfig()
+        rejected: set[str] = set()
+        plugin = SimpleNamespace(config=config, _rejected_hashes=rejected)
+        service = EmojiSenderService(plugin=cast(Any, plugin))
+
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        # 向量库中已无该记录，只剩文件
+        vdb = _make_vdb([])
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, _, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is True
+        assert reason == "删除成功"
+        assert not meme_file.exists()
+        assert MEME_ID in rejected
+
+    @pytest.mark.asyncio
+    async def test_failed_delete_does_not_suppress_reingest(self, tmp_path: Path) -> None:
+        """删除失败时不应抑制重新入库，避免误伤正常表情包。"""
+        config = EmojiSenderConfig()
+        rejected: set[str] = set()
+        plugin = SimpleNamespace(config=config, _rejected_hashes=rejected)
+        service = EmojiSenderService(plugin=cast(Any, plugin))
+
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))])
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, _, _ = await service.delete_by_meme_id(meme_id=OTHER_ID)
+
+        assert ok is False
+        assert MEME_ID not in rejected
+
+
+class TestStageAFailureHandling:
+    """收集阶段（扫描向量库）的失败形态必须失败关闭。"""
+
+    @pytest.mark.asyncio
+    async def test_scan_query_exception_keeps_file(self, tmp_path: Path) -> None:
+        """扫描阶段查询抛异常时失败关闭，文件不得被删除。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb(
+            [_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))],
+            fail_get=True,
+        )
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is False
+        assert result is None
+        assert "查询向量库失败" in reason
+        assert meme_file.exists()
+        assert vdb.records != []
+
+    @pytest.mark.asyncio
+    async def test_scan_empty_dict_response_keeps_file(self, tmp_path: Path) -> None:
+        """扫描阶段返回空字典（真实后端的失败形态）时失败关闭。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb(
+            [_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))],
+            empty_dict_on_get=True,
+        )
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is False
+        assert result is None
+        assert "无法确认表情包记录" in reason
+        assert meme_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_scan_metadata_key_missing_keeps_file(self, tmp_path: Path) -> None:
+        """扫描阶段响应缺少 metadatas 键时失败关闭。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb(
+            [_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))],
+            metadatas_missing_key=True,
+        )
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is False
+        assert result is None
+        assert "无法确认表情包元数据" in reason
+        assert meme_file.exists()
+
+
+class TestCollectionScoping:
+    """所有向量库操作必须落在同一个集合上。"""
+
+    @pytest.mark.asyncio
+    async def test_all_operations_use_same_collection(self, tmp_path: Path) -> None:
+        """扫描、删除与复查查询必须使用同一个集合名。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))])
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, _, _ = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is True
+        collections = {
+            call["collection_name"]
+            for call in [*vdb.get_calls, *vdb.delete_calls]
+            if call.get("collection_name")
+        }
+        assert len(collections) == 1, f"应只使用一个集合，实际用了 {collections}"
+
+
+class TestPartialCompletionAssertions:
+    """部分完成状态必须同时钉住向量侧与文件侧。"""
+
+    @pytest.mark.asyncio
+    async def test_vector_deleted_but_file_kept(self, tmp_path: Path) -> None:
+        """向量已删、文件未删时，向量侧与文件侧都要被断言。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))])
+
+        def boom(path_value: str) -> None:
+            raise OSError("注入的文件删除失败")
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+            patch.object(service, "_delete_file", side_effect=boom),
+        ):
+            ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is False
+        assert result is None
+        assert "已删除向量库记录，但删除文件失败" in reason
+        # 向量记录确实已删除，文件确实仍在
+        assert vdb.records == []
+        assert meme_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_retry_completion_file_delete_failure(self, tmp_path: Path) -> None:
+        """补齐路径中文件删除也失败时，必须报告失败而非成功。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        # 向量库中已无记录，只剩文件
+        vdb = _make_vdb([])
+
+        def boom(path_value: str) -> None:
+            raise OSError("注入的文件删除失败")
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+            patch.object(service, "_delete_file", side_effect=boom),
+        ):
+            ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is False
+        assert result is None
+        assert "表情包文件删除失败" in reason
+        assert meme_file.exists()
+
+
+class TestPaginationAdvancement:
+    """分页必须真正推进到下一页。"""
+
+    @pytest.mark.asyncio
+    async def test_alternating_pages_rejected(self, tmp_path: Path) -> None:
+        """交替重复页必须被识别为分页未推进。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+
+        page_a = [f"{MEME_ID}:开心"]
+        page_b = [f"{OTHER_ID}:开心"]
+        vdb = _make_vdb(
+            [
+                _record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file)),
+                _record(f"{OTHER_ID}:开心", OTHER_ID, path=str(meme_file)),
+            ],
+            page_sequence=[page_a, page_b, page_a, page_b],
+        )
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is False
+        assert result is None
+        assert "分页未推进" in reason
+        assert meme_file.exists()
