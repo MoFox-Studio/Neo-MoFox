@@ -137,7 +137,8 @@ class ToolUse:
         if not tool_cls or not issubclass(tool_cls, BaseTool):
             raise ValueError(f"Tool 类未找到: {signature}")
 
-        # 创建 Tool 实例
+        # 创建 Tool 实例（运行时上下文在 BEFORE_TOOL_CALL 之后绑定，
+        # 因为事件处理器可能替换 message）
         tool_instance = tool_cls(plugin)
 
         # 检查缓存
@@ -212,6 +213,16 @@ class ToolUse:
             except Exception:
                 # 事件触发失败不中断工具执行，静默降级
                 pass
+
+            # 绑定运行时上下文。
+            # 与 create_llm_usable_execution 保持一致：Tool 通过
+            # get_current_stream_id() / trigger_message 访问调用上下文，未绑定时只能拿到空串。
+            # 必须放在 BEFORE_TOOL_CALL 之后：事件处理器可能替换 message，
+            # 绑定要跟随最终生效的那条消息，否则 Tool 会看到过期的流与触发消息。
+            tool_instance._bind_runtime_context(
+                stream_id=str(getattr(message, "stream_id", "") or "").strip(),
+                message=message,
+            )
 
             # 调用 Tool 的 execute 方法
             from src.kernel.llm.usable_execution import execute_usable_instance
