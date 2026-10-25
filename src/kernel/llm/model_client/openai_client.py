@@ -399,6 +399,45 @@ def _should_backfill_reasoning_content(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+_REASONING_HISTORY_DISABLED = {"", "0", "none", "false", "off", "no", "disabled", "disable"}
+
+# 区分「用户没有配置」与「用户显式配置了假值」：前者的处理见 create() 里的说明。
+_UNSET = object()
+
+
+def _resolve_reasoning_history_enabled(mode: Any) -> bool:
+    """把用户显式配置的 ``reasoning_history_mode`` 归一化为「是否发送 reasoning_content 历史」。
+
+    只负责归一化**显式配置**；未配置时的默认值由 :meth:`OpenAIChatClient.create` 决定
+    （按请求是否携带 ``tools``：携带则必须发送，否则 DeepSeek 返回 400；不携带则省略）。
+
+    支持三种写法：
+
+    - 旧的布尔写法：``True`` 发送、``False`` 不发送；
+    - 数字写法：``0`` 不发送、非 0 发送（TOML 里 ``= false`` 与 ``= 0`` 都常见）；
+    - 字符串模式：``"none"`` / ``"off"`` / ``"disabled"`` 等表示关闭；``"deepseek"`` /
+      ``"kimi"`` / ``"auto"`` 等显式开启模式。无法识别的字符串按开启处理，避免静默改变既有部署。
+    - 其他类型（list / dict 等）视为配置错误，按不发送处理。
+
+    Args:
+        mode: ``extra_params["reasoning_history_mode"]`` 的原始取值。
+
+    Returns:
+        bool: ``True`` 表示保留并在需要时回填 reasoning_content 历史。
+    """
+    if isinstance(mode, bool):
+        return mode
+    if mode is None:
+        return False
+    if isinstance(mode, (int, float)):
+        return mode != 0
+    if not isinstance(mode, str):
+        # list / dict 之类的写法是配置错误。不要 str() 之后当成未知模式放行，
+        # 否则会把 reasoning_content 历史发给 provider。
+        return False
+    return mode.strip().lower() not in _REASONING_HISTORY_DISABLED
+
+
 def _thinking_enabled(model_set: dict[str, Any]) -> bool:
     """判断当前模型请求是否显式开启了 thinking / reasoning 模式。"""
     extra_params = model_set.get("extra_params")
@@ -859,8 +898,11 @@ class OpenAIChatClient:
         )
         # force_sync_http 已废弃，移除后不传给 API
         extra_params.pop("force_sync_http", None)
-        # 控制是否向兼容供应商发送 reasoning_content 历史字段
-        reasoning_history_mode = extra_params.pop("reasoning_history_mode", True)
+        # 控制是否向兼容供应商发送 reasoning_content 历史字段。
+        # 未配置时默认发送：DeepSeek 对携带 tools 的请求要求历史轮次的 reasoning_content
+        # 必须完整回传，缺席会 400；未携带 tools 时该字段会被忽略，无副作用。
+        # 需要关闭时显式配置 reasoning_history_mode = "none" / false / 0。
+        reasoning_history_mode = extra_params.pop("reasoning_history_mode", _UNSET)
 
         client = self._get_client(
             api_key=api_key,
@@ -870,9 +912,16 @@ class OpenAIChatClient:
             force_ipv4=force_ipv4,
         )
         messages, openai_tools = _payloads_to_openai_messages(payloads)
-        # 默认不向 OpenAI-compatible provider 发送非标准 reasoning_content 历史字段，
-        # 避免污染请求结构；需要时通过 reasoning_history_mode 显式开启。
-        allow_reasoning_history = ( reasoning_history_mode == True )
+        if reasoning_history_mode is _UNSET:
+            # 未配置时按 DeepSeek 官方文档决定：
+            # - 携带 tools 的请求必须完整回传 reasoning_content，否则 API 返回 400；
+            # - 未携带 tools 的请求无需回传（即使传入也会被忽略），省略更干净。
+            # https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/
+            allow_reasoning_history = bool(openai_tools)
+        else:
+            allow_reasoning_history = _resolve_reasoning_history_enabled(
+                reasoning_history_mode
+            )
 
         if not allow_reasoning_history:
             for msg in messages:
@@ -902,6 +951,13 @@ class OpenAIChatClient:
         params.update(extra_params)
         if openai_tools and not tool_call_compat:
             params["tools"] = openai_tools
+        # 按最终请求体里是否真的有工具来决定 tool_choice：extra_params 也能直接注入
+        # tools，那种情况下同样要补上 auto，否则 provider 会收到 tools 却没有
+        # tool_choice，撞上上游把缺省值当作 required 的行为。
+        if params.get("tools"):
+            # 带工具时必须给出 tool_choice：默认 auto，避免上游把缺省值当作
+            # required 而触发 grammar 编译失败。用户显式注入的值优先。
+            params.setdefault("tool_choice", "auto")
         else:
             params.pop("tool_choice", None)
 
@@ -944,10 +1000,16 @@ class OpenAIChatClient:
         if extra_query:
             params["extra_query"] = extra_query
 
-        # 仅在显式允许 reasoning 历史模式时，才为缺失字段的 assistant 历史回填
-        # reasoning_content；默认模式下前面已经清理过该字段。
+        # 仅在允许 reasoning 历史时，才为缺失字段的 assistant 历史回填
+        # reasoning_content；关闭模式（allow_reasoning_history=False）下前面已经清理过该字段。
+        # 字符串模式（deepseek / kimi / auto 等）由用户显式声明，直接保留并回填；
+        # 旧的布尔写法维持原语义：仅在 thinking 开启或历史中已有 reasoning_content 时回填。
+        # 只有字符串模式算「用户显式声明的供应商方言」；布尔与数字写法都走下面的旧语义，
+        # 否则 `reasoning_history_mode = 0`（数字零）会被误判成显式开启并强制回填。
+        explicit_history_mode = isinstance(reasoning_history_mode, str)
         if allow_reasoning_history and (
-            _thinking_enabled(model_set)
+            explicit_history_mode
+            or _thinking_enabled(model_set)
             or _should_backfill_reasoning_content(messages)
         ):
             for msg in messages:
