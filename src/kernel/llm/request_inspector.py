@@ -1,6 +1,7 @@
 """LLM 原生调用生命周期检视器。
 
-本模块以线程安全的内存缓冲保存脱敏请求、标准化响应和 SDK 原始 JSON。
+本模块以线程安全的内存缓冲保存请求、标准化响应和 SDK 原始 JSON。
+数据不脱敏，键名及内容原样保留；外部读取必须认证并限制访问。
 原生适配器直接报告生命周期，不包装 SDK、不提供 HTTP 端点。
 
 **本模块是纯进程内工具，不对外提供任何 HTTP 端点。** 可视化调试请使用官方 WebUI：
@@ -24,13 +25,11 @@ import copy
 import json
 import time
 import math
-import re
 import threading
 import uuid
 from collections import Counter
 from dataclasses import field, fields, is_dataclass
 from types import SimpleNamespace
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dataclasses import dataclass
 from typing import Any
 
@@ -501,53 +500,7 @@ def build_render_view(
 
 
 _TERMINAL = frozenset({"captured", "succeeded", "failed", "cancelled"})
-_REDACTED = "[REDACTED]"
 _UNAVAILABLE = "[unavailable]"
-_SENSITIVE = frozenset(
-    {
-        "authorization",
-        "proxyauthorization",
-        "apikey",
-        "xapikey",
-        "key",
-        "token",
-        "accesstoken",
-        "refreshtoken",
-        "idtoken",
-        "password",
-        "passwd",
-        "secret",
-        "clientsecret",
-        "cookie",
-        "setcookie",
-        "credential",
-        "credentials",
-        "xamzsignature",
-        "xgoogsignature",
-        "xauthtoken",
-        "subscriptionkey",
-        "ocpapimsubscriptionkey",
-    }
-)
-_URL = re.compile(r"https?://[^\s\"'<>]+")
-_CREDENTIAL = re.compile(
-    r"(?i)(\b(?:authorization|proxy-authorization)[\"']?\s*[:=]\s*[\"']?)(?:bearer\s+|basic\s+)?[^\s,;\"']+"
-    r"|(\b(?:api[_-]?key|access[_-]?token|password|client[_-]?secret)[\"']?\s*[:=]\s*[\"']?)[^\s,;\"']+"
-)
-
-
-def _sensitive(key: str) -> bool:
-    """识别凭据字段名，避免误删词元用量计数。
-
-    Args:
-        key: 待检查的字段名。
-
-    Returns:
-        bool: 字段名是否表示敏感凭据。
-    """
-    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
-    # 同时覆盖 x-goog-api-key 等厂商前缀，不匹配 token 计数或 api_key_count。
-    return normalized in _SENSITIVE or normalized.endswith("apikey")
 
 
 def _json_size(value: Any) -> int:
@@ -564,81 +517,13 @@ def _json_size(value: Any) -> int:
     )
 
 
-class _Sanitizer:
-    """将数据安全转换为脱敏 JSON；未知对象不使用 repr/str 兜底。"""
+class _JsonConverter:
+    """转换为独立的 JSON 兼容数据，不脱敏、不改写字符串键或内容。"""
 
-    def __init__(self, secrets: tuple[str, ...] = ()) -> None:
-        self.secrets = {value for value in secrets if isinstance(value, str) and value}
-        self.redacted = False
+    def __init__(self) -> None:
+        """初始化无法转换与超出预算的标记。"""
         self.unavailable = False
         self.truncated = False
-
-    def learn(self, value: Any, seen: set[int] | None = None, depth: int = 0) -> None:
-        """在转换同级文本字段前收集凭据值，以便统一脱敏。
-
-        Args:
-            value: 待观测或转换的原始数据。
-            seen: 已访问对象的标识集合，用于检测循环引用。
-            depth: 当前递归层级。
-        """
-        seen = seen if seen is not None else set()
-        if id(value) in seen or depth > 64:
-            return
-        if isinstance(value, (dict, list, tuple)):
-            seen.add(id(value))
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if isinstance(key, str) and _sensitive(key):
-                    candidates = item if isinstance(item, (list, tuple)) else [item]
-                    for candidate in candidates:
-                        if isinstance(candidate, str) and candidate:
-                            self.secrets.add(candidate)
-                            if candidate.lower().startswith(("bearer ", "basic ")):
-                                self.secrets.add(candidate.split(" ", 1)[1])
-                self.learn(item, seen, depth + 1)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                self.learn(item, seen, depth + 1)
-
-    def text(self, value: str) -> str:
-        """移除普通文本中的已知凭据和 URL 认证信息。
-
-        Args:
-            value: 待观测或转换的原始数据。
-
-        Returns:
-            str: 去除已知凭据和 URL 认证信息后的文本。
-        """
-        original = value
-        for secret in sorted(self.secrets, key=len, reverse=True):
-            value = value.replace(secret, _REDACTED)
-
-        def clean_url(match: re.Match[str]) -> str:
-            """移除 URL 中的认证信息，同时保留非敏感参数。
-
-            Args:
-                match: 文本中匹配到的 URL。
-
-            Returns:
-                str: 移除认证信息后的 URL；解析失败时返回 [invalid URL] 标记。
-            """
-            try:
-                url = urlsplit(match.group())
-                netloc = url.netloc.rsplit("@", 1)[-1]
-                pairs = parse_qsl(url.query, keep_blank_values=True)
-                query = [(k, _REDACTED if _sensitive(k) else v) for k, v in pairs]
-                if netloc == url.netloc and query == pairs:
-                    return match.group()
-                return urlunsplit(
-                    (url.scheme, netloc, url.path, urlencode(query), url.fragment)
-                )
-            except ValueError:
-                return "[invalid URL]"
-
-        value = _URL.sub(clean_url, value)
-        value = _CREDENTIAL.sub(lambda m: (m.group(1) or m.group(2)) + _REDACTED, value)
-        self.redacted |= value != original
-        return value
 
     def convert(self, value: Any, limit: int | None = None) -> Any:
         """转换为独立的 JSON 兼容数据，并按需严格限制输出字节数。
@@ -650,7 +535,6 @@ class _Sanitizer:
         Returns:
             Any: 独立的 JSON 兼容数据，必要时仅保留部分结构或使用不可用标记。
         """
-        self.learn(value)
         seen: set[int] = set()
 
         def visit(item: Any, budget: int | None, depth: int) -> Any:
@@ -671,14 +555,10 @@ class _Sanitizer:
                 if isinstance(item, float) and not math.isfinite(item):
                     self.unavailable = True
                     item = None
-                if isinstance(item, str):
+                if isinstance(item, str) and budget is not None and len(item) > budget:
                     # 避免对单个超大的 SDK 文本增量执行无上限的 JSON 编码。
-                    if budget is not None and len(item) > budget:
-                        item = item[
-                            : budget + max((len(v) for v in self.secrets), default=0)
-                        ]
-                        self.truncated = True
-                    item = self.text(item)
+                    item = item[:budget]
+                    self.truncated = True
                 if budget is None or _json_size(item) <= budget:
                     return item
                 self.truncated = True
@@ -705,7 +585,6 @@ class _Sanitizer:
                     else:
                         self.unavailable = True
                         return visit(_UNAVAILABLE, budget, depth + 1)
-                    self.learn(item)
                     return visit(item, budget, depth + 1)
                 out: Any = {} if isinstance(item, dict) else []
                 used = 2
@@ -714,24 +593,20 @@ class _Sanitizer:
                     if isinstance(out, dict) and not isinstance(key, str):
                         self.unavailable = True
                         continue
-                    safe_key = self.text(key) if isinstance(out, dict) else key
                     overhead = (1 if out else 0) + (
-                        _json_size(safe_key) + 1 if isinstance(out, dict) else 0
+                        _json_size(key) + 1 if isinstance(out, dict) else 0
                     )
                     remaining = None if budget is None else budget - used - overhead
                     if remaining is not None and remaining < 4:
                         self.truncated = True
                         break
-                    if isinstance(key, str) and _sensitive(key):
-                        self.redacted = True
-                        child = _REDACTED
                     result = visit(child, remaining, depth + 1)
                     size = _json_size(result)
                     if budget is not None and used + overhead + size > budget:
                         self.truncated = True
                         break
                     if isinstance(out, dict):
-                        out[safe_key] = result
+                        out[key] = result
                     else:
                         out.append(result)
                     used += overhead + size
@@ -791,6 +666,7 @@ class CapturedRequest:
     error: dict[str, Any] | None = None
     capture_info: dict[str, Any] = field(
         default_factory=lambda: {
+            # 保留既有读取契约；当前不执行脱敏，该字段恒为 False。
             "redacted": False,
             "raw_bytes": 0,
             "raw_limit_bytes": 2 * 1024 * 1024,
@@ -802,13 +678,12 @@ class CapturedRequest:
     )
     _clock: float | None = field(default=None, repr=False)
     _raw_response_bytes: int = field(default=0, repr=False)
-    _secrets: set[str] = field(default_factory=set, repr=False)
 
     def to_summary(self) -> dict[str, Any]:
-        """返回记录摘要，不包含请求正文、响应正文或内部凭据状态。
+        """返回记录摘要，不包含请求正文或响应正文。
 
         Returns:
-            dict[str, Any]: 不含正文与内部凭据的记录摘要。
+            dict[str, Any]: 不含正文的记录摘要。
         """
         usage = self.response.get("usage") or {}
         return {
@@ -840,7 +715,7 @@ class CapturedRequest:
         }
 
     def to_full(self) -> dict[str, Any]:
-        """生成与内部状态隔离的详情，所有展示视图均来自脱敏快照。
+        """生成与内部状态隔离的详情，所有展示视图均来自同一参数快照。
 
         Returns:
             dict[str, Any]: 包含安全参数、派生视图、响应与采集状态的独立详情。
@@ -887,10 +762,10 @@ class RequestInspector:
         record.version += 1
         self._revision += 1
 
-    def _safe(
+    def _serialize(
         self, record: CapturedRequest, value: Any, unavailable: str | None = None
     ) -> Any:
-        """在保留数据前统一脱敏，并更新数据完整性标记。
+        """在保留数据前转换为独立的 JSON 兼容值，并更新完整性标记。
 
         Args:
             record: 需要处理的内部记录。
@@ -898,12 +773,10 @@ class RequestInspector:
             unavailable: 需要更新的不可用标记字段名；为 None 时不更新该标记。
 
         Returns:
-            Any: 脱敏后的独立 JSON 兼容数据。
+            Any: 不改写键名及内容的独立 JSON 兼容数据。
         """
-        converter = _Sanitizer(tuple(record._secrets))
+        converter = _JsonConverter()
         result = converter.convert(value)
-        record._secrets.update(converter.secrets)
-        record.capture_info["redacted"] |= converter.redacted
         if unavailable:
             record.capture_info[unavailable] |= converter.unavailable
         return result
@@ -918,7 +791,6 @@ class RequestInspector:
         logical_request_id: str | None = None,
         attempt: int = 1,
         stream: bool = False,
-        secrets: tuple[str, ...] = (),
     ) -> int:
         """创建手工捕获记录或原生待执行记录，返回单调递增的记录 ID。
 
@@ -930,7 +802,6 @@ class RequestInspector:
             logical_request_id: 关联重试的逻辑请求 ID；未提供时自动生成。
             attempt: 本逻辑请求的尝试序号，通常从 1 开始。
             stream: 是否以流式方式执行本次调用。
-            secrets: 已知敏感值，仅用于脱敏，不在公共快照中暴露。
 
         Returns:
             int: 新记录的单调递增 ID，清空后也不重复使用。
@@ -938,14 +809,11 @@ class RequestInspector:
         with self._lock:
             self._counter += 1
             record = CapturedRequest(self._counter, time.time(), "", "", {}, {})
-            record._secrets.update(secrets)
-            learner = _Sanitizer(tuple(secrets))
-            learner.learn(params)
-            learner.learn(metadata)
-            record._secrets.update(learner.secrets)
-            record.api_name = self._safe(record, api_name)
-            record.params = self._safe(record, params, "request_unavailable")
-            record.metadata = self._safe(record, metadata or {}, "metadata_unavailable")
+            record.api_name = self._serialize(record, api_name)
+            record.params = self._serialize(record, params, "request_unavailable")
+            record.metadata = self._serialize(
+                record, metadata or {}, "metadata_unavailable"
+            )
             if not isinstance(record.params, dict):
                 record.params = {"_unavailable": True}
                 record.capture_info["request_unavailable"] = True
@@ -971,7 +839,6 @@ class RequestInspector:
         *,
         api_name: str | None = None,
         metadata: dict[str, Any] | None = None,
-        secrets: tuple[str, ...] = (),
     ) -> None:
         """在调用提供商前记录最终 SDK 参数，并将记录设为执行中。
 
@@ -980,22 +847,20 @@ class RequestInspector:
             params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
             api_name: 用于标识 SDK 调用入口的接口名称。
             metadata: 需要合并到记录中的请求元数据。
-            secrets: 已知敏感值，仅用于脱敏，不在公共快照中暴露。
         """
         with self._lock:
             record = self._records.get(record_id)
             if record is None or record.status in _TERMINAL:
                 return
-            record._secrets.update(secrets)
             if params is not None:
-                record.params = self._safe(record, params, "request_unavailable")
+                record.params = self._serialize(record, params, "request_unavailable")
                 record.model = str(record.params.get("model", record.model))
                 record.stream = record.params.get("stream") is True or record.stream
             if api_name is not None:
-                record.api_name = self._safe(record, api_name)
+                record.api_name = self._serialize(record, api_name)
             if metadata:
                 record.metadata.update(
-                    self._safe(record, metadata, "metadata_unavailable")
+                    self._serialize(record, metadata, "metadata_unavailable")
                 )
             if record.started_at is None:
                 record.started_at = time.time()
@@ -1017,7 +882,7 @@ class RequestInspector:
             record = self._records.get(record_id)
             if record is None or record.status in _TERMINAL:
                 return
-            record.response.update(self._safe(record, response))
+            record.response.update(self._serialize(record, response))
             if record.stream and (content or record.raw_events):
                 record.status = "streaming"
             if content and record.first_token_ms is None and record._clock is not None:
@@ -1052,10 +917,8 @@ class RequestInspector:
                 info["raw_truncated"] = True
                 self._touch(record)
                 return
-            converter = _Sanitizer(tuple(record._secrets))
+            converter = _JsonConverter()
             data = converter.convert(value, available)
-            record._secrets.update(converter.secrets)
-            info["redacted"] |= converter.redacted
             info["raw_unavailable"] |= converter.unavailable
             info["raw_truncated"] |= converter.truncated
             size = _json_size(data)
@@ -1090,7 +953,7 @@ class RequestInspector:
             if record is None or record.status in _TERMINAL:
                 return
             if response:
-                record.response.update(self._safe(record, response))
+                record.response.update(self._serialize(record, response))
             if error is not None:
                 # 异常的 __str__ 可能不安全，因此仅保留其字符串参数。
                 message = next(
@@ -1098,7 +961,7 @@ class RequestInspector:
                     type(error).__name__,
                 )
                 code = getattr(error, "status_code", None)
-                record.error = self._safe(
+                record.error = self._serialize(
                     record,
                     {
                         "type": type(error).__name__,
@@ -1210,20 +1073,19 @@ class RequestInspector:
         return self.clear_snapshot()["cleared_count"]
 
     def import_json(self, payload: Any) -> list[CapturedRequest]:
-        """导入为手工捕获状态，返回与内部状态隔离且不含凭据的记录副本。
+        """导入为手工捕获状态，返回与内部状态隔离、保留原始字段的记录副本。
 
         Args:
             payload: 待导入的 JSON 对象、对象列表或包含 requests 的包装对象。
 
         Returns:
-            list[CapturedRequest]: 导入记录的脱敏副本，状态均为 captured。
+            list[CapturedRequest]: 导入记录的独立副本，状态均为 captured。
         """
         with self._lock:
             imported = []
             for api_name, params, metadata in _normalize_import_payload(payload):
                 record_id = self.capture(api_name, params, metadata)
                 record = copy.deepcopy(self._records[record_id])
-                record._secrets.clear()
                 imported.append(record)
             return imported
 

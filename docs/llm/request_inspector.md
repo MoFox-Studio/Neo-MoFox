@@ -56,12 +56,12 @@ result = inspector.clear_snapshot()
 | `duration_ms / first_token_ms` | 尝试耗时、首个文本/推理/工具参数增量耗时 |
 | `tokens_in / tokens_out` | 供应商实际返回的 token，缺失为 `null` |
 | `estimated_input_tokens` | 独立的输入估算，不替代实际 token |
-| `params / metadata` | 脱敏后的 SDK 参数和请求元数据 |
+| `params / metadata` | 原样保留字段名和内容的 SDK 参数及请求元数据 |
 | `rendered` | 从同一参数快照派生的概览、消息和工具视图 |
 | `response` | `kind=chat/embedding/rerank` 的标准化输出 |
 | `raw_response / raw_events` | SDK 原始响应或原始流事件 |
-| `error` | 安全的错误类型、消息和可用的 HTTP 状态码 |
-| `capture_info` | 脱敏、原始数据预算、截断及不可用标记 |
+| `error` | 错误类型、异常字符串参数和可用的 HTTP 状态码；内容不脱敏 |
+| `capture_info` | 原始数据预算、截断及不可用标记；兼容字段 `redacted` 恒为 `false` |
 
 `params` 保留 `messages/input/system/instructions/tools`、生成参数和
 `extra_body/extra_headers/extra_query` 的真实层级，未知字段也会保留。
@@ -119,26 +119,28 @@ finally:
 
 ## 安全与容量
 
-- 数据进入缓冲前脱敏；认证头、API Key、Cookie、敏感 URL 参数、已知凭据值和
-  JSON 字符串中的常见凭据字段不会原样出现在快照中。
-- API Key 字段按忽略大小写及分隔符后的名称识别，包含 `x-goog-api-key` 等
-  以 `apikey` 结尾的厂商前缀字段；独立于模型密钥的值也会脱敏，手工捕获和导入
-  使用同一规则。普通请求头、token 用量和 `api_key_count` 等计数字段保持不变。
-- 展示、复制、导出应使用同一快照，不能另取未脱敏 SDK 对象。
+- **不执行任何脱敏。** 请求头、查询参数、提示词、工具定义及参数、模型响应、流事件、
+  元数据和错误中的可序列化键名及内容原样保留；不扫描正文、不学习密钥、不改写字段名。
+- `capture_info.redacted` 为兼容既有读取契约保留，恒为 `false`，不表示内容不含敏感信息。
+- 采集接口不再接受 `secrets` 参数，也不从模型配置提取密钥用于观测；不会额外捕获 SDK
+  自动注入的认证头，但最终 SDK 参数或响应中已经出现的凭据不会被隐藏。
+- 展示、复制和导出使用同一份独立快照；不能将其当成可公开分享的数据。
 - 不支持的对象使用 `[unavailable]`，并标记不完整；不调用任意对象 `repr/str`
   兜底。其他可序列化字段仍然保留。
 - 单条原始响应和流事件共用默认 **2 MiB** 的紧凑 UTF-8 JSON 预算。超限保留
   前缀/部分结构，仍返回合法 JSON，并设置 `raw_truncated=true`；标准化内容继续采集。
 - `raw_bytes` 是实际保留的紧凑 JSON 字节数，不是网络流量或 Python 堆占用。
 - 该预算不限制请求正文和标准化结果的大小。200 条容量也不等于固定总内存上限。
-- 普通提示词、用户消息、工具结果仍可能包含个人信息。此功能是管理员调试数据，
-  不是通用个人信息脱敏器；外部接口仍必须认证并控制访问。
+- 请求头、正文、响应及错误可能包含明文 API Key、Cookie、个人信息等敏感内容。
+  外部接口必须认证并限制访问；导出、截图或分享前需自行移除敏感数据，不应公开暴露监视器。
+- 取消脱敏不改变异常传播、模型调用、流清理、预算及快照隔离规则。异常只读取已有字符串
+  参数，不通过任意对象的 `str/repr` 获取内容；日志仍不输出完整请求、响应或异常正文。
 
 ## 验证
 
 ```shell
 uv sync --locked
-uv run pytest test/kernel/llm/test_request_monitor.py test/kernel/llm/test_request_inspector.py test/kernel/llm/test_request_monitor_regressions.py --no-cov
+uv run pytest test/kernel/llm/test_request_monitor.py test/kernel/llm/test_request_inspector.py test/kernel/llm/test_request_monitor_regressions.py test/kernel/llm/test_request_inspector_fidelity.py --no-cov
 uv run pytest test/kernel/llm --no-cov
 uv run python examples/src/kernel/llm/request_inspector_example.py
 ```

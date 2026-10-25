@@ -1,4 +1,4 @@
-"""请求监视器审查回归：未消费流关闭与厂商前缀凭据脱敏。"""
+"""请求监视器回归：未消费流关闭与请求响应字段保真。"""
 
 from __future__ import annotations
 
@@ -197,8 +197,10 @@ async def test_anthropic_deferred_creation_error_is_terminal(
         "Ocp-Apim-Subscription-Key",
     ],
 )
-def test_vendor_header_redaction_in_capture_and_import(mode: str, header: str) -> None:
-    """手工捕获和导入均应识别厂商前缀凭据，不依赖已知模型密钥。"""
+def test_vendor_headers_are_preserved_in_capture_and_import(
+    mode: str, header: str
+) -> None:
+    """手工捕获与导入完整保留厂商请求头、业务字段及原始内容。"""
     inspector = RequestInspector()
     secret = "offline-independent-vendor-credential"
     params = {
@@ -217,13 +219,13 @@ def test_vendor_header_redaction_in_capture_and_import(mode: str, header: str) -
             {"api_name": "review.offline", "params": params}
         )
         record_id = imported[0].id
-        assert secret not in json.dumps(imported[0].to_full())
+        assert imported[0].to_full()["params"] == params
     record = inspector.get_record(record_id)
     headers = record["params"]["extra_headers"]
-    assert headers[header] == "[REDACTED]"
+    assert headers[header] == secret
     assert headers["x-request-id"] == "safe-request-id"
-    assert record["capture_info"]["redacted"]
-    assert secret not in json.dumps(record)
+    assert record["capture_info"]["redacted"] is False
+    assert record["params"] == params
     for key in ("prompt_tokens", "completion_tokens", "api_key_count"):
         assert record["params"][key] == params[key]
     assert params["extra_headers"][header] == secret
@@ -231,13 +233,13 @@ def test_vendor_header_redaction_in_capture_and_import(mode: str, header: str) -
 
 @pytest.mark.parametrize("protocol", ["openai", "responses", "anthropic"])
 @pytest.mark.parametrize("same_model_key", [False, True])
-async def test_native_vendor_header_redaction(
+async def test_native_vendor_headers_are_preserved(
     monkeypatch: pytest.MonkeyPatch,
     isolated_inspector: RequestInspector,
     protocol: str,
     same_model_key: bool,
 ) -> None:
-    """真实适配器使用独立厂商密钥时仍脱敏，但不改变发给 SDK 的参数。"""
+    """无论厂商请求头是否与模型密钥相同，SDK 参数及快照都保持原值。"""
     config = model(protocol)
     secret = (
         config["api_key"] if same_model_key else "offline-independent-vendor-credential"
@@ -256,12 +258,13 @@ async def test_native_vendor_header_redaction(
     record = isolated_inspector.get_record(1)
     assert calls[0]["extra_headers"]["x-goog-api-key"] == secret
     assert record["status"] == "succeeded"
-    assert record["params"]["extra_headers"]["x-goog-api-key"] == "[REDACTED]"
-    assert secret not in json.dumps(record)
+    assert record["params"]["extra_headers"]["x-goog-api-key"] == secret
+    assert record["params"] == calls[0]
+    assert record["capture_info"]["redacted"] is False
 
 
-def test_vendor_header_secret_is_removed_from_all_lifecycle_views() -> None:
-    """从厂商请求头学到的密钥应同时从元数据、响应、工具及错误中移除。"""
+def test_vendor_header_value_is_preserved_in_all_lifecycle_views() -> None:
+    """请求头内容不会影响元数据、响应、工具参数及错误的原样保存。"""
     inspector = RequestInspector()
     secret = "offline-independent-vendor-credential"
     record_id = inspector.capture(
@@ -285,7 +288,12 @@ def test_vendor_header_secret_is_removed_from_all_lifecycle_views() -> None:
     )
     inspector.finish(record_id, error=RuntimeError(f"vendor rejected {secret}"))
     record = inspector.get_record(record_id)
-    assert secret not in json.dumps(record)
+    assert record["metadata"]["echo"] == secret
+    assert record["raw_events"] == [{"echo": secret}]
+    assert record["response"]["message"] == secret
+    assert record["response"]["tool_calls"][0]["args"] == json.dumps({"token": secret})
+    assert record["error"]["message"] == f"vendor rejected {secret}"
+    assert record["capture_info"]["redacted"] is False
     assert (record["tokens_in"], record["tokens_out"]) == (3, 2)
     assert record["status"] == "failed"
 

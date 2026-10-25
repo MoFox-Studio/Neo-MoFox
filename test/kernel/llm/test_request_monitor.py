@@ -608,36 +608,35 @@ def test_buffer_atomicity_isolation_eviction_and_clear() -> None:
     assert RequestInspector().snapshot()["instance_id"] != snapshot["instance_id"]
 
 
-def test_credentials_removed_from_all_views_and_error() -> None:
-    """验证序列化及派生视图不会重新泄露凭据。"""
+def test_values_are_preserved_in_all_views_and_error() -> None:
+    """请求、响应、派生视图与错误原样保存，不扫描或替换凭据内容。"""
     inspector = get_inspector()
-    secret = "private-credential-123"
-    record_id = inspector.capture(
-        "test",
-        {
-            "model": "m",
-            "messages": [{"role": "user", "content": f"echo {secret}"}],
-            "extra_headers": {"Authorization": f"Bearer {secret}"},
-            "url": "https://user:password@example.invalid/v1?api_key=another-secret&version=1",
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {"name": "lookup", "parameters": {"type": "object"}},
-                }
-            ],
-        },
-        native=True,
-    )
+    secret = "offline-credential-123"
+    params = {
+        "model": "m",
+        "messages": [{"role": "user", "content": f"echo {secret}"}],
+        "extra_headers": {"Authorization": f"Bearer {secret}"},
+        "url": "https://user:password@example.invalid/v1?api_key=another-secret&version=1",
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "lookup", "parameters": {"type": "object"}},
+            }
+        ],
+    }
+    record_id = inspector.capture("test", params, native=True)
     inspector.start(record_id)
     inspector.raw(record_id, JSON(text=f"echo {secret}"))
     inspector.update(record_id, {"message": secret, "usage": {"prompt_tokens": 5}})
     inspector.finish(record_id, error=RuntimeError(f"key was {secret}"))
-    serialized = json.dumps(inspector.get_record(record_id))
-    assert secret not in serialized
-    assert "another-secret" not in serialized
-    assert "user:password" not in serialized
-    assert inspector.get_record(record_id)["tokens_in"] == 5
-    assert inspector.get_record(record_id)["capture_info"]["redacted"]
+    record = inspector.get_record(record_id)
+    assert record["params"] == params
+    assert record["raw_response"] == {"text": f"echo {secret}"}
+    assert record["response"]["message"] == secret
+    assert record["error"]["message"] == f"key was {secret}"
+    assert secret in json.dumps(record["rendered"])
+    assert record["tokens_in"] == 5
+    assert record["capture_info"]["redacted"] is False
 
 
 @pytest.mark.parametrize("event", [False, True])
@@ -789,7 +788,8 @@ async def test_native_creation_errors(
         await invoke(monkeypatch, protocol, error=error)
     record = get_inspector().get_record(1)
     assert record["status"] == ("cancelled" if cancel else "failed")
-    assert "confidential" not in json.dumps(record)
+    if not cancel:
+        assert record["error"]["message"] == "api_key=confidential"
     assert record["capture_info"]["raw_unavailable"]
 
 
@@ -861,27 +861,19 @@ async def test_sdk_parse_error_keeps_raw_response(
     assert record["raw_response"]["extra"] == "diagnostic body"
 
 
-def test_redaction_of_json_strings_and_url_encoding() -> None:
-    """验证序列化后的工具参数及认证查询字符串同样经过脱敏。"""
+def test_json_strings_and_urls_are_preserved() -> None:
+    """JSON 字符串、认证 URL、编码方式及普通正文均不被改写。"""
     inspector = get_inspector()
-    record_id = inspector.capture(
-        "test",
-        {
-            "arguments": '{"api_key":"tool-secret","password":"private"}',
-            "ordinary_url": "https://example.invalid/path?q=a%20b&version=1",
-            "secure_url": "https://example.invalid/path?access_token=access-secret",
-        },
-    )
+    params = {
+        "arguments": '{"api_key":"tool-secret","password":"private"}',
+        "ordinary_url": "https://example.invalid/path?q=a%20b&version=1",
+        "secure_url": "https://user:password@example.invalid/path?access_token=access-secret",
+        "content": "password=example-value，后面还有普通说明。",
+    }
+    record_id = inspector.capture("test", params)
     record = inspector.get_record(record_id)
-    serialized = json.dumps(record)
-    assert "tool-secret" not in serialized
-    assert "access-secret" not in serialized
-    assert "private" not in serialized
-    assert (
-        record["params"]["ordinary_url"]
-        == "https://example.invalid/path?q=a%20b&version=1"
-    )
-    assert json.loads(record["params"]["arguments"])["api_key"] == "[REDACTED]"
+    assert record["params"] == params
+    assert record["capture_info"]["redacted"] is False
 
 
 def test_raw_budget_exhaustion_and_terminal_immutability() -> None:

@@ -116,7 +116,7 @@ class Attempt:
 
         Args:
             logical: 本次调用所属的逻辑请求。
-            model: 模型配置，包含模型标识、提供商信息及用于脱敏的凭据。
+            model: 模型配置，仅提取模型标识与提供商信息用于观测。
             request_name: 用于展示和关联业务场景的请求名称。
             kind: 标准化响应类型，如聊天、嵌入或重排序。
             stream: 是否以流式方式执行本次调用。
@@ -140,9 +140,6 @@ class Attempt:
         self._usage_fields: set[str] = set()
         try:
             self._inspector = get_inspector()
-            key = model.get("api_key")
-            keys = key if isinstance(key, list) else [key]
-            secrets = tuple(k for k in keys if isinstance(k, str) and k)
             self.record_id = self._inspector.capture(
                 "provider.create",
                 {"model": model.get("model_identifier", "—")},
@@ -157,7 +154,6 @@ class Attempt:
                 logical_request_id=logical.id,
                 attempt=logical.next_attempt(),
                 stream=stream,
-                secrets=secrets,
             )
         except Exception as error:  # noqa: BLE001 - 可选观测逻辑的异常隔离边界
             self._warn(error)
@@ -429,7 +425,7 @@ def provider_attempt(
 
     Args:
         api_name: 用于标识 SDK 调用入口的接口名称。
-        model: 模型配置，包含模型标识、提供商信息及用于脱敏的凭据。
+        model: 模型配置，仅提取模型标识与提供商信息用于观测。
         request_name: 用于展示和关联业务场景的请求名称。
         kind: 标准化响应类型，如聊天、嵌入或重排序。
         stream: 是否以流式方式执行本次调用。

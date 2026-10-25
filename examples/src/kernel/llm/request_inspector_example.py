@@ -1,4 +1,4 @@
-"""请求监视器离线示例：安全的结构化输入、响应及缓冲快照。"""
+"""请求监视器离线示例：原样保留字段的输入、响应及缓冲快照。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from src.kernel.llm.request_inspector import RequestInspector
 
 
 def main() -> None:
-    """仅演示请求观测，不使用 SDK、HTTP 服务或凭据，也不调用模型。"""
+    """仅用虚构凭据演示请求观测，不使用 SDK、HTTP 服务或真实模型。"""
     inspector = RequestInspector()
     params = {
         "model": "offline-demo",
@@ -32,7 +32,7 @@ def main() -> None:
         ],
         "extra_headers": {
             "Authorization": "Bearer demo-not-a-real-key",
-            # 独立的厂商凭据同样脱敏，不依赖模型配置中的 API Key。
+            # 以下都是虚构值；监视器不脱敏，真实凭据也会原样出现在快照中。
             "x-goog-api-key": "demo-independent-vendor-key",
         },
     }
@@ -40,7 +40,11 @@ def main() -> None:
     inspector.start(record_id, params)
     inspector.raw(record_id, {"choices": [{"message": {"content": "演示结果"}}]})
     inspector.finish(record_id, {"kind": "chat", "message": "演示结果"})
-    print(json.dumps(inspector.get_record(record_id), ensure_ascii=False, indent=2))
+    detail = inspector.get_record(record_id)
+    assert detail is not None
+    assert detail["params"] == params
+    assert detail["capture_info"]["redacted"] is False
+    print(json.dumps(detail, ensure_ascii=False, indent=2))
     print(json.dumps(inspector.snapshot(), ensure_ascii=False, indent=2))
     assert inspector.clear_snapshot()["cleared_count"] == 1
 
