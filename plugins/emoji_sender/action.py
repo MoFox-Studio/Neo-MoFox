@@ -152,7 +152,11 @@ class DeleteEmojiMemeByIdAction(BaseAction):
         yield None
         ok, result, reason = await service.delete_by_meme_id(meme_id=meme_id)
 
-        if ok and result:
+        if ok:
+            # 成功但没有详情时也要给出成功文案，不能把成功当成失败
+            if not result:
+                yield True, "已删除表情包"
+                return
             tags = result.get("tags") or []
             tag_text = "、".join(str(tag) for tag in tags) if tags else "无"
             desc = str(result.get("description") or "").strip()

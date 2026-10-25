@@ -21,8 +21,13 @@ from plugins.emoji_sender.service import EmojiSenderService, _is_full_meme_id
 def _make_service() -> EmojiSenderService:
     """创建带最小配置的服务实例。"""
     config = EmojiSenderConfig()
-    # _rejected_hashes 由插件持有并共享给服务实例，构造 stub 时需一并提供
-    plugin = SimpleNamespace(config=config, _rejected_hashes=set())
+    # _rejected_hashes / _deleted_hashes 由插件持有并共享给服务实例，
+    # 构造 stub 时需一并提供
+    plugin = SimpleNamespace(
+        config=config,
+        _rejected_hashes=set(),
+        _deleted_hashes=set(),
+    )
     return EmojiSenderService(plugin=cast(Any, plugin))
 
 
@@ -149,9 +154,11 @@ class _FakeVectorDB:
         limit = kwargs.get("limit")
         offset = kwargs.get("offset") or 0
 
-        if self.page_sequence is not None:
-            # 按调用次数取页：服务每页只推进 offset += len(ids)，
-            # 用 offset // limit 索引会永远停在第一页。
+        if self.page_sequence is not None and ids is None:
+            # 仅作用于扫描查询（无 ids）。按 ids 的复查查询必须按 id 过滤，
+            # 否则阶段 D 的删除确认拿到的是无关页面，确认逻辑就测不到。
+            # 服务每页只推进 offset += len(ids)，用 offset // limit 索引会永远
+            # 停在第一页，因此改按调用次数取页。
             index = self.scan_call_count
             self.scan_call_count += 1
             if index >= len(self.page_sequence):
@@ -447,9 +454,11 @@ class TestDeleteByMemeId:
             ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
 
         assert ok is False
-        assert result is None
         assert "删除文件失败" in reason
         assert meme_file.exists()
+        # 部分完成状态携带详情
+        assert result is not None
+        assert result["file_deleted"] is False
 
     @pytest.mark.asyncio
     async def test_records_remaining_detected(self, tmp_path: Path) -> None:
@@ -1004,6 +1013,37 @@ class TestUnrelatedRecordsDoNotBlockDelete:
         assert ok is True
         assert reason == "删除成功"
         assert not meme_file.exists()
+        # 无关记录必须幸存，否则过度删除（把无关记录一并删掉）不会被发现
+        assert [item["record_id"] for item in vdb.records] == [f"{OTHER_ID}:开心"]
+
+    @pytest.mark.asyncio
+    async def test_record_without_any_meme_id_does_not_block(self, tmp_path: Path) -> None:
+        """记录 ID 前缀与元数据都缺少 meme_id 的记录不应阻断删除目标。
+
+        这类记录无法指向目标（目标 ID 恒为非空的 64 位十六进制），
+        对它失败关闭不会防止漏删目标记录，只会阻断用户的删除请求。
+        """
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+
+        records = [
+            _record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file)),
+            # 记录 ID 前缀为空（以冒号开头）且元数据没有 meme_id
+            _record(":开心", None, path=str(meme_file)),
+        ]
+        vdb = _make_vdb(records)
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, _, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is True
+        assert reason == "删除成功"
+        assert not meme_file.exists()
+        assert [item["record_id"] for item in vdb.records] == [":开心"]
 
     @pytest.mark.asyncio
     async def test_target_record_with_conflicting_identity_still_rejected(
@@ -1034,11 +1074,13 @@ class TestDeleteSuppressesReingest:
     """删除后应抑制后续入库重新收录同一张表情包。"""
 
     @pytest.mark.asyncio
-    async def test_deleted_meme_id_added_to_rejected_hashes(self, tmp_path: Path) -> None:
-        """删除成功后 meme_id 进入拒绝集合，阻止再次入库。"""
+    async def test_deleted_meme_id_added_to_deleted_hashes(self, tmp_path: Path) -> None:
+        """删除成功后 meme_id 进入删除集合，阻止再次入库。"""
         config = EmojiSenderConfig()
-        rejected: set[str] = set()
-        plugin = SimpleNamespace(config=config, _rejected_hashes=rejected)
+        deleted: set[str] = set()
+        plugin = SimpleNamespace(
+            config=config, _rejected_hashes=set(), _deleted_hashes=deleted
+        )
         service = EmojiSenderService(plugin=cast(Any, plugin))
 
         data_dir = tmp_path / "memes"
@@ -1053,14 +1095,42 @@ class TestDeleteSuppressesReingest:
 
         assert ok is True
         assert reason == "删除成功"
-        assert MEME_ID in rejected
+        assert MEME_ID in deleted
+
+    @pytest.mark.asyncio
+    async def test_delete_not_written_into_vlm_rejected_set(self, tmp_path: Path) -> None:
+        """删除语义不应与 VLM 拒收混在同一个集合里。"""
+        config = EmojiSenderConfig()
+        rejected: set[str] = set()
+        deleted: set[str] = set()
+        plugin = SimpleNamespace(
+            config=config, _rejected_hashes=rejected, _deleted_hashes=deleted
+        )
+        service = EmojiSenderService(plugin=cast(Any, plugin))
+
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))])
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            ok, _, _ = await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        assert ok is True
+        assert MEME_ID in deleted
+        # VLM 拒收集合只表达「模型认为不值得收藏」，不应记录用户删除
+        assert MEME_ID not in rejected
 
     @pytest.mark.asyncio
     async def test_completion_path_also_suppresses_reingest(self, tmp_path: Path) -> None:
         """补齐文件删除的路径同样要抑制重新入库。"""
         config = EmojiSenderConfig()
-        rejected: set[str] = set()
-        plugin = SimpleNamespace(config=config, _rejected_hashes=rejected)
+        deleted: set[str] = set()
+        plugin = SimpleNamespace(
+            config=config, _rejected_hashes=set(), _deleted_hashes=deleted
+        )
         service = EmojiSenderService(plugin=cast(Any, plugin))
 
         data_dir = tmp_path / "memes"
@@ -1077,28 +1147,37 @@ class TestDeleteSuppressesReingest:
         assert ok is True
         assert reason == "删除成功"
         assert not meme_file.exists()
-        assert MEME_ID in rejected
+        assert MEME_ID in deleted
 
     @pytest.mark.asyncio
     async def test_failed_delete_does_not_suppress_reingest(self, tmp_path: Path) -> None:
         """删除失败时不应抑制重新入库，避免误伤正常表情包。"""
         config = EmojiSenderConfig()
-        rejected: set[str] = set()
-        plugin = SimpleNamespace(config=config, _rejected_hashes=rejected)
+        deleted: set[str] = set()
+        plugin = SimpleNamespace(
+            config=config, _rejected_hashes=set(), _deleted_hashes=deleted
+        )
         service = EmojiSenderService(plugin=cast(Any, plugin))
 
         data_dir = tmp_path / "memes"
         meme_file = _write_meme(data_dir, MEME_ID)
         vdb = _make_vdb([_record(f"{MEME_ID}:开心", MEME_ID, path=str(meme_file))])
 
+        def boom(path_value: str) -> None:
+            raise OSError("注入的文件删除失败")
+
         with (
             patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
             patch.object(service, "_data_dir", return_value=data_dir),
+            patch.object(service, "_delete_file", side_effect=boom),
         ):
-            ok, _, _ = await service.delete_by_meme_id(meme_id=OTHER_ID)
+            ok, _, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
 
         assert ok is False
-        assert MEME_ID not in rejected
+        assert "删除文件失败" in reason
+        # 删除的是 MEME_ID 本身，因此断言的必须是同一个 id，
+        # 否则断言的候选从未参与删除，恒为真、无法发现过早抑制。
+        assert MEME_ID not in deleted
 
 
 class TestStageAFailureHandling:
@@ -1190,12 +1269,16 @@ class TestCollectionScoping:
             ok, _, _ = await service.delete_by_meme_id(meme_id=MEME_ID)
 
         assert ok is True
-        collections = {
-            call["collection_name"]
-            for call in [*vdb.get_calls, *vdb.delete_calls]
-            if call.get("collection_name")
-        }
-        assert len(collections) == 1, f"应只使用一个集合，实际用了 {collections}"
+        calls = [*vdb.get_calls, *vdb.delete_calls]
+        assert calls, "应记录到向量库调用"
+        expected = service._collection_name()
+        # 断言每一次调用都显式带上同一个集合名：不能用
+        # `if call.get("collection_name")` 过滤，否则漏掉集合名的调用
+        # 会被悄悄跳过，扫描路径指向错集合也测不出来。
+        assert all(call["collection_name"] == expected for call in calls), (
+            f"所有向量库调用都应使用集合 {expected}，实际: "
+            f"{[call['collection_name'] for call in calls]}"
+        )
 
 
 class TestPartialCompletionAssertions:
@@ -1220,11 +1303,15 @@ class TestPartialCompletionAssertions:
             ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
 
         assert ok is False
-        assert result is None
         assert "已删除向量库记录，但删除文件失败" in reason
         # 向量记录确实已删除，文件确实仍在
         assert vdb.records == []
         assert meme_file.exists()
+        # 部分完成也要返回详情，调用方无需解析中文字符串即可区分
+        # 「什么都没删」与「删了一半」
+        assert result is not None
+        assert result["deleted_records"] == 1
+        assert result["file_deleted"] is False
 
     @pytest.mark.asyncio
     async def test_retry_completion_file_delete_failure(self, tmp_path: Path) -> None:
@@ -1246,9 +1333,12 @@ class TestPartialCompletionAssertions:
             ok, result, reason = await service.delete_by_meme_id(meme_id=MEME_ID)
 
         assert ok is False
-        assert result is None
         assert "表情包文件删除失败" in reason
         assert meme_file.exists()
+        # 部分完成同样返回详情
+        assert result is not None
+        assert result["file_deleted"] is False
+        assert result["deleted_records"] == 0
 
 
 class TestPaginationAdvancement:

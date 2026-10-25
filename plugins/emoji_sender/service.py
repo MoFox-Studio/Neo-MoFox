@@ -161,7 +161,12 @@ class EmojiSenderService(BaseService):
         """初始化使用历史并共享插件的拒绝哈希集合。"""
         super().__init__(plugin)
         self._usage_history: dict[str, deque[str]] = {}
+        # VLM 判定「不值得收藏」的哈希
         self._rejected_hashes: set[str] = plugin._rejected_hashes
+        # 用户显式删除的哈希。刻意与 VLM 拒收分开存放：
+        # 两者意图不同（一个是不该收，一个是用户不要了），
+        # 混在一起会导致无法判断某张图为何没被收录。
+        self._deleted_hashes: set[str] = plugin._deleted_hashes
 
     def _dedup_enabled(self) -> bool:
         """使用历史去重是否开启。"""
@@ -347,10 +352,14 @@ class EmojiSenderService(BaseService):
                     return [], f"表情包文件是符号链接，拒绝删除: {candidate}"
                 if not candidate.is_file():
                     continue
-                # 用解析后的真实父目录比对，才能识别指向存储目录外的软链
+                # 用解析后的真实父目录比对。真正拦住符号链接的是上面的
+                # is_symlink() 判断，这一行只是额外防线：若将来去掉
+                # is_symlink()，它能挡住指向存储目录外的软链。
                 if candidate.resolve().parent != resolved_dir:
                     return [], f"表情包文件不在存储目录内，拒绝删除: {candidate}"
-            except OSError as e:
+            except (OSError, RuntimeError) as e:
+                # RuntimeError: Path.resolve() 遇到符号链接环时抛的是
+                # RuntimeError 而非 OSError。
                 return [], f"检查表情包文件失败: {candidate} - {e}"
             candidates.append(candidate)
         return candidates, None
@@ -372,7 +381,9 @@ class EmojiSenderService(BaseService):
         data_dir = self._data_dir()
         try:
             resolved_dir = await asyncio.to_thread(data_dir.resolve)
-        except OSError as e:
+        except (OSError, RuntimeError) as e:
+            # RuntimeError: Path.resolve() 遇到符号链接环时抛的是
+            # RuntimeError 而非 OSError，需一并捕获以保持失败关闭契约。
             return [], f"无法解析表情包存储目录: {e}"
 
         candidates, probe_error = await asyncio.to_thread(
@@ -412,7 +423,7 @@ class EmojiSenderService(BaseService):
             except Exception:
                 continue
 
-            if meme_id in self._rejected_hashes:
+            if meme_id in self._rejected_hashes or meme_id in self._deleted_hashes:
                 continue
             if not await self._already_ingested(meme_id):
                 return candidate
@@ -717,7 +728,7 @@ class EmojiSenderService(BaseService):
                 logger.warning(f"读取缓存表情包失败: {candidate} - {error}")
                 continue
 
-            if meme_id in self._rejected_hashes:
+            if meme_id in self._rejected_hashes or meme_id in self._deleted_hashes:
                 continue
             if not await self._already_ingested(meme_id):
                 return candidate
@@ -876,7 +887,11 @@ class EmojiSenderService(BaseService):
                 logger.warning(f"读取候选表情包失败: {source} - {e}")
                 return
 
-            if meme_id in self._rejected_hashes or await self._already_ingested(meme_id):
+            if (
+                meme_id in self._rejected_hashes
+                or meme_id in self._deleted_hashes
+                or await self._already_ingested(meme_id)
+            ):
                 return
 
             # 压缩图片用于 VLM
@@ -915,6 +930,12 @@ class EmojiSenderService(BaseService):
             data_dir.mkdir(parents=True, exist_ok=True)
             suffix = source.suffix.lower() if source.suffix.lower() in _ALLOWED_SUFFIXES else ".png"
             target_path = data_dir / f"{meme_id}{suffix}"
+            # 复制前再确认一次：选文件之后到复制之前会经历 VLM 判别与 embedding
+            # 生成等耗时操作，其间删除请求可能已经删掉了同一张表情包，
+            # 此时若继续复制会把已删除的表情包重新收录回去。
+            if meme_id in self._deleted_hashes:
+                logger.info(f"表情包在入库过程中被删除，跳过收录: {meme_id[:8]}...")
+                return
             try:
                 await asyncio.to_thread(self._copy_file, source, target_path)
             except Exception as e:
@@ -968,6 +989,16 @@ class EmojiSenderService(BaseService):
                         "created_at": float(now_ts),
                     }
                 )
+
+            # 写库前最后确认一次：复制之后到写入向量库之间仍可能被删除请求
+            # 抢先完成，此时写回记录会让已删除的表情包重新出现在库中。
+            if meme_id in self._deleted_hashes:
+                logger.info(f"表情包在入库过程中被删除，跳过写库: {meme_id[:8]}...")
+                try:
+                    await asyncio.to_thread(self._delete_file, str(target_path))
+                except Exception as e:
+                    logger.warning(f"清理已入库副本失败: {target_path} - {e}")
+                return
 
             try:
                 await vdb.add(
@@ -1325,9 +1356,18 @@ class EmojiSenderService(BaseService):
                 return False, None, f"未找到 id={normalized} 对应的表情包"
             deleted_files = await self._delete_meme_files(files)
             if deleted_files is None:
+                # 与主路径一致：部分完成也返回详情
                 return (
                     False,
-                    None,
+                    {
+                        "meme_id": normalized,
+                        "tags": [],
+                        "description": "",
+                        "path": str(files[0]),
+                        "deleted_records": 0,
+                        "file_deleted": False,
+                        "deleted_files": [],
+                    },
                     "向量库记录已不存在，但表情包文件删除失败，请重试",
                 )
             detail = {
@@ -1340,7 +1380,7 @@ class EmojiSenderService(BaseService):
                 "deleted_files": deleted_files,
             }
             # 同样抑制后续入库重新收录，否则补齐后表情包会再次出现。
-            self._rejected_hashes.add(normalized)
+            self._deleted_hashes.add(normalized)
             logger.info(
                 f"已补齐表情包文件删除: {normalized[:8]}... 文件数={len(deleted_files)}"
             )
@@ -1380,9 +1420,20 @@ class EmojiSenderService(BaseService):
         # 阶段 E：删除磁盘文件
         deleted_files = await self._delete_meme_files(files)
         if deleted_files is None:
+            # 部分完成：向量记录已删除、文件仍在。与同文件 send 系列的
+            # 约定一致（失败也尽量返回详情），让调用方能区分
+            # 「什么都没删」与「删了一半」，无需解析中文字符串。
             return (
                 False,
-                None,
+                {
+                    "meme_id": normalized,
+                    "tags": tags,
+                    "description": description,
+                    "path": str(files[0]) if files else "",
+                    "deleted_records": len(target_records),
+                    "file_deleted": False,
+                    "deleted_files": [],
+                },
                 f"已删除向量库记录，但删除文件失败：{files[0] if files else normalized}",
             )
 
@@ -1397,8 +1448,9 @@ class EmojiSenderService(BaseService):
         }
         # 抑制后续入库重新收录同一张表情包：向量记录已删除，若源文件仍留在
         # media cache 或手动目录，下一轮入库会把它当作新表情包重新复制回库，
-        # 使「彻底删除」失效。此处与 VLM 拒收走同一套抑制机制。
-        self._rejected_hashes.add(normalized)
+        # 使「彻底删除」失效。写入删除集合而非 VLM 拒收集合，
+        # 两者意图不同，混在一起会分不清某张图为何没被收录。
+        self._deleted_hashes.add(normalized)
         logger.info(
             f"已删除表情包: {normalized[:8]}... 标签={tags} "
             f"记录数={len(target_records)} 文件数={len(deleted_files)}"
@@ -1509,13 +1561,11 @@ class EmojiSenderService(BaseService):
                 meta_meme_id = str(meta.get("meme_id") or "").strip().lower()
 
                 # 身份校验只针对目标记录：无关记录的异常不应阻断删除目标。
-                # 但当一条记录完全无法判断归属（记录 ID 前缀与元数据都缺少
-                # meme_id）时，仍按失败关闭处理，避免漏删目标记录。
+                # 记录 ID 前缀与元数据都缺少 meme_id 的记录无法指向目标
+                # （目标 ID 恒为非空的 64 位十六进制），因此跳过即可；
+                # 对它失败关闭并不会防止漏删目标记录，只会阻断用户的删除请求。
                 if not record_id_meme_id and not meta_meme_id:
-                    return _CollectResult(
-                        (),
-                        f"表情包记录缺少 meme_id，拒绝删除: {record_id}",
-                    )
+                    continue
 
                 record_id_matches = record_id_meme_id == meme_id
                 meta_matches = meta_meme_id == meme_id
