@@ -17,7 +17,12 @@ from src.core.components import BasePlugin, register_plugin
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
 
-from .action import SendEmojiMemeAction, SendEmojiMemeByIdAction
+from .action import (
+    CollectEmojiMemeAction,
+    RefreshEmojiMemeAction,
+    SendEmojiMemeAction,
+    SendEmojiMemeByIdAction,
+)
 from .config import EmojiSenderConfig
 from .service import EmojiSenderService
 from .tool import SearchEmojiMemesTool
@@ -30,6 +35,20 @@ MODE_PICKER = "picker"
 
 _TARGET_REMINDER_BUCKET = "actor"
 _TARGET_REMINDER_NAME = "关于表情包的使用"
+_EMOJI_COLLECTION_REMINDER = (
+    "\n看到聊天中自己喜欢、符合自己的人设和表达习惯、以后用得上的表情包时，主动调用 collect_emoji_meme 收藏，不必等用户要求。"
+    "想想以后会用它表达什么情绪、回应什么场景；有选择地收藏，不是看到图片就收。"
+    "收藏不代表现在就要发送，也不改变表情包的发送频率限制。"
+    "media_id 使用图片或表情包占位符括号里的完整哈希。"
+    "有想留给以后自己的内容，可以用 note 附上备注；没什么想记的就不写，不用每张图都凑收藏理由。"
+    "备注可以写理解、梗、前因后果、用法，也可以写其他值得记住的内容，不限一两句话，写到以后脱离当前聊天还能看懂即可，不编造背景。"
+    "发现聊天图片或表情包的描述、文字可能认错时，可以调用 refresh_emoji_meme 重新识别，不需要先收藏。"
+    "meme_id 使用当前聊天图片的完整 media_id，也可使用收藏返回的 id 或检索结果的 12 位 id；"
+    "extra_prompt 可补充需要重点核对的疑点。原文件已不可用时请对方重新发送图片，不用旧描述代替看图。"
+    "只想补充、修改或清除已收藏图片的备注时，调用 refresh_emoji_meme，传 note_only=true 和 note，不用原图或重新识别；"
+    "note 不传或 null 保留原备注，空字符串清除。检索候选带有备注时，也看看它留下的含义和语境。"
+    "收藏、重新识别和修改备注都不会自动发消息，不必每次向聊天对象宣布。"
+)
 _EMOJI_USAGE_REMINDER = (
     "表情包的使用在你的日常互动中扮演着非常重要的角色。它直接影响到你向他人所展示出的形象。"
     "如果你经常只发文字，不发表情包，则通常被认为是严肃、专业的象征，而经常使用表情包则更可能被认为是可爱、活力的象征，"
@@ -73,8 +92,8 @@ def build_emoji_sender_actor_reminder(plugin: Any) -> str:
     if isinstance(config, EmojiSenderConfig) and not config.plugin.inject_system_prompt:
         return ""
     if _get_interaction_mode(plugin) == MODE_PICKER:
-        return _EMOJI_USAGE_REMINDER_PICKER
-    return _EMOJI_USAGE_REMINDER
+        return _EMOJI_USAGE_REMINDER_PICKER + _EMOJI_COLLECTION_REMINDER
+    return _EMOJI_USAGE_REMINDER + _EMOJI_COLLECTION_REMINDER
 
 
 def sync_emoji_sender_actor_reminder(plugin: Any) -> str:
@@ -119,9 +138,10 @@ class EmojiSenderPlugin(BasePlugin):
         config = self.config
         if isinstance(config, EmojiSenderConfig) and not config.plugin.enabled:
             return []
+        components: list[type] = [EmojiSenderService, CollectEmojiMemeAction, RefreshEmojiMemeAction]
         if _get_interaction_mode(self) == MODE_PICKER:
-            return [EmojiSenderService, SearchEmojiMemesTool, SendEmojiMemeByIdAction]
-        return [EmojiSenderService, SendEmojiMemeAction]
+            return [*components, SearchEmojiMemesTool, SendEmojiMemeByIdAction]
+        return [*components, SendEmojiMemeAction]
 
     async def on_plugin_loaded(self) -> None:
         """插件加载完成后：初始化配置并注册周期任务。"""
