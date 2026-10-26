@@ -8,9 +8,6 @@
   :class:`~src.kernel.db.CRUDBase` / :class:`~src.kernel.db.QueryBuilder` /
   :class:`~src.kernel.db.AggregateQuery` 接口，在指定路径独立存储，与主程序数据库不共享连接。
 
-- **取消安全收尾**：``await_cancellation_safe`` 等待资源操作完成后再传播调用方取消，
-  与主程序全局停机清扫共享清理任务登记；从 storage_api 1.1.0 起提供。
-
 使用示例（JSON 存储）::
 
     from src.app.plugin_system.api import storage_api
@@ -61,18 +58,15 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.kernel.db import AggregateQuery, CRUDBase, QueryBuilder
 from src.kernel.db.core.cache import invalidate_model_cache
-from src.kernel.db.core.session import (
-    CancellationSafeAsyncSession, dispose_engine_safely, transaction_session,
-)
-from src.kernel.concurrency.cleanup import await_cancellation_safe
 from src.kernel.logger import get_logger
 from src.kernel.storage import JSONStore
 
-API_VERSION = "1.1.0"
+API_VERSION = "1.0.0"
 
 logger = get_logger("plugin.storage", display="插件存储")
 
@@ -218,31 +212,25 @@ class PluginDatabase:
                 connect_args={"check_same_thread": False, "timeout": 60},
             )
 
-            async def initialize_engine() -> None:
-                """初始化期间的原始连接同样要等待驱动与连接回收完成。"""
-                async with engine.begin() as conn:
-                    await conn.execute(text("PRAGMA journal_mode = WAL"))
-                    await conn.execute(text("PRAGMA synchronous = NORMAL"))
-                    await conn.execute(text("PRAGMA foreign_keys = ON"))
-                    await conn.execute(text("PRAGMA busy_timeout = 10000"))
+            # 应用 SQLite 优化
+            async with engine.begin() as conn:
+                await conn.execute(text("PRAGMA journal_mode = WAL"))
+                await conn.execute(text("PRAGMA synchronous = NORMAL"))
+                await conn.execute(text("PRAGMA foreign_keys = ON"))
+                await conn.execute(text("PRAGMA busy_timeout = 10000"))
 
-                seen_metadata: set[int] = set()
-                for model in self._models:
-                    meta = model.__table__.metadata
-                    if id(meta) not in seen_metadata:
-                        seen_metadata.add(id(meta))
-                        async with engine.begin() as conn:
-                            await conn.run_sync(meta.create_all)
-
-            try:
-                await await_cancellation_safe(initialize_engine(), name="plugin_database_initialize")
-            except BaseException:
-                await dispose_engine_safely(engine)
-                raise
+            # 合并所有模型的 Metadata（去重），逐一建表
+            seen_metadata: set[int] = set()
+            for model in self._models:
+                meta = model.__table__.metadata
+                if id(meta) not in seen_metadata:
+                    seen_metadata.add(id(meta))
+                    async with engine.begin() as conn:
+                        await conn.run_sync(meta.create_all)
 
             self._session_factory = async_sessionmaker(
                 bind=engine,
-                class_=CancellationSafeAsyncSession,
+                class_=AsyncSession,
                 expire_on_commit=False,
             )
             self._engine = engine
@@ -309,7 +297,6 @@ class PluginDatabase:
 
         适用于 upsert、原子计数更新、复杂 JOIN 等无法通过标准接口表达的场景。
         会话在退出时自动提交；发生异常时自动回滚。
-        取消时先完成事务收尾和连接归还，再向调用方传播取消。
 
         Yields:
             :class:`~sqlalchemy.ext.asyncio.AsyncSession` 实例。
@@ -323,24 +310,32 @@ class PluginDatabase:
                 await s.execute(update(MyModel).where(...).values(...))
         """
         sf = self._require_initialized()
-        async with transaction_session(sf) as s:
-            yield s
+        async with sf() as s:
+            try:
+                yield s
+                if s.is_active:
+                    await s.commit()
+            except SQLAlchemyError:
+                if s.is_active:
+                    await s.rollback()
+                raise
+            except Exception:
+                if s.is_active:
+                    await s.rollback()
+                raise
+            finally:
+                await s.close()
 
     async def close(self) -> None:
         """关闭数据库引擎，释放所有连接资源。
 
         调用后如需再次使用须重新调用 :meth:`initialize`。
         """
-        async def close_database() -> None:
-            """与初始化互斥，并在连接池释放前等待仍在使用该库的任务。"""
-            async with self._init_lock:
-                if self._engine is not None:
-                    await dispose_engine_safely(self._engine)
-                    self._engine = None
-                    self._session_factory = None
-                    logger.debug(f"插件数据库已关闭: {self._db_path}")
-
-        await await_cancellation_safe(close_database(), name="plugin_database_close")
+        if self._engine is not None:
+            await self._engine.dispose()
+            self._engine = None
+            self._session_factory = None
+            logger.debug(f"插件数据库已关闭: {self._db_path}")
 
 
 __all__ = [
@@ -354,5 +349,4 @@ __all__ = [
     "list_json",
     # 数据库存储
     "PluginDatabase",
-    "await_cancellation_safe",
 ]

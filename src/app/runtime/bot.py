@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -15,10 +16,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 from src.core.config import CORE_VERSION
-from src.kernel.concurrency.cleanup import (
-    await_cancellation_safe, cancel_and_wait_tasks, cleanup_ancestors,
-    drain_cleanup_tasks, is_cleanup_task,
-)
 
 from .console_ui import ConsoleUIManager
 from .exceptions import BotInitializationError, BotRuntimeError, BotShutdownError
@@ -28,6 +25,7 @@ if TYPE_CHECKING:
     from src.core.config import CoreConfig
     from src.core.components import PluginLoader, PluginManifest
     from src.core.managers import MCPManager, PluginManager
+    from src.core.managers import MediaManager
     from src.core.transport import MessageReceiver, HTTPServer, SinkManager
     from src.kernel.concurrency import TaskManager, WatchDog
     from src.kernel.event import EventBus
@@ -99,14 +97,20 @@ class Bot:
         self.plugin_loader: PluginLoader | None = None
         self.plugin_manager: PluginManager | None = None
         self.mcp_manager: MCPManager | None = None
+        self.media_manager: MediaManager | None = None
         self.http_server: HTTPServer | None = None
         self.load_order: list[str] = []
         self.manifests: dict[str, PluginManifest] = {}
         self.load_results: dict[str, bool] = {}
         self._telemetry_log_unsubscribe: Any | None = None
+        # 在初始化调用前登记，以覆盖“资源创建后初始化抛错”的情况。
+        self._owned_resources: set[str] = set()
+        self._stream_loop_manager: Any | None = None
 
         # DNS 专用线程池与原始 loop 方法（用于关闭时恢复）
         self._dns_executor: ThreadPoolExecutor | None = None
+        self._default_executor: ThreadPoolExecutor | None = None
+        self._previous_default_executor: ThreadPoolExecutor | None = None
         self._original_getaddrinfo: Any | None = None
         self._original_getnameinfo: Any | None = None
 
@@ -132,44 +136,37 @@ class Bot:
         }
 
     async def initialize(self) -> None:
-        """完整初始化流程
+        """按依赖顺序准备内核、核心服务和插件。
 
-        按顺序初始化：
-        1. Kernel 层（9 步）
-        2. Core 层组件初始化
-        3. 插件发现
-        4. 插件加载
+        调度器在此阶段只接收任务注册，由 run() 启动执行循环。
+        已完成初始化时重复调用无副作用；关闭后的 Bot 不可复用。
 
         Raises:
             BotInitializationError: 初始化失败
         """
+        if self._shutdown_requested:
+            raise BotInitializationError("Bot 已进入关闭流程", "initialize")
+        if self._initialized:
+            return
         try:
-            # 显示启动横幅（在进度条之前）
+            # 步骤 1：展示启动信息，准备线程池和 DNS 运行环境。
             self.ui.show_banner(self.bot_version, self.bot_name)
 
             # 启动前优化 async 连接池/DNS 行为
             await self._optimize_async_network_runtime()
 
             # 单一总体进度条贯穿全部初始化阶段
-            with self.ui.startup_progress(total_steps=16):
-                # Phase 1: Kernel 初始化
+            with self.ui.startup_progress(total_steps=21):
+                # 步骤 2：准备配置、事件、并发和存储基础设施。
                 await self._initialize_kernel()
 
-                # Phase 2: Core 组件初始化
+                # 步骤 3：数据库就绪后显式准备核心服务。
                 await self._initialize_core()
 
-                # Phase 2.5: 插件市场同步
-                await self._sync_plugin_market()
-
-                # Phase 3: 插件发现
-                await self._discover_plugins()
-
-                # Phase 3.5: 安装插件 Python 依赖
-                await self._install_plugin_deps()
-
-                # Phase 4: 插件加载（进度条追加插件子任务）
-                self.ui.begin_plugin_loading(len(self.load_order))
-                await self._load_plugins()
+                # 步骤 4：同步、发现和加载插件，允许预注册定时任务。
+                await self._initialize_plugins()
+                # 步骤 5：校验必需依赖后才标记初始化成功。
+                self._validate_startup_contract()
 
             self._initialized = True
 
@@ -223,7 +220,13 @@ class Bot:
         self._original_getnameinfo = loop.getnameinfo
 
         # 默认线程池：承载 to_thread / run_in_executor(None, ...)
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=192))
+        # asyncio 没有公开的默认线程池 getter；用动态访问兼容抽象循环类型。
+        previous_executor = getattr(loop, "_default_executor", None)
+        self._previous_default_executor = (
+            previous_executor if isinstance(previous_executor, ThreadPoolExecutor) else None
+        )
+        self._default_executor = ThreadPoolExecutor(max_workers=192)
+        loop.set_default_executor(self._default_executor)
 
         # DNS 专用线程池：避免 getaddrinfo 被通用任务挤占
         self._dns_executor = ThreadPoolExecutor(max_workers=16)
@@ -302,21 +305,29 @@ class Bot:
         return out
 
     async def _initialize_kernel(self) -> None:
-        """初始化 Kernel 层（9 步）
-
-        1. Config
-        2. Logger
-        3. Event Bus
-        4. Task Manager
-        5. Scheduler
-        6. WatchDog
-        7. Database
-        8. VectorDB
-        9. Storage
-        """
+        """按配置、事件、并发、存储的依赖顺序准备基础设施。"""
         self.ui.update_phase_status("初始化内核", "启动中...")
+        # 步骤 1：加载配置与日志，执行可选连接预检。
+        self._initialize_config()
+        self._initialize_logger()
+        await self._preflight_llm_providers()
+        # 步骤 2：准备事件总线和本地遥测订阅。
+        self._initialize_event_bus()
+        await self._initialize_telemetry()
+        # 步骤 3：先创建任务管理器，再创建调度器和看门狗。
+        self._initialize_task_manager()
+        self._initialize_scheduler()
+        self._initialize_watchdog()
+        # 步骤 4：准备数据库、向量库和文件存储。
+        await self._initialize_database()
+        self._initialize_vector_database()
+        self._initialize_storage()
+        # 步骤 5：准备统计与云端遥测；发送循环留到 run()。
+        await self._initialize_llm_statistics()
+        await self._initialize_cloud_telemetry()
 
-        # Step 1: Config
+    def _initialize_config(self) -> None:
+        """加载 Core、模型和 MCP 配置，供后续阶段使用。"""
         from src.core.config import init_core_config, init_mcp_config, init_model_config
 
         self.config = init_core_config(self.config_path)
@@ -324,7 +335,9 @@ class Bot:
         init_mcp_config("config/mcp.toml")
         self.ui.update_phase_status("配置", "已加载")
 
-        # Step 2: Logger
+    def _initialize_logger(self) -> None:
+        """初始化日志并保存清理启停函数，周期任务由运行阶段注册。"""
+        assert self.config is not None
         from src.kernel.logger import (
             get_logger,
             initialize_logger_system,
@@ -334,7 +347,8 @@ class Bot:
         )
 
         # 初始化日志系统（含日志自动清理管理器的创建）
-        # 清理调度任务的注册需在调度器启动后调用 start_logger_cleanup() 完成
+        # Bot 在运行阶段调用 start_logger_cleanup() 注册清理任务
+        self._owned_resources.add("logger")
         initialize_logger_system(
             log_dir=self.log_dir,
             log_level=self.config.bot.log_level,
@@ -350,18 +364,21 @@ class Bot:
 
         self.ui.update_phase_status("日志", "已初始化")
 
-        await self._preflight_llm_providers()
-
-        # Step 3: Event Bus
+    def _initialize_event_bus(self) -> None:
+        """设置事件处理超时并取得核心服务共享的事件总线。"""
+        assert self.config is not None
         from src.kernel.event import get_event_bus, set_event_handler_timeout
 
         set_event_handler_timeout(self.config.advanced.event_handler_timeout)
         self.event_bus = get_event_bus()
         self.ui.update_phase_status("事件总线", "已初始化")
 
-        # Step 3.5: 通用遥测
+    async def _initialize_telemetry(self) -> None:
+        """准备本地遥测存储并在已初始化的事件总线上订阅日志。"""
+        assert self.config is not None
         from src.kernel.telemetry import TelemetryConfig, init_telemetry
 
+        self._owned_resources.add("telemetry")
         await init_telemetry(
             config=TelemetryConfig(
                 enabled=self.config.telemetry.enabled,
@@ -381,35 +398,43 @@ class Bot:
         self._install_telemetry_hooks()
         self.ui.update_phase_status("遥测", "已初始化")
 
-        # Step 4: Task Manager
-        from src.kernel.concurrency import get_task_manager, get_watchdog
+    def _initialize_task_manager(self) -> None:
+        """按配置创建任务管理器，必须先于调度器创建。"""
+        assert self.config is not None
+        from src.kernel.concurrency import get_task_manager
 
         self.task_manager = get_task_manager(
             process_workers=self.config.advanced.process_workers
         )
-        
-        # 仅在启用时启动 WatchDog
-        if self.config.bot.enable_watchdog:
-            get_watchdog().start()
-        else:
-            self.logger.warning("WatchDog 已禁用 (调试模式)")
-            
         self.ui.update_phase_status("任务管理器", "已初始化")
 
-        # Step 5: Scheduler
+    def _initialize_scheduler(self) -> None:
+        """取得统一调度器供插件预注册任务，暂不启动检查循环。"""
         from src.kernel.scheduler import get_unified_scheduler
 
         self.scheduler = get_unified_scheduler()
         self.ui.update_phase_status("调度器", "已初始化")
 
-        # Step 6: WatchDog
+    def _initialize_watchdog(self) -> None:
+        """创建并按配置启动看门狗，以监控后续初始化过程。"""
+        assert self.config is not None
+        assert self.logger is not None
+        from src.kernel.concurrency import get_watchdog
+
         self.watchdog = get_watchdog()
+        if self.config.bot.enable_watchdog:
+            self.watchdog.start()
+        else:
+            self.logger.warning("WatchDog 已禁用 (调试模式)")
         self.ui.update_phase_status("看门狗", "已初始化")
 
-        # Step 7: Database
+    async def _initialize_database(self) -> None:
+        """连接主数据库并完成结构同步，失败时阻止核心服务加载。"""
+        assert self.config is not None
         from src.kernel.db import init_database_from_config
 
         db_cfg = self.config.database
+        self._owned_resources.add("database")
         await init_database_from_config(
             database_type=db_cfg.database_type,
             sqlite_path=db_cfg.sqlite_path,
@@ -444,15 +469,18 @@ class Bot:
         self._stats["db_connected"] = True
         self.ui.update_phase_status("数据库", "已连接")
 
-        # Step 8: VectorDB
+    def _initialize_vector_database(self) -> None:
+        """准备向量数据库目录并取得服务实例。"""
         from src.kernel.vector_db import get_vector_db_service
 
         # 确保 data 目录存在
         Path("data/chroma_db").mkdir(parents=True, exist_ok=True)
+        self._owned_resources.add("vector_db")
         self.vector_db = get_vector_db_service("data/chroma_db")
         self.ui.update_phase_status("向量数据库", "已初始化")
 
-        # Step 9: Storage
+    def _initialize_storage(self) -> None:
+        """创建 JSON 存储目录与存储实例。"""
         from src.kernel.storage import JSONStore
 
         # 确保 data 目录存在
@@ -460,9 +488,11 @@ class Bot:
         self.storage = JSONStore("data/json_storage")
         self.ui.update_phase_status("存储", "已初始化")
 
-        # Step 10: LLM 统计
+    async def _initialize_llm_statistics(self) -> None:
+        """按配置初始化独立的 LLM 统计存储。"""
         from src.kernel.llm.stats import LLMStatsConfig, init_llm_stats
         assert self.config is not None
+        self._owned_resources.add("llm_stats")
         await init_llm_stats(
             config=LLMStatsConfig(
                 db_path=self.config.llm_stats.db_path,
@@ -473,13 +503,17 @@ class Bot:
         )
         self.ui.update_phase_status("LLM统计", "已初始化")
 
-        # Step 10.5: Cloud Telemetry Runtime
+    async def _initialize_cloud_telemetry(self) -> None:
+        """准备云端遥测运行时，发送循环由运行阶段显式启动。"""
+        assert self.config is not None
         from src.app.cloud_telemetry import initialize_cloud_telemetry_runtime
 
+        self._owned_resources.add("cloud_telemetry")
         await initialize_cloud_telemetry_runtime(self.config)
         self.ui.update_phase_status("云端遥测", "已初始化")
 
     async def _preflight_llm_providers(self) -> None:
+        """可选地探测模型提供商，记录连接情况；探测失败不阻止启动。"""
         assert self.config is not None
         if not self.config.bot.llm_preflight_check:
             self.ui.update_phase_status("LLM 预检", "已跳过")
@@ -601,13 +635,26 @@ class Bot:
             self.ui.update_phase_status("HTTP服务器", "⚠️ 不安全配置")
             
     async def _initialize_core(self) -> None:
-        """初始化 Core 层组件
+        """在数据库就绪后准备媒体、传输和管理器，再加载插件。"""
+        # 步骤 1：显式准备媒体服务，避免插件首次访问触发后台初始化。
+        await self._initialize_media_manager()
+        # 步骤 2：先发布消息通道，再安装管理器的事件订阅。
+        self._initialize_transport()
+        self._initialize_builtin_managers()
+        # 步骤 3：准备外部工具连接及插件路由所需的 HTTP 服务。
+        await self._initialize_mcp_manager()
+        await self._initialize_http_server()
 
-        包括插件管理器、Action 管理器、Chatter 管理器、Command 管理器等。
-        """
-        assert self.config is not None
+    async def _initialize_media_manager(self) -> None:
+        """显式准备媒体管理器，周期清理在运行阶段启动。"""
+        from src.core.managers import initialize_media_manager
 
-        # Step 1: 初始化 MessageReceiver 和 SinkManager
+        self.media_manager = initialize_media_manager()
+        await self.media_manager.initialize()
+        self.ui.update_phase_status("媒体管理器", "已初始化")
+
+    def _initialize_transport(self) -> None:
+        """创建消息接收器并发布共享 SinkManager，供适配器使用。"""
         from src.core.transport import MessageReceiver, SinkManager
         from src.core.transport.sink import set_sink_manager
         
@@ -616,7 +663,8 @@ class Bot:
         set_sink_manager(self.sink_manager)
         self.ui.update_phase_status("消息接收器", "已初始化")
         
-        # Step 2: 导入其他manager以初始化
+    def _initialize_builtin_managers(self) -> None:
+        """初始化核心管理器及事件订阅，必须先于插件加载。"""
         from src.core.managers import (
             initialize_adapter_manager,
             initialize_router_manager,
@@ -627,18 +675,24 @@ class Bot:
         initialize_adapter_manager()
         initialize_router_manager()
         initialize_event_manager()
+        from src.core.transport.distribution import get_stream_loop_manager
+
+        self._stream_loop_manager = get_stream_loop_manager()
         initialize_distribution()
 
         self.ui.update_phase_status("核心管理器", "已初始化")
 
-        # Step 3: 初始化 MCP 客户端工具接入
+    async def _initialize_mcp_manager(self) -> None:
+        """建立 MCP 工具连接；连接资源由 shutdown() 释放。"""
         from src.core.managers import get_mcp_manager
 
         self.mcp_manager = get_mcp_manager()
         await self.mcp_manager.initialize()
         self.ui.update_phase_status("MCP", "已初始化")
         
-        # Step 4: 启动 HTTP 服务器
+    async def _initialize_http_server(self) -> None:
+        """按配置启动 HTTP 服务，供插件加载完成时挂载路由。"""
+        assert self.config is not None
         from src.core.transport.router.http_server import get_http_server
         
         if self.config.http_router.enable_http_router:
@@ -652,14 +706,36 @@ class Bot:
             self.http_server = get_http_server(host=host, port=port)
             await self.http_server.start()
 
-            # 挂载 LLM 请求体检视器（调试用 WebUI）
-            try:
-                from src.kernel.llm.request_inspector import get_inspector
-                get_inspector().mount(self.http_server.app)
-            except Exception:
-                pass
-
             self.ui.update_phase_status("HTTP服务器", "已启动")
+        else:
+            self.ui.update_phase_status("HTTP服务器", "已跳过")
+
+    async def _initialize_plugins(self) -> None:
+        """同步市场、发现插件、安装依赖并按依赖顺序加载插件。"""
+        # 步骤 1：同步市场后发现插件并解析加载顺序。
+        await self._sync_plugin_market()
+        await self._discover_plugins()
+        # 步骤 2：安装依赖并剔除缺少必需依赖的插件。
+        await self._install_plugin_deps()
+        # 步骤 3：加载插件并发布 ON_ALL_PLUGIN_LOADED。
+        self.ui.begin_plugin_loading(len(self.load_order))
+        await self._load_plugins()
+
+    def _validate_startup_contract(self) -> None:
+        """检查必需资源已准备完成，并记录预注册任务供诊断。
+
+        Raises:
+            BotRuntimeError: 必需资源缺失。
+        """
+        for name in (
+            "config", "logger", "event_bus", "task_manager", "scheduler",
+            "media_manager", "message_receiver", "sink_manager", "plugin_manager",
+        ):
+            if getattr(self, name) is None:
+                raise BotRuntimeError(f"启动依赖未就绪: {name}")
+        assert self.logger is not None
+        assert self.scheduler is not None
+        self.logger.debug(f"已注册定时任务: {self.scheduler.list_schedule_names()}")
 
     async def _discover_plugins(self) -> None:
         """发现插件并解析依赖"""
@@ -815,26 +891,65 @@ class Bot:
         return self.load_results
 
     async def run(self) -> None:
-        """主运行循环
+        """校验依赖、启动运行时服务，再进入命令循环。
+
+        服务启动失败时不发布 ON_START；start() 的 finally 负责释放资源。
+        信号处理器和命令解析器保留到 shutdown() 末尾，以支持二次中断。
 
         Raises:
-            BotRuntimeError: Bot 未初始化
+            BotRuntimeError: Bot 未初始化、重复运行或已进入关闭流程。
         """
         if not self._initialized:
             raise BotRuntimeError("Bot 未初始化。请先调用 initialize()。")
+        if self._running or self._shutdown_requested:
+            raise BotRuntimeError("Bot 已在运行或已进入关闭流程。")
+        self._validate_startup_contract()
 
-        # 断言核心组件已初始化（由于_initialized=True，这些不应该为None）
-        assert self.logger is not None
-        assert self.scheduler is not None
-        assert self.task_manager is not None
-
+        # ON_START 处理器可以请求停止，因此启动后不能重新覆盖该标志。
         self._running = True
+        try:
+            # 步骤 1：激活调度器及依赖它的后台服务。
+            await self._start_runtime_services()
+            # 步骤 2：服务就绪后通知插件；处理器可请求停止。
+            await self._publish_start_event()
+            # 步骤 3：准备信号和终端输入，保留到 shutdown() 末尾。
+            self._install_signal_handler()
+            self._create_command_parser()
+            assert self.logger is not None
+            self.logger.info("Neo-MoFox Bot 启动成功")
+            self.logger.info("输入 /help 查看可用命令")
+            # 步骤 4：进入命令循环，退出后复位运行标记。
+            await self._run_command_loop()
+        finally:
+            self._running = False
+            await self._record_runtime_snapshot(event_name="run_stopped")
 
-        # 启动调度器
+    async def _start_runtime_services(self) -> None:
+        """先启动调度器，再启动媒体、日志清理及云端遥测服务。"""
+        # 步骤 1：启动检查循环，激活插件在初始化阶段注册的任务。
+        await self._start_scheduler()
+        # 步骤 2：注册媒体和日志清理，延迟从此时开始计算。
+        await self._start_media_manager()
+        await self._start_log_cleanup()
+        # 步骤 3：启动可选的云端遥测发送循环。
+        await self._start_cloud_telemetry()
+
+    async def _start_scheduler(self) -> None:
+        """激活预注册任务的检查循环，成功后更新运行统计。"""
+        assert self.scheduler is not None
         await self.scheduler.start()
         self._stats["scheduler_running"] = True
 
-        # 启动日志自动清理任务（由 logger 模块统一管理）
+    async def _start_media_manager(self) -> None:
+        """在调度器运行后注册媒体清理任务，错误交由启动入口处理。"""
+        assert self.scheduler is not None
+        assert self.media_manager is not None
+        if not self.scheduler.is_started:
+            raise BotRuntimeError("启动媒体清理前必须启动调度器。")
+        await self.media_manager.start()
+
+    async def _start_log_cleanup(self) -> None:
+        """注册日志清理任务；失败时记录警告并继续运行。"""
         if self._start_logger_cleanup is not None:
             try:
                 await self._start_logger_cleanup()
@@ -842,7 +957,8 @@ class Bot:
                 if self.logger:
                     self.logger.warning(f"启动日志自动清理失败: {e}")
 
-        # 启动云端遥测客户端发送循环
+    async def _start_cloud_telemetry(self) -> None:
+        """启动已启用的云端遥测发送循环，失败不阻止 Bot 运行。"""
         try:
             from src.app.cloud_telemetry import get_cloud_telemetry_client
 
@@ -853,7 +969,8 @@ class Bot:
             if self.logger:
                 self.logger.warning(f"启动云端遥测发送循环失败: {e}")
         
-        # 触发 ON_START 事件（所有初始化完成，系统即将进入运行状态）
+    async def _publish_start_event(self) -> None:
+        """在服务启动完成后发布 ON_START，处理器异常记录为警告。"""
         try:
             from src.core.components.types import EventType
             assert self.event_bus is not None
@@ -864,53 +981,46 @@ class Bot:
             if self.logger:
                 self.logger.warning(f"触发 ON_START 事件失败: {e}")
 
-        # 启动信号处理器（在 shutdown() 末尾统一卸下，保证关闭期间第二次
-        # Ctrl+C 仍能触发 SignalHandler 的强制退出分支）
+    def _install_signal_handler(self) -> None:
+        """安装信号处理器，保留至关闭结束以支持第二次 Ctrl+C。"""
         self._signal_handler = SignalHandler(self)
         self._signal_handler.register_signals()
 
-        # 创建交互式命令解析器（保存为实例属性，shutdown() 末尾关闭，
-        # 让 shutdown 期间第二次 Ctrl+C 仍能被 input worker 读取并
-        # raise_signal 触发强制退出）
+    def _create_command_parser(self) -> None:
+        """创建交互命令解析器，其输入线程由 shutdown() 末尾关闭。"""
         from .command_parser import CommandParser
 
         self._command_parser = CommandParser(self)
 
-        self.logger.info("Neo-MoFox Bot 启动成功")
-        self.logger.info("输入 /help 查看可用命令")
+    async def _run_command_loop(self) -> None:
+        """处理终端命令，直到退出命令、关闭信号或任务取消。
 
-        # 主循环
-        try:
-            await self._record_telemetry_event(
-                domain="runtime",
-                event_name="run_started",
-                summary="bot run loop started",
-            )
-            while self._running:
-                try:
-                    # 读取并执行命令（内部使用短超时轮询）
-                    should_continue = await self._command_parser.read_and_execute()
-
-                    if not should_continue:
-                        break
-                except asyncio.CancelledError:
+        单条命令异常被记录后继续读取；解析器的释放属于关闭阶段。
+        """
+        assert self._command_parser is not None
+        assert self.logger is not None
+        await self._record_telemetry_event(
+            domain="runtime",
+            event_name="run_started",
+            summary="bot run loop started",
+        )
+        while self._running:
+            try:
+                should_continue = await self._command_parser.read_and_execute()
+                if not should_continue:
                     break
-                except Exception as e:
-                    await self._record_telemetry_event(
-                        domain="error",
-                        event_name="run_loop_error",
-                        severity="error",
-                        summary="run loop error",
-                        attributes={"error_type": type(e).__name__},
-                        detail={"message": str(e)},
-                    )
-                    self.logger.error(f"主循环错误: {e}", exc_info=e)
-
-        finally:
-            await self._record_runtime_snapshot(event_name="run_stopped")
-            # 注意：不在这里关闭 command_parser 或卸下 SignalHandler。
-            # 两者都保留到 shutdown() 末尾，让 shutdown 期间第二次 Ctrl+C
-            # 仍能被 input worker 读取并 raise_signal 触发强制退出。
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                await self._record_telemetry_event(
+                    domain="error",
+                    event_name="run_loop_error",
+                    severity="error",
+                    summary="run loop error",
+                    attributes={"error_type": type(e).__name__},
+                    detail={"message": str(e)},
+                )
+                self.logger.error(f"主循环错误: {e}", exc_info=e)
 
     def _install_telemetry_hooks(self) -> None:
         """安装遥测日志订阅。"""
@@ -1098,200 +1208,263 @@ class Bot:
         self._stats["plugins_failed"] = 0
 
     async def shutdown(self, timeout: float = 30.0) -> None:
-        """等待完整停机完成，即使调用者在收尾期间再次被取消。"""
-        await await_cancellation_safe(self._shutdown(timeout), name="bot_shutdown")
-
-    async def _drain_runtime_tasks(self) -> None:
-        """关闭存储前清理所有业务任务，保留其清理任务和停机调用链。"""
-        excluded = cleanup_ancestors() | {asyncio.current_task()}
-        while True:
-            # 已开始的库操作先完成，避免扫到 SQLAlchemy 内部派生的 close 任务。
-            await drain_cleanup_tasks()
-            pending = {
-                task for task in asyncio.all_tasks()
-                if task not in excluded and not task.done() and not is_cleanup_task(task)
-            }
-            if not pending:
-                return
-            await cancel_and_wait_tasks(pending)
-
-    async def _shutdown(self, timeout: float = 30.0) -> None:
-        """优雅关闭 Bot
+        """按依赖顺序释放已取得的资源，汇总错误后再报告失败。
 
         Args:
-            timeout: 关闭超时时间（秒）
+            timeout: 每个异步清理步骤（包括单个插件）的等待上限，秒。
+                依赖协程配合取消；同步阻塞操作不受 asyncio 超时抢占。
 
         Raises:
-            BotShutdownError: 关闭失败
+            ValueError: timeout 不大于零。
+            BotShutdownError: 一个或多个清理步骤失败或超时。
         """
         if self._shutdown_requested:
             return
-
+        if timeout <= 0:
+            raise ValueError("关闭步骤超时必须大于零")
         self._shutdown_requested = True
         self._running = False
+        errors: list[str] = []
 
-        if self.logger:
-            self.logger.info("正在关闭 Neo-MoFox Bot...")
-        else:
-            print("正在关闭 Neo-MoFox Bot...")
+        async def step(name: str, callback: Callable[[], Awaitable[Any]]) -> None:
+            """独立限制清理步骤的等待时间；失败不会跳过后续步骤。"""
+            try:
+                async with asyncio.timeout(timeout):
+                    await callback()
+            except Exception as exc:
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
         try:
-            await self._record_telemetry_event(
-                domain="runtime",
-                event_name="shutdown_started",
-                summary="bot shutdown started",
-            )
-            # 1. 停止接受新工作
-            if self.logger:
-                self.logger.info("停止接受新任务...")
+            # 步骤 1：停止主循环，记录关闭开始；遥测失败也不能阻断清理。
+            if "telemetry" in self._owned_resources:
+                await step("关闭开始遥测", partial(
+                    self._record_telemetry_event, domain="runtime",
+                    event_name="shutdown_started", summary="bot shutdown started",
+                ))
 
-            # 先停止流循环和重启监控，确保插件卸载时不再使用插件数据库。
-            if self.watchdog:
-                self.watchdog.stop()
+            # 步骤 2：在插件还存在时发布停止事件，停止 HTTP 入口与聊天流。
+            await step("ON_STOP", self._publish_stop_event)
+            await step("HTTP", self._stop_http_server)
+            await step("聊天流", self._stop_stream_loops)
 
-            # 关闭入口和生产者，避免卸载插件或等待数据库清理时继续产生新任务。
-            if self.http_server and self.http_server.is_running():
-                await self.http_server.stop()
-            if self._stop_logger_cleanup is not None:
-                await self._stop_logger_cleanup()
-            if self.scheduler:
-                await self.scheduler.stop()
-                self._stats["scheduler_running"] = False
+            # 步骤 3：逐个逆序卸载插件，每个插件拥有独立的超时与错误记录。
+            if self.plugin_manager is not None:
+                for name in reversed(self.load_order):
+                    await step(f"插件 {name}", partial(self._shutdown_plugin, name))
+            self.load_results.clear()
+            self._stats.update(plugins_loaded=0, plugins_failed=0)
 
-            from src.core.transport.distribution.stream_loop_manager import (
-                get_stream_loop_manager,
-            )
+            # 步骤 4：移除周期服务的任务，再停止统一调度器。
+            await step("日志清理", self._stop_log_cleanup)
+            await step("媒体管理器", self._stop_media_manager)
+            await step("调度器", self._stop_scheduler)
 
-            stream_loop_manager = get_stream_loop_manager()
-            if stream_loop_manager.is_running:
-                await stream_loop_manager.stop()
+            # 步骤 5：停止外部连接、遥测发送和工作任务，避免访问已关闭的数据库。
+            await step("MCP", self._stop_mcp_manager)
+            await step("云端遥测", self._close_cloud_telemetry)
+            await step("看门狗", self._stop_watchdog)
+            await step("任务管理器", self._stop_task_manager)
 
-            # 2. 触发 ON_STOP 事件（让事件处理器在插件卸载前执行清理）
+            # 步骤 6：后台工作停止后，逐个关闭业务存储。
+            await step("主数据库", self._close_database)
+            await step("向量数据库", self._close_vector_database)
+            await step("LLM统计", self._close_llm_statistics)
+
+            # 步骤 7：遥测尚可写时记录结果，之后解绑订阅并关闭遥测存储。
+            if "telemetry" in self._owned_resources:
+                await step("关闭结果遥测", partial(
+                    self._record_telemetry_event, domain="runtime",
+                    event_name="shutdown_failed" if errors else "shutdown_complete",
+                    summary="bot shutdown finished", detail={"errors": list(errors)},
+                ))
+            await step("遥测订阅", self._remove_telemetry_hooks)
+            await step("本地遥测", self._close_telemetry)
+        finally:
+            # 步骤 8：即使关闭任务被取消，也恢复线程池、终端和信号；各项独立兜底。
+            for name, cleanup in (
+                ("网络运行环境", self._restore_network_runtime),
+                ("日志系统", self._close_logger),
+                ("命令解析器", self._close_command_parser),
+                ("信号处理器", self._restore_signal_handler),
+            ):
+                try:
+                    cleanup()
+                except Exception as exc:
+                    errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            self._initialized = False
+
+        if errors:
+            message = "关闭部分失败：" + "；".join(errors)
+            self.ui.display_error(message)
+            raise BotShutdownError(message)
+        self.ui.display_success("关闭完成")
+
+    async def _shutdown_plugin(self, name: str) -> None:
+        """卸载单个插件，并将已加载插件的失败返回值转换为关闭错误。"""
+        assert self.plugin_manager is not None
+        result = await self.plugin_manager.unload_plugin(name)
+        if result is False and self.load_results.get(name):
+            raise BotShutdownError(f"插件 {name} 卸载失败")
+
+    async def _publish_stop_event(self) -> None:
+        """仅在事件总线已创建时通知插件停止，供部分初始化回滚使用。"""
+        if self.event_bus is not None:
+            from src.core.components.types import EventType
+
+            await self.event_bus.publish(EventType.ON_STOP, {})
+
+    async def _stop_http_server(self) -> None:
+        """停止已创建的 HTTP 服务，避免后续释放期间继续接收请求。"""
+        if self.http_server is not None:
+            await self.http_server.stop()
+
+    async def _stop_stream_loops(self) -> None:
+        """在插件和数据库释放前停止聊天流；关闭时不懒创建管理器。"""
+        if self._stream_loop_manager is not None:
+            await self._stream_loop_manager.stop()
+
+    async def _stop_log_cleanup(self) -> None:
+        """在调度器仍可操作时移除日志清理任务。"""
+        if self._stop_logger_cleanup is not None:
+            await self._stop_logger_cleanup()
+
+    async def _stop_media_manager(self) -> None:
+        """显式释放媒体清理任务，允许媒体服务尚未启动。"""
+        if self.media_manager is not None:
+            await self.media_manager.shutdown()
+
+    async def _stop_scheduler(self) -> None:
+        """停止调度器并清空预注册任务，成功后更新统计。"""
+        if self.scheduler is not None:
+            await self.scheduler.stop()
+            self._stats["scheduler_running"] = False
+
+    async def _stop_mcp_manager(self) -> None:
+        """关闭已创建的 MCP 连接和工具资源。"""
+        if self.mcp_manager is not None:
+            await self.mcp_manager.cleanup()
+
+    async def _stop_watchdog(self) -> None:
+        """停止看门狗，避免将正常关闭中的任务报告为异常。"""
+        if self.watchdog is not None:
+            self.watchdog.stop()
+
+    async def _stop_task_manager(self) -> None:
+        """取消并等待受管理任务，包括守护任务；始终回收进程池。
+
+        只清理 TaskManager 持有的任务，不取消宿主事件循环中的无关任务。
+        当前关闭任务可能也受管理，必须排除，避免自取消或自等待。
+        """
+        if self.task_manager is None:
+            return
+        current = asyncio.current_task()
+        pending = []
+        try:
+            for info in self.task_manager.get_active_tasks():
+                if info.task is not None and info.task is not current:
+                    self.task_manager.cancel_task(info.task_id)
+                    pending.append(info.task)
+            if pending:
+                await asyncio.wait(pending)
+        finally:
             try:
-                from src.core.components.types import EventType
-                assert self.event_bus is not None
-                await self.event_bus.publish(EventType.ON_STOP, {})
-                if self.logger:
-                    self.logger.info("已触发 ON_STOP 事件")
-            except Exception as e:
-                if self.logger:
-                    self.logger.warning(f"触发 ON_STOP 事件失败: {e}")
-
-            # 3. 卸载插件
-            await self._unload_all_plugins()
-
-            # 6. 关闭 MCP 客户端连接
-            if self.mcp_manager:
-                if self.logger:
-                    self.logger.info("关闭 MCP 客户端连接...")
-                await self.mcp_manager.cleanup()
-
-            # 8. 停止任务管理器，等待包括守护任务在内的数据库收尾。
-            from src.kernel.logger import stop_logger_event_broadcast
-
-            stop_logger_event_broadcast()
-            if self.task_manager:
-                active_tasks = [
-                    info for info in self.task_manager.get_active_tasks()
-                    if info.task is not asyncio.current_task()
-                ]
-                await cancel_and_wait_tasks(
-                    info.task for info in active_tasks if info.task is not None
-                )
-
-                # 清理已完成的任务
                 self.task_manager.cleanup_tasks()
+            finally:
                 self.task_manager.shutdown_process_pool(wait=False)
 
-            # 包括未登记到 TaskManager 的任务，必须在数据库关闭前退出。
-            await self._drain_runtime_tasks()
-
-            # 9. 关闭数据库
+    async def _close_database(self) -> None:
+        """释放本 Bot 尝试初始化的主数据库，包括初始化部分失败的情况。"""
+        if "database" in self._owned_resources:
             from src.kernel.db import close_engine
 
             await close_engine()
             self._stats["db_connected"] = False
+            self._owned_resources.discard("database")
 
-            # 10. 关闭向量数据库
+    async def _close_vector_database(self) -> None:
+        """关闭本 Bot 初始化过的向量数据库服务。"""
+        if "vector_db" in self._owned_resources:
             from src.kernel.vector_db import close_all_vector_db_services
 
             await close_all_vector_db_services()
+            self._owned_resources.discard("vector_db")
 
-            # 10.5 关闭 LLM 统计数据库
+    async def _close_cloud_telemetry(self) -> None:
+        """在统计存储关闭前停止云端发送循环并释放运行时。"""
+        if "cloud_telemetry" in self._owned_resources:
             from src.app.cloud_telemetry import close_cloud_telemetry_runtime
 
             await close_cloud_telemetry_runtime()
+            self._owned_resources.discard("cloud_telemetry")
 
-            # 10.6 关闭 LLM 统计数据库
+    async def _close_llm_statistics(self) -> None:
+        """关闭已尝试初始化的 LLM 统计数据库。"""
+        if "llm_stats" in self._owned_resources:
             from src.kernel.llm.stats import close_llm_stats_db
+
             await close_llm_stats_db()
+            self._owned_resources.discard("llm_stats")
 
-            # 10.6.2 恢复 DNS patch 并关闭 DNS 线程池
-            loop = asyncio.get_running_loop()
-            if self._original_getaddrinfo is not None:
-                loop.getaddrinfo = self._original_getaddrinfo  # type: ignore[method-assign]
-                self._original_getaddrinfo = None
-            if self._original_getnameinfo is not None:
-                loop.getnameinfo = self._original_getnameinfo  # type: ignore[method-assign]
-                self._original_getnameinfo = None
+    async def _remove_telemetry_hooks(self) -> None:
+        """在遥测存储关闭前解除日志订阅。"""
+        if callable(self._telemetry_log_unsubscribe):
+            self._telemetry_log_unsubscribe()
+            self._telemetry_log_unsubscribe = None
 
+    async def _close_telemetry(self) -> None:
+        """关闭已尝试初始化的本地遥测数据库。"""
+        if "telemetry" in self._owned_resources:
+            from src.kernel.telemetry import close_telemetry_db
+
+            await close_telemetry_db()
+            self._owned_resources.discard("telemetry")
+
+    def _restore_network_runtime(self) -> None:
+        """恢复 DNS 方法和原默认线程池，仅关闭本 Bot 创建的线程池。"""
+        loop = asyncio.get_running_loop()
+        if self._original_getaddrinfo is not None:
+            loop.getaddrinfo = self._original_getaddrinfo  # type: ignore[method-assign]
+            self._original_getaddrinfo = None
+        if self._original_getnameinfo is not None:
+            loop.getnameinfo = self._original_getnameinfo  # type: ignore[method-assign]
+            self._original_getnameinfo = None
+        if (
+            self._default_executor is not None
+            and getattr(loop, "_default_executor", None) is self._default_executor
+        ):
+            if self._previous_default_executor is not None:
+                loop.set_default_executor(self._previous_default_executor)
+            else:
+                # 公共 setter 不接受 None；恢复未创建默认池的状态需动态赋值。
+                setattr(loop, "_default_executor", None)
+        try:
             if self._dns_executor is not None:
                 self._dns_executor.shutdown(wait=False, cancel_futures=True)
                 self._dns_executor = None
+        finally:
+            if self._default_executor is not None:
+                self._default_executor.shutdown(wait=False, cancel_futures=True)
+                self._default_executor = None
 
-            # 10.6.3 显式关闭默认线程池
-            default_executor = loop._default_executor  # type: ignore[attr-defined]
-            if default_executor is not None:
-                default_executor.shutdown(wait=False, cancel_futures=True)
-                loop._default_executor = None  # type: ignore[attr-defined]
-
-            await self._record_runtime_snapshot(event_name="shutdown_complete")
-
-            if callable(self._telemetry_log_unsubscribe):
-                self._telemetry_log_unsubscribe()
-                self._telemetry_log_unsubscribe = None
-
-            # 10.7 关闭通用遥测数据库
-            from src.kernel.telemetry import close_telemetry_db
-            await close_telemetry_db()
-
-            # 11. 关闭日志系统（停止事件广播）
+    def _close_logger(self) -> None:
+        """关闭本 Bot 初始化过的日志系统，错误报告随后走控制台 UI。"""
+        if "logger" in self._owned_resources:
             from src.kernel.logger import shutdown_logger_system
 
             shutdown_logger_system()
+            self._owned_resources.discard("logger")
 
-            # 12. 等待资源关闭期间产生的任务，不直接取消资源收尾任务。
-            await self._drain_runtime_tasks()
+    def _close_command_parser(self) -> None:
+        """在资源释放结束后停止输入线程，让关闭期间的二次中断有效。"""
+        if self._command_parser is not None:
+            self._command_parser.close()
+            self._command_parser = None
 
-            self.ui.display_success("关闭完成")
-
-        except Exception as e:
-            await self._record_telemetry_event(
-                domain="error",
-                event_name="shutdown_failed",
-                severity="error",
-                summary="bot shutdown failed",
-                attributes={"error_type": type(e).__name__},
-                detail={"message": str(e)},
-            )
-            if self.logger:
-                self.logger.error(f"关闭过程中出错: {e}", exc_info=e)
-            else:
-                print(f"关闭过程中出错: {e}")
-            raise BotShutdownError(f"关闭失败: {e}") from e
-        finally:
-            # 关闭命令解析器：input worker 活到现在，shutdown 期间的第二次
-            # Ctrl+C 仍能被它读取并 raise_signal 触发强制退出。shutdown 完成
-            # 后才关闭，并通过 app.exit 注入 EOF 让阻塞中的 prompt() 返回，
-            # 避免终端残留 raw 模式。
-            if self._command_parser is not None:
-                self._command_parser.close()
-                self._command_parser = None
-            # 卸下信号处理器：shutdown 已完成（或失败），不再需要拦截 SIGINT。
-            # 此后 Ctrl+C 恢复为 asyncio/Python 默认行为。
-            if self._signal_handler is not None:
-                self._signal_handler.restore_handlers()
-                self._signal_handler = None
+    def _restore_signal_handler(self) -> None:
+        """最后恢复进程原信号处理器，即使命令解析器关闭失败也执行。"""
+        if self._signal_handler is not None:
+            self._signal_handler.restore_handlers()
+            self._signal_handler = None
 
     async def start(self) -> None:
         """完整的启动流程（初始化 + 运行 + 关闭）
@@ -1299,7 +1472,9 @@ class Bot:
         这是推荐的启动方式。
         """
         try:
+            # 步骤 1：准备依赖与插件，允许调度任务预注册。
             await self.initialize()
+            # 步骤 2：启动服务并进入命令循环。
             await self.run()
 
         except KeyboardInterrupt:
@@ -1329,7 +1504,14 @@ class Bot:
                 print(f"\n[致命错误: {e}]")
             raise
         finally:
-            await self.shutdown()
+            # 步骤 3：任何退出路径都尝试清理；清理失败不能覆盖原始启动异常。
+            original_error = sys.exc_info()[1]
+            try:
+                await self.shutdown()
+            except Exception as cleanup_error:
+                if original_error is None:
+                    raise
+                original_error.add_note(f"关闭期间另有异常: {cleanup_error}")
 
 
 __all__ = ["Bot"]

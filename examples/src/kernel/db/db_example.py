@@ -5,11 +5,9 @@
 """
 import sys
 import asyncio
-from contextlib import suppress
 from pathlib import Path
 
-from sqlalchemy import Boolean, Integer, String, Text, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import Boolean, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, declarative_base
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent.parent))
@@ -21,8 +19,6 @@ from src.kernel.db import (
     close_engine,
     configure_engine,
     get_engine,
-    get_db_session,
-    run_write_transaction,
 )
 from src.kernel.logger import get_logger, COLOR
 
@@ -292,47 +288,6 @@ async def demo_stream_iteration():
     logger.info(f"   找到 {count} 个年龄大于 25 的用户")
 
 
-async def demo_cancelled_transaction() -> None:
-    """取消业务任务后仍等待回滚完成，再关闭数据库。
-
-    若取消发生在提交已经开始之后，提交仍可能完成，不能据此断言未写入。
-    """
-    ready = asyncio.Event()
-
-    async def write_pending_user() -> None:
-        """写入尚未提交的用户，并等待调用方取消。"""
-        async with get_db_session() as session:
-            session.add(User(name="取消事务示例", age=20, is_active=True))
-            await session.flush()
-            ready.set()
-            await asyncio.Event().wait()
-
-    task = asyncio.create_task(write_pending_user())
-    try:
-        await asyncio.wait_for(ready.wait(), timeout=5)
-    finally:
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
-
-    assert not await CRUDBase(User).exists(name="取消事务示例")
-    logger.info("取消任务的未提交写入已回滚，连接已归还")
-
-
-async def demo_short_write_transaction() -> None:
-    """查询后更新必须放在短写事务内，回调只包含可整体重试的数据库操作。"""
-    async def increment_age(session: AsyncSession) -> None:
-        """SQLite 在读取前排队取得写锁，避免并发读取后覆盖彼此的更新。"""
-        result = await session.execute(select(User).order_by(User.id).limit(1))
-        user = result.scalars().first()
-        if user is not None:
-            user.age += 1
-
-    await run_write_transaction(increment_age)
-    # 网络请求、文件操作和日志等外部副作用放在已提交的事务之外。
-    logger.info("短写事务已提交")
-
-
 async def main():
     """主函数"""
     logger.info("=" * 50)
@@ -352,8 +307,6 @@ async def main():
         await demo_aggregate_query()
         await demo_bulk_operations()
         await demo_stream_iteration()
-        await demo_cancelled_transaction()
-        await demo_short_write_transaction()
 
         logger.info("\n" + "=" * 50)
         logger.info("示例运行完成！")

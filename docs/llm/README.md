@@ -24,7 +24,7 @@ kernel/llm/
 ├── roles.py                 # 消息角色枚举
 ├── request.py               # LLMRequest 门面 + 模型校验
 ├── request_execution.py     # 请求执行主流程（生命周期管理）
-├── request_inspector.py     # 请求调试与检查工具
+├── request_inspector.py     # 请求捕获与结构化视图（进程内，不提供 Web 端点）
 ├── response.py              # LLMResponse 包装层
 ├── stream_state.py          # 流式状态归并（LLMStreamReducer）
 ├── tool_call_compat.py      # 工具调用兼容解析
@@ -251,6 +251,47 @@ by_model = await collector.get_by_model()
 cache_rate = await collector.get_cache_hit_rate()
 ```
 
+### 9. 请求检视器（RequestInspector）
+
+在**进程内**记录每次 LLM 调用的完整请求体到内存环形缓冲（默认保留最近 200 条），
+并提供只读查询接口。本模块**不提供任何 HTTP 端点**——框架本体不内置可视化后台
+（见根目录 README「WebUI 安装提示」），可视化调试请使用官方 WebUI。
+
+写入侧由 model_client 自动完成（`chat.completions.create` / `messages.create` /
+`responses.create` / `embeddings.create` / `rerank.create` 都会捕获），
+以下为读取侧的公共接口：
+
+```python
+from src.kernel.llm import get_inspector
+
+inspector = get_inspector()          # 进程内单例
+
+inspector.list_summaries()          # 按捕获顺序返回摘要列表
+inspector.get_record(record_id)      # 返回单条完整记录；不存在返回 None
+inspector.clear()                    # 清空缓冲，返回被清除的条数
+```
+
+要点：
+
+- **只读快照语义**：`get_record()` 返回的 `params` / `metadata` 是深拷贝，
+  调用方就地修改不会污染缓冲中的原始记录；`import_json()` 返回的同样是
+  与缓冲隔离的 `CapturedRequest` 副本。`capture()` 会深拷贝传入的 metadata，
+  记录与调用方不共享嵌套对象。
+- **降级约定**：`params` 无法 JSON 序列化、或 `metadata` 无法深拷贝时，
+  对应字段降级为 `{"_raw": str(...)}`，`capture()` 不会因入参抛异常。
+  两类入参共用同一套约定，便于事后回查原始值。
+- **ID 语义**：`id` 由捕获顺序单调递增，`clear()` **不重置**计数器——
+  清空后新记录的 ID 会接着旧值继续，不会从 1 重新开始。
+- **环形缓冲淘汰**：`max_records` 超出后最旧的记录会被挤出，
+  此时 `get_record()` 对被淘汰的 ID 返回 `None`。
+- **并发模型**：所有方法均为同步、无 `await`。读取前会对 deque 取快照，
+  因此可安全地与其他线程的 `capture()` 并发调用，不会抛
+  `RuntimeError: deque mutated during iteration`。
+  但写入侧的自增不是原子操作，**多线程并发 `capture()` 时 ID 不保证唯一**，
+  按 ID 查询在这种情况下可能命中非预期记录；本模块设计用于单事件循环内使用。
+- 捕获内容包含完整 system prompt、用户消息、工具定义与返回，**属敏感数据**，
+  接入方需自行控制暴露范围。
+
 ## 详细文档索引
 
 - [Exceptions](./exceptions.md) - 异常类和错误分类（含 `classify_exception`）
@@ -309,6 +350,16 @@ extra_params = {headers = {"X-API-Version" = "2024-06", "X-Priority" = "high"}, 
 ### Q: 指标收集是否有性能开销？
 
 A: 内存级指标可以通过 `enable_metrics=False` 关闭。持久化统计仅在显式调用 `init_llm_stats` 后生效。
+
+### Q: 如何可视化查看 LLM 请求体？
+
+A: 框架本体不再内置调试 WebUI，请安装官方 WebUI：
+[MoFox-Core-Webui](https://github.com/MoFox-Studio/MoFox-Core-Webui)。
+
+`src/kernel/llm/request_inspector.py` 仅在**进程内**保留请求捕获与结构化视图构造，
+不对外提供任何 HTTP 端点。需要程序内调试时用 `get_inspector()` 获取实例，
+再调用 `list_summaries()` / `get_record()` 读取记录，
+详见 [第 9 节](#9-请求检视器requestinspector)。
 
 ## 相关资源
 

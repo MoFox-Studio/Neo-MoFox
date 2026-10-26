@@ -12,7 +12,6 @@ from functools import lru_cache
 from typing import Any, Generic, TypeVar
 
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.kernel.db.core.cache import (
@@ -24,8 +23,7 @@ from src.kernel.db.core.cache import (
 from src.kernel.logger import get_logger
 
 from ..telemetry import record_db_operation_event
-from ..core.session import get_db_session, transaction_session
-from ..core.exceptions import DatabaseTransactionError
+from ..core.session import get_db_session
 
 logger = get_logger("database.crud", display="CRUD")
 
@@ -48,8 +46,17 @@ async def _get_session_ctx(
         AsyncSession 实例（自动处理提交/回滚）。
     """
     if session_factory is not None:
-        async with transaction_session(session_factory) as session:
-            yield session
+        async with session_factory() as session:
+            try:
+                yield session
+                if session.is_active:
+                    await session.commit()
+            except Exception:
+                if session.is_active:
+                    await session.rollback()
+                raise
+            finally:
+                await session.close()
     else:
         async with get_db_session() as session:
             yield session
@@ -615,19 +622,7 @@ class CRUDBase(Generic[T]):
         if defaults:
             create_data.update(defaults)
 
-        try:
-            instance = await self.create(create_data)
-        except (IntegrityError, DatabaseTransactionError) as exc:
-            # 另一个调用者可能在查询和插入之间成功创建同一记录。
-            # create 已完成回滚；仅在重新查询确实匹配时接受竞争结果。
-            cause = exc.__cause__ if isinstance(exc, DatabaseTransactionError) else exc
-            if not isinstance(cause, IntegrityError):
-                raise
-            invalidate_model_cache(self.model, session_factory=self._session_factory)
-            instance = await self.get_by(**filters)
-            if instance is None:
-                raise
-            return instance, False
+        instance = await self.create(create_data)
         return instance, True
 
     async def bulk_create(self, objs_in: list[dict[str, Any]]) -> list[T]:

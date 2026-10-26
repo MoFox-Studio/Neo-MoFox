@@ -125,6 +125,7 @@ class NoticeHandler:
                             notice_config["notice_type"] = str(notice_type)
                             notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
                             notice_config["raw"] = raw
+                            notice_config["is_unknown_event"] = True
 
             case NoticeType.group_msg_emoji_like:
                 # 检查是否启用表情回复功能
@@ -203,7 +204,16 @@ class NoticeHandler:
 
                     case _:
                         logger.warning(f"不支持的group_ban类型: {notice_type}.{sub_type}")
-                        return None
+                        handled_segment, user_info = await self._handle_raw_passthrough(
+                            raw, f"{notice_type}.{sub_type}"
+                        )
+                        if handled_segment and user_info:
+                            notice_config["notice_type"] = f"{notice_type}.{sub_type}"
+                            notice_config["text_description"] = cast(
+                                str, handled_segment.get("data", "")
+                            )
+                            notice_config["raw"] = raw
+                            notice_config["is_unknown_event"] = True
 
             case NoticeType.group_upload:
                 logger.info("群文件上传")
@@ -225,6 +235,7 @@ class NoticeHandler:
                     notice_config["notice_type"] = str(notice_type)
                     notice_config["text_description"] = cast(str, handled_segment.get("data", ""))
                     notice_config["raw"] = raw
+                    notice_config["is_unknown_event"] = True
 
         if not handled_segment or not user_info:
             logger.warning("notice处理失败或不支持")

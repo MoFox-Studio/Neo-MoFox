@@ -15,7 +15,6 @@ import time
 from pathlib import Path
 
 from src.kernel.logger import get_logger
-from src.kernel.scheduler import TriggerType, get_unified_scheduler
 
 logger = get_logger("logger.cleanup", display="日志清理")
 
@@ -65,6 +64,8 @@ class LoggerCleanupManager:
         通过 UnifiedScheduler 注册周期性清理任务。
         若 enabled 为 False 则跳过注册。
         """
+        from src.kernel.scheduler import TriggerType, get_unified_scheduler
+
         if not self.enabled:
             logger.info("日志自动清理已禁用")
             return
@@ -153,6 +154,8 @@ class LoggerCleanupManager:
 
         从调度器中移除已注册的清理任务。
         """
+        from src.kernel.scheduler import get_unified_scheduler
+
         if self._cleanup_task_id is None:
             return
 

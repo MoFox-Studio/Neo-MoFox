@@ -13,14 +13,14 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
-from src.app.plugin_system.api.storage_api import PluginDatabase
+from .database import MnemosyneDatabase
 
 from .models import ALL_MODELS, SchemaVersionModel
 from .schema_version import SCHEMA_KEY, SCHEMA_VERSION
 
 
-class _MnemosynePluginDatabase(PluginDatabase):
-    """沿用框架统一事务管理，避免插件副本再次遗漏提交或失败 flush 的清理。"""
+class _MnemosynePluginDatabase(MnemosyneDatabase):
+    """正式记忆库沿用插件统一的取消安全事务。"""
 
 
 def create_episode_tables(connection: sqlite3.Connection) -> None:

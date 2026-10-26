@@ -44,22 +44,6 @@ def _patch_api_version(monkeypatch: pytest.MonkeyPatch, api_name: str, version: 
     monkeypatch.setitem(api_pkg.PLUGIN_API_VERSIONS, api_name, version)
 
 
-async def test_mnemosyne_rejects_storage_without_cancellation_safe_api(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """市场发布包依赖新存储能力，旧宿主必须在导入插件前被拒绝。"""
-    plugin_dir = Path(__file__).resolve().parents[3] / "plugins" / "Mnemosyne_memory"
-    manifest = await load_manifest(str(plugin_dir))
-    assert manifest is not None
-    loader = PluginLoader()
-    assert loader._check_version_compatibility(manifest)[0]
-    _patch_api_version(monkeypatch, "storage_api", "1.0.0")
-    compatible, reason = loader._check_version_compatibility(manifest)
-    assert not compatible
-    assert "storage_api" in reason
-    assert "1.1.0" in reason
-
-
 # =============================================================================
 # 基础：聚合表与常量
 # =============================================================================
@@ -154,7 +138,7 @@ def test_dict_api_version_current_versions_compatible() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "plugin_name",
-    ["neo_default_chatter", "perm_plugin", "utility_commands"],
+    ["default_chatter", "neo_default_chatter", "perm_plugin", "utility_commands"],
 )
 async def test_official_stream_api_plugin_manifests_are_loadable(plugin_name: str) -> None:
     """官方插件的真实清单应被当前加载器接受，不启动插件或写入数据。"""
@@ -203,17 +187,17 @@ def test_dict_api_version_core_too_low(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "低于" in reason
 
 
-def test_dict_api_version_core_higher_is_compatible(
+def test_dict_api_version_core_higher_warns_but_loads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """dict 形式，同一主版本的较新 API 应向后兼容。"""
+    """dict 形式，核心版本高于插件要求，应警告但允许加载。"""
     _patch_api_version(monkeypatch, "llm_api", "1.5.0")
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(
         _manifest(api_version={"llm_api": "1.0.0"})
     )
     assert ok is True
-    assert reason == "兼容"
+    assert "llm_api" in reason
 
 
 def test_dict_api_version_unknown_key_rejected() -> None:

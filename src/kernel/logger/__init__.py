@@ -54,7 +54,6 @@ from .logger import (
     get_all_loggers,
     clear_all_loggers,
     shutdown_logger_system,
-    stop_logger_event_broadcast,
     install_rich_traceback_formatter,
     LOG_OUTPUT_EVENT,
 )
@@ -69,7 +68,6 @@ __all__ = [
     "stop_logger_cleanup",
     "get_global_log_config",
     "shutdown_logger_system",
-    "stop_logger_event_broadcast",
     # 主要接口
     "get_logger",
     "Logger",

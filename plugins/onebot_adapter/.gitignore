@@ -1,46 +1,86 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions
 *.so
-.Python
+
+# Distribution / packaging
 build/
-develop-eggs/
 dist/
-downloads/
 eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
+.eggs/
 
-# Virtual Environment
-venv/
-ENV/
-env/
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
 
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Testing
+# Unit test / coverage reports
 .pytest_cache/
+coverage/
 .coverage
 htmlcov/
 
-# MoFox-Bot specific
-config/local_*.toml
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+
+# IDE/editor files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and local runtime files
 *.log
+*.pid
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Local settings and secrets
+local_settings.py
+secrets.yml
+*.pem
+*.key
+
+# Data files
+*.sqlite3
+*.db
+
+# Jupyter
+.ipynb_checkpoints
+
+# Node / frontend
+node_modules/
+npm-debug.log
+
+# Coverage and reports
+reports/
+
+# Ignore compiled binaries
+*.exe
+*.dll
+*.so
+
+# Ignore temporary files
+*.tmp
+~*
+
+# Ignore build artifacts from poetry/uv if any
+.venv/
+poetry.lock
+
+# Project-specific
+/.pytest_cache/
+/test/__pycache__/

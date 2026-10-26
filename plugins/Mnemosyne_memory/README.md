@@ -1,14 +1,16 @@
 # Mnemosyne Memory
 
-当前开发版本为 **2.1.3**，开发分支为 `engram-memory-dev`，以主 `dev` 为基线独立开发，不再依赖 `feat/mnemosyne-memory-trial` 分支。沿用 `2.x` 版本序列，误发布的 `1.1.0` 已撤下。可训练的 Transformer 记忆控制器默认关闭学习和训练，不改变既有前馈选择或已保存的正式记忆。
+当前开发版本为 **2.1.4**，开发分支为 `engram-memory-dev`，以主 `dev` 为基线独立开发，不再依赖 `feat/mnemosyne-memory-trial` 分支。沿用 `2.x` 版本序列，误发布的 `1.1.0` 已撤下。可训练的 Transformer 记忆控制器默认关闭学习和训练，不改变既有前馈选择或已保存的正式记忆。
 
-2.1.3 为数据库修复的配套发布，沿用 2.1.2 的插件运行逻辑。请先更新主程序 `engram-memory-dev` 至 [7550c16](https://github.com/MoFox-Studio/Neo-MoFox/commit/7550c1656e97dad5cc98f7555f3bdd339bdb47a4) 或后续包含该修复的版本，再更新插件并重启。媒体写入排队、哈希索引和消息 ID 作用域修复由主程序提供，索引在主程序启动时自动迁移；本次插件版本升级不修改记忆数据库格式。
+2.1.4 适配 Neo-MoFox `1.3.0-alpha.2` 的最新 dev（同步基线 [49b5ded](https://github.com/MoFox-Studio/Neo-MoFox/commit/49b5ded)）。正式记忆库和日记库在插件内部完成取消安全的查询、提交、回滚及关闭，不再依赖主程序分支独有的 `storage_api 1.1.0` 或额外数据库补丁。工具和 Action 使用宿主 `llm_api 1.2.0` 的执行与上下文绑定。数据库 Schema 仍为 v8，本次升级不迁移已有记忆数据。
 
-2.1.2 修复数据库任务取消期间的连接清理，查询、提交、回滚和关闭统一使用框架提供的安全收尾；插件关闭会等待数据库使用者退出。请先更新包含本次修复的主程序（`engram-memory-dev` 分支），确认 `storage_api>=1.1.0` 后再升级插件。旧存储 API 会在加载前被版本检查拒绝。版本升级不修改记忆数据库格式。
+历史版本 2.1.3 为数据库修复的配套发布，沿用 2.1.2 的插件运行逻辑，要求主程序 `engram-memory-dev` 包含 [7550c16](https://github.com/MoFox-Studio/Neo-MoFox/commit/7550c1656e97dad5cc98f7555f3bdd339bdb47a4)。该历史要求不适用于 2.1.4；当前主程序媒体管理与消息表行为以最新 dev 为准。
+
+历史版本 2.1.2 修复数据库任务取消期间的连接清理，依赖分支提供的 `storage_api>=1.1.0`。2.1.4 已将插件数据库所需的资源收尾移到插件内部，关闭时仍会等待数据库使用者退出。
 
 ## 安装与加载
 
-需要 Neo-MoFox `1.2.0-rc.2` 或更新版本，且 `storage_api>=1.1.0`、`stream_api=2.0.0`、`message_api/person_api>=1.1.0`。将发布的 `.mfp` 放在主程序 `plugins/` 根目录，或将源码文件夹放为 `plugins/mnemosyne_memory/`。同一插件只保留一个安装来源，避免文件夹和旧包重复发现。不要把整个 Neo-MoFox 仓库或包含多层目录的压缩包作为插件安装。
+需要 Neo-MoFox `1.3.0-alpha.2` 或更新版本，且 `llm_api>=1.2.0`、`storage_api>=1.0.0`、`stream_api=2.0.0`、`message_api/person_api>=1.1.0`。将发布的 `.mfp` 放在主程序 `plugins/` 根目录，或将源码文件夹放为 `plugins/mnemosyne_memory/`。同一插件只保留一个安装来源，避免文件夹和旧包重复发现。不要把整个 Neo-MoFox 仓库或包含多层目录的压缩包作为插件安装。
 
 源码安装必须包含根级 `manifest.json`、`plugin.py`、`config.py` 和完整子模块；只有 `.git`、空目录或 `__pycache__` 的残留目录不是有效安装。缺少 manifest 时不会被发现，缺少入口或子模块时无法注册。请在实际启动实例的 `plugins/` 中安装完整发布包或源码，而不是仅更新开发工作树。正常启动会输出 `Mnemosyne Memory 已初始化`，随后由宿主注册事件处理器并输出插件加载成功日志。
 

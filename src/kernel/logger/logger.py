@@ -94,7 +94,6 @@ _global_config: dict[str, Any] = {
     "enable_event_broadcast": True,
 }
 _config_lock = threading.Lock()
-_event_broadcast_stopped = False
 
 # 全局共享的文件处理器（所有logger共享同一个）
 _global_file_handler: FileHandler | None = None
@@ -329,8 +328,6 @@ class Logger:
             message: 日志消息
             metadata: 元数据字典
         """
-        if _event_broadcast_stopped:
-            return
         try:
             # 构建事件数据
             log_data: dict[str, Any] = {
@@ -539,10 +536,9 @@ def initialize_logger_system(
         ...     log_filename="mofox",
         ... )
     """
-    global _global_file_handler, _global_cleanup_manager, _event_broadcast_stopped
+    global _global_file_handler, _global_cleanup_manager
 
     with _config_lock:
-        _event_broadcast_stopped = False
         _global_config["log_dir"] = log_dir
         _global_config["log_level"] = log_level.upper()
         _global_config["enable_file"] = enable_file
@@ -714,13 +710,6 @@ def get_all_loggers() -> dict[str, Logger]:
     """
     with _lock:
         return dict(_loggers)
-
-def stop_logger_event_broadcast() -> None:
-    """停止派生新的日志事件任务，保留控制台和文件日志供停机清理使用。"""
-    global _event_broadcast_stopped
-    with _config_lock:
-        _event_broadcast_stopped = True
-
 
 def shutdown_logger_system() -> None:
     """关闭日志系统，释放所有资源

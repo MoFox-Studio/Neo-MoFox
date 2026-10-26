@@ -740,7 +740,7 @@ async def test_sqlite_config_builder():
         # 验证URL
         assert "sqlite" in url
         assert "aiosqlite" in url
-        assert db_path.absolute().as_posix() in url
+        assert str(db_path.absolute()) in url
 
         # 验证参数
         assert kwargs["echo"] is False
@@ -772,7 +772,7 @@ async def test_postgresql_config_builder():
     assert kwargs["pool_size"] == 10
     assert kwargs["max_overflow"] == 20
     assert kwargs["pool_timeout"] == 30
-    assert kwargs["pool_recycle"] == 1800
+    assert kwargs["pool_recycle"] == 3600
     assert kwargs["pool_pre_ping"] is True
 
 

@@ -728,20 +728,22 @@ class TestSchedulerTimeUtils:
 
     @pytest.mark.asyncio
     async def test_create_schedule_without_start(self):
-        """测试未启动调度器时创建任务"""
+        """测试调度器未启动时也可以先注册任务。"""
         scheduler = UnifiedScheduler()
 
         async def dummy_task():
             pass
 
-        # 应该抛出RuntimeError
-        with pytest.raises(RuntimeError, match="调度器未运行"):
-            await scheduler.create_schedule(
-                callback=dummy_task,
-                trigger_type=TriggerType.TIME,
-                trigger_config={"delay_seconds": 1},
-                task_name="test_error",
-            )
+        schedule_id = await scheduler.create_schedule(
+            callback=dummy_task,
+            trigger_type=TriggerType.TIME,
+            trigger_config={"delay_seconds": 1},
+            task_name="test_error",
+        )
+
+        assert scheduler.is_started is False
+        assert "test_error" in scheduler.list_schedule_names()
+        assert await scheduler.get_task_info(schedule_id) is not None
 
     @pytest.mark.asyncio
     async def test_event_trigger_without_event_name(self):

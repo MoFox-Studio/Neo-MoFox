@@ -8,7 +8,7 @@ from sqlalchemy import JSON, Float, Integer, String, Text, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from src.app.plugin_system.api.storage_api import PluginDatabase
+from ..vnext.database import MnemosyneDatabase
 
 
 class DiaryBase(DeclarativeBase):
@@ -104,7 +104,7 @@ class DiaryStore:
 
     def __init__(self, database_path: str) -> None:
         """使用公开插件存储 API 创建独立数据库。"""
-        self.database = PluginDatabase(
+        self.database = MnemosyneDatabase(
             database_path, [StreamProgress, DailyDiary, DiaryEpisodeExport]
         )
 

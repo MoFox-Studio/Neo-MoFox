@@ -20,6 +20,7 @@ from src.core.utils.schema_sync import (
     enforce_database_schema_consistency,
 )
 from src.kernel.db import configure_engine, get_engine
+from src.kernel.db.core.exceptions import DatabaseInitializationError
 from src.kernel.db.core.engine import _build_sqlite_config
 
 
@@ -256,8 +257,8 @@ async def test_schema_sync_adds_missing_and_removes_undefined_columns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_schema_sync_preserves_sqlite_type_mismatch() -> None:
-    """SQLite 的类型亲和性兼容策略不重建表，已有原值和类型必须保留。"""
+async def test_schema_sync_raises_on_sqlite_type_mismatch() -> None:
+    """SQLite 遇到类型漂移时应硬失败，避免带病启动。"""
     engine = await get_engine()
 
     async with engine.begin() as conn:
@@ -274,19 +275,8 @@ async def test_schema_sync_preserves_sqlite_type_mismatch() -> None:
         )
 
     try:
-        async with engine.begin() as conn:
-            await conn.execute(text(
-                "INSERT INTO schema_sync_type_mismatch (id, score) VALUES (1, 'original')"
-            ))
-        await enforce_database_schema_consistency(TestBase.metadata)
-        async with engine.connect() as conn:
-            assert (await conn.execute(text(
-                "SELECT id, score FROM schema_sync_type_mismatch"
-            ))).one() == (1, "original")
-            columns = await conn.run_sync(
-                lambda sync: inspect(sync).get_columns("schema_sync_type_mismatch")
-            )
-            assert str(next(col for col in columns if col["name"] == "score")["type"]) == "TEXT"
+        with pytest.raises(DatabaseInitializationError):
+            await enforce_database_schema_consistency(TestBase.metadata)
     finally:
         async with engine.begin() as conn:
             await conn.execute(text("DROP TABLE IF EXISTS schema_sync_type_mismatch"))

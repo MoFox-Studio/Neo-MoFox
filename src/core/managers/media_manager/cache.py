@@ -10,16 +10,15 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from src.core.models.sql_alchemy import (
     ImageDescriptions,
     VideoDescriptions,
     VoiceDescriptions,
 )
-from src.kernel.db import QueryBuilder, invalidate_model_cache, run_write_transaction
+from src.kernel.db import QueryBuilder, invalidate_model_cache
+from src.kernel.db.core.session import get_db_session
 from src.kernel.logger import get_logger
 
 logger = get_logger("media_manager")
@@ -87,26 +86,33 @@ class MediaCache:
             model_cls = ImageDescriptions
             hash_field = "image_description_hash"
         try:
-            async def save(session: AsyncSession) -> None:
-                """描述缓存采用首个结果，重复识别不重复插入或覆盖。"""
-                dialect = session.get_bind().dialect.name
-                if dialect == "sqlite":
-                    insert = sqlite_insert(model_cls)
-                elif dialect == "postgresql":
-                    insert = postgresql_insert(model_cls)
-                else:
-                    raise ValueError(f"不支持的媒体数据库类型: {dialect}")
-                stmt = insert.values(**{
-                    hash_field: media_hash, "type": media_type,
-                    "description": description, "timestamp": time.time(),
-                }).on_conflict_do_nothing(
-                    index_elements=[getattr(model_cls, hash_field), model_cls.type],
+            created = False
+            async with get_db_session() as session:
+                stmt = (
+                    select(model_cls)
+                    .where(
+                        getattr(model_cls, hash_field) == media_hash,
+                        model_cls.type == media_type,
+                    )
+                    .order_by(model_cls.timestamp.desc())
+                    .limit(1)
                 )
-                await session.execute(stmt)
+                result = await session.execute(stmt)
+                existing = result.scalars().first()
 
-            await run_write_transaction(save)
-            invalidate_model_cache(model_cls)
-            logger.debug(f"已保存描述缓存: {media_hash[:8]}...")
+                if not existing:
+                    new_desc = model_cls(
+                        **{hash_field: media_hash},
+                        type=media_type,
+                        description=description,
+                        timestamp=time.time(),
+                    )
+                    session.add(new_desc)
+                    created = True
+                    await session.commit()
+                    logger.debug(f"保存描述缓存: {media_hash[:8]}...")
+            if created:
+                invalidate_model_cache(model_cls)
 
         except Exception as e:
             logger.error(f"保存描述缓存失败: {e}", exc_info=True)

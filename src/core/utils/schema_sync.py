@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 
 from sqlalchemy import DDL, inspect, text
-from sqlalchemy.engine import Connection, Dialect
+from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.schema import MetaData, Table
 
@@ -63,21 +63,10 @@ async def enforce_database_schema_consistency(
     stats = SchemaSyncStats()
 
     async with engine.begin() as conn:
-        if conn.dialect.name == "sqlite":
-            # sqlite3 的传统模式不会为 DDL 自动 BEGIN；显式事务保证索引迁移原子性。
-            await conn.execute(text("BEGIN IMMEDIATE"))
         await conn.run_sync(lambda sync_conn: active_metadata.create_all(sync_conn))
 
         for table in active_metadata.sorted_tables:
             await _sync_table(conn, table, db_type, stats)
-            if table.name == "messages":
-                await _sync_message_identity(conn, table)
-            for index in table.indexes:
-                if index.name in {
-                    "idx_images_image_id", "idx_voices_voice_id", "idx_videos_video_id",
-                }:
-                    # OR(hash, path) 的两侧都需要索引，缩短媒体写锁持有时间。
-                    await conn.run_sync(lambda sync_conn: index.create(sync_conn, checkfirst=True))
 
     logger.info(
         "Schema 对齐完成: "
@@ -88,51 +77,6 @@ async def enforce_database_schema_consistency(
         f"nullable={stats.columns_nullability_altered}"
     )
     return stats
-
-
-async def _sync_message_identity(conn: AsyncConnection, table: Table) -> None:
-    """将旧的消息 ID 全局唯一索引迁移为聊天流内唯一，保留所有历史行。"""
-    target = next(
-        (index for index in table.indexes if index.name == "idx_messages_stream_message_id"),
-        None,
-    )
-    if target is None:
-        return
-
-    def inspect_identity(sync_conn: Connection) -> tuple[list[dict], list[dict]]:
-        """同时读取显式索引和表级 UNIQUE，避免遗漏另一种旧结构。"""
-        inspector = inspect(sync_conn)
-        return (
-            inspector.get_indexes(table.name, schema=table.schema),
-            inspector.get_unique_constraints(table.name, schema=table.schema),
-        )
-
-    indexes, constraints = await conn.run_sync(inspect_identity)
-    old_constraints = [
-        item for item in constraints if item.get("column_names") == ["message_id"]
-    ]
-    if old_constraints and conn.dialect.name == "sqlite":
-        raise DatabaseInitializationError(
-            "messages 存在表级全局 message_id UNIQUE，需显式迁移；拒绝自动重建历史消息表"
-        )
-    # 先建立新约束，后移除旧约束；任一步失败由外层事务整体回滚。
-    await conn.run_sync(lambda sync_conn: target.create(sync_conn, checkfirst=True))
-    table_ref = _qualified_table_name(table.name, table.schema, conn.dialect)
-    for constraint in old_constraints:
-        name = _quote_identifier(conn.dialect, constraint["name"])
-        await conn.execute(text(f"ALTER TABLE {table_ref} DROP CONSTRAINT {name}"))
-    for index in indexes:
-        if (
-            index.get("unique") and index.get("column_names") == ["message_id"]
-            and not index.get("duplicates_constraint")
-        ):
-            index_ref = _qualified_table_name(index["name"], table.schema, conn.dialect)
-            await conn.execute(text(f"DROP INDEX {index_ref}"))
-            logger.info(f"已迁移消息 ID 全局唯一索引: {index['name']}")
-    # message_id 的普通索引仍服务于来源查询，不修改历史 ID 或消息内容。
-    for index in table.indexes:
-        if index.name == "ix_messages_message_id":
-            await conn.run_sync(lambda sync_conn: index.create(sync_conn, checkfirst=True))
 
 
 async def _sync_table(
