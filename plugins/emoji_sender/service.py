@@ -167,6 +167,11 @@ class EmojiSenderService(BaseService):
         # 两者意图不同（一个是不该收，一个是用户不要了），
         # 混在一起会导致无法判断某张图为何没被收录。
         self._deleted_hashes: set[str] = plugin._deleted_hashes
+        # 正在入库中的哈希：文件已落盘、向量记录尚未写入。
+        # 对齐任务据此跳过这些文件，避免「刚写入就删除」窗口内
+        # 把文件误判为孤儿删除，留下指向不存在文件的僵尸记录。
+        # 这是本次入库的中间状态，只由当前实例持有，无需跨实例共享。
+        self._pending_ingest_hashes: set[str] = set()
 
     def _dedup_enabled(self) -> bool:
         """使用历史去重是否开启。"""
@@ -633,6 +638,29 @@ class EmojiSenderService(BaseService):
         return "\n".join([x for x in parts if x])
 
     @staticmethod
+    def _meme_id_from_store_path(store_path: str) -> str:
+        """从存储路径反推表情包的内容哈希。
+
+        入库时文件名由内容 sha256 与后缀拼成（``{meme_id}{suffix}``），
+        因此可直接从文件名还原哈希，无需读取文件内容。路径不是
+        ``_path_to_store_value`` 形式或文件名不符合该约定时返回空串。
+
+        Args:
+            store_path: ``_path_to_store_value`` 形式的存储路径。
+
+        Returns:
+            str: 64 位十六进制哈希；无法反推时返回空串。
+        """
+        name = store_path.rsplit("/", 1)[-1]
+        for suffix in sorted(_ALLOWED_SUFFIXES, key=len, reverse=True):
+            if name.endswith(suffix):
+                candidate = name[: -len(suffix)]
+                if len(candidate) == _MEME_ID_LENGTH and _is_full_meme_id(candidate):
+                    return candidate.lower()
+                break
+        return ""
+
+    @staticmethod
     def _extract_json_object(text: str) -> dict[str, Any] | None:
         """从模型输出中提取 JSON object。"""
         if not text:
@@ -707,8 +735,15 @@ class EmojiSenderService(BaseService):
             await vdb.delete(collection_name=collection, where={"path": missing_path})
 
         # 4) 磁盘多余 -> 删文件
+        # 但要先排除「正在入库」的���件：入库流程先复制文件、后写向量库，
+        # 两步之间可能触发本对齐任务。此时文件确实还没有对应记录，
+        # 却是入库的正常中间产物，删掉它会让入库流程写出一条指向
+        # 不存在文件的僵尸记录。
         orphan_files = sorted(files_on_disk - paths_in_db)
         for orphan_path in orphan_files:
+            if self._meme_id_from_store_path(orphan_path) in self._pending_ingest_hashes:
+                logger.debug(f"跳过正在入库中的表情包文件: {orphan_path}")
+                continue
             try:
                 await asyncio.to_thread(self._delete_file, orphan_path)
             except Exception as e:
@@ -936,81 +971,91 @@ class EmojiSenderService(BaseService):
             if meme_id in self._deleted_hashes:
                 logger.info(f"表情包在入库过程中被删除，跳过收录: {meme_id[:8]}...")
                 return
+
+            # 登记为「正在入库」：文件落盘与向量记录写入之间存在时间差，
+            # 其间若触发对齐任务，该文件会因「库中无记录」被误判为孤儿删除，
+            # 留下指向不存在文件的僵尸记录。登记后对齐任务会跳过它。
+            self._pending_ingest_hashes.add(meme_id)
             try:
-                await asyncio.to_thread(self._copy_file, source, target_path)
-            except Exception as e:
-                logger.warning(f"复制表情包失败: {source} -> {target_path} - {e}")
-                return
-
-            # 生成 embedding
-            try:
-                embedding_model_set = get_model_set_by_task("embedding")
-            except Exception:
-                logger.warning("未配置 embedding 任务模型，跳过入库")
-                return
-
-            try:
-                emb_req = create_embedding_request(
-                    model_set=embedding_model_set,
-                    request_name="emoji_sender_embedding",
-                    inputs=[description],
-                )
-                emb_resp = await emb_req.send()
-                embedding = emb_resp.embeddings[0]
-            except Exception as e:
-                logger.warning(f"生成 embedding 失败: {e}")
-                return
-
-            # 写入向量库：每个 tag 一条记录（metadata 全标量）
-            vdb = self._vector_db()
-            collection = self._collection_name()
-            await vdb.get_or_create_collection(collection)
-
-            ids: list[str] = []
-            embeddings: list[list[float]] = []
-            documents: list[str] = []
-            metadatas: list[dict[str, Any]] = []
-
-            stored_path = self._path_to_store_value(target_path)
-            now_ts = time.time()
-
-            for tag in tags:
-                ids.append(f"{meme_id}:{tag}")
-                embeddings.append(list(embedding))
-                documents.append(description)
-                metadatas.append(
-                    {
-                        "meme_id": meme_id,
-                        "tag": tag,
-                        "path": stored_path,
-                        "description": description,
-                        "source_hash": meme_id,
-                        "source_cache_path": self._path_to_store_value(source),
-                        "created_at": float(now_ts),
-                    }
-                )
-
-            # 写库前最后确认一次：复制之后到写入向量库之间仍可能被删除请求
-            # 抢先完成，此时写回记录会让已删除的表情包重新出现在库中。
-            if meme_id in self._deleted_hashes:
-                logger.info(f"表情包在入库过程中被删除，跳过写库: {meme_id[:8]}...")
                 try:
-                    await asyncio.to_thread(self._delete_file, str(target_path))
+                    await asyncio.to_thread(self._copy_file, source, target_path)
                 except Exception as e:
-                    logger.warning(f"清理已入库副本失败: {target_path} - {e}")
-                return
+                    logger.warning(f"复制表情包失败: {source} -> {target_path} - {e}")
+                    return
 
-            try:
-                await vdb.add(
-                    collection_name=collection,
-                    ids=ids,
-                    embeddings=embeddings,
-                    documents=documents,
-                    metadatas=metadatas,
-                )
-                logger.info(f"收藏表情包: {meme_id[:8]}... tags={tags}")
-            except Exception as e:
-                logger.warning(f"写入向量库失败: {e}")
+                # 生成 embedding
+                try:
+                    embedding_model_set = get_model_set_by_task("embedding")
+                except Exception:
+                    logger.warning("未配置 embedding 任务模型，跳过入库")
+                    return
+
+                try:
+                    emb_req = create_embedding_request(
+                        model_set=embedding_model_set,
+                        request_name="emoji_sender_embedding",
+                        inputs=[description],
+                    )
+                    emb_resp = await emb_req.send()
+                    embedding = emb_resp.embeddings[0]
+                except Exception as e:
+                    logger.warning(f"生成 embedding 失败: {e}")
+                    return
+
+                # 写入向量库：每个 tag 一条记录（metadata 全标量）
+                vdb = self._vector_db()
+                collection = self._collection_name()
+                await vdb.get_or_create_collection(collection)
+
+                ids: list[str] = []
+                embeddings: list[list[float]] = []
+                documents: list[str] = []
+                metadatas: list[dict[str, Any]] = []
+
+                stored_path = self._path_to_store_value(target_path)
+                now_ts = time.time()
+
+                for tag in tags:
+                    ids.append(f"{meme_id}:{tag}")
+                    embeddings.append(list(embedding))
+                    documents.append(description)
+                    metadatas.append(
+                        {
+                            "meme_id": meme_id,
+                            "tag": tag,
+                            "path": stored_path,
+                            "description": description,
+                            "source_hash": meme_id,
+                            "source_cache_path": self._path_to_store_value(source),
+                            "created_at": float(now_ts),
+                        }
+                    )
+
+                # 写库前最后确认一次：复制之后到写入向量库之间仍可能被删除请求
+                # 抢先完成，此时写回记录会让已删除的表情包重新出现在库中。
+                if meme_id in self._deleted_hashes:
+                    logger.info(f"表情包在入库过程中被删除，跳过写库: {meme_id[:8]}...")
+                    try:
+                        await asyncio.to_thread(self._delete_file, str(target_path))
+                    except Exception as e:
+                        logger.warning(f"清理已入库副本失败: {target_path} - {e}")
+                    return
+
+                try:
+                    await vdb.add(
+                        collection_name=collection,
+                        ids=ids,
+                        embeddings=embeddings,
+                        documents=documents,
+                        metadatas=metadatas,
+                    )
+                    logger.info(f"收藏表情包: {meme_id[:8]}... tags={tags}")
+                except Exception as e:
+                    logger.warning(f"写入向量库失败: {e}")
+            finally:
+                # 无论入库成功与否都要注销登记：文件已落盘但未写库时若
+                # 残留登记项，该文件将永远不会被对齐任务清理。
+                self._pending_ingest_hashes.discard(meme_id)
 
     async def _embed_query(self, query: str, request_name: str) -> list[float] | None:
         """生成查询文本的 embedding，失败返回 None。"""

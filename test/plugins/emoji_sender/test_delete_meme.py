@@ -1371,3 +1371,115 @@ class TestPaginationAdvancement:
         assert result is None
         assert "分页未推进" in reason
         assert meme_file.exists()
+
+
+class TestAlignWithIngestWindow:
+    """入库与对齐任务之间的窗口：文件已落盘但向量记录尚未写入。
+
+    入库流程先复制文件、后写向量库，两步之间存在时间差。此时若对齐任务
+    运行，会看到「文件在磁盘上、库里无记录」，把它误判为孤儿文件删除，
+    随后入库流程仍会写入记录，最终留下指向不存在文件的僵尸记录。
+    """
+
+    @pytest.mark.asyncio
+    async def test_pending_ingest_file_not_deleted_by_align(self, tmp_path: Path) -> None:
+        """正在入库中的文件不应被对齐任务当作孤儿删除。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([])
+
+        # 模拟入库已复制文件、尚未写库
+        service._pending_ingest_hashes.add(MEME_ID)
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            await service._align_data_dir_with_db()
+
+        assert meme_file.exists(), "正在入库的文件不应被对齐任务删除"
+
+    @pytest.mark.asyncio
+    async def test_real_orphan_still_deleted_by_align(self, tmp_path: Path) -> None:
+        """真正没有入库记录的孤儿文件仍应被清理，不能因新增保护而泄漏。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([])
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            await service._align_data_dir_with_db()
+
+        assert not meme_file.exists(), "没有对应记录的孤儿文件应被清理"
+
+    @pytest.mark.asyncio
+    async def test_align_leaves_normal_state_untouched(self, tmp_path: Path) -> None:
+        """记录与文件都在的正常状态不应被对齐任务改动。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb(
+            [_record(f"{MEME_ID}:开心", MEME_ID, path=service._path_to_store_value(meme_file))]
+        )
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            await service._align_data_dir_with_db()
+
+        assert meme_file.exists()
+        assert [item["record_id"] for item in vdb.records] == [f"{MEME_ID}:开心"]
+
+    @pytest.mark.asyncio
+    async def test_pending_registration_released_after_ingest(
+        self, tmp_path: Path
+    ) -> None:
+        """入库结束后必须注销登记，否则该文件永远不会被对齐任务清理。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([])
+
+        # 模拟入库登记后异常退出
+        service._pending_ingest_hashes.add(MEME_ID)
+        try:
+            try:
+                raise RuntimeError("模拟入库中途失败")
+            finally:
+                service._pending_ingest_hashes.discard(MEME_ID)
+        except RuntimeError:
+            pass
+
+        assert MEME_ID not in service._pending_ingest_hashes
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+        ):
+            await service._align_data_dir_with_db()
+
+        assert not meme_file.exists(), "登记注销后残留文件应能被对齐任务清理"
+
+
+class TestMemeIdFromStorePath:
+    """从存储路径反推内容哈希。"""
+
+    def test_valid_name(self) -> None:
+        """符合命名约定的路径可反推出哈希。"""
+        assert (
+            EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.png") == MEME_ID
+        )
+        assert (
+            EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.webp") == MEME_ID
+        )
+
+    def test_invalid_name_returns_empty(self) -> None:
+        """不符合命名约定的路径返回空串，不会误判为正在入库。"""
+        assert EmojiSenderService._meme_id_from_store_path("data/memes/notahash.png") == ""
+        assert EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}") == ""
+        assert EmojiSenderService._meme_id_from_store_path("data/memes/short.png") == ""
