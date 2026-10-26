@@ -119,6 +119,12 @@ class EmojiSenderPlugin(BasePlugin):
         self._rejected_hashes: set[str] = set()
         # 用户显式删除的表情包哈希，与 VLM 拒收分开存放
         self._deleted_hashes: set[str] = set()
+        # 正在入库中的表情包哈希：文件已落盘但向量记录尚未写入。
+        # 对齐任务据此跳过这些文件，避免把「刚写入、还没写库」的文件
+        # 误判成孤儿文件删除，留下指向不存在文件的僵尸记录。
+        # Service 不是单例（get_service 每次新建实例），因此共享状态
+        # 必须放在插件上，与其余哈希集合同层。
+        self._pending_ingest_hashes: set[str] = set()
 
     def get_components(self) -> list[type]:
         """返回本插件提供的组件类（按 interaction_mode 分模式注册）。"""

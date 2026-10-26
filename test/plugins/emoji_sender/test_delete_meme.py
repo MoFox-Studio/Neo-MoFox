@@ -26,6 +26,7 @@ def _make_service() -> EmojiSenderService:
     plugin = SimpleNamespace(
         config=config,
         _rejected_hashes=set(),
+        _pending_ingest_hashes=set(),
         _deleted_hashes=set(),
     )
     return EmojiSenderService(plugin=cast(Any, plugin))
@@ -190,6 +191,19 @@ class _FakeVectorDB:
             if record_id_value == record_id:
                 return meta
         return {}
+
+    async def add(self, **kwargs: Any) -> None:
+        """模拟向量库写入。
+
+        真实向量库写入时记录才会出现，替身原先缺少该方法，
+        导致涉及入库写库的路径无法被测试覆盖。
+        """
+        ids = kwargs.get("ids") or []
+        metadatas = kwargs.get("metadatas") or []
+        for record_id, meta in zip(ids, metadatas):
+            self.records.append(
+                {"record_id": str(record_id), "metadata": dict(meta or {})}
+            )
 
     async def delete(self, **kwargs: Any) -> dict[str, Any]:
         """模拟向量库删除。"""
@@ -1079,7 +1093,10 @@ class TestDeleteSuppressesReingest:
         config = EmojiSenderConfig()
         deleted: set[str] = set()
         plugin = SimpleNamespace(
-            config=config, _rejected_hashes=set(), _deleted_hashes=deleted
+            config=config,
+            _rejected_hashes=set(),
+            _deleted_hashes=deleted,
+            _pending_ingest_hashes=set(),
         )
         service = EmojiSenderService(plugin=cast(Any, plugin))
 
@@ -1104,7 +1121,8 @@ class TestDeleteSuppressesReingest:
         rejected: set[str] = set()
         deleted: set[str] = set()
         plugin = SimpleNamespace(
-            config=config, _rejected_hashes=rejected, _deleted_hashes=deleted
+            config=config, _rejected_hashes=rejected, _deleted_hashes=deleted,
+            _pending_ingest_hashes=set()
         )
         service = EmojiSenderService(plugin=cast(Any, plugin))
 
@@ -1129,7 +1147,10 @@ class TestDeleteSuppressesReingest:
         config = EmojiSenderConfig()
         deleted: set[str] = set()
         plugin = SimpleNamespace(
-            config=config, _rejected_hashes=set(), _deleted_hashes=deleted
+            config=config,
+            _rejected_hashes=set(),
+            _deleted_hashes=deleted,
+            _pending_ingest_hashes=set(),
         )
         service = EmojiSenderService(plugin=cast(Any, plugin))
 
@@ -1155,7 +1176,10 @@ class TestDeleteSuppressesReingest:
         config = EmojiSenderConfig()
         deleted: set[str] = set()
         plugin = SimpleNamespace(
-            config=config, _rejected_hashes=set(), _deleted_hashes=deleted
+            config=config,
+            _rejected_hashes=set(),
+            _deleted_hashes=deleted,
+            _pending_ingest_hashes=set(),
         )
         service = EmojiSenderService(plugin=cast(Any, plugin))
 
@@ -1439,31 +1463,199 @@ class TestAlignWithIngestWindow:
     async def test_pending_registration_released_after_ingest(
         self, tmp_path: Path
     ) -> None:
-        """入库结束后必须注销登记，否则该文件永远不会被对齐任务清理。"""
+        """入库失败后必须注销登记，否则残留文件永远不会被对齐任务清理。
+
+        走真实的 ingest_once：让入库在「文件已落盘、向量记录尚未写入」时
+        失败，随后断言登记已被注销，且残留文件在下一轮对齐时能被清理。
+        """
         service = _make_service()
         data_dir = tmp_path / "memes"
-        meme_file = _write_meme(data_dir, MEME_ID)
+        media_dir = tmp_path / "media" / "emojis"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        source = media_dir / "src.png"
+        source.write_bytes(MEME_PAYLOAD)
         vdb = _make_vdb([])
 
-        # 模拟入库登记后异常退出
-        service._pending_ingest_hashes.add(MEME_ID)
-        try:
-            try:
-                raise RuntimeError("模拟入库中途失败")
-            finally:
-                service._pending_ingest_hashes.discard(MEME_ID)
-        except RuntimeError:
-            pass
+        import plugins.emoji_sender.service as svc_mod
 
-        assert MEME_ID not in service._pending_ingest_hashes
+        class _BoomEmbReq:
+            async def send(self) -> Any:
+                # 写库之前失败：此时文件已落盘、记录未写
+                raise RuntimeError("注入的 embedding 失败")
 
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+            patch.object(service, "_media_cache_dir", staticmethod(lambda: media_dir)),
+            patch.object(service, "_manual_memes_dir", staticmethod(lambda: tmp_path / "manual")),
+            patch.object(
+                service,
+                "_vlm_decide_and_label",
+                AsyncMock(
+                    return_value={
+                        "keep": True,
+                        "description": "描述",
+                        "emotion_tags": ["开心"],
+                    }
+                ),
+            ),
+            patch.object(service, "_compress_image_for_vlm", staticmethod(lambda p, m: (b"x", "image/png", False))),
+            patch.object(service, "_guess_mime", staticmethod(lambda s: "image/png")),
+            patch("plugins.emoji_sender.service.base64_encode_bytes", lambda b: "b64"),
+            patch("plugins.emoji_sender.service.get_model_set_by_task", lambda *a, **k: object()),
+            patch(
+                "plugins.emoji_sender.service.create_embedding_request",
+                lambda **kw: _BoomEmbReq(),
+            ),
+        ):
+            await service.ingest_once()
+
+        # 文件已落盘，但向量记录未写入
+        assert (data_dir / f"{MEME_ID}.png").exists()
+        assert vdb.records == []
+        # 登记必须已注销
+        assert MEME_ID not in service._pending_ingest_hashes, (
+            "入库失败后必须注销「正在入库」登记，否则残留文件永远不会被清理"
+        )
+
+        # 下一轮对齐应能清理这个残留文件
         with (
             patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
             patch.object(service, "_data_dir", return_value=data_dir),
         ):
             await service._align_data_dir_with_db()
 
-        assert not meme_file.exists(), "登记注销后残留文件应能被对齐任务清理"
+        assert not (data_dir / f"{MEME_ID}.png").exists(), (
+            "登记注销后，残留文件应能被对齐任务清理"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pending_registration_visible_across_service_instances(
+        self, tmp_path: Path
+    ) -> None:
+        """登记必须跨 Service 实例可见。
+
+        Service 不是单例（get_service 每次都新建实例），因此「正在入库」
+        的登记若只存在于实例字段里，换一个实例调用对齐任务就会失效。
+        登记必须由插件持有，才能在实例之间共享。
+        """
+        config = EmojiSenderConfig()
+        pending: set[str] = set()
+        plugin = SimpleNamespace(
+            config=config,
+            _rejected_hashes=set(),
+            _deleted_hashes=set(),
+            _pending_ingest_hashes=pending,
+        )
+        # 两个独立实例，共享同一个插件
+        ingest_service = EmojiSenderService(plugin=cast(Any, plugin))
+        align_service = EmojiSenderService(plugin=cast(Any, plugin))
+
+        data_dir = tmp_path / "memes"
+        meme_file = _write_meme(data_dir, MEME_ID)
+        vdb = _make_vdb([])
+
+        # 由「入库实例」登记
+        ingest_service._pending_ingest_hashes.add(MEME_ID)
+
+        # 由「对齐实例」执行对齐：应能看到另一个实例的登记
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(align_service, "_data_dir", return_value=data_dir),
+        ):
+            await align_service._align_data_dir_with_db()
+
+        assert meme_file.exists(), "对齐实例应看到其它实例的「正在入库」登记"
+
+
+class TestDeleteRacingIngestWrite:
+    """删除请求落在入库写库期间的交错。
+
+    删除流程不持入库锁，可能恰好落在入库「写库前复查」与「写入向量库」
+    之间：删除已经删掉文件并记入删除集合，此刻写库却照常写入记录，
+    库里就留下一条指向不存在文件的僵尸记录。
+    """
+
+    @pytest.mark.asyncio
+    async def test_zombie_record_rolled_back(self, tmp_path: Path) -> None:
+        """写库期间发生的删除应撤销刚写入的记录，不留僵尸记录。"""
+        service = _make_service()
+        data_dir = tmp_path / "memes"
+        media_dir = tmp_path / "media" / "emojis"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        source = media_dir / "src.png"
+        source.write_bytes(MEME_PAYLOAD)
+        vdb = _make_vdb([])
+
+        import plugins.emoji_sender.service as svc_mod
+
+        target = data_dir / f"{MEME_ID}.png"
+
+        async def delete_during_add() -> None:
+            await service.delete_by_meme_id(meme_id=MEME_ID)
+
+        original_add = vdb.add
+
+        async def add_with_delete_hook(collection_name, ids, embeddings, documents, metadatas):
+            # 在 add 内部、记录真正写入之前让删除请求落地：
+            # 删除会删掉磁盘文件并记入删除集合，随后 add 继续写入记录，
+            # 库中就会留下一条指向不存在文件的僵尸记录。
+            await delete_during_add()
+            await original_add(
+                collection_name=collection_name,
+                ids=ids,
+                embeddings=embeddings,
+                documents=documents,
+                metadatas=metadatas,
+            )
+
+        vdb.add = add_with_delete_hook  # type: ignore[method-assign]
+
+        with (
+            patch("plugins.emoji_sender.service.get_vector_db_service", return_value=vdb),
+            patch.object(service, "_data_dir", return_value=data_dir),
+            patch.object(service, "_media_cache_dir", staticmethod(lambda: media_dir)),
+            patch.object(service, "_manual_memes_dir", staticmethod(lambda: tmp_path / "manual")),
+            patch.object(
+                service,
+                "_vlm_decide_and_label",
+                AsyncMock(
+                    return_value={
+                        "keep": True,
+                        "description": "描述",
+                        "emotion_tags": ["开心"],
+                    }
+                ),
+            ),
+            patch.object(
+                service,
+                "_compress_image_for_vlm",
+                staticmethod(lambda p, m: (b"x", "image/png", False)),
+            ),
+            patch.object(service, "_guess_mime", staticmethod(lambda s: "image/png")),
+            patch("plugins.emoji_sender.service.base64_encode_bytes", lambda b: "b64"),
+            patch("plugins.emoji_sender.service.get_model_set_by_task", lambda *a, **k: object()),
+            patch(
+                "plugins.emoji_sender.service.create_embedding_request",
+                lambda **kw: _StubEmbReq(),
+            ),
+        ):
+            await service.ingest_once()
+
+        # 删除已生效：文件不存在
+        assert not target.exists()
+        # 且不能留下指向不存在文件的僵尸记录
+        assert vdb.records == [], f"不应留下僵尸记录，实际: {vdb.records}"
+
+
+class _StubEmbReq:
+    """最小 embedding 请求替身。"""
+
+    async def send(self) -> Any:
+        class _Resp:
+            embeddings = [[0.1, 0.2, 0.3]]
+
+        return _Resp()
 
 
 class TestMemeIdFromStorePath:
@@ -1477,9 +1669,38 @@ class TestMemeIdFromStorePath:
         assert (
             EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.webp") == MEME_ID
         )
+        assert (
+            EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.gif") == MEME_ID
+        )
+
+    def test_overlapping_suffixes(self) -> None:
+        """``.jpg`` 与 ``.jpeg`` 前缀重叠，长的后缀必须先匹配。
+
+        两者都只比 ``.jpg`` 长一个字符，若按默认顺序先匹配 ``.jpg``，
+        ``{hash}.jpeg`` 会被剥成 ``{hash}.j``，长度与字符集校验不通过，
+        反推就会失败。
+        """
+        assert (
+            EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.jpg") == MEME_ID
+        )
+        assert (
+            EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.jpeg") == MEME_ID
+        )
 
     def test_invalid_name_returns_empty(self) -> None:
         """不符合命名约定的路径返回空串，不会误判为正在入库。"""
         assert EmojiSenderService._meme_id_from_store_path("data/memes/notahash.png") == ""
         assert EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}") == ""
         assert EmojiSenderService._meme_id_from_store_path("data/memes/short.png") == ""
+        # 残留后缀形态：剥离 .jpg 后残留的 .j / .jpe 都不是合法哈希长度
+        assert EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.j") == ""
+        assert EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.jpe") == ""
+
+    def test_uppercase_suffix_returns_empty(self) -> None:
+        """大写后缀不被识别。
+
+        入库时后缀经 ``source.suffix.lower()`` 归一，产生的文件名后缀恒为
+        小写；但目录扫描用的是 ``path.suffix.lower()``，因此目录里可能存在
+        大写后缀的文件，它们不会被「正在入库」登记保护到。
+        """
+        assert EmojiSenderService._meme_id_from_store_path(f"data/memes/{MEME_ID}.PNG") == ""

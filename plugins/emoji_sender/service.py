@@ -170,8 +170,9 @@ class EmojiSenderService(BaseService):
         # 正在入库中的哈希：文件已落盘、向量记录尚未写入。
         # 对齐任务据此跳过这些文件，避免「刚写入就删除」窗口内
         # 把文件误判为孤儿删除，留下指向不存在文件的僵尸记录。
-        # 这是本次入库的中间状态，只由当前实例持有，无需跨实例共享。
-        self._pending_ingest_hashes: set[str] = set()
+        # Service 不是单例（get_service 每次都新建实例），共享状态
+        # 必须由插件持有，因此这里引用插件上的同一个集合。
+        self._pending_ingest_hashes: set[str] = plugin._pending_ingest_hashes
 
     def _dedup_enabled(self) -> bool:
         """使用历史去重是否开启。"""
@@ -349,7 +350,7 @@ class EmojiSenderService(BaseService):
         """
         candidates: list[Path] = []
         for suffix in sorted(_ALLOWED_SUFFIXES):
-            candidate = data_dir / f"{meme_id}{suffix}"
+            candidate = data_dir / EmojiSenderService._store_file_name(meme_id, suffix)
             try:
                 if not candidate.exists():
                     continue
@@ -638,10 +639,27 @@ class EmojiSenderService(BaseService):
         return "\n".join([x for x in parts if x])
 
     @staticmethod
+    def _store_file_name(meme_id: str, suffix: str) -> str:
+        """构造表情包在存储目录中的文件名。
+
+        存储目录中的文件名由内容 sha256 与后缀拼成。入库、删除定位与
+        路径反推都依赖这一约定，必须集中在此，否则改动其中一处会让
+        其它两处静默失效。
+
+        Args:
+            meme_id: 表情包内容哈希（64 位十六进制）。
+            suffix: 文件后缀（含点，如 ``.png``）。
+
+        Returns:
+            str: 存储文件名。
+        """
+        return f"{meme_id}{suffix}"
+
+    @staticmethod
     def _meme_id_from_store_path(store_path: str) -> str:
         """从存储路径反推表情包的内容哈希。
 
-        入库时文件名由内容 sha256 与后缀拼成（``{meme_id}{suffix}``），
+        入库时文件名由内容 sha256 与后缀拼成（见 ``_store_file_name``），
         因此可直接从文件名还原哈希，无需读取文件内容。路径不是
         ``_path_to_store_value`` 形式或文件名不符合该约定时返回空串。
 
@@ -735,10 +753,11 @@ class EmojiSenderService(BaseService):
             await vdb.delete(collection_name=collection, where={"path": missing_path})
 
         # 4) 磁盘多余 -> 删文件
-        # 但要先排除「正在入库」的���件：入库流程先复制文件、后写向量库，
-        # 两步之间可能触发本对齐任务。此时文件确实还没有对应记录，
-        # 却是入库的正常中间产物，删掉它会让入库流程写出一条指向
-        # 不存在文件的僵尸记录。
+        # 但要先排除「正在入库」的文件：入库流程先复制文件、后写向量库，
+        # 两步之间若触发本对齐任务，该文件确实还没有对应记录，却是入库的
+        # 正常中间产物，删掉它会让入库流程写出一条指向不存在文件的僵尸
+        # 记录。目前入库任务内的对齐步骤先于复制执行、且整段受入库锁保护，
+        # 因此这里不会命中；保留登记是为了防止将来调用结构变化时出问题。
         orphan_files = sorted(files_on_disk - paths_in_db)
         for orphan_path in orphan_files:
             if self._meme_id_from_store_path(orphan_path) in self._pending_ingest_hashes:
@@ -964,7 +983,7 @@ class EmojiSenderService(BaseService):
             data_dir = self._data_dir()
             data_dir.mkdir(parents=True, exist_ok=True)
             suffix = source.suffix.lower() if source.suffix.lower() in _ALLOWED_SUFFIXES else ".png"
-            target_path = data_dir / f"{meme_id}{suffix}"
+            target_path = data_dir / self._store_file_name(meme_id, suffix)
             # 复制前再确认一次：选文件之后到复制之前会经历 VLM 判别与 embedding
             # 生成等耗时操作，其间删除请求可能已经删掉了同一张表情包，
             # 此时若继续复制会把已删除的表情包重新收录回去。
@@ -975,6 +994,8 @@ class EmojiSenderService(BaseService):
             # 登记为「正在入库」：文件落盘与向量记录写入之间存在时间差，
             # 其间若触发对齐任务，该文件会因「库中无记录」被误判为孤儿删除，
             # 留下指向不存在文件的僵尸记录。登记后对齐任务会跳过它。
+            # 目前对齐步骤在复制之前执行、且与入库同锁，不会命中；
+            # 登记是一道防御，防止将来调用结构变化时出现该问题。
             self._pending_ingest_hashes.add(meme_id)
             try:
                 try:
@@ -1052,6 +1073,22 @@ class EmojiSenderService(BaseService):
                     logger.info(f"收藏表情包: {meme_id[:8]}... tags={tags}")
                 except Exception as e:
                     logger.warning(f"写入向量库失败: {e}")
+                    return
+
+                # 写库后再确认一次：删除请求不持入库锁，可能恰好落在
+                # 「写库前复查」与「写入向量库」之间——删除已经删掉文件
+                # 并记入删除集合，此刻库里的记录却指向一个不存在的文件。
+                # 此时把刚写入的记录撤掉，避免留下僵尸记录。
+                if meme_id in self._deleted_hashes:
+                    logger.info(f"表情包在写库期间被删除，撤销刚写入的记录: {meme_id[:8]}...")
+                    try:
+                        await vdb.delete(collection_name=collection, ids=ids)
+                    except Exception as e:
+                        logger.warning(f"撤销刚写入的向量记录失败: {e}")
+                    try:
+                        await asyncio.to_thread(self._delete_file, str(target_path))
+                    except Exception as e:
+                        logger.warning(f"清理已入库副本失败: {target_path} - {e}")
             finally:
                 # 无论入库成功与否都要注销登记：文件已落盘但未写库时若
                 # 残留登记项，该文件将永远不会被对齐任务清理。
