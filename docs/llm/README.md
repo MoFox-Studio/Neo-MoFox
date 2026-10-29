@@ -300,7 +300,8 @@ inspector.clear()                    # 清空缓冲，返回被清除的条数
 - [Response](./response.md) - LLM 响应处理（含 reasoning 与 tool_call_compat）
 - [Monitor](./monitor.md) - 内存级指标收集和监控
 - [Payload Structure](./payload/README.md) - 消息负载系统（含 ReasoningText/Video/File）
-- [Model Client](./model_client/README.md) - 模型客户端实现（OpenAI + Anthropic + Responses）
+- [Model Client](./model_client/README.md) - 模型客户端实现（OpenAI + Anthropic + Responses + Gemini）
+- [GeminiChatClient](./model_client/gemini_client.md) - 原生 Developer API、配置、签名/工具回合与首期限制
 - [OpenAIResponsesClient 与内置 web_search](./model_client/responses_client.md) - Responses API 客户端与服务端内置工具配置
 - [Policy](./policy/README.md) - 负载均衡和重试策略（RoundRobin + LoadBalanced）
 
