@@ -475,7 +475,49 @@ class Bot:
         await initialize_cloud_telemetry_runtime(self.config)
         self.ui.update_phase_status("云端遥测", "已初始化")
 
+    async def _preflight_gemini_provider(
+        self, provider: Any, models: list[Any], timeout: float,
+    ) -> None:
+        """使用官方 SDK 非生成 models.list 检查连通性；不代表模型生成验收。"""
+        import httpx
+        from google import genai
+        from google.genai import types
+        from src.kernel.llm.model_client.gemini_codec import normalize_endpoint
+
+        assert self.config is not None
+        versions = {
+            model.extra_params.get("gemini", {}).get("api_version", "v1beta")
+            for model in models if model.api_provider == provider.name
+        }
+        if len(versions) > 1:
+            raise ValueError("Gemini preflight requires one API version per provider")
+        root, version = normalize_endpoint(provider.base_url, next(iter(versions), "v1beta"))
+        effective_timeout = min(timeout, float(provider.timeout))
+        async with httpx.AsyncClient(
+            timeout=effective_timeout, trust_env=self.config.advanced.trust_env,
+            follow_redirects=False,
+        ) as http:
+            sdk = genai.Client(
+                vertexai=False, api_key=provider.get_api_key(),
+                http_options=types.HttpOptions(
+                    base_url=root, api_version=version, httpx_async_client=http,
+                    timeout=max(1, int(effective_timeout * 1000)),
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+            )
+            try:
+                await asyncio.wait_for(
+                    sdk.aio.models.list(config={"page_size": 1}),
+                    timeout=effective_timeout,
+                )
+            finally:
+                try:
+                    await sdk.aio.aclose()
+                finally:
+                    sdk.close()
+
     async def _preflight_llm_providers(self) -> None:
+        """按显式 provider 协议执行非生成连通性预检。"""
         assert self.config is not None
         if not self.config.bot.llm_preflight_check:
             self.ui.update_phase_status("LLM 预检", "已跳过")
@@ -488,7 +530,8 @@ class Bot:
         import httpx
         import time
 
-        providers = get_model_config().api_providers
+        model_config = get_model_config()
+        providers = model_config.api_providers
         if not providers:
             self.logger.warning("LLM 预检: 未配置任何 API 提供商")
             self.ui.update_phase_status("LLM 预检", "无配置")
@@ -498,8 +541,11 @@ class Bot:
         self.ui.update_phase_status("LLM 预检", "进行中...")
         logger = self.logger
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async def _check_provider(provider) -> None:
+        async with httpx.AsyncClient(
+            timeout=timeout, trust_env=self.config.advanced.trust_env,
+        ) as client:
+            async def _check_provider(provider: Any) -> None:
+                """隔离单个 provider 的预检失败，不切换协议或记录凭据。"""
                 # JEv 是独立的 typed-evaluation provider，只提供 /v1/systemone，
                 # 没有 /models 路由；按聊天 provider 探测只会得到无意义的 404。
                 client_type = str(getattr(provider, "client_type", "") or "").casefold()
@@ -508,6 +554,25 @@ class Bot:
                         "LLM 预检: 跳过 Jev provider %s（非聊天 provider，无 /models 路由）",
                         provider.name,
                     )
+                    return
+
+                if client_type in {"gemini", "aiohttp_gemini", "google", "gemini_v2"}:
+                    start = time.perf_counter()
+                    try:
+                        await self._preflight_gemini_provider(provider, model_config.models, timeout)
+                        logger.info(
+                            "LLM 预检: Gemini models.list 可用 %.2fs（非生成检查）",
+                            time.perf_counter() - start,
+                        )
+                    except Exception as exc:
+                        # SDK 错误文本、URL、provider 名称均可能包含凭据；只记录异常类型。
+                        if getattr(exc, "code", None) in {404, 405, 501}:
+                            logger.info("LLM 预检: 跳过不支持 models.list 的 Gemini 网关，未验证生成能力")
+                        else:
+                            logger.warning(
+                                "LLM 预检失败: Gemini models.list %.2fs (%s)，未切换协议",
+                                time.perf_counter() - start, type(exc).__name__,
+                            )
                     return
 
                 base_url = str(provider.base_url).rstrip("/")
@@ -1117,6 +1182,7 @@ class Bot:
         else:
             print("正在关闭 Neo-MoFox Bot...")
 
+        gemini_clients_closed = False
         try:
             await self._record_telemetry_event(
                 domain="runtime",
@@ -1182,6 +1248,16 @@ class Bot:
                 # 清理已完成的任务
                 self.task_manager.cleanup_tasks()
                 self.task_manager.shutdown_process_pool(wait=False)
+
+            # 活动 LLM 任务结束后、事件循环和线程池结束前释放 Gemini 连接。
+            from src.kernel.llm.model_client.gemini_client import close_gemini_clients
+
+            gemini_clients_closed = True
+            try:
+                await close_gemini_clients()
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning("关闭 Gemini 客户端失败 (%s)", type(exc).__name__)
 
             # 9. 关闭数据库
             from src.kernel.db import close_engine
@@ -1269,6 +1345,14 @@ class Bot:
                 print(f"关闭过程中出错: {e}")
             raise BotShutdownError(f"关闭失败: {e}") from e
         finally:
+            if not gemini_clients_closed:
+                try:
+                    from src.kernel.llm.model_client.gemini_client import close_gemini_clients
+
+                    await close_gemini_clients()
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning("关闭 Gemini 客户端失败 (%s)", type(exc).__name__)
             # 关闭命令解析器：input worker 活到现在，shutdown 期间的第二次
             # Ctrl+C 仍能被它读取并 raise_signal 触发强制退出。shutdown 完成
             # 后才关闭，并通过 app.exit 注入 EOF 让阻塞中的 prompt() 返回，

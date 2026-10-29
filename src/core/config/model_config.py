@@ -30,7 +30,7 @@
 from threading import Lock as ThreadLock
 from typing import Any, ClassVar, Literal, cast
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, field_validator
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
 from src.kernel.llm.types import ModelSet
 
@@ -64,6 +64,8 @@ class APIProviderSection(SectionBase):
         "anthropic",
         "gemini",
         "aiohttp_gemini",
+        "google",
+        "gemini_v2",
         "bedrock",
         "jev",
         "typesafe",
@@ -89,6 +91,18 @@ class APIProviderSection(SectionBase):
         default=10,
         description="重试间隔时间（秒）",
     )
+
+    @field_validator("client_type", mode="before")
+    @classmethod
+    def normalize_client_type(cls, value: Any) -> Any:
+        """归一原生 Gemini 别名，不导入 SDK 或自动切换认证后端。"""
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized == "vertex_ai":
+                raise ValueError("Vertex AI is unsupported; use Gemini Developer API")
+            if normalized in {"gemini", "aiohttp_gemini", "google", "gemini_v2"}:
+                return "gemini"
+        return value
 
     # 私有属性，用于密钥轮询
     _api_key_lock: "ThreadLock | None" = None
