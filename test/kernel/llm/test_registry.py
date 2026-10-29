@@ -9,9 +9,10 @@ from typing import Any, cast
 
 import pytest
 
-from src.kernel.llm import LLMConfigurationError
+from src.kernel.llm import LLMConfigurationError, LLMProviderUnavailableError
 from src.kernel.llm.model_client import ModelClientRegistry
 from src.kernel.llm.model_client.anthropic_client import AnthropicChatClient
+from src.kernel.llm.model_client.gemini_client import GeminiChatClient
 from src.kernel.llm.model_client.openai_client import OpenAIChatClient
 from src.kernel.llm.types import ModelEntry
 
@@ -116,14 +117,42 @@ def test_registry_get_aiohttp_gemini_client():
 
 @pytest.mark.parametrize(
     "client_type",
-    ["gemini", "Gemini", "GEMINI", "gemini_v2", "Gemini-V2", "google", "vertex_ai"],
+    ["gemini", "Gemini", "GEMINI", "gemini_v2", "Gemini-V2", "google", "aiohttp_gemini"],
+)
+def test_registry_default_gemini_client(client_type: str) -> None:
+    """已支持的 Gemini 别名默认路由到真实 Gemini 客户端。"""
+    registry = ModelClientRegistry()
+    model = _model_entry(client_type=client_type, api_provider="Google")
+
+    client = registry.get_client_for_model(model)
+
+    assert client is registry.gemini
+    assert isinstance(client, GeminiChatClient)
+
+
+@pytest.mark.parametrize(
+    "client_type",
+    ["gemini", "Gemini", "GEMINI", "gemini_v2", "Gemini-V2", "google", "aiohttp_gemini"],
 )
 def test_registry_unregistered_gemini_does_not_fallback_to_openai(client_type: str):
     """已识别的 Gemini 别名未注册时必须报错，不能回退到 OpenAI。"""
     registry = ModelClientRegistry()
+    registry.gemini = None
     model = _model_entry(client_type=client_type, api_provider="Google")
 
     with pytest.raises(LLMConfigurationError, match="Gemini client 未注册"):
+        registry.get_client_for_model(model)
+
+
+def test_registry_unsupported_vertex_ai_does_not_fallback_to_openai() -> None:
+    """Vertex AI 需要独立认证与路由，不能使用默认 Gemini 或 OpenAI。"""
+    registry = ModelClientRegistry()
+    model = _model_entry(client_type="vertex_ai", api_provider="Google")
+
+    with pytest.raises(
+        LLMProviderUnavailableError,
+        match="Vertex AI requires a separate authentication/route adapter",
+    ):
         registry.get_client_for_model(model)
 
 

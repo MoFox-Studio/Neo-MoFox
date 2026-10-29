@@ -25,7 +25,8 @@ def append_payload(
     if position is not None:
         updated.insert(int(position), payload)
         return updated
-    if updated and updated[-1].role == payload.role:
+    if (updated and updated[-1].role == payload.role
+            and updated[-1].provider_state is None and payload.provider_state is None):
         updated[-1].content.extend(payload.content)
         return updated
     updated.append(payload)

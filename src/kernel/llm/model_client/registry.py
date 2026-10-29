@@ -11,10 +11,11 @@ from .base import ASRModelClient, ChatModelClient, EmbeddingModelClient, RerankM
 from .anthropic_client import AnthropicChatClient
 from .openai_client import OpenAIChatClient
 from .responses_client import OpenAIResponsesClient
+from .gemini_client import get_default_gemini_client
 from ..types import ModelEntry
 from src.kernel.jev import JEV_CLIENT_TYPES
 
-# 已经识别、但本仓库尚未提供实现的 provider 别名集合。
+# 原生 Gemini 与尚未实现的 Bedrock 分别显式分发，禁止协议误回退。
 # 这些别名一旦出现就必须显式报错，禁止静默回退到 OpenAI：
 # 用 OpenAI 协议去请求 Gemini/Bedrock 只会产生难以定位的 404/400。
 _GEMINI_CLIENT_TYPES = frozenset(
@@ -44,14 +45,14 @@ def _normalize_client_type(client_type: Any) -> str | None:
     """把 client_type 归一化为小写下划线形式，非字符串返回 None。"""
     if not isinstance(client_type, str):
         return None
-    return client_type.casefold().replace("-", "_")
+    return client_type.strip().casefold().replace("-", "_")
 
 
 @dataclass(slots=True)
 class ModelClientRegistry:
     """provider -> client 的注册表。
 
-    当前默认提供 openai client；gemini/bedrock 后续可注册。
+    默认装配 OpenAI、Anthropic、Responses 与 Gemini；Bedrock 仍需显式实现。
     """
 
     openai: ChatModelClient | None = None
@@ -61,6 +62,9 @@ class ModelClientRegistry:
     bedrock: ChatModelClient | None = None
 
     def __post_init__(self) -> None:
+        """Supply default adapters while retaining explicitly injected clients."""
+        if self.gemini is None:
+            self.gemini = get_default_gemini_client()
         if self.openai is None:
             self.openai = OpenAIChatClient()
         if self.anthropic is None:
@@ -79,6 +83,8 @@ class ModelClientRegistry:
         """
 
         normalized_type = _normalize_client_type(model.get("client_type"))
+        if normalized_type == "vertex_ai":
+            raise LLMProviderUnavailableError("Vertex AI requires a separate authentication/route adapter")
         if normalized_type:
             if normalized_type == "openai" and self.openai is not None:
                 return self.openai

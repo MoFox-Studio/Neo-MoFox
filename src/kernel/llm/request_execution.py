@@ -29,6 +29,8 @@ from .payload import LLMPayload, ReasoningText, Text, ToolCall, ToolResult
 from .roles import ROLE
 from .response import LLMResponse
 from .types import ModelEntry, ModelSet
+from .model_client.base import ModelClientResult
+from .request_attempt import AttemptContext, ManagedStream
 
 if TYPE_CHECKING:
     from .request import LLMRequest
@@ -70,7 +72,7 @@ def extract_tools(payloads: list[LLMPayload]) -> list[LLMUsable]:
 
 
 def normalize_client_create_result(
-    result: tuple[Any, ...],
+    result: tuple[Any, ...] | ModelClientResult,
 ) -> tuple[
     str | None,
     list[dict[str, Any]] | None,
@@ -79,6 +81,8 @@ def normalize_client_create_result(
     dict[str, Any] | None,
 ]:
     """把历史上的 3/4/5 元组 provider 返回值统一成一种形态。"""
+    if isinstance(result, ModelClientResult):
+        return result.message, result.tool_calls, result.stream_iter, result.reasoning_content, result.usage
     if len(result) == 5:
         message, tool_calls, stream_iter, reasoning_content, usage = result
         return message, tool_calls, stream_iter, reasoning_content, usage
@@ -120,20 +124,28 @@ async def execute_request(
 ) -> LLMResponse:
     """执行一次逻辑上的 LLM 请求，并带上策略驱动的重试行为。"""
     model_set = validate_model_set(request.model_set)
-    request_started_at = time.perf_counter()
-
     # 先统一一次 payload 形态，确保每次重试看到的输入结构完全一致。
     payloads = [normalize_tool_result_payload(p) for p in request.payloads]
     tools = extract_tools(payloads)
 
     assert request.policy is not None
-    session = request.policy.new_session(
-        model_set=model_set, request_name=request.request_name
-    )
+    if request._locked_target is not None:
+        from .model_client.gemini_codec import target_identity
+        model_set = [m for m in model_set if str(m.get("client_type")).casefold() in {"gemini", "aiohttp_gemini", "google", "gemini_v2"}
+                     and target_identity(m) == request._locked_target]
+        if not model_set:
+            from .exceptions import LLMContextError
+            raise LLMContextError("The active Gemini tool round has no matching configured target")
+    context = request._attempt_context
+    if context is None:
+        session = request.policy.new_session(model_set=model_set, request_name=request.request_name)
+        context = AttemptContext(session=session, step=session.first())
+    else:
+        session = context.session
 
     last_error: BaseException | None = None
-    retry_count = 0
-    step = session.first()
+    retry_count = context.retry_count
+    step = context.step
 
     while step.model is not None:
         # 每次循环都是一次具体的 provider 调用尝试，由当前重试策略会话决定。
@@ -163,14 +175,13 @@ async def execute_request(
         from .monitor import RequestTimer
 
         timer = RequestTimer()
+        attempt_started = time.perf_counter()
+        tools = extract_tools(payloads)
 
         try:
-            # 客户端解析也放进 try：未注册 provider、Jev provider 误入这类
-            # 配置错误必须走 policy 的 failover，否则会直接中断整个重试链，
-            # 也拿不到失败统计与失败事件。
-            client = request.clients.get_client_for_model(model)
-
             with timer:
+                # Include registry resolution in both timing and failure accounting.
+                client = request.clients.get_client_for_model(model)
                 timeout_seconds = model.get("timeout")
 
                 # 触发大模型请求前事件
@@ -246,6 +257,9 @@ async def execute_request(
                 reasoning_parts=reasoning_parts,
                 call_list=[],
             )
+            if isinstance(result, ModelClientResult):
+                resp.provider_state = result.provider_state
+                resp.stop_reason = result.stop_reason
             # 保存原始 payloads 副本，供流式消费重试时恢复使用
             resp._original_payloads = list(trimmed_payloads)
 
@@ -274,24 +288,53 @@ async def execute_request(
                     retry_count=retry_count,
                     model_index=model_index,
                 )
-            elif request.enable_metrics and actual_stream:
-                resp._stream_stats_recorder = (
-                    lambda final_usage, final_latency: stats_recorder(
-                        model=model,
-                        model_identifier=model_identifier,
-                        request_name=request.request_name,
-                        meta_data=request.meta_data,
-                        latency=final_latency,
-                        usage=final_usage,
-                        success=True,
-                        stream=True,
-                        retry_count=retry_count,
-                        model_index=step.meta.get("model_index", 0) if step.meta else 0,
-                    )
-                )
-                resp._stream_started_at = request_started_at
+            if actual_stream and stream_iter is not None:
+                async def terminal(
+                    error: BaseException | None, final_usage: dict[str, Any] | None,
+                    latency: float, phase: str,
+                ) -> None:
+                    """Account for the actual stream outcome, never just its creation."""
+                    from src.kernel.event import get_event_bus
+                    success = error is None and phase == "completed"
+                    if request.enable_metrics:
+                        stats_recorder(model=model, model_identifier=model_identifier,
+                            request_name=request.request_name, meta_data=request.meta_data,
+                            latency=latency, usage=final_usage, success=success, stream=True,
+                            retry_count=retry_count, model_index=step.meta.get("model_index", 0) if step.meta else 0,
+                            error=error)
+                    if success:
+                        session.record_success(latency=latency)
+                    params = {"request_name": request.request_name, "model_identifier": model_identifier,
+                        "stream": True, "success": success, "phase": phase, "terminal": True,
+                        "error": error, "error_type": type(error).__name__ if error else None,
+                        "error_message": str(error) if error else "", "usage": final_usage,
+                        "latency": latency, "retry_count": retry_count, "meta_data": request.meta_data}
+                    try:
+                        bus = get_event_bus()
+                        if error is not None and phase == "failed":
+                            await bus.publish("on_llm_request_failed", params)
+                        await bus.publish("on_llm_stream_finished", params)
+                    except Exception:
+                        logger.debug("LLM stream terminal event failed", exc_info=True)
 
-            session.record_success(latency=timer.elapsed)
+                async def resume(next_context: AttemptContext) -> LLMResponse:
+                    """Continue the same policy session with its remaining budget."""
+                    from .request import LLMRequest
+                    retry = LLMRequest(model_set=request.model_set, request_name=request.request_name,
+                        meta_data=dict(request.meta_data), payloads=list(payloads), clients=request.clients,
+                        policy=request.policy, context_manager=request.context_manager,
+                        enable_metrics=request.enable_metrics, _attempt_context=next_context,
+                        _locked_target=request._locked_target)
+                    replacement = await retry.send(auto_append_response=auto_append_response, stream=True)
+                    resp.tool_call_compat = replacement.tool_call_compat
+                    return replacement
+
+                context.step, context.retry_count = step, retry_count
+                resp._stream = ManagedStream(stream_iter, timeout=model.get("timeout"),
+                    started_at=attempt_started, context=context, terminal=terminal, resume=resume)
+                resp._stream.on_replacement = lambda final_response: setattr(resp, "tool_call_compat", final_response.tool_call_compat)
+            elif not actual_stream:
+                session.record_success(latency=timer.elapsed)
 
             # 触发大模型请求后事件
             # 事件订阅者可以修改 message、reasoning_content、reasoning_parts、
@@ -308,7 +351,9 @@ async def execute_request(
                             "request_name": request.request_name,
                             "model_identifier": model_identifier,
                             "stream": actual_stream,
-                            "success": True,
+                            "success": True,  # Legacy opened-stage compatibility, not final success.
+                            "phase": "opened" if actual_stream else "completed",
+                            "terminal": not actual_stream,
                             "latency": timer.elapsed,
                             "retry_count": retry_count,
                             "message": message,
@@ -354,6 +399,9 @@ async def execute_request(
                 raise
 
             classified_error = classify_exception(exc, model=model_identifier)
+            if type(exc).__module__.startswith("google.genai"):
+                # The raw SDK traceback includes the upstream response body.
+                setattr(classified_error, "_suppress_provider_trace", True)
             last_error = classified_error
             retry_decision = decide_retry(classified_error)
             _log_request_error(
@@ -456,7 +504,7 @@ def _log_request_error(
         logger.debug(
             f"LLM 请求暂时失败（详情）：model={model_identifier}, "
             f"request={request_name or '__default__'}, reason={str(error)}",
-            exc_info=True,
+            exc_info=not getattr(error, "_suppress_provider_trace", False),
         )
         return
 
@@ -464,5 +512,5 @@ def _log_request_error(
         f"LLM 请求失败：model={model_identifier}, "
         f"request={request_name or '__default__'}, "
         f"error_type={error_type}, reason={str(error)}",
-        exc_info=True,
+        exc_info=not getattr(error, "_suppress_provider_trace", False),
     )

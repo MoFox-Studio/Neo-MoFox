@@ -1,9 +1,11 @@
+"""Provider client protocols, compatible result types and uniform stream events."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Protocol
 
 from ..payload import LLMPayload, LLMUsable, ReasoningText
+from ..provider_state import ProviderReplayState
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +23,21 @@ class StreamEvent:
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
     stop_reason: str | None = None
+    provider_state: ProviderReplayState | None = field(default=None, repr=False)
+    reset: bool = False
+
+
+@dataclass(slots=True)
+class ModelClientResult:
+    """Extended provider result; legacy tuple implementations remain supported."""
+
+    message: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    stream_iter: AsyncIterator[StreamEvent] | None = None
+    reasoning_content: str | list[ReasoningText] | None = None
+    usage: dict[str, Any] | None = None
+    stop_reason: str | None = None
+    provider_state: ProviderReplayState | None = field(default=None, repr=False)
 
 
 class ChatModelClient(Protocol):
@@ -33,7 +50,7 @@ class ChatModelClient(Protocol):
         request_name: str,
         model_set: Any,
         stream: bool,
-    ) -> tuple[
+    ) -> ModelClientResult | tuple[
         str | None,
         list[dict[str, Any]] | None,
         AsyncIterator[StreamEvent] | None,

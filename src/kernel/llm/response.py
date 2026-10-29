@@ -13,10 +13,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, AsyncIterator, Self
+from functools import wraps
+from types import TracebackType
+from typing import (
+    TYPE_CHECKING, Any, AsyncIterator, Concatenate, ParamSpec, Self, TypeVar,
+    cast, overload,
+)
 
 from src.kernel.logger import get_logger
 
@@ -29,8 +35,11 @@ from .exceptions import (
 from .model_client import StreamEvent
 from .payload import LLMPayload, ReasoningText, Text, ToolCall
 from .roles import ROLE
+from .provider_state import ProviderReplayState
+from .request_attempt import ManagedStream
 from .stream_state import (
     LLMStreamReducer,
+    StreamReductionResult,
     drain_stream,
 )
 from .tool_call_compat import parse_tool_call_compat_response
@@ -61,6 +70,70 @@ def _is_retryable_stream_error(exc: BaseException) -> bool:
         return exc.status_code is None or exc.status_code >= 500
     return False
 
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+@overload
+def _close_managed_after(
+    method: Callable[Concatenate[LLMResponse, P], AsyncIterator[T]],
+) -> Callable[Concatenate[LLMResponse, P], AsyncIterator[T]]:
+    """Preserve the signature and item type of an asynchronous generator method."""
+    ...
+
+
+@overload
+def _close_managed_after(
+    method: Callable[Concatenate[LLMResponse, P], Awaitable[T]],
+) -> Callable[Concatenate[LLMResponse, P], Awaitable[T]]:
+    """Preserve the signature and result type of an asynchronous consumer method."""
+    ...
+
+
+def _close_managed_after(
+    method: Callable[Concatenate[LLMResponse, P], AsyncIterator[T]]
+    | Callable[Concatenate[LLMResponse, P], Awaitable[T]],
+) -> Callable[Concatenate[LLMResponse, P], AsyncIterator[T]] | Callable[Concatenate[LLMResponse, P], Awaitable[T]]:
+    """Wrap a consumer, closing its managed stream without swallowing exceptions.
+
+    The returned method retains the caller's parameters and result type. Generator
+    consumers release ownership when explicitly closed; coroutine consumers also
+    release ownership when cancellation occurs inside a caller-provided callback.
+    """
+    if inspect.isasyncgenfunction(method):
+        generate_method = cast("Callable[Concatenate[LLMResponse, P], AsyncIterator[T]]", method)
+
+        @wraps(method)
+        async def generate(self: LLMResponse, *args: P.args, **kwargs: P.kwargs) -> AsyncIterator[T]:
+            """Yield the wrapped items and release stream ownership on exit."""
+            try:
+                async for value in generate_method(self, *args, **kwargs):
+                    yield value
+            finally:
+                if isinstance(self._stream, ManagedStream):
+                    cancelled = asyncio.current_task() is not None and asyncio.current_task().cancelling() > 0
+                    await self._stream.aclose(cancelled=cancelled)
+                    if self._stream.phase != "completed" and self._stream.result_response is None:
+                        self.call_list = []
+                        self.provider_state = None
+        return generate
+    consume_method = cast("Callable[Concatenate[LLMResponse, P], Awaitable[T]]", method)
+
+    @wraps(method)
+    async def consume(self: LLMResponse, *args: P.args, **kwargs: P.kwargs) -> T:
+        """Return the wrapped result, releasing resources on error or cancellation."""
+        try:
+            return await consume_method(self, *args, **kwargs)
+        finally:
+            if isinstance(self._stream, ManagedStream):
+                cancelled = asyncio.current_task() is not None and asyncio.current_task().cancelling() > 0
+                await self._stream.aclose(cancelled=cancelled)
+                if self._stream.phase != "completed" and self._stream.result_response is None:
+                    self.call_list = []
+                    self.provider_state = None
+    return consume
+
+
 @dataclass(slots=True)
 class LLMResponse:
     """对缓冲式 provider 结果或实时流结果的统一包装。"""
@@ -83,6 +156,7 @@ class LLMResponse:
     _stream_started_at: float | None = None
     _usage: dict[str, object] | None = None
     stop_reason: str | None = None
+    provider_state: ProviderReplayState | None = None
 
     _consumed: bool = False
     _appended_to_context: bool = False
@@ -113,6 +187,8 @@ class LLMResponse:
 
     def _get_stream_retries(self) -> int:
         """从 model_set 读取流式重试次数上限，默认 2。"""
+        if isinstance(self._stream, ManagedStream):
+            return 0  # The managed iterator owns the original policy budget.
         if self.model_set:
             return self.model_set[0].get("max_retry", 2)
         return 2
@@ -147,6 +223,10 @@ class LLMResponse:
             request_name=getattr(self._upper, "request_name", ""),
             meta_data=dict(getattr(self._upper, "meta_data", {})),
             context_manager=self.context_manager,
+            clients=getattr(self._upper, "clients", None),
+            policy=getattr(self._upper, "policy", None),
+            enable_metrics=getattr(self._upper, "enable_metrics", True),
+            _locked_target=(self.provider_state.target if self.provider_state and self.call_list else None),
         )
         req.payloads = list(self.payloads)
         return await req.send(
@@ -169,9 +249,32 @@ class LLMResponse:
             for call in parsed_calls
         ]
 
-    def __await__(self):
+    async def aclose(self) -> None:
+        """Explicitly release an unconsumed or partially consumed response stream."""
+        close = getattr(self._stream, "aclose", None)
+        if close:
+            await close()
+        if isinstance(self._stream, ManagedStream) and self._stream.phase != "completed" and self._stream.result_response is None:
+            self.call_list = []
+            self.provider_state = None
+        self._consumed = True
+
+    async def __aenter__(self) -> Self:
+        """Use async with when a consumer may break before draining the stream."""
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None,
+        exc: BaseException | None, tb: TracebackType | None,
+    ) -> None:
+        """Close the response at the end of its explicit ownership scope."""
+        await self.aclose()
+
+    def __await__(self) -> Generator[Any, None, str]:
+        """Collect the complete response through Python's await protocol."""
         return self._collect_full_response().__await__()
 
+    @_close_managed_after
     async def stream_events(self) -> AsyncIterator[StreamEvent]:
         """以严格单次消费的方式产出原始流事件，并实时更新响应状态。
 
@@ -227,7 +330,8 @@ class LLMResponse:
             new_resp = await self._retry_send()
             self._stream = new_resp._stream
 
-    async def __aiter__(self):
+    @_close_managed_after
+    async def __aiter__(self) -> AsyncIterator[str]:
         """以严格单次消费的方式产出流式文本增量。"""
         async for event in self.stream_events():
             if event.text_delta:
@@ -251,7 +355,13 @@ class LLMResponse:
         delay = self._get_stream_retry_delay()
 
         while True:
-            result = await drain_stream(self._stream)
+            if isinstance(self._stream, ManagedStream):
+                self._stream.buffered = True
+            try:
+                result = await drain_stream(self._stream)
+            finally:
+                if isinstance(self._stream, ManagedStream):
+                    await self._stream.aclose()
             self._apply_stream_result(result)
 
             if result.error is None:
@@ -275,7 +385,7 @@ class LLMResponse:
             new_resp = await self._retry_send()
             self._stream = new_resp._stream
 
-    def _apply_stream_result(self, result) -> None:
+    def _apply_stream_result(self, result: StreamReductionResult) -> None:
         """把归并后的流状态应用到当前响应对象。"""
         self.message = result.message
         self.reasoning_parts = result.reasoning_parts or self.reasoning_parts
@@ -283,6 +393,12 @@ class LLMResponse:
         self.call_list = result.call_list
         self._usage = result.usage
         self.stop_reason = result.stop_reason
+        self.provider_state = result.provider_state
+        if result.error is not None:
+            if isinstance(self._stream, ManagedStream):
+                self.call_list = []  # Never execute half-generated provider tool calls.
+                self.provider_state = None
+            return
         self._maybe_apply_tool_call_compat()
         self._maybe_append_response_to_context()
         self._maybe_record_stream_stats()
@@ -310,7 +426,7 @@ class LLMResponse:
         if not content_parts:
             return
 
-        assistant_payload = LLMPayload(ROLE.ASSISTANT, content_parts)  # type: ignore[arg-type]
+        assistant_payload = LLMPayload(ROLE.ASSISTANT, content_parts, provider_state=self.provider_state)  # type: ignore[arg-type]
         if self.context_manager is not None:
             self.payloads = self.context_manager.add_payload(
                 self.payloads, assistant_payload
@@ -347,9 +463,9 @@ class LLMResponse:
             content_parts.extend(self.call_list)
         if not content_parts:
             content_parts.append(Text(""))
-        return LLMPayload(ROLE.ASSISTANT, content_parts)  # type: ignore[arg-type]
+        return LLMPayload(ROLE.ASSISTANT, content_parts, provider_state=self.provider_state)  # type: ignore[arg-type]
 
-    def add_payload(self, payload: "LLMPayload | LLMResponse", position=None) -> Self:
+    def add_payload(self, payload: LLMPayload | LLMResponse, position: int | None = None) -> Self:
         """把 payload 或另一个 response 追加进当前响应上下文。"""
         if isinstance(payload, LLMResponse):
             payload = payload.to_payload()
@@ -365,7 +481,8 @@ class LLMResponse:
         if position is not None:
             self.payloads.insert(int(position), payload)
         else:
-            if self.payloads and self.payloads[-1].role == payload.role:
+            if (self.payloads and self.payloads[-1].role == payload.role
+                and self.payloads[-1].provider_state is None and payload.provider_state is None):
                 self.payloads[-1].content.extend(payload.content)
             else:
                 self.payloads.append(payload)
@@ -394,6 +511,10 @@ class LLMResponse:
         stream: bool = True,
     ) -> "LLMResponse":
         """把当前响应里的 payload 作为下一次请求的输入继续发送。"""
+        if (isinstance(self._stream, ManagedStream) and self._stream.finished
+                and self._stream.phase != "completed" and self._stream.result_response is None):
+            from .exceptions import LLMContextError
+            raise LLMContextError("Cannot continue an incomplete or abandoned response")
         if not self._consumed:
             await self._collect_full_response()
 
@@ -408,10 +529,15 @@ class LLMResponse:
             request_name=getattr(self._upper, "request_name", ""),
             meta_data=dict(getattr(self._upper, "meta_data", {})),
             context_manager=self.context_manager,
+            clients=getattr(self._upper, "clients", None),
+            policy=getattr(self._upper, "policy", None),
+            enable_metrics=getattr(self._upper, "enable_metrics", True),
+            _locked_target=(self.provider_state.target if self.provider_state and self.call_list else None),
         )
         req.payloads = list(self.payloads)
         return await req.send(auto_append_response=auto_append_response, stream=stream)
 
+    @_close_managed_after
     async def stream_with_callback(
         self, on_chunk: Callable[[str], Awaitable[None]]
     ) -> str:
@@ -459,6 +585,7 @@ class LLMResponse:
             new_resp = await self._retry_send()
             self._stream = new_resp._stream
 
+    @_close_managed_after
     async def stream_events_with_callback(
         self,
         on_event: Callable[[StreamEvent], Awaitable[None]],
@@ -517,6 +644,7 @@ class LLMResponse:
             new_resp = await self._retry_send()
             self._stream = new_resp._stream
 
+    @_close_managed_after
     async def stream_with_buffer(self, buffer_size: int = 10) -> AsyncIterator[str]:
         """以缓冲方式产出流式文本块。
 
@@ -582,6 +710,7 @@ class LLMResponse:
             self._stream = new_resp._stream
 
     def _maybe_record_stream_stats(self) -> None:
+        """Flush the legacy recorder once after a successfully collected stream."""
         if self._stream_stats_recorder is None:
             return
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import TracebackType
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -163,22 +164,36 @@ class RequestTimer:
     """请求计时器（上下文管理器）。"""
 
     def __init__(self) -> None:
+        """Create an unstarted timer with compatible public timestamp defaults."""
         self.start_time: float = 0.0
         self.end_time: float = 0.0
+        self._started = False
+        self._finished = False
 
     def __enter__(self) -> RequestTimer:
+        """Start a fresh monotonic interval, discarding any previous end time."""
         self.start_time = time.perf_counter()
+        self.end_time = 0.0
+        self._started = True
+        self._finished = False
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self, exc_type: type[BaseException] | None,
+        exc_val: BaseException | None, exc_tb: TracebackType | None,
+    ) -> None:
+        """Freeze elapsed time while leaving any exception to propagate."""
         self.end_time = time.perf_counter()
+        self._finished = True
 
     @property
     def elapsed(self) -> float:
         """已用时间（秒）。"""
-        if self.end_time > 0:
-            return self.end_time - self.start_time
-        return time.perf_counter() - self.start_time
+        if not self._started:
+            return 0.0
+        if self._finished:
+            return max(0.0, self.end_time - self.start_time)
+        return max(0.0, time.perf_counter() - self.start_time)
 
 
 # 全局单例

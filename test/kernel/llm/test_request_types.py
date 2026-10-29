@@ -201,13 +201,15 @@ async def test_rerank_unregistered_provider_fails_over_to_next_model() -> None:
         "extra_params": {},
     }
     openai_entry = {**gemini_entry, "client_type": "openai", "model_identifier": "rerank-model"}
+    registry = ModelClientRegistry(openai=_MockMultiClient())
+    registry.gemini = None
 
     request = RerankRequest(
         model_set=cast(ModelSet, [gemini_entry, openai_entry]),
         query="q",
         documents=["doc0", "doc1"],
         policy=RoundRobinPolicy(),
-        clients=ModelClientRegistry(openai=_MockMultiClient()),
+        clients=registry,
         enable_metrics=False,
     )
 

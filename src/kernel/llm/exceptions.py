@@ -243,7 +243,35 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
     这个函数尝试识别常见的 API 错误类型并转换为更具体的异常类型。
     如果无法识别，返回原始异常。
     """
+    # 标准异常的语义已经确定，不能再根据诊断消息中的模型名猜类型。
+    if isinstance(error, LLMError):
+        return error
     error_msg = str(error).lower()
+
+    # Google Gen AI SDK uses structured status codes; never expose raw details/key URLs.
+    try:
+        from google.genai.errors import APIError as GeminiAPIError
+        if isinstance(error, GeminiAPIError):
+            code = error.code
+            message = f"Gemini API failed (HTTP {code})"
+            if code in {401, 403}:
+                return LLMAuthenticationError(message, model=model)
+            if code == 429:
+                headers = getattr(getattr(error, "response", None), "headers", None)
+                return LLMRateLimitError(message, retry_after=parse_retry_after(headers), model=model)
+            if code == 404:
+                return LLMProviderUnavailableError("Gemini model or endpoint is unavailable")
+            return LLMAPIError(message, status_code=code, error_code=getattr(error, "status", None), model=model)
+    except ImportError:
+        pass
+    try:
+        import httpx
+        if isinstance(error, httpx.TimeoutException):
+            return LLMTimeoutError("Provider HTTP timeout", model=model)
+        if isinstance(error, httpx.TransportError):
+            return ConnectionError("Provider transport failure: " + type(error).__name__)
+    except ImportError:
+        pass
 
     # OpenAI SDK 异常处理
     try:

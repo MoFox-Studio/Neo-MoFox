@@ -70,8 +70,9 @@ def _model_entry(**overrides: Any) -> ModelEntry:
     ["gemini", "bedrock", "google", "vertex_ai", "amazon_bedrock"],
 )
 def test_unregistered_provider_is_retryable_for_failover(client_type: str) -> None:
-    """未注册的 provider 属于「换个模型还有希望」，必须允许 failover。"""
+    """未注册或不支持的 provider 必须允许 failover。"""
     registry = ModelClientRegistry()
+    registry.gemini = None
 
     with pytest.raises(LLMProviderUnavailableError):
         registry.get_client_for_model(_model_entry(client_type=client_type))
