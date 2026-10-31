@@ -21,6 +21,7 @@ from src.app.plugin_system.api import permission_api
 from src.app.plugin_system.api import person_api
 from src.app.plugin_system.api import plugin_api
 from src.app.plugin_system.api import prompt_api
+from src.app.plugin_system.api import request_inspector_api
 from src.app.plugin_system.api import router_api
 from src.app.plugin_system.api import send_api
 from src.app.plugin_system.api import service_api
@@ -52,6 +53,7 @@ PLUGIN_API_VERSIONS: dict[str, str] = {
     "person_api": person_api.API_VERSION,
     "plugin_api": plugin_api.API_VERSION,
     "prompt_api": prompt_api.API_VERSION,
+    "request_inspector_api": request_inspector_api.API_VERSION,
     "router_api": router_api.API_VERSION,
     "send_api": send_api.API_VERSION,
     "service_api": service_api.API_VERSION,
@@ -77,6 +79,7 @@ __all__ = [
     "person_api",
     "plugin_api",
     "prompt_api",
+    "request_inspector_api",
     "router_api",
     "send_api",
     "service_api",
