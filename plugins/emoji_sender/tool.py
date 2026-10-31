@@ -32,7 +32,9 @@ class SearchEmojiMemesTool(BaseTool):
     description: str = (
         "根据目标描述与情感标签检索表情包库，返回候选列表（每项含 id、标签、描述与距离，距离越小与你想要的越贴切）。"
         "当你想发表情包时，先用本工具查看有哪些候选，挑选最契合当前语境的一张，"
-        "再用它的 id 调用 send_emoji_meme_by_id 发送。对候选不满意时可换更具体的描述重新查询，或翻页查看更多。"
+        "再用它的 id 调用 send_emoji_meme_by_id 发送。"
+        "每项候选还带完整 meme_id，若候选明显不合适可用 delete_emoji_meme_by_id 彻底删除。"
+        "对候选不满意时可换更具体的描述重新查询，或翻页查看更多。"
     )
 
     async def execute(
@@ -76,14 +78,20 @@ class SearchEmojiMemesTool(BaseTool):
         lines: list[str] = [f"候选表情包列表（第 {current_page} 页，共 {total} 张可选）："]
         for item in candidates:
             short_id = str(item.get("short_id") or "")
+            meme_id = str(item.get("meme_id") or "")
             tag = str(item.get("tag") or "")
             desc = str(item.get("description") or "")
             distance = item.get("distance")
             dist_text = f"{float(distance):.2f}" if isinstance(distance, (int, float)) else "?"
-            lines.append(f"- id={short_id} | 标签: {tag} | 描述: {desc} | 距离: {dist_text}")
+            lines.append(
+                f"- id={short_id} | 标签: {tag} | 描述: {desc} | 距离: {dist_text}\n"
+                f"  meme_id={meme_id}"
+            )
 
         lines.append(
             "用 send_emoji_meme_by_id(id) 发送选中的表情包；"
+            "若候选明显不合适，可用 delete_emoji_meme_by_id(meme_id) 彻底删除它"
+            "（需传上方完整的 meme_id，删除后不可恢复）；"
             "候选都不合适时可换更具体的描述重新查询，或传更大 page 翻页。"
         )
         return True, "\n".join(lines)
