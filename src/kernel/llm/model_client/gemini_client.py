@@ -16,6 +16,7 @@ from google.genai import types
 
 from src.kernel.network import build_httpx_timeout, build_httpx_transport
 
+from .._stream_close import CloseOutcome, close_outcome, select_close_error
 from ..exceptions import LLMConfigurationError
 from ..payload import LLMPayload, LLMUsable
 from .base import ModelClientResult, StreamEvent
@@ -66,10 +67,9 @@ async def _close_all(resources: list[Any]) -> None:
 
 async def _close_after_error(resource: Any, primary: BaseException) -> None:
     """保留请求主异常；普通清理错误只作提示，清理期间的新取消仍传播。"""
-    try:
-        await resource.aclose()
-    except Exception:
-        primary.add_note("Gemini 资源清理也发生错误；请求主异常保持不变。")
+    selected = select_close_error(primary, await close_outcome(resource))
+    if selected is not None and selected is not primary:
+        raise selected
 
 
 class _ResponseBody(httpx.AsyncByteStream):
@@ -236,22 +236,31 @@ class _OwnedStream:
         finally:
             _response_owner.reset(token)
 
-    async def aclose(self) -> None:
-        """只执行一次关闭并释放逻辑占用；失败会缓存而不是伪装成功。"""
-        async with self._close_lock:
-            if not self.closed:
+    async def _close_outcome(self) -> CloseOutcome:
+        """显式区分本次关闭控制异常和已完成关闭的缓存重放。"""
+        try:
+            async with self._close_lock:
+                if self.closed:
+                    return CloseOutcome(self._close_error)
                 self.closed = True
                 token = _response_owner.set(self.owner)
                 try:
                     await _close_all([self.events, self.source, self.owner])
                 except BaseException as error:
                     self._close_error = error
-                    raise
+                    return CloseOutcome(error, not isinstance(error, Exception))
                 finally:
                     _response_owner.reset(token)
                     self.lease.active -= 1
-            elif self._close_error is not None:
-                raise self._close_error
+                return CloseOutcome()
+        except BaseException as error:
+            return CloseOutcome(error, not isinstance(error, Exception))
+
+    async def aclose(self) -> None:
+        """只执行一次关闭并释放逻辑占用；重复关闭仍报告缓存错误。"""
+        result = await self._close_outcome()
+        if result.error is not None:
+            raise result.error
 
 
 class GeminiChatClient:

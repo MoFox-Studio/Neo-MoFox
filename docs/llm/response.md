@@ -36,6 +36,16 @@ class LLMResponse:
     _appended_to_context: bool = False                  # 是否已追加到上下文
 ```
 
+## 托管流的关闭与异常
+
+`LLMResponse` 的公开消费入口先领取独占消费权，再承担清理责任；被拒绝的重复消费者不能关闭正在工作的流。提前结束时使用 `async with response:` 或显式 `await response.aclose()`，普通 async-for 的 break 不保证立即关闭仍被引用的生成器。
+
+托管流关闭普通失败不能替换读取主错、callback 错误、上下文体异常或已有取消；清理期间的新取消继续传播，没有主错时关闭失败必须可见。callback 错误不进入 provider 重试；关闭失败不跳过未完成 `call_list` 和 `provider_state` 的清除。旧非托管流不因消费装饰器获得额外自动关闭责任。
+
+当流式 provider 读取失败且关闭失败时，保留原分类错误，但不创建 replacement、不推进重试计数或策略步骤，响应外层也不再次发请求。安全次要诊断不含错误原文或 URL。该规则不改变关闭成功路径的既有剩余预算，也不改变非流式重试。
+
+可运行的纯内存示例：`examples/src/kernel/llm/stream_cleanup_example.py`，不访问模型服务或读取密钥。
+
 ## 核心属性
 
 ### message

@@ -99,13 +99,19 @@ async def drain_stream(
     """使用共享 reducer 消费完整条 provider 流。"""
     reducer = LLMStreamReducer()
     stream_error: Exception | None = None
-    try:
-        async for event in stream:
-            text_delta = reducer.apply(event)
-            if text_delta and on_text_delta is not None:
-                await on_text_delta(text_delta)
-    except Exception as exc:
-        stream_error = exc
+    iterator = aiter(stream)
+    while True:
+        try:
+            event = await anext(iterator)
+        except StopAsyncIteration:
+            break
+        except Exception as exc:
+            stream_error = exc
+            break
+        text_delta = reducer.apply(event)
+        if text_delta and on_text_delta is not None:
+            # 调用方异常不属于 provider 读取，不可归并成可重试错误。
+            await on_text_delta(text_delta)
     return reducer.finalize(stream_error)
 
 
