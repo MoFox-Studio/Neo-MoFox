@@ -15,7 +15,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
+from contextlib import aclosing
 from dataclasses import dataclass
 from functools import wraps
 from types import TracebackType
@@ -78,7 +79,7 @@ T = TypeVar("T")
 def _close_managed_after(
     method: Callable[Concatenate[LLMResponse, P], AsyncIterator[T]],
 ) -> Callable[Concatenate[LLMResponse, P], AsyncIterator[T]]:
-    """Preserve the signature and item type of an asynchronous generator method."""
+    """保留异步生成器 method 的参数签名与产出类型。"""
     ...
 
 
@@ -86,7 +87,7 @@ def _close_managed_after(
 def _close_managed_after(
     method: Callable[Concatenate[LLMResponse, P], Awaitable[T]],
 ) -> Callable[Concatenate[LLMResponse, P], Awaitable[T]]:
-    """Preserve the signature and result type of an asynchronous consumer method."""
+    """保留异步消费者 method 的参数签名与返回类型。"""
     ...
 
 
@@ -94,43 +95,36 @@ def _close_managed_after(
     method: Callable[Concatenate[LLMResponse, P], AsyncIterator[T]]
     | Callable[Concatenate[LLMResponse, P], Awaitable[T]],
 ) -> Callable[Concatenate[LLMResponse, P], AsyncIterator[T]] | Callable[Concatenate[LLMResponse, P], Awaitable[T]]:
-    """Wrap a consumer, closing its managed stream without swallowing exceptions.
+    """为 method 领取单次消费权，并返回保留签名和异步形态的包装器。
 
-    The returned method retains the caller's parameters and result type. Generator
-    consumers release ownership when explicitly closed; coroutine consumers also
-    release ownership when cancellation occurs inside a caller-provided callback.
+    领取成功的调用独占托管流关闭和半成品清理责任；重复调用在进入
+    清理区之前拒绝。被包装方法不再重复领取消费权，嵌套消费应显式委托
+    给已持权的内部实现，不能根据任务身份或 _consumed 的变化推测归属。
     """
     if inspect.isasyncgenfunction(method):
-        generate_method = cast("Callable[Concatenate[LLMResponse, P], AsyncIterator[T]]", method)
+        generate_method = cast("Callable[Concatenate[LLMResponse, P], AsyncGenerator[T, None]]", method)
 
         @wraps(method)
         async def generate(self: LLMResponse, *args: P.args, **kwargs: P.kwargs) -> AsyncIterator[T]:
-            """Yield the wrapped items and release stream ownership on exit."""
+            """为 self 领取消费权，转发 args/kwargs 并在退出时清理所属流。"""
+            self._claim_consumption()
             try:
-                async for value in generate_method(self, *args, **kwargs):
-                    yield value
+                async with aclosing(generate_method(self, *args, **kwargs)) as iterator:
+                    async for value in iterator:
+                        yield value
             finally:
-                if isinstance(self._stream, ManagedStream):
-                    cancelled = asyncio.current_task() is not None and asyncio.current_task().cancelling() > 0
-                    await self._stream.aclose(cancelled=cancelled)
-                    if self._stream.phase != "completed" and self._stream.result_response is None:
-                        self.call_list = []
-                        self.provider_state = None
+                await self._close_owned_managed_stream()
         return generate
     consume_method = cast("Callable[Concatenate[LLMResponse, P], Awaitable[T]]", method)
 
     @wraps(method)
     async def consume(self: LLMResponse, *args: P.args, **kwargs: P.kwargs) -> T:
-        """Return the wrapped result, releasing resources on error or cancellation."""
+        """为 self 领取消费权，以 args/kwargs 调用方法并清理所属流。"""
+        self._claim_consumption()
         try:
             return await consume_method(self, *args, **kwargs)
         finally:
-            if isinstance(self._stream, ManagedStream):
-                cancelled = asyncio.current_task() is not None and asyncio.current_task().cancelling() > 0
-                await self._stream.aclose(cancelled=cancelled)
-                if self._stream.phase != "completed" and self._stream.result_response is None:
-                    self.call_list = []
-                    self.provider_state = None
+            await self._close_owned_managed_stream()
     return consume
 
 
@@ -188,7 +182,7 @@ class LLMResponse:
     def _get_stream_retries(self) -> int:
         """从 model_set 读取流式重试次数上限，默认 2。"""
         if isinstance(self._stream, ManagedStream):
-            return 0  # The managed iterator owns the original policy budget.
+            return 0  # 托管迭代器独占原始策略预算。
         if self.model_set:
             return self.model_set[0].get("max_retry", 2)
         return 2
@@ -249,8 +243,25 @@ class LLMResponse:
             for call in parsed_calls
         ]
 
+    def _claim_consumption(self) -> None:
+        """同步领取唯一消费权；失败者不得进入所属流的清理作用域。"""
+        if self._consumed:
+            raise LLMResponseConsumedError("Response has already been consumed.")
+        self._consumed = True
+
+    async def _close_owned_managed_stream(self) -> None:
+        """由已取得消费权的包装器关闭托管流，并清除未完成工具状态。"""
+        if not isinstance(self._stream, ManagedStream):
+            return
+        task = asyncio.current_task()
+        cancelled = task is not None and task.cancelling() > 0
+        await self._stream.aclose(cancelled=cancelled)
+        if self._stream.phase != "completed" and self._stream.result_response is None:
+            self.call_list = []
+            self.provider_state = None
+
     async def aclose(self) -> None:
-        """Explicitly release an unconsumed or partially consumed response stream."""
+        """显式释放未消费或部分消费的响应；调用方主动关闭不受消费入口限制。"""
         close = getattr(self._stream, "aclose", None)
         if close:
             await close()
@@ -260,18 +271,18 @@ class LLMResponse:
         self._consumed = True
 
     async def __aenter__(self) -> Self:
-        """Use async with when a consumer may break before draining the stream."""
+        """进入显式资源作用域，供可能提前结束的消费者使用。"""
         return self
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None,
         exc: BaseException | None, tb: TracebackType | None,
     ) -> None:
-        """Close the response at the end of its explicit ownership scope."""
+        """退出显式资源作用域时关闭响应；exc_type、exc、tb 不改变异常传播。"""
         await self.aclose()
 
     def __await__(self) -> Generator[Any, None, str]:
-        """Collect the complete response through Python's await protocol."""
+        """通过 await 协议领取单次消费权并返回完整响应文本。"""
         return self._collect_full_response().__await__()
 
     @_close_managed_after
@@ -279,11 +290,14 @@ class LLMResponse:
         """以严格单次消费的方式产出原始流事件，并实时更新响应状态。
 
         流式消费期间遇到可重试错误时自动重建请求并重试。
+        消费权和关闭责任由包装器持有，内部事件迭代器只接受显式委托。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
+        async with aclosing(self._stream_events_owned()) as events:
+            async for event in events:
+                yield event
 
+    async def _stream_events_owned(self) -> AsyncGenerator[StreamEvent, None]:
+        """在外层已领取的消费权内产出事件，不重新领取或关闭共享流。"""
         if self._stream is None:
             self._maybe_apply_tool_call_compat()
             if self.message:
@@ -332,20 +346,18 @@ class LLMResponse:
 
     @_close_managed_after
     async def __aiter__(self) -> AsyncIterator[str]:
-        """以严格单次消费的方式产出流式文本增量。"""
-        async for event in self.stream_events():
-            if event.text_delta:
-                yield event.text_delta
+        """产出文本增量，将已领取的消费权显式委托给共享事件实现。"""
+        async with aclosing(self._stream_events_owned()) as events:
+            async for event in events:
+                if event.text_delta:
+                    yield event.text_delta
 
+    @_close_managed_after
     async def _collect_full_response(self) -> str:
         """以严格单次消费的方式收集完整响应文本。
 
         流式消费期间遇到可重试错误时自动重建请求并重试。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
-
         if self._stream is None:
             self._maybe_apply_tool_call_compat()
             self._maybe_append_response_to_context()
@@ -357,11 +369,7 @@ class LLMResponse:
         while True:
             if isinstance(self._stream, ManagedStream):
                 self._stream.buffered = True
-            try:
-                result = await drain_stream(self._stream)
-            finally:
-                if isinstance(self._stream, ManagedStream):
-                    await self._stream.aclose()
+            result = await drain_stream(self._stream)
             self._apply_stream_result(result)
 
             if result.error is None:
@@ -396,7 +404,7 @@ class LLMResponse:
         self.provider_state = result.provider_state
         if result.error is not None:
             if isinstance(self._stream, ManagedStream):
-                self.call_list = []  # Never execute half-generated provider tool calls.
+                self.call_list = []  # 未完成的供应商工具调用不可交给执行方。
                 self.provider_state = None
             return
         self._maybe_apply_tool_call_compat()
@@ -543,12 +551,10 @@ class LLMResponse:
     ) -> str:
         """以回调方式消费流式文本增量，返回最终完整文本。
 
+        on_chunk 接收每个文本增量，返回值为最终完整文本。
+        包装器独占消费权，并在结束、异常或取消时释放托管流。
         流式消费期间遇到可重试错误时自动重建请求并重试。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
-
         if self._stream is None:
             self._maybe_apply_tool_call_compat()
             content = self.message or ""
@@ -594,14 +600,11 @@ class LLMResponse:
 
         与 ``stream_with_callback`` 的区别是回调接收完整的 ``StreamEvent``，
         包含 ``tool_call_id`` / ``tool_name`` / ``tool_args_delta`` 等字段，
-        而不仅仅是文本增量。
+        而不仅仅是文本增量。on_event 接收事件，返回值为最终完整文本。
+        包装器独占消费权，并在结束、异常或取消时释放托管流。
 
         流式消费期间遇到可重试错误时自动重建请求并重试。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
-
         if self._stream is None:
             self._maybe_apply_tool_call_compat()
             self._maybe_append_response_to_context()
@@ -648,12 +651,10 @@ class LLMResponse:
     async def stream_with_buffer(self, buffer_size: int = 10) -> AsyncIterator[str]:
         """以缓冲方式产出流式文本块。
 
+        buffer_size 为触发产出的累计文本长度阈值；末尾不足阈值也会产出。
+        包装器独占消费权，显式关闭生成器会释放托管流。
         流式消费期间遇到可重试错误时自动重建请求并重试。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
-
         if self._stream is None:
             self._maybe_apply_tool_call_compat()
             content = self.message or ""
@@ -710,7 +711,7 @@ class LLMResponse:
             self._stream = new_resp._stream
 
     def _maybe_record_stream_stats(self) -> None:
-        """Flush the legacy recorder once after a successfully collected stream."""
+        """在流成功归并后仅一次调用旧统计记录器。"""
         if self._stream_stats_recorder is None:
             return
 
