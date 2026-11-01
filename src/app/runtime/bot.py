@@ -1120,7 +1120,7 @@ class Bot:
 
         current = asyncio.current_task()
         tasks = [
-            info.task for info in self.task_manager.get_active_tasks()
+            info.task for info in self.task_manager.get_all_tasks()
             if info.daemon and info.name is not None and info.name.startswith("chat_stream_")
             and info.task is not None and info.task is not current
         ] if self.task_manager else []
@@ -1140,6 +1140,13 @@ class Bot:
                 if not task.done() and not task.cancelling():
                     task.cancel()
         await self._wait_shutdown_tasks(tasks, deadline, "聊天请求释放")
+        failed = [
+            task for task in tasks
+            if task.done() and not task.cancelled() and task.exception() is not None
+        ]
+        if failed:
+            # 任务退出只证明不再运行；清理失败不能上报为资源已关闭。
+            raise BotShutdownError(f"关闭失败: 聊天请求清理，{len(failed)} 个任务异常退出")
 
     async def shutdown(self, timeout: float = 30.0) -> None:
         """优雅关闭 Bot
