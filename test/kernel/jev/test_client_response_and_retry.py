@@ -56,10 +56,11 @@ def _answer_response(answer: Any) -> httpx.Response:
 # ==============================================================================
 
 
-async def test_evaluate_rejects_answer_that_is_not_an_object():
+async def test_evaluate_rejects_answer_that_is_not_an_object() -> None:
     """answer 不是 object 时必须整体失败，不能把脏结构交给业务。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response(["not", "an", "object"])
 
     with pytest.raises(JevResponseError, match="answer 结构非法"):
@@ -69,10 +70,11 @@ async def test_evaluate_rejects_answer_that_is_not_an_object():
         )
 
 
-async def test_evaluate_rejects_unknown_answer_type():
+async def test_evaluate_rejects_unknown_answer_type() -> None:
     """answer.type 不属于三种 typed question 时必须失败。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response({"type": "unknown", "noul": 0.5})
 
     with pytest.raises(JevResponseError, match="answer 结构非法"):
@@ -95,10 +97,11 @@ async def test_evaluate_rejects_unknown_answer_type():
 )
 async def test_evaluate_rejects_invalid_numeric_answer_fields(
     answer: dict[str, Any], expected: str,
-):
+) -> None:
     """数值字段必须是 number，bool 不算数字，缺失必填数值也要失败。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response(answer)
 
     with pytest.raises(JevResponseError, match="answer 结构非法") as info:
@@ -109,10 +112,11 @@ async def test_evaluate_rejects_invalid_numeric_answer_fields(
     assert expected in str(info.value)
 
 
-async def test_evaluate_rejects_non_string_choice():
+async def test_evaluate_rejects_non_string_choice() -> None:
     """choice 必须是 string。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response({"type": "choice", "choice": 42, "confidence": 0.5})
 
     with pytest.raises(JevResponseError, match="answer 结构非法"):
@@ -122,10 +126,11 @@ async def test_evaluate_rejects_non_string_choice():
         )
 
 
-async def test_evaluate_rejects_choice_without_choice_value():
+async def test_evaluate_rejects_choice_without_choice_value() -> None:
     """choice 题型必须给出 choice 值。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response({"type": "choice", "confidence": 0.5})
 
     with pytest.raises(JevResponseError, match="answer 结构非法"):
@@ -135,10 +140,11 @@ async def test_evaluate_rejects_choice_without_choice_value():
         )
 
 
-async def test_evaluate_rejects_non_object_legend():
+async def test_evaluate_rejects_non_object_legend() -> None:
     """legend 必须是 object。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response(
             {"type": "score", "score": 1.0, "confidence": 0.5, "legend": ["low", "high"]},
         )
@@ -150,10 +156,11 @@ async def test_evaluate_rejects_non_object_legend():
         )
 
 
-async def test_evaluate_rejects_non_object_probabilities():
+async def test_evaluate_rejects_non_object_probabilities() -> None:
     """probabilities 必须是 object。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response(
             {"type": "choice", "choice": "a", "confidence": 0.5, "probabilities": [0.5]},
         )
@@ -165,10 +172,11 @@ async def test_evaluate_rejects_non_object_probabilities():
         )
 
 
-async def test_evaluate_rejects_non_numeric_probability_values():
+async def test_evaluate_rejects_non_numeric_probability_values() -> None:
     """probabilities 的值必须是 number。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response(
             {
                 "type": "choice",
@@ -185,10 +193,11 @@ async def test_evaluate_rejects_non_numeric_probability_values():
         )
 
 
-async def test_evaluate_reports_validation_error_for_bad_answer_fields():
+async def test_evaluate_reports_validation_error_for_bad_answer_fields() -> None:
     """答案字段非法属于 provider 契约问题，映射为响应错误而非静默降级。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response({"type": "noul", "noul": "not-a-number"})
 
     with pytest.raises(JevResponseError) as info:
@@ -205,7 +214,7 @@ async def test_evaluate_reports_validation_error_for_bad_answer_fields():
 # ==============================================================================
 
 
-async def test_retry_delay_honors_http_date_retry_after():
+async def test_retry_delay_honors_http_date_retry_after() -> None:
     """Retry-After 使用 HTTP 日期时也能解析出等待秒数。"""
     target = datetime.now(timezone.utc) + timedelta(seconds=30)
     response = httpx.Response(
@@ -217,7 +226,7 @@ async def test_retry_delay_honors_http_date_retry_after():
     assert 25 <= delay <= 30
 
 
-async def test_retry_delay_caps_http_date_by_max_backoff():
+async def test_retry_delay_caps_http_date_by_max_backoff() -> None:
     """服务端给出的等待时间仍然受本地退避上限约束。"""
     target = datetime.now(timezone.utc) + timedelta(seconds=600)
     response = httpx.Response(
@@ -228,7 +237,7 @@ async def test_retry_delay_caps_http_date_by_max_backoff():
     assert client._retry_delay(0, response) == 5
 
 
-async def test_retry_delay_ignores_past_http_date():
+async def test_retry_delay_ignores_past_http_date() -> None:
     """已过期的 HTTP 日期不是合法等待时间，回退到本地退避。"""
     target = datetime.now(timezone.utc) - timedelta(seconds=60)
     response = httpx.Response(
@@ -240,7 +249,7 @@ async def test_retry_delay_ignores_past_http_date():
     assert 0 <= delay <= 2
 
 
-async def test_retry_delay_ignores_naive_http_date():
+async def test_retry_delay_ignores_naive_http_date() -> None:
     """没有时区的 HTTP 日期按 UTC 解释，不会直接判定为非法。"""
     target = datetime.now(timezone.utc) + timedelta(seconds=20)
     naive = target.replace(tzinfo=None).strftime("%a, %d %b %Y %H:%M:%S")
@@ -250,11 +259,12 @@ async def test_retry_delay_ignores_naive_http_date():
     assert 15 <= delay <= 20
 
 
-async def test_evaluate_retries_after_http_date_retry_after():
+async def test_evaluate_retries_after_http_date_retry_after() -> None:
     """带 HTTP 日期 Retry-After 的 429 会触发重试并最终成功。"""
     attempts: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """首次返回带 HTTP 日期的限流响应，重试时返回合法答案。"""
         attempts.append(len(attempts) + 1)
         if len(attempts) == 1:
             target = datetime.now(timezone.utc) + timedelta(seconds=1)
@@ -279,7 +289,7 @@ async def test_evaluate_retries_after_http_date_retry_after():
     assert response.answer("q").noul == 0.3
 
 
-async def test_retry_delay_ignores_unparsable_retry_after():
+async def test_retry_delay_ignores_unparsable_retry_after() -> None:
     """无法解析的 Retry-After 退回本地抖动退避，不让请求卡死。"""
     response = httpx.Response(429, headers={"Retry-After": "soon"})
     client = _client(lambda request: httpx.Response(200), retry_backoff_seconds=3)
@@ -292,7 +302,7 @@ async def test_retry_delay_ignores_unparsable_retry_after():
 # ==============================================================================
 
 
-async def test_invalid_event_rewritten_answers_keep_original_answers():
+async def test_invalid_event_rewritten_answers_keep_original_answers() -> None:
     """订阅者改写出非法 answers 时保留原始答案，不把脏数据交给业务。"""
     from src.kernel.event import EventDecision, get_event_bus
     from src.kernel.jev.events import AFTER_JEV_REQUEST
@@ -306,6 +316,7 @@ async def test_invalid_event_rewritten_answers_keep_original_answers():
     bus.subscribe(AFTER_JEV_REQUEST, rewrite_answers)
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response({"type": "noul", "noul": 0.42})
 
     try:
@@ -319,7 +330,7 @@ async def test_invalid_event_rewritten_answers_keep_original_answers():
     assert response.answer("q").noul == 0.42
 
 
-async def test_invalid_event_rewritten_questions_keep_original_questions():
+async def test_invalid_event_rewritten_questions_keep_original_questions() -> None:
     """订阅者把 questions 改写成非 mapping 时保留原始问题定义。"""
     from src.kernel.event import EventDecision, get_event_bus
     from src.kernel.jev.events import BEFORE_JEV_REQUEST
@@ -333,6 +344,7 @@ async def test_invalid_event_rewritten_questions_keep_original_questions():
     bus.subscribe(BEFORE_JEV_REQUEST, rewrite_questions)
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response({"type": "noul", "noul": 0.11})
 
     try:
@@ -345,7 +357,7 @@ async def test_invalid_event_rewritten_questions_keep_original_questions():
     assert response.answer("q").noul == 0.11
 
 
-async def test_event_bus_failure_does_not_break_request():
+async def test_event_bus_failure_does_not_break_request() -> None:
     """事件总线故障不能让主请求失败。"""
     from src.kernel.event import get_event_bus
     from src.kernel.jev.events import BEFORE_JEV_REQUEST
@@ -358,6 +370,7 @@ async def test_event_bus_failure_does_not_break_request():
     bus.subscribe(BEFORE_JEV_REQUEST, broken_handler)
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """为当前答案校验用例返回指定结构的响应。"""
         return _answer_response({"type": "noul", "noul": 0.77})
 
     try:
@@ -370,10 +383,11 @@ async def test_event_bus_failure_does_not_break_request():
     assert response.answer("q").noul == 0.77
 
 
-async def test_long_upstream_error_detail_is_truncated():
+async def test_long_upstream_error_detail_is_truncated() -> None:
     """上游 error 字符串过长时必须截断，避免污染日志与异常。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """返回当前用例指定的 HTTP 状态及响应体，验证响应边界。"""
         return httpx.Response(
             500,
             json={"error": {"type": "x" * 500}},
@@ -390,10 +404,11 @@ async def test_long_upstream_error_detail_is_truncated():
     assert len(message) < 300
 
 
-async def test_evaluate_rejects_empty_question_id():
+async def test_evaluate_rejects_empty_question_id() -> None:
     """question ID 必须是非空字符串。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """若本应在本地校验失败的请求进入传输层，立即使测试失败。"""
         raise AssertionError("请求不应发出")
 
     with pytest.raises(JevConfigurationError, match="question ID"):
@@ -403,10 +418,11 @@ async def test_evaluate_rejects_empty_question_id():
         )
 
 
-async def test_evaluate_rejects_invalid_question_object():
+async def test_evaluate_rejects_invalid_question_object() -> None:
     """question 既不是 JevQuestion 也不是 Mapping 时必须失败。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """若本应在本地校验失败的请求进入传输层，立即使测试失败。"""
         raise AssertionError("请求不应发出")
 
     with pytest.raises(JevConfigurationError, match="格式无效"):
@@ -416,11 +432,12 @@ async def test_evaluate_rejects_invalid_question_object():
         )
 
 
-async def test_evaluate_sends_question_criteria_for_choice():
+async def test_evaluate_sends_question_criteria_for_choice() -> None:
     """choice 题型的 criteria 必须进入请求体，便于断言编解码一致。"""
     seen: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """记录序列化问题结构，并返回合法 choice 答案。"""
         seen["body"] = json.loads(request.content)
         return httpx.Response(
             200,
@@ -438,10 +455,11 @@ async def test_evaluate_sends_question_criteria_for_choice():
     assert seen["body"]["questions"]["q"]["criteria"] == {"a": "A", "b": "B"}
 
 
-async def test_evaluate_rejects_response_with_mismatched_answer_ids():
+async def test_evaluate_rejects_response_with_mismatched_answer_ids() -> None:
     """answers 的 question ID 与请求不一致时整体失败。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """返回当前用例指定的 HTTP 状态及响应体，验证响应边界。"""
         return httpx.Response(
             200,
             json={
@@ -458,10 +476,11 @@ async def test_evaluate_rejects_response_with_mismatched_answer_ids():
         )
 
 
-async def test_evaluate_rejects_non_integer_usage():
+async def test_evaluate_rejects_non_integer_usage() -> None:
     """usage 的 token 字段必须是整数。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """返回当前用例指定的 HTTP 状态及响应体，验证响应边界。"""
         return httpx.Response(
             200,
             json={
@@ -478,10 +497,11 @@ async def test_evaluate_rejects_non_integer_usage():
         )
 
 
-async def test_evaluate_rejects_non_json_response():
+async def test_evaluate_rejects_non_json_response() -> None:
     """响应不是合法 JSON 时明确失败。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """返回当前用例指定的 HTTP 状态及响应体，验证响应边界。"""
         return httpx.Response(200, text="not json")
 
     with pytest.raises(JevResponseError, match="JSON"):
@@ -491,10 +511,11 @@ async def test_evaluate_rejects_non_json_response():
         )
 
 
-async def test_evaluate_rejects_non_object_response():
+async def test_evaluate_rejects_non_object_response() -> None:
     """响应必须是 JSON object。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """返回当前用例指定的 HTTP 状态及响应体，验证响应边界。"""
         return httpx.Response(200, json=[1, 2, 3])
 
     with pytest.raises(JevResponseError, match="JSON object"):
@@ -504,10 +525,11 @@ async def test_evaluate_rejects_non_object_response():
         )
 
 
-async def test_evaluate_rejects_missing_model_or_answers():
+async def test_evaluate_rejects_missing_model_or_answers() -> None:
     """缺少 model 或 answers 时明确失败。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """返回当前用例指定的 HTTP 状态及响应体，验证响应边界。"""
         return httpx.Response(200, json={"usage": {"input_tokens": 1, "output_tokens": 1}})
 
     with pytest.raises(JevResponseError, match="model"):
@@ -517,10 +539,11 @@ async def test_evaluate_rejects_missing_model_or_answers():
         )
 
 
-async def test_evaluate_rejects_missing_usage():
+async def test_evaluate_rejects_missing_usage() -> None:
     """缺少 usage 时明确失败。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """返回当前用例指定的 HTTP 状态及响应体，验证响应边界。"""
         return httpx.Response(
             200,
             json={
@@ -536,10 +559,11 @@ async def test_evaluate_rejects_missing_usage():
         )
 
 
-async def test_evaluate_rejects_state_that_is_not_serializable():
+async def test_evaluate_rejects_state_that_is_not_serializable() -> None:
     """state 无法序列化时在传输前失败。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """若本应在本地校验失败的请求进入传输层，立即使测试失败。"""
         raise AssertionError("请求不应发出")
 
     with pytest.raises(JevConfigurationError, match="JSON"):
@@ -549,10 +573,11 @@ async def test_evaluate_rejects_state_that_is_not_serializable():
         )
 
 
-async def test_evaluate_rejects_empty_questions():
+async def test_evaluate_rejects_empty_questions() -> None:
     """questions 必须是非空 mapping。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """若本应在本地校验失败的请求进入传输层，立即使测试失败。"""
         raise AssertionError("请求不应发出")
 
     with pytest.raises(JevConfigurationError, match="questions"):
@@ -562,10 +587,11 @@ async def test_evaluate_rejects_empty_questions():
         )
 
 
-async def test_evaluate_rejects_invalid_state_type():
+async def test_evaluate_rejects_invalid_state_type() -> None:
     """state 必须是 string、object 或 array。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """若本应在本地校验失败的请求进入传输层，立即使测试失败。"""
         raise AssertionError("请求不应发出")
 
     with pytest.raises(JevConfigurationError, match="state"):

@@ -175,6 +175,22 @@ class JevClientConfig:
         return parts._replace(path=path).geturl()
 
 
+class _BorrowedAsyncTransport(httpx.AsyncBaseTransport):
+    """向请求上下文借出传输能力，但不接管调用方的底层资源。"""
+
+    def __init__(self, transport: httpx.AsyncBaseTransport) -> None:
+        """保存调用方拥有的底层传输，不创建连接或修改其生命周期。"""
+        self._transport = transport
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        """把 HTTP 请求原样交给底层传输，并返回其响应或传播异常。"""
+        return await self._transport.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        """请求上下文退出时不回收借用资源；底层仅由调用方显式关闭。"""
+        return None
+
+
 class JevClient:
     """发送结构化 Jev 判断请求的异步客户端。"""
 
@@ -188,7 +204,8 @@ class JevClient:
 
         Args:
             config: 连接与重试配置。
-            transport: 可选的自定义传输层，用于测试或受控网络环境。
+            transport: 可选的调用方传输层，用于测试或受控网络环境；客户端
+                仅借用，不会关闭底层，调用方须负责最终回收。
         """
         self.config = config
         self._transport = transport
@@ -253,7 +270,11 @@ class JevClient:
         async with httpx.AsyncClient(
             timeout=build_httpx_timeout(self.config.timeout_seconds),
             trust_env=self.config.trust_env,
-            transport=self._transport or self._build_transport(),
+            transport=(
+                _BorrowedAsyncTransport(self._transport)
+                if self._transport is not None
+                else self._build_transport()
+            ),
         ) as client:
             headers = dict(self.config.extra_headers)
             # Provider-specific headers may be added, but cannot replace the
