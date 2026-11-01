@@ -80,7 +80,20 @@ def normalize_client_create_result(
     str | list[ReasoningText] | None,
     dict[str, Any] | None,
 ]:
-    """把历史上的 3/4/5 元组 provider 返回值统一成一种形态。"""
+    """把结构化结果或历史 3/4/5 元组转换为标准五元组。
+
+    Args:
+        result: provider 返回的 ModelClientResult，或依次包含消息、工具调用、
+            流迭代器及可选思考内容、用量的兼容元组。
+
+    Returns:
+        消息、工具调用、流迭代器、思考内容、用量组成的五元组；兼容元组缺少的
+        可选项补 None。provider_state 和 stop_reason 不在此返回，执行流程会
+        从原始 ModelClientResult 单独写入 LLMResponse，避免丢失签名回放状态。
+
+    Raises:
+        ValueError: 兼容元组的长度不是 3、4 或 5。
+    """
     if isinstance(result, ModelClientResult):
         return result.message, result.tool_calls, result.stream_iter, result.reasoning_content, result.usage
     if len(result) == 5:
@@ -130,9 +143,11 @@ async def execute_request(
 
     assert request.policy is not None
     if request._locked_target is not None:
-        from .model_client.gemini_codec import target_identity
-        model_set = [m for m in model_set if str(m.get("client_type")).casefold() in {"gemini", "aiohttp_gemini", "google", "gemini_v2"}
-                     and target_identity(m) == request._locked_target]
+        assert request.clients is not None
+        model_set = [
+            model for model in model_set
+            if request.clients.matches_replay_target(model, request._locked_target)
+        ]
         if not model_set:
             from .exceptions import LLMContextError
             raise LLMContextError("The active Gemini tool round has no matching configured target")
@@ -293,7 +308,12 @@ async def execute_request(
                     error: BaseException | None, final_usage: dict[str, Any] | None,
                     latency: float, phase: str,
                 ) -> None:
-                    """Account for the actual stream outcome, never just its creation."""
+                    """按流的实际终态记账并发布事件，而不是把创建成功当作完成。
+
+                    error 为终态异常或 None，final_usage 为最终累计用量，latency
+                    为整次尝试的秒数，phase 区分完成、失败及放弃；仅 completed
+                    且无异常时记录策略成功。事件发布失败不覆盖原流结果。
+                    """
                     from src.kernel.event import get_event_bus
                     success = error is None and phase == "completed"
                     if request.enable_metrics:
@@ -318,7 +338,12 @@ async def execute_request(
                         logger.debug("LLM stream terminal event failed", exc_info=True)
 
                 async def resume(next_context: AttemptContext) -> LLMResponse:
-                    """Continue the same policy session with its remaining budget."""
+                    """用 next_context 的同一策略会话和剩余重试预算续接流。
+
+                    从原始消息重建请求，保留客户端、来源锁及上下文管理器；
+                    返回新的流式响应，交由 ManagedStream 接管消费与关闭责任，
+                    不在此函数消费替代流或重新建立独立重试预算。
+                    """
                     from .request import LLMRequest
                     retry = LLMRequest(model_set=request.model_set, request_name=request.request_name,
                         meta_data=dict(request.meta_data), payloads=list(payloads), clients=request.clients,

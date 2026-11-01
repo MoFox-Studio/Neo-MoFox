@@ -15,11 +15,9 @@ from .gemini_client import get_default_gemini_client
 from ..types import ModelEntry
 from src.kernel.jev import JEV_CLIENT_TYPES
 
-# 原生 Gemini 与尚未实现的 Bedrock 分别显式分发，禁止协议误回退。
-# 这些别名一旦出现就必须显式报错，禁止静默回退到 OpenAI：
-# 用 OpenAI 协议去请求 Gemini/Bedrock 只会产生难以定位的 404/400。
+# Developer API 与尚未实现的 Vertex/Bedrock 分别显式分发，禁止协议误回退。
 _GEMINI_CLIENT_TYPES = frozenset(
-    {"gemini", "aiohttp_gemini", "gemini_v2", "google", "vertex_ai"}
+    {"gemini", "aiohttp_gemini", "gemini_v2", "google"}
 )
 _BEDROCK_CLIENT_TYPES = frozenset(
     {"bedrock", "amazon_bedrock", "bedrock_converse"}
@@ -48,6 +46,18 @@ def _normalize_client_type(client_type: Any) -> str | None:
     return client_type.strip().casefold().replace("-", "_")
 
 
+
+
+def is_gemini_client_type(client_type: Any) -> bool:
+    """判断原始 client_type 是否为 Gemini Developer API 别名。
+
+    参数接受未经配置层处理的值；复用注册表的小写、空白及连字符归一化规则，
+    非字符串、Vertex 与 Jev 均返回 False。注册分发和签名来源锁共用此入口，
+    调用方无需维护另一套别名集合；此判断不验证模型的具体签名来源。
+    """
+    return _normalize_client_type(client_type) in _GEMINI_CLIENT_TYPES
+
+
 @dataclass(slots=True)
 class ModelClientRegistry:
     """provider -> client 的注册表。
@@ -62,7 +72,7 @@ class ModelClientRegistry:
     bedrock: ChatModelClient | None = None
 
     def __post_init__(self) -> None:
-        """Supply default adapters while retaining explicitly injected clients."""
+        """保留显式注入的客户端，并补齐默认适配器；不在此处创建网络连接。"""
         if self.gemini is None:
             self.gemini = get_default_gemini_client()
         if self.openai is None:
@@ -72,14 +82,38 @@ class ModelClientRegistry:
         if self.responses is None:
             self.responses = OpenAIResponsesClient()
 
-    def get_client_for_model(self, model: ModelEntry) -> ChatModelClient:
-        """根据单个模型配置决定使用哪个 provider。
+    def matches_replay_target(self, model: ModelEntry, target: tuple[str, str, str]) -> bool:
+        """检查签名续轮来源，别名共用技术匹配器且不放宽 Jev/Vertex 隔离。
 
-        当前阶段以 `client_type` 为准：openai/anthropic/gemini/bedrock。
-        client_type 统一做大小写与连字符归一化；已识别但尚未注册的
-        provider（gemini/bedrock 系列别名）直接抛出 LLMProviderUnavailableError，
-        不会回退到 OpenAI；JEv 系列别名（含常见拼写变体）同样明确报错，
-        引导使用 ``jev_api``；真正未知的 client_type 仍回退到 OpenAI。
+        Args:
+            model: 本次候选模型技术配置，不修改调用方条目。
+            target: 已锁定的 provider、端点版本和模型标识。
+
+        Returns:
+            只有受支持协议与完整来源完全一致时返回 True。
+        """
+        if not is_gemini_client_type(model.get("client_type")):
+            return False
+        from .gemini_codec import target_identity
+
+        return target_identity(model) == target
+
+    def get_client_for_model(self, model: ModelEntry) -> ChatModelClient:
+        """根据单个模型配置返回已装配的聊天客户端，不发起网络请求。
+
+        Args:
+            model: 原始单模型配置；按 client_type 归一化大小写、首尾空白及
+                连字符后分发，不修改调用方的配置。
+
+        Returns:
+            对应的聊天客户端。默认已装配 Gemini Developer API；真正未知的
+            client_type 仍兼容回退到 OpenAI。
+
+        Raises:
+            LLMProviderUnavailableError: Vertex 需要独立认证/路由适配器，Bedrock
+                尚未装配，或命中独立 Jev 协议（应通过 jev_api 使用）；这些类型
+                不会回退到 OpenAI 或 Gemini。
+            LLMConfigurationError: 需要使用的默认 OpenAI 客户端未配置。
         """
 
         normalized_type = _normalize_client_type(model.get("client_type"))
@@ -99,7 +133,7 @@ class ModelClientRegistry:
                     f"（api_provider={model.get('api_provider')!r}, "
                     f"model_identifier={model.get('model_identifier')!r}）"
                 )
-            if normalized_type in _GEMINI_CLIENT_TYPES:
+            if is_gemini_client_type(model.get("client_type")):
                 if self.gemini is None:
                     raise LLMProviderUnavailableError(
                         f"Gemini client 未注册（client_type={normalized_type}），"

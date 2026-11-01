@@ -206,3 +206,80 @@ def test_decode_intermediate_chunk_and_duplicate_validation() -> None:
     duplicate = types.GenerateContentResponse.model_validate(_response(_parts(["same", "same"])))
     with pytest.raises(LLMAPIError, match="Duplicate Gemini function call ID"):
         decode_response(duplicate, target_identity(model), require_finish=False)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("client_type", [
+    "gemini", "gemini-v2", "aiohttp-gemini", " Gemini ",
+    "GEMINI_V2", " aiohttp_GEMINI ", "GOOGLE",
+])
+async def test_raw_model_aliases_complete_two_tool_rounds(stream: bool, client_type: str) -> None:
+    """原始 ModelSet 别名经过相同分类规则，连续两个工具轮及第三次请求均成功。"""
+    observed: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """前两轮提供无 ID 工具，第三轮结束，固定为同一来源。"""
+        observed.append(json.loads(request.content))
+        return _wire_response(request, _parts([None]) if len(observed) <= 2 else [{"text": "done"}])
+
+    client = GeminiChatClient(transport=httpx.MockTransport(handler))
+    model = _model(client_type)
+    try:
+        response = await _request(model, client).send(stream=stream)
+        for index in range(2):
+            await response
+            assert len(response.call_list) == 1
+            response.add_payload(LLMPayload(
+                ROLE.TOOL_RESULT, ToolResult({"round": index}, call_id=response.call_list[0].id),
+            ))
+            response = await response.send(stream=stream)
+        assert await response == "done"
+        assert len(observed) == 3
+        assert model["client_type"] == client_type
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("field,value", [
+    ("api_provider", "other"),
+    ("base_url", "https://other.invalid"),
+    ("model_identifier", "other-model"),
+    ("extra_params", {"gemini": {"api_version": "v1"}}),
+    ("client_type", "vertex-ai"),
+    ("client_type", "jev"),
+    ("client_type", "openai"),
+])
+async def test_locked_target_rejects_changes_before_http(
+    stream: bool, field: str, value: Any,
+) -> None:
+    """别名兼容不能放宽 provider、端点、版本、模型或协议来源锁。"""
+    observed: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """记录请求，错误续轮必须在到达此处理器之前失败。"""
+        observed.append(request)
+        return _wire_response(request, _parts([None]))
+
+    client = GeminiChatClient(transport=httpx.MockTransport(handler))
+    try:
+        response = await _request(_model("gemini-v2"), client).send(stream=stream)
+        await response
+        response.add_payload(LLMPayload(
+            ROLE.TOOL_RESULT, ToolResult({"ok": True}, call_id=response.call_list[0].id),
+        ))
+        changed = _model("gemini-v2")
+        changed[field] = value
+        response.model_set = [changed]
+        with pytest.raises(LLMContextError, match="no matching configured target"):
+            await response.send(stream=stream)
+        assert len(observed) == 1
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("client_type", ["vertex-ai", " Vertex_AI ", "jev", "typesafe-ai"])
+def test_registry_keeps_vertex_and_jev_outside_gemini(client_type: str) -> None:
+    """默认注册表仍拒绝 Vertex 与 Jev，不把独立认证或协议发给 Gemini。"""
+    with pytest.raises(LLMProviderUnavailableError):
+        ModelClientRegistry().get_client_for_model(_model(client_type))
