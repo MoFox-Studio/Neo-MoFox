@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 from src.kernel.jev import (
-    JEV_CLIENT_TYPES,
     JevClient,
     JevClientConfig,
     JevQuestion,
@@ -54,45 +53,13 @@ def create_jev_client(
         raise ValueError("provider_name 不能与 configured_model_name 同时传入")
 
     if provider_name or configured_model_name:
-        from src.core.config import get_model_config
+        from src.core.config.jev import resolve_jev_config
 
-        model_config = get_model_config()
-        configured_model = None
-        if configured_model_name:
-            configured_model = model_config.get_model(configured_model_name)
-            provider_name = configured_model.api_provider
-        assert provider_name is not None
-        provider = model_config.get_provider(provider_name)
-        if str(getattr(provider, "client_type", "")).casefold() not in JEV_CLIENT_TYPES:
-            raise ValueError(
-                "Core provider 的 client_type 必须是 jev/typesafe，不能用传统聊天 provider"
-            )
-        extra_params = dict(getattr(configured_model, "extra_params", {}) or {})
-        extra_headers = extra_params.get("headers")
-        extra_query = extra_params.get("query")
-        derived: dict[str, Any] = {
-            "api_key": provider.get_api_key(),
-            "base_url": provider.base_url,
-            "timeout_seconds": float(provider.timeout),
-            "model": getattr(configured_model, "model_identifier", "jev-latest"),
-            "max_retries": int(provider.max_retry),
-            "retry_backoff_seconds": float(provider.retry_interval),
-            "trust_env": extra_params.get("trust_env", True),
-            "force_ipv4": extra_params.get("force_ipv4", False),
-            "extra_headers": extra_headers if isinstance(extra_headers, dict) else {},
-            "extra_query": extra_query if isinstance(extra_query, dict) else {},
-        }
-        # 运维配置里的 base_url 与 API key 是绑定的：把 key 发往另一个 host
-        # 等同于凭据泄漏。因此这里禁止 overrides 改写 base_url，需要换地址时
-        # 必须改 Core 的 provider 配置。
-        if "base_url" in overrides:
-            raise ValueError(
-                "复用 Core provider 配置时不允许覆盖 base_url："
-                "API key 与该地址绑定，改写会把密钥发往非预期主机；"
-                "请直接修改 Core 的 provider 配置"
-            )
-        derived.update(overrides)
-        return JevClient(JevClientConfig(**derived))
+        return JevClient(resolve_jev_config(
+            provider_name=provider_name,
+            configured_model_name=configured_model_name,
+            overrides=overrides,
+        ))
 
     return JevClient.from_env(**overrides)
 

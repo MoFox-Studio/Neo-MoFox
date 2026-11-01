@@ -45,7 +45,7 @@ def _ok_handler(request: httpx.Request) -> httpx.Response:
 # ==============================================================================
 
 
-async def test_unavailable_event_bus_does_not_break_request(monkeypatch: pytest.MonkeyPatch):
+async def test_unavailable_event_bus_does_not_break_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """事件总线完全不可用时，Jev 请求仍应正常完成。"""
     import src.kernel.event as event_module
 
@@ -62,7 +62,7 @@ async def test_unavailable_event_bus_does_not_break_request(monkeypatch: pytest.
     assert response.answer("q").noul == 0.5
 
 
-async def test_build_transport_uses_shared_network_helper(monkeypatch: pytest.MonkeyPatch):
+async def test_build_transport_uses_shared_network_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     """客户端使用共享网络基础设施构造传输层，而不是自建连接池。"""
     import src.kernel.jev.client as client_module
 
@@ -81,7 +81,7 @@ async def test_build_transport_uses_shared_network_helper(monkeypatch: pytest.Mo
     await sentinel.aclose()
 
 
-async def test_client_without_explicit_transport_builds_shared_transport():
+async def test_client_without_explicit_transport_builds_shared_transport() -> None:
     """未注入传输层时按配置构造共享传输层。"""
     client = JevClient(JevClientConfig(api_key="test-key", force_ipv4=True))
     transport = client._build_transport()
@@ -116,7 +116,7 @@ def _mock_core_config(monkeypatch: pytest.MonkeyPatch, *, client_type: str = "je
     monkeypatch.setattr("src.core.config.get_model_config", lambda: config)
 
 
-def test_create_jev_client_rejects_provider_and_model_together():
+def test_create_jev_client_rejects_provider_and_model_together() -> None:
     """provider_name 与 configured_model_name 不能同时传入。"""
     with pytest.raises(ValueError, match="不能与 configured_model_name 同时传入"):
         jev_api.create_jev_client(
@@ -145,7 +145,7 @@ def test_create_jev_client_from_env_uses_environment_key(monkeypatch: pytest.Mon
     assert client.config.model == "jev-latest"
 
 
-async def test_evaluate_jev_rejects_client_with_overrides():
+async def test_evaluate_jev_rejects_client_with_overrides() -> None:
     """传入 client 的同时再给 overrides 会造成配置来源歧义，必须拒绝。"""
     client = _client(_ok_handler)
     with pytest.raises(ValueError, match="不能与 Jev 客户端 overrides 同时传入"):
@@ -184,7 +184,7 @@ async def test_evaluate_jev_creates_client_from_overrides(monkeypatch: pytest.Mo
     assert created["client"].config.base_url == "https://api.typesafe.ai"
 
 
-async def test_evaluate_jev_requires_non_empty_questions():
+async def test_evaluate_jev_requires_non_empty_questions() -> None:
     """questions 为空时必须在发出请求前失败。"""
     with pytest.raises(Exception):
         await jev_api.evaluate_jev(
@@ -202,7 +202,7 @@ def test_create_jev_client_rejects_non_jev_client_type(monkeypatch: pytest.Monke
         jev_api.create_jev_client(configured_model_name="system-one")
 
 
-def test_environment_key_is_not_leaked_into_repr():
+def test_environment_key_is_not_leaked_into_repr() -> None:
     """API key 不得出现在配置对象的 repr 中。"""
     os.environ["TYPESAFE_API_KEY"] = "env-key"
     client = jev_api.create_jev_client()
