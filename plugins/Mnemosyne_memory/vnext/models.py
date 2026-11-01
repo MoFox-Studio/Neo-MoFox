@@ -122,6 +122,7 @@ class EpisodeModel(Base):
     __table_args__ = (
         Index("idx_mnemosyne_vnext_episode_stream_time", "stream_id", "observed_at"),
         Index("idx_mnemosyne_vnext_episode_kind", "episode_kind", "created_at"),
+        Index("idx_mnemosyne_vnext_episode_observed", "observed_at"),
     )
 
 
@@ -176,6 +177,8 @@ class ClaimHypothesisModel(Base):
             name="ck_mnemosyne_vnext_claim_status",
         ),
         Index("idx_mnemosyne_vnext_claim_stream_status", "stream_id", "status", "created_at"),
+        Index("idx_mnemosyne_vnext_claim_queue", "status", "review_attempts", "stream_id", "created_at"),
+        Index("idx_mnemosyne_vnext_claim_proposal", "proposal_id"),
     )
 
 
@@ -195,6 +198,7 @@ class CueSetModel(Base):
 
     __table_args__ = (
         Index("idx_mnemosyne_vnext_cue_stream_time", "stream_id", "created_at"),
+        Index("idx_mnemosyne_vnext_cue_episode", "episode_id", "created_at"),
     )
 
 
@@ -223,6 +227,7 @@ class EpisodeRelationModel(Base):
         ),
         Index("idx_mnemosyne_vnext_episode_relation_source", "source_episode_id"),
         Index("idx_mnemosyne_vnext_episode_relation_target", "target_episode_id"),
+        Index("idx_mnemosyne_vnext_episode_relation_type_target", "relation_type", "target_episode_id"),
     )
 
 
@@ -264,6 +269,7 @@ class MemoryUpdateProposalModel(Base):
 
     __table_args__ = (
         Index("idx_mnemosyne_vnext_proposal_status", "status", "created_at"),
+        Index("idx_mnemosyne_vnext_proposal_stream_status", "stream_id", "status", "created_at"),
     )
 
 

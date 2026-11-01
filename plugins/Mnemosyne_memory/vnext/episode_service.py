@@ -21,6 +21,7 @@ from .models import (
     WorkingMemoryModel,
 )
 from .cognitive_engine import CognitiveRecallEngine
+from .embedding_cache import EpisodeEmbeddingCache
 from .runtime import MessageLike, message_to_snapshot
 from .schema import VNextSchema
 
@@ -137,6 +138,11 @@ class EpisodeService:
         embedding_function: EmbeddingFunction | None = None,
         semantic_candidate_limit: int = 50,
         semantic_min_similarity: float = 0.45,
+        cross_stream_recall_enabled: bool = False,
+        embedding_namespace: Callable[[], str] | None = None,
+        semantic_cache_capacity: int = 1024,
+        semantic_cache_ttl_seconds: int = 3600,
+        semantic_timeout_ms: int = 1000,
     ) -> None:
         """绑定数据库与低成本在线召回参数。"""
         if max_working_memory <= 0:
@@ -157,6 +163,11 @@ class EpisodeService:
         self._reconstruction_noise = reconstruction_noise
         self._working_memory_ttl = working_memory_ttl_seconds
         self._embedding_function = embedding_function
+        self._cross_stream_recall_enabled = cross_stream_recall_enabled
+        self.embedding_cache = (EpisodeEmbeddingCache(
+            embedding_function, namespace=embedding_namespace, capacity=semantic_cache_capacity,
+            ttl_seconds=semantic_cache_ttl_seconds, timeout_ms=semantic_timeout_ms,
+        ) if embedding_function is not None else None)
         self._semantic_candidate_limit = semantic_candidate_limit
         self._semantic_min_similarity = semantic_min_similarity
         self._cognitive_engine = cognitive_engine or CognitiveRecallEngine(
@@ -363,19 +374,22 @@ class EpisodeService:
     ) -> None:
         """按人物和主题共现建立同流或受限跨流关联边。"""
         time_floor = episode.observed_at - timedelta(days=30)
+        conditions = [EpisodeModel.episode_id != episode.episode_id,
+                      EpisodeModel.observed_at >= time_floor,
+                      EpisodeModel.observed_at <= episode.observed_at]
+        if not self._cross_stream_recall_enabled:
+            conditions.append(EpisodeModel.stream_id == episode.stream_id)
         recent = (
             await session.scalars(  # type: ignore[union-attr]
                 select(EpisodeModel)
-                .where(
-                    EpisodeModel.episode_id != episode.episode_id,
-                    EpisodeModel.observed_at >= time_floor,
-                )
+                .where(*conditions)
                 .order_by(EpisodeModel.observed_at.desc())
                 .limit(100)
             )
         ).all()
         people = set(episode.participants)
         topics = set(episode.topics)
+        relation_rows = []
         for other in recent:
             if (
                 episode.stream_id != other.stream_id
@@ -402,18 +416,18 @@ class EpisodeService:
                 if shared_people
                 else "TOPIC_OVERLAP"
             )
-            await session.execute(
-                sqlite_insert(EpisodeRelationModel)
-                .values(
-                    relation_id=str(uuid4()),
-                    source_episode_id=episode.episode_id,
-                    target_episode_id=other.episode_id,
-                    relation_type=relation_type,
-                    weight=weight,
-                    created_at=now,
-                )
-                .prefix_with("OR IGNORE")
-            )
+            relation_rows.append(dict(
+                relation_id=str(uuid4()), source_episode_id=episode.episode_id,
+                target_episode_id=other.episode_id, relation_type=relation_type,
+                weight=weight, created_at=now,
+            ))
+        if relation_rows:
+            await session.execute(sqlite_insert(EpisodeRelationModel).on_conflict_do_nothing(), relation_rows)
+
+    async def close(self) -> None:
+        """释放可取消的派生语义请求；经历和来源保留在数据库。"""
+        if self.embedding_cache is not None:
+            await self.embedding_cache.close()
 
     async def recall_working_memory(
         self,
@@ -428,6 +442,146 @@ class EpisodeService:
         if limit <= 0 or hops not in {1, 2}:
             raise ValueError("max_items 必须大于 0，relation_hops 必须为 1/2")
         now = datetime.now(UTC)
+        direct, relation_ids, first_hop_ids = await self._load_recall_candidates(episode, hops)
+        candidates: dict[str, tuple[EpisodeModel, float, str]] = {}
+        current_topics = set(episode.topics)
+        current_people = set(episode.participants)
+        semantic_scores = await self._semantic_scores(episode, direct)
+        for item in direct:
+            shared_topics = current_topics & set(item.topics)
+            shared_people = current_people & set(item.participants)
+            graph_weight = relation_ids.get(item.episode_id, 0.0)
+            semantic_score = semantic_scores.get(item.episode_id, 0.0)
+            if (
+                not shared_topics
+                and not shared_people
+                and not graph_weight
+                and semantic_score < self._semantic_min_similarity
+            ):
+                continue
+            reason = (
+                "人物关联"
+                if shared_people
+                else "主题关联"
+                if shared_topics
+                else "语义关联"
+            )
+            if graph_weight:
+                reason += " + 经历扩散"
+                if item.episode_id not in first_hop_ids:
+                    reason += "（二跳衰减）"
+            overlap = 0.25 * len(shared_topics) + 0.35 * bool(shared_people)
+            age_days = max(0.0, (now - item.observed_at).total_seconds() / 86400)
+            recency = math.exp(-math.log(2) * age_days / 30)
+            score = (
+                overlap
+                + graph_weight
+                + 0.45 * semantic_score
+                + 0.2 * recency
+                + 0.15 * float(item.salience)
+                + 0.1 * float(item.certainty)
+            )
+            if "不再" in episode.raw_text or "已经不" in episode.raw_text:
+                score += 0.15 if "不" in item.raw_text else 0.0
+            digest = sha256(f"{episode.episode_id}:{item.episode_id}".encode()).digest()
+            stable_bias = int.from_bytes(digest[:4], "big") / 2**32
+            score += (stable_bias - 0.5) * self._reconstruction_noise
+            candidates[item.episode_id] = (item, score, reason)
+        cognitive_scores = self._cognitive_engine.rank(
+            episode.raw_text,
+            tuple(
+                (item.episode_id, item.compressed_text, float(item.certainty))
+                for item, _, _ in candidates.values()
+            ),
+        )
+        candidates = {
+            episode_id: (item, score + 0.2 * cognitive_scores.get(episode_id, 0.0), reason)
+            for episode_id, (item, score, reason) in candidates.items()
+        }
+        ranked = sorted(candidates.values(), key=lambda item: (-item[1], item[0].episode_id))
+        selected: list[dict[str, object]] = []
+        selected_topics: set[str] = set()
+        while ranked and len(selected) < limit:
+            ranked.sort(key=lambda candidate: (
+                -(candidate[1] - len(set(candidate[0].topics) & selected_topics) * 0.08),
+                candidate[0].episode_id,
+            ))
+            item, score, reason = ranked.pop(0)
+            item_topics = set(item.topics)
+            duplicate_penalty = len(item_topics & selected_topics) * 0.08
+            effective = score - duplicate_penalty
+            if selected and effective < 0:
+                continue
+            source_messages: list[dict[str, object]] = []
+            if item.source_type == DIARY_SUMMARY_SOURCE:
+                source_messages = await self._diary_source_messages(item.episode_id)
+                reason += "；模型回顾索引，须核对原始消息"
+            selected.append(
+                {
+                    "episode_id": item.episode_id,
+                    "content": item.compressed_text,
+                    "observed_at": item.observed_at.isoformat(),
+                    "source_type": item.source_type,
+                    "source_ref": item.source_ref,
+                    "source_messages": source_messages,
+                    "evidence_eligible": item.source_type != DIARY_SUMMARY_SOURCE,
+                    "certainty": item.certainty,
+                    "reason": reason,
+                    "activation_score": round(max(0.0, effective), 6),
+                    "historical": True,
+                }
+            )
+            selected_topics.update(item_topics)
+            if len(selected) >= limit:
+                break
+        cue = CueSetModel(
+            cue_id=str(uuid4()),
+            episode_id=None if episode.episode_kind == "CUE" else episode.episode_id,
+            stream_id=episode.stream_id,
+            hard_cues={
+                "person_ids": list(episode.participants),
+                "topics": list(episode.topics),
+                "explicit_correction": "不再" in episode.raw_text or "已经不" in episode.raw_text,
+            },
+            soft_cues={"emotion": episode.emotion, "scene": None},
+            created_at=now,
+        )
+        conflicts = [
+            {
+                "episode_id": item["episode_id"],
+                "reason": "当前明确纠正优先，历史片段仅作背景",
+            }
+            for item in selected
+            if episode.raw_text and (
+                "不再" in episode.raw_text
+                or "已经不" in episode.raw_text
+                or "不是" in episode.raw_text
+            )
+        ]
+        working_memory = WorkingMemoryModel(
+            working_memory_id=str(uuid4()),
+            stream_id=episode.stream_id,
+            cue_id=cue.cue_id,
+            selected_episodes=selected,
+            conflicts=conflicts,
+            created_at=now,
+            expires_at=now + timedelta(seconds=self._working_memory_ttl),
+        )
+        async with self._schema.database.session() as session:
+            session.add_all((cue, working_memory))
+        return {
+            "working_memory_id": working_memory.working_memory_id,
+            "cue_id": cue.cue_id,
+            "stream_id": episode.stream_id,
+            "selected_episodes": selected,
+            "conflicts": conflicts,
+        }
+
+
+    async def _load_recall_candidates(
+        self, episode: EpisodeView, hops: int,
+    ) -> tuple[list[EpisodeModel], dict[str, float], tuple[str, ...]]:
+        """在短会话中读取候选；远程语义计算必须在会话归还后执行。"""
         async with self._schema.database.session() as session:
             superseded_ids = select(EpisodeRelationModel.target_episode_id).where(
                 EpisodeRelationModel.relation_type == DIARY_SUPERSEDES
@@ -507,145 +661,33 @@ class EpisodeService:
                         relation_ids.get(relation.target_episode_id, 0.0),
                         propagated * float(relation.weight) * 0.55,
                     )
-            candidates: dict[str, tuple[EpisodeModel, float, str]] = {}
-            current_topics = set(episode.topics)
-            current_people = set(episode.participants)
-            semantic_scores = await self._semantic_scores(episode, direct)
-            for item in direct:
-                shared_topics = current_topics & set(item.topics)
-                shared_people = current_people & set(item.participants)
-                graph_weight = relation_ids.get(item.episode_id, 0.0)
-                semantic_score = semantic_scores.get(item.episode_id, 0.0)
-                if (
-                    not shared_topics
-                    and not shared_people
-                    and not graph_weight
-                    and semantic_score < self._semantic_min_similarity
-                ):
-                    continue
-                reason = (
-                    "人物关联"
-                    if shared_people
-                    else "主题关联"
-                    if shared_topics
-                    else "语义关联"
-                )
-                if graph_weight:
-                    reason += " + 经历扩散"
-                    if item.episode_id not in first_hop_ids:
-                        reason += "（二跳衰减）"
-                overlap = 0.25 * len(shared_topics) + 0.35 * bool(shared_people)
-                age_days = max(0.0, (now - item.observed_at).total_seconds() / 86400)
-                recency = math.exp(-math.log(2) * age_days / 30)
-                score = (
-                    overlap
-                    + graph_weight
-                    + 0.45 * semantic_score
-                    + 0.2 * recency
-                    + 0.15 * float(item.salience)
-                    + 0.1 * float(item.certainty)
-                )
-                if "不再" in episode.raw_text or "已经不" in episode.raw_text:
-                    score += 0.15 if "不" in item.raw_text else 0.0
-                digest = sha256(f"{episode.episode_id}:{item.episode_id}".encode()).digest()
-                stable_bias = int.from_bytes(digest[:4], "big") / 2**32
-                score += (stable_bias - 0.5) * self._reconstruction_noise
-                candidates[item.episode_id] = (item, score, reason)
-            cognitive_scores = self._cognitive_engine.rank(
-                episode.raw_text,
-                tuple(
-                    (item.episode_id, item.compressed_text, float(item.certainty))
-                    for item, _, _ in candidates.values()
-                ),
-            )
-            candidates = {
-                episode_id: (item, score + 0.2 * cognitive_scores.get(episode_id, 0.0), reason)
-                for episode_id, (item, score, reason) in candidates.items()
-            }
-            ranked = sorted(candidates.values(), key=lambda item: (-item[1], item[0].episode_id))
-            selected: list[dict[str, object]] = []
-            selected_topics: set[str] = set()
-            while ranked and len(selected) < limit:
-                ranked.sort(key=lambda candidate: (
-                    -(candidate[1] - len(set(candidate[0].topics) & selected_topics) * 0.08),
-                    candidate[0].episode_id,
-                ))
-                item, score, reason = ranked.pop(0)
-                item_topics = set(item.topics)
-                duplicate_penalty = len(item_topics & selected_topics) * 0.08
-                effective = score - duplicate_penalty
-                if selected and effective < 0:
-                    continue
-                source_messages: list[dict[str, object]] = []
-                if item.source_type == DIARY_SUMMARY_SOURCE:
-                    source_cue = await session.scalar(
-                        select(CueSetModel).where(
-                            CueSetModel.episode_id == item.episode_id
-                        ).order_by(CueSetModel.created_at).limit(1)
-                    )
-                    if source_cue is not None:
-                        source_messages = list(source_cue.soft_cues.get("source_messages", []))
-                    reason += "；模型回顾索引，须核对原始消息"
-                selected.append(
-                    {
-                        "episode_id": item.episode_id,
-                        "content": item.compressed_text,
-                        "observed_at": item.observed_at.isoformat(),
-                        "source_type": item.source_type,
-                        "source_ref": item.source_ref,
-                        "source_messages": source_messages,
-                        "evidence_eligible": item.source_type != DIARY_SUMMARY_SOURCE,
-                        "certainty": item.certainty,
-                        "reason": reason,
-                        "activation_score": round(max(0.0, effective), 6),
-                        "historical": True,
-                    }
-                )
-                selected_topics.update(item_topics)
-                if len(selected) >= limit:
-                    break
-            cue = CueSetModel(
-                cue_id=str(uuid4()),
-                episode_id=None if episode.episode_kind == "CUE" else episode.episode_id,
-                stream_id=episode.stream_id,
-                hard_cues={
-                    "person_ids": list(episode.participants),
-                    "topics": list(episode.topics),
-                    "explicit_correction": "不再" in episode.raw_text or "已经不" in episode.raw_text,
-                },
-                soft_cues={"emotion": episode.emotion, "scene": None},
-                created_at=now,
-            )
-            session.add(cue)
-            conflicts = [
-                {
-                    "episode_id": item["episode_id"],
-                    "reason": "当前明确纠正优先，历史片段仅作背景",
-                }
-                for item in selected
-                if episode.raw_text and (
-                    "不再" in episode.raw_text
-                    or "已经不" in episode.raw_text
-                    or "不是" in episode.raw_text
-                )
-            ]
-            working_memory = WorkingMemoryModel(
-                working_memory_id=str(uuid4()),
-                stream_id=episode.stream_id,
-                cue_id=cue.cue_id,
-                selected_episodes=selected,
-                conflicts=conflicts,
-                created_at=now,
-                expires_at=now + timedelta(seconds=self._working_memory_ttl),
-            )
-            session.add(working_memory)
-            return {
-                "working_memory_id": working_memory.working_memory_id,
-                "cue_id": cue.cue_id,
-                "stream_id": episode.stream_id,
-                "selected_episodes": selected,
-                "conflicts": conflicts,
-            }
+            known_ids = {item.episode_id for item in direct}
+            missing = set(relation_ids) - known_ids - {episode.episode_id}
+            if missing:
+                direct.extend((await session.scalars(select(EpisodeModel).where(
+                    EpisodeModel.episode_id.in_(missing),
+                    EpisodeModel.episode_kind.notin_(("CUE", "OUTPUT")),
+                    EpisodeModel.episode_id.notin_(superseded_ids),
+                ))).all())
+            direct = [item for item in direct if self._in_recall_scope(episode, item)]
+            return direct, relation_ids, first_hop_ids
+
+    def _in_recall_scope(self, episode: EpisodeView, candidate: EpisodeModel) -> bool:
+        """历史关系边不能绕过当前范围开关或将日记带入其他流。"""
+        if candidate.stream_id == episode.stream_id:
+            return True
+        return (self._cross_stream_recall_enabled
+                and DIARY_SUMMARY_SOURCE not in (episode.source_type, candidate.source_type)
+                and bool(set(episode.participants) & set(candidate.participants))
+                and bool(set(episode.topics) & set(candidate.topics)))
+
+    async def _diary_source_messages(self, episode_id: str) -> list[dict[str, object]]:
+        """只在选中日记后读取追溯引用。"""
+        async with self._schema.database.session() as session:
+            cue = await session.scalar(select(CueSetModel).where(
+                CueSetModel.episode_id == episode_id,
+            ).order_by(CueSetModel.created_at).limit(1))
+            return list(cue.soft_cues.get("source_messages", [])) if cue is not None else []
 
     async def _semantic_scores(
         self,
@@ -653,22 +695,17 @@ class EpisodeService:
         candidates: Sequence[EpisodeModel],
     ) -> dict[str, float]:
         """用真实 Embedding 为有限近期候选补充语义相似度。"""
-        if self._embedding_function is None or not candidates:
+        if self.embedding_cache is None or not candidates:
             return {}
         selected = tuple(candidates[: self._semantic_candidate_limit])
         texts = (episode.raw_text, *(item.compressed_text for item in selected))
-        try:
-            vectors = tuple(await self._embedding_function(texts))
-        except Exception:
-            return {}
-        if len(vectors) != len(texts):
-            return {}
-        query = self._normalized_vector(vectors[0])
+        vectors = await self.embedding_cache.vectors(texts)
+        query = vectors[0]
         if query is None:
             return {}
         scores: dict[str, float] = {}
         for item, vector in zip(selected, vectors[1:], strict=True):
-            normalized = self._normalized_vector(vector)
+            normalized = vector
             if normalized is None or len(normalized) != len(query):
                 continue
             scores[item.episode_id] = max(
@@ -789,11 +826,18 @@ class EpisodeService:
             ).first()
             if row is None:
                 return None
+            selected = list(row.selected_episodes)
+            if not self._cross_stream_recall_enabled and selected:
+                allowed = set((await session.scalars(select(EpisodeModel.episode_id).where(
+                    EpisodeModel.stream_id == stream_id,
+                    EpisodeModel.episode_id.in_([str(item.get("episode_id")) for item in selected]),
+                ))).all())
+                selected = [item for item in selected if item.get("episode_id") in allowed]
             return {
                 "working_memory_id": row.working_memory_id,
                 "cue_id": row.cue_id,
                 "stream_id": row.stream_id,
-                "selected_episodes": list(row.selected_episodes),
+                "selected_episodes": selected,
                 "conflicts": list(row.conflicts),
             }
 

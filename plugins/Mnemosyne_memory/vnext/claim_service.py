@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, func, select, update
 
 from src.app.plugin_system.api import llm_api
 from src.kernel.llm import LLMPayload, ROLE, Text
@@ -87,6 +88,9 @@ class ClaimHypothesisService:
         model_task: str = "actor",
         max_per_run: int = 2,
         reviewer: Callable[[str, str], Awaitable[str]] | None = None,
+        review_timeout_seconds: float = 30,
+        retry_backoff_seconds: float = 300,
+        max_attempts: int = 3,
     ) -> None:
         """绑定存储、审核配置和可替换的测试模型调用器。"""
         if max_per_run <= 0:
@@ -97,6 +101,12 @@ class ClaimHypothesisService:
         self._model_task = model_task
         self._max_per_run = max_per_run
         self._reviewer = reviewer
+        if review_timeout_seconds <= 0 or retry_backoff_seconds < 0 or max_attempts < 1:
+            raise ValueError("审核超时、退避和重试上限无效")
+        self._review_timeout = review_timeout_seconds
+        self._retry_backoff = retry_backoff_seconds
+        self._max_attempts = max_attempts
+        self._review_locks: dict[str, asyncio.Lock] = {}
 
     async def extract_semantics(self, episode_id: str) -> SemanticView:
         """以显式 ID、完整引号和高重合度规则解析 Episode 引用、实体和事件。"""
@@ -186,7 +196,18 @@ class ClaimHypothesisService:
 
     async def sync_pending_proposals(self, stream_id: str) -> tuple[str, ...]:
         """为待审 MemoryUpdateProposal 建立对应 Claim/Hypothesis 对象。"""
-        proposals = await self._proposals.list_pending(stream_id, limit=20)
+        # 只取尚未同步的最旧提案，避免反复读取最近 20 条而饿死历史积压。
+        async with self._schema.database.session() as session:
+            rows = (await session.scalars(select(MemoryUpdateProposalModel).where(
+                MemoryUpdateProposalModel.stream_id == stream_id,
+                MemoryUpdateProposalModel.status == "PENDING",
+                ~exists().where(ClaimHypothesisModel.proposal_id == MemoryUpdateProposalModel.proposal_id),
+            ).order_by(MemoryUpdateProposalModel.created_at, MemoryUpdateProposalModel.proposal_id).limit(20))).all()
+            proposals = tuple({
+                "proposal_id": row.proposal_id, "claim": row.claim,
+                "evidence_ids": list(row.evidence_ids), "operation": row.operation,
+                "target_memory_id": row.target_memory_id, "confidence": row.confidence,
+            } for row in rows)
         semantic_by_proposal: dict[str, tuple[SemanticView, ...]] = {}
         for proposal in proposals:
             semantic_by_proposal[str(proposal["proposal_id"])] = tuple(
@@ -231,26 +252,72 @@ class ClaimHypothesisService:
         """自动审核有限数量候选；审核结果只推进提案，不确认正式 Memory。"""
         if not self._enabled:
             return ()
+        async with self._review_locks.setdefault(stream_id, asyncio.Lock()):
+            return await self._review_pending(stream_id)
+
+    async def _review_pending(self, stream_id: str) -> tuple[str, ...]:
+        """新候选优先，延后项遵循退避；远程审核有独立预算。"""
+        retry_before = datetime.now(UTC) - timedelta(seconds=self._retry_backoff)
         async with self._schema.database.session() as session:
             rows = tuple((await session.scalars(
                 select(ClaimHypothesisModel)
                 .where(
                     ClaimHypothesisModel.stream_id == stream_id,
                     ClaimHypothesisModel.status.in_(("PENDING", "DEFERRED")),
-                    ClaimHypothesisModel.review_attempts < 3,
+                    ClaimHypothesisModel.review_attempts < self._max_attempts,
+                    (ClaimHypothesisModel.status == "PENDING")
+                    | (ClaimHypothesisModel.reviewed_at.is_(None))
+                    | (ClaimHypothesisModel.reviewed_at <= retry_before),
                 )
-                .order_by(ClaimHypothesisModel.created_at.asc())
+                .order_by((ClaimHypothesisModel.status != "PENDING"), ClaimHypothesisModel.created_at.asc())
                 .limit(self._max_per_run)
             )).all())
         completed: list[str] = []
         for row in rows:
             try:
-                result = await self._review_one(row)
+                async with asyncio.timeout(self._review_timeout):
+                    result = await self._review_one(row)
             except Exception as error:  # noqa: BLE001
                 await self._defer(row.item_id, f"审核异常：{type(error).__name__}")
                 continue
             completed.append(result)
         return tuple(completed)
+
+    async def pending_stream_ids(self) -> tuple[str, ...]:
+        """重启后从持久化积压恢复审核流，不依赖收到新聊天。"""
+        retry_before = datetime.now(UTC) - timedelta(seconds=self._retry_backoff)
+        async with self._schema.database.session() as session:
+            claims = select(ClaimHypothesisModel.stream_id).where(
+                ClaimHypothesisModel.status.in_(("PENDING", "DEFERRED")),
+                ClaimHypothesisModel.review_attempts < self._max_attempts,
+                (ClaimHypothesisModel.reviewed_at.is_(None))
+                | (ClaimHypothesisModel.reviewed_at <= retry_before),
+            )
+            proposals = select(MemoryUpdateProposalModel.stream_id).where(
+                MemoryUpdateProposalModel.status == "PENDING",
+                ~exists().where(ClaimHypothesisModel.proposal_id == MemoryUpdateProposalModel.proposal_id),
+            )
+            return tuple((await session.scalars(claims.union(proposals))).all())
+
+    async def backlog_status(self) -> dict[str, object]:
+        """供本地只读管理页展示数量、最早积压和重试耗尽项。"""
+        async with self._schema.database.session() as session:
+            claims = (await session.execute(select(
+                ClaimHypothesisModel.status, func.count(),
+            ).group_by(ClaimHypothesisModel.status))).all()
+            proposals = (await session.execute(select(
+                MemoryUpdateProposalModel.status, func.count(),
+            ).group_by(MemoryUpdateProposalModel.status))).all()
+            exhausted = int(await session.scalar(select(func.count()).select_from(ClaimHypothesisModel).where(
+                ClaimHypothesisModel.status == "DEFERRED",
+                ClaimHypothesisModel.review_attempts >= self._max_attempts,
+            )) or 0)
+            oldest = await session.scalar(select(func.min(ClaimHypothesisModel.created_at)).where(
+                ClaimHypothesisModel.status.in_(("PENDING", "DEFERRED")),
+            ))
+        return {"claims": dict(claims), "proposals": dict(proposals),
+                "exhausted": exhausted, "oldest_pending_at": oldest.isoformat() if oldest else None,
+                "review_enabled": self._enabled}
 
     async def pending_status(self, stream_id: str, limit: int = 20) -> tuple[dict[str, object], ...]:
         """返回当前流 Claim/Hypothesis 的审核状态和结构化来源。"""

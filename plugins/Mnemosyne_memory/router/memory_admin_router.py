@@ -362,6 +362,14 @@ class VNextMemoryAdminRouter(BaseRouter):
                 )
             return {
                 "ok": True,
+                "review_backlog": await owner.claim_service.backlog_status(),
+                "episode_recall": {
+                    "cross_stream_enabled": owner.config.vnext.flashback.cross_stream_recall_enabled,
+                    "embedding_cache": (
+                        owner.episode_service.embedding_cache.status()
+                        if owner.episode_service.embedding_cache is not None else None
+                    ),
+                },
                 "persona_count": await self._people_query().count(),
                 "revision_count": revision_count,
                 "memory_counts": {

@@ -112,7 +112,7 @@ async def test_same_person_event_recall_crosses_streams_without_copying_source(
     schema: VNextSchema,
 ) -> None:
     """同人物同主题经历可跨流联想，但 Episode 仍保留原聊天流。"""
-    service = EpisodeService(schema, reconstruction_noise=0)
+    service = EpisodeService(schema, reconstruction_noise=0, cross_stream_recall_enabled=True)
     source = await service.record_external_episode(
         title="咖啡偏好",
         content="我最近喜欢喝咖啡。",
@@ -164,7 +164,7 @@ async def test_cross_stream_relation_requires_same_person_and_topic(
     """跨流关联必须同时匹配人物和主题。"""
     schema = VNextSchema(str(tmp_path / "cross-stream-negative.db"))
     await schema.initialize()
-    service = EpisodeService(schema)
+    service = EpisodeService(schema, cross_stream_recall_enabled=True)
     source = await service.record_external_episode(
         title=source_text,
         content=source_text,
@@ -200,7 +200,7 @@ async def test_cross_stream_relation_ignores_events_older_than_30_days(
     """跨流 Episode 关联只检查最近 30 天。"""
     schema = VNextSchema(str(tmp_path / "cross-stream-expiry.db"))
     await schema.initialize()
-    service = EpisodeService(schema)
+    service = EpisodeService(schema, cross_stream_recall_enabled=True)
     current_time = datetime(2026, 10, 5, 10, 0, tzinfo=UTC)
     source = await service.record_external_episode(
         title="espresso",

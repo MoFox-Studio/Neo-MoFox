@@ -10,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sqlalchemy import event, func, select
@@ -1101,7 +1101,8 @@ async def test_diary_existing_collection_config_without_external_service(
         ban_user_id=[789],
     )
     loaded = SimpleNamespace(features=features)
-    monkeypatch.setattr(diary_service.config_api, "get_config", lambda name: loaded)
+    get_config = Mock(side_effect={"onebot_adapter": loaded}.get)
+    monkeypatch.setattr(diary_service.config_api, "get_config", get_config)
     source = DiarySource()
     group = StreamDetails("group-stream", "qq", "group", "123", "")
     private = StreamDetails("private-stream", "qq", "private", "", "101")
@@ -1119,11 +1120,39 @@ async def test_diary_existing_collection_config_without_external_service(
     assert await source.allowed(private)
     features.ban_user_id.append(101)
     assert not await source.allowed(private)
+    assert get_config.call_args_list
+    assert all(call.args == ("onebot_adapter",) for call in get_config.call_args_list)
     monkeypatch.setattr(diary_service.config_api, "get_config", lambda name: None)
     assert not await source.allowed(group)
     assert not await source.allowed(
         StreamDetails("unknown-platform", "other", "group", "123", "")
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("onebot_loaded", [False, True])
+async def test_diary_collection_does_not_fall_back_to_other_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+    onebot_loaded: bool,
+) -> None:
+    """OneBot 未加载或拒绝采集时，其他插件的允许配置不能作为回退。"""
+    permissive = SimpleNamespace(features=SimpleNamespace(
+        group_list_type="blacklist", group_list=[],
+        private_list_type="blacklist", private_list=[], ban_user_id=[],
+    ))
+    configs = {name: permissive for name in ("snowluma_adapter", "snowluma_plus")}
+    if onebot_loaded:
+        configs["onebot_adapter"] = SimpleNamespace(features=SimpleNamespace(
+            group_list_type="whitelist", group_list=[],
+            private_list_type="whitelist", private_list=[], ban_user_id=[],
+        ))
+    get_config = Mock(side_effect=configs.get)
+    monkeypatch.setattr(diary_service.config_api, "get_config", get_config)
+
+    assert not await DiarySource().allowed(
+        StreamDetails("group-stream", "qq", "group", "123", "")
+    )
+    get_config.assert_called_once_with("onebot_adapter")
 
 
 @pytest.mark.parametrize("datetime_messages", [False, True])

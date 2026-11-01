@@ -20,11 +20,12 @@ from src.app.plugin_system.api import event_api, log_api, stream_api
 from ..diary.runtime import DiaryRuntime
 from ..diary.store import DiaryEpisodeExportSnapshot
 from .doctor_service import DoctorService
+from .async_utils import await_cancellation_safe
 from .claim_service import ClaimHypothesisService
 from .decay_service import MemoryDecayService
 from .backends.neo4j import Neo4jEpisodeGraph
 from .domain import MemoryChanged
-from .episode_service import DIARY_SUMMARY_SOURCE, EpisodeService
+from .episode_service import DIARY_SUMMARY_SOURCE, EpisodeService, EpisodeView
 from .backends.layersplit_store import LayerSplitStore
 from .enums import VectorIndexStatus
 from .feedforward_service import (
@@ -297,6 +298,11 @@ class VNextRuntimeOwner:
             ),
             semantic_candidate_limit=vnext.flashback.semantic_candidate_limit,
             semantic_min_similarity=vnext.flashback.semantic_min_similarity,
+            cross_stream_recall_enabled=vnext.flashback.cross_stream_recall_enabled,
+            embedding_namespace=self.vector_sink.embedding_model_identity,
+            semantic_cache_capacity=vnext.flashback.semantic_cache_capacity,
+            semantic_cache_ttl_seconds=vnext.flashback.semantic_cache_ttl_seconds,
+            semantic_timeout_ms=vnext.flashback.semantic_timeout_ms,
         )
         self.diary = DiaryRuntime(
             self.config.diary,
@@ -309,6 +315,9 @@ class VNextRuntimeOwner:
             enabled=vnext.claim_review.enabled,
             model_task=vnext.claim_review.model_task,
             max_per_run=vnext.claim_review.max_per_run,
+            review_timeout_seconds=vnext.claim_review.review_timeout_seconds,
+            retry_backoff_seconds=vnext.claim_review.retry_backoff_seconds,
+            max_attempts=vnext.claim_review.max_attempts,
         )
         self.neo4j_graph: Neo4jEpisodeGraph | None = None
         if vnext.neo4j.enabled:
@@ -342,6 +351,10 @@ class VNextRuntimeOwner:
         self._vector_available = False
         self._vector_error: str | None = None
         self._recent_learning_candidates: dict[str, dict[str, str]] = {}
+        self._latest_input_episodes: dict[str, EpisodeView] = {}
+        self._ingestion_tasks: dict[asyncio.Future[None], str] = {}
+        self._review_locks: dict[str, asyncio.Lock] = {}
+        self._consolidation_cursor = ""
 
     async def _export_diary_episode(self, export: DiaryEpisodeExportSnapshot) -> None:
         """将聊天日记作为低置信度 SUMMARY Episode 幂等保存。"""
@@ -360,7 +373,7 @@ class VNextRuntimeOwner:
                 certainty=0.35,
                 source_messages=export.source_messages,
             )
-            await self.mirror_episode_to_graph(episode.episode_id)
+        await self.mirror_episode_to_graph(episode.episode_id)
 
     @property
     def vector_available(self) -> bool:
@@ -487,6 +500,10 @@ class VNextRuntimeOwner:
     async def _shutdown_resources(self) -> None:
         """幂等释放当前实例已部分或完整初始化的运行时资源。"""
         self._initialized = False
+        # 已接收输入只等待本地提交；回忆、模型与图镜像不在这条路径上。
+        ingestions = tuple(self._ingestion_tasks)
+        if ingestions:
+            await asyncio.gather(*ingestions, return_exceptions=True)
         task_ids = tuple(self._task_ids | set(self._flashback_task_ids.values()))
         task_infos = []
         for task_id in task_ids:
@@ -523,10 +540,15 @@ class VNextRuntimeOwner:
         self._learning_task_id = None
         self._recent_messages.clear()
         self._recent_learning_candidates.clear()
+        self._latest_input_episodes.clear()
+        self._ingestion_tasks.clear()
+        self._review_locks.clear()
+        self._consolidation_cursor = ""
         self._vector_available = False
         self._vector_error = None
         self.feedforward.layers.clear()
         self.learning.close()
+        await self.episode_service.close()
         if self.neo4j_graph is not None:
             try:
                 await self.neo4j_graph.close()
@@ -553,8 +575,8 @@ class VNextRuntimeOwner:
                 finally:
                     self._schema_initialized = False
 
-    def observe_message(self, message: object) -> None:
-        """记录新消息并安排该流的闪回预取。"""
+    async def observe_message(self, message: object) -> None:
+        """逐条提交输入经历，再合并安排回忆；合并预取不能吞掉输入。"""
         try:
             snapshot = message_to_snapshot(message)  # type: ignore[arg-type]
         except ValueError:
@@ -573,8 +595,53 @@ class VNextRuntimeOwner:
                 person_id=snapshot.snapshot.get("person_id"),  # type: ignore[arg-type]
                 observed_at=snapshot.time,
             )
-        if self._initialized:
-            self._schedule_flashback_prefetch(stream_id)
+        if not self._initialized:
+            return
+        generation = self._flashback_generations.get(stream_id, 0) + 1
+        self._flashback_generations[stream_id] = generation
+        self._flashback_results.pop(stream_id, None)
+        completion: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._ingestion_tasks[completion] = stream_id
+        source = dict(snapshot.snapshot)
+        source.update(message_id=message_id, stream_id=stream_id, time=snapshot.time,
+                      processed_plain_text=snapshot.text, sender_name=snapshot.speaker)
+
+        async def commit_input() -> EpisodeView:
+            """即使事件处理超时，已接收的输入也完成本地事务后再传播取消。"""
+            async with self._sqlite_write_lock:
+                value = await self.episode_service.record_episode(source)
+                current = self._latest_input_episodes.get(stream_id)
+                if current is None or value.observed_at >= current.observed_at:
+                    self._latest_input_episodes[stream_id] = value
+                return value
+
+        try:
+            episode = await await_cancellation_safe(commit_input(), name="mnemosyne_ingest_input")
+            if self._initialized:
+                self._schedule_graph_mirror(episode.episode_id)
+                self._schedule_flashback_prefetch(stream_id, increment_generation=False)
+        finally:
+            if not completion.done():
+                completion.set_result(None)
+            self._ingestion_tasks.pop(completion, None)
+
+    def _schedule_graph_mirror(self, episode_id: str) -> None:
+        """可选图镜像独立于输入提交和回复预取。"""
+        if self.neo4j_graph is None:
+            return
+        handle = create_managed_task(
+            self._mirror_episode_task(episode_id), name="mnemosyne_episode_graph", daemon=True,
+        )
+        self._task_ids.add(handle.task_id)
+        if handle.task is not None:
+            self._task_ids_by_task[handle.task] = handle.task_id
+
+    async def _mirror_episode_task(self, episode_id: str) -> None:
+        """图镜像任务遵循插件卸载生命周期。"""
+        try:
+            await self.mirror_episode_to_graph(episode_id)
+        finally:
+            self._forget_current_task()
 
     def _start_consolidation_loop(self) -> None:
         """启动低频候选巩固扫描，任务由框架统一托管。"""
@@ -643,15 +710,14 @@ class VNextRuntimeOwner:
         try:
             while self._initialized:
                 await asyncio.sleep(interval)
-                stream_ids = tuple(sorted(self._recent_messages))[:limit]
+                known = sorted(set(self._recent_messages) | set(await self.claim_service.pending_stream_ids()))
+                after = [stream_id for stream_id in known if stream_id > self._consolidation_cursor]
+                before = [stream_id for stream_id in known if stream_id <= self._consolidation_cursor]
+                stream_ids = (after + before)[:limit]
                 for stream_id in stream_ids:
+                    self._consolidation_cursor = stream_id
                     try:
-                        async with self._sqlite_write_lock:
-                            await self.proposal_service.collect_consolidation_candidates(
-                                stream_id
-                            )
-                            await self.claim_service.sync_pending_proposals(stream_id)
-                            await self.claim_service.review_pending(stream_id)
+                        await self._run_claim_review(stream_id)
                     except Exception as error:  # noqa: BLE001
                         logger.warning(
                             f"后台巩固扫描失败 stream={stream_id}: "
@@ -714,12 +780,14 @@ class VNextRuntimeOwner:
     ) -> tuple[object, ...]:
         """执行当前流的回复前闪回检索并缓存当前请求的结果。"""
         try:
-            recent_message = self._latest_recent_message(stream_id)
-            if recent_message is not None:
-                async with self._sqlite_write_lock:
-                    episode = await self.episode_service.record_episode(recent_message)
-                    await self.mirror_episode_to_graph(episode.episode_id)
-                    working_memory = await self.episode_service.recall_working_memory(episode)
+            ingestions = tuple(task for task, stream in self._ingestion_tasks.items() if stream == stream_id)
+            if ingestions:
+                await asyncio.gather(*(asyncio.shield(task) for task in ingestions))
+            if self._flashback_generations.get(stream_id) != generation:
+                return ()
+            episode = self._latest_input_episodes.get(stream_id)
+            if episode is not None:
+                working_memory = await self.episode_service.recall_working_memory(episode)
                 if self._flashback_generations.get(stream_id) == generation:
                     self._working_memory_results[stream_id] = working_memory
             turn_index = self._prompt_turns.get(stream_id)
@@ -813,24 +881,26 @@ class VNextRuntimeOwner:
             stream_id = str(self._message_value(message, "stream_id") or "").strip()
             if not stream_id:
                 return
-            async with self._sqlite_write_lock:
-                await self.proposal_service.collect_consolidation_candidates(stream_id)
-                await self.claim_service.sync_pending_proposals(stream_id)
-                await self.claim_service.review_pending(stream_id)
+            await self._run_claim_review(stream_id)
         except Exception as error:  # noqa: BLE001
             logger.warning(f"Claim/Hypothesis 后台审核失败: {type(error).__name__}: {error}")
         finally:
             self._forget_current_task()
+
+    async def _run_claim_review(self, stream_id: str) -> None:
+        """同流审核互斥；只在本地候选整理时取得全局写锁。"""
+        async with self._review_locks.setdefault(stream_id, asyncio.Lock()):
+            async with self._sqlite_write_lock:
+                await self.proposal_service.collect_consolidation_candidates(stream_id)
+                await self.claim_service.sync_pending_proposals(stream_id)
+            await self.claim_service.review_pending(stream_id)
 
     async def _record_output_episode(self, message: object) -> None:
         """后台写入输出经历，失败只记录日志。"""
         try:
             async with self._sqlite_write_lock:
                 episode = await self.episode_service.record_output_observation(message)
-                await self.mirror_episode_to_graph(episode.episode_id)
-                stream_id = str(self._message_value(message, "stream_id") or "").strip()
-                if stream_id:
-                    await self.proposal_service.collect_consolidation_candidates(stream_id)
+            await self.mirror_episode_to_graph(episode.episode_id)
         except Exception as error:  # noqa: BLE001
             logger.warning(f"输出 Episode 记录失败: {type(error).__name__}: {error}")
         finally:
@@ -852,7 +922,7 @@ class VNextRuntimeOwner:
                 relations = (await session.scalars(select(EpisodeRelationModel).where(
                     EpisodeRelationModel.source_episode_id == episode_id,
                 ))).all()
-            await self.neo4j_graph.upsert_episode(
+            await asyncio.wait_for(self.neo4j_graph.upsert_episode(
                 episode.episode_id,
                 {
                     "stream_id": episode.stream_id,
@@ -861,7 +931,7 @@ class VNextRuntimeOwner:
                     "salience": float(episode.salience),
                 },
                 tuple((item.target_episode_id, item.relation_type, float(item.weight)) for item in relations),
-            )
+            ), timeout=5.0)
         except Exception as error:  # noqa: BLE001
             logger.warning(f"Neo4j Episode 镜像失败: {type(error).__name__}: {error}")
 
@@ -1055,12 +1125,11 @@ class VNextRuntimeOwner:
         if turn_index is None:
             turn_index = await self.flashback.next_turn_index(stream_id)
         self._prompt_turns[stream_id] = turn_index + 1
-        async with self._sqlite_write_lock:
-            return await self._flashback_for_stream(
-                stream_id,
-                turn_index=turn_index,
-                record_exposure=True,
-            )
+        return await self._flashback_for_stream(
+            stream_id,
+            turn_index=turn_index,
+            record_exposure=True,
+        )
 
     async def _flashback_for_stream(
         self,

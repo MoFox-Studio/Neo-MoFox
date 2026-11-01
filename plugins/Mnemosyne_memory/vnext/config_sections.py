@@ -184,6 +184,22 @@ class VNextFlashbackSection(SectionBase):
         default=True,
         description="是否使用 Embedding 补充 Episode 语义关联",
     )
+    cross_stream_recall_enabled: bool = Field(
+        label="允许跨聊天流经历联想", default=False,
+        description="默认仅召回当前流；开启后同人物且同主题的非日记经历可跨流联想",
+    )
+    semantic_cache_capacity: int = Field(
+        label="经历向量缓存条数", default=1024, ge=1, le=20000,
+        description="按模型身份和文本摘要隔离的进程内 LRU 缓存容量",
+    )
+    semantic_cache_ttl_seconds: int = Field(
+        label="经历向量缓存有效期（秒）", default=3600, ge=1,
+        description="派生向量缓存有效期，过期后按需重算",
+    )
+    semantic_timeout_ms: int = Field(
+        label="经历语义召回预算（毫秒）", default=1000, ge=100, le=30000,
+        description="超时后继续规则和关系召回，不占用数据库写锁",
+    )
     semantic_candidate_limit: int = Field(
         label="语义召回候选上限",
         default=50,
@@ -344,6 +360,18 @@ class ClaimReviewSection(SectionBase):
         ge=1,
         le=10,
         description="每次后台审核最多处理的候选数量",
+    )
+    review_timeout_seconds: int = Field(
+        label="单条模型审核超时（秒）", default=30, ge=1, le=300,
+        description="模型审核超时后延后，不阻塞其他聊天流的输入登记",
+    )
+    retry_backoff_seconds: int = Field(
+        label="延后候选重试间隔（秒）", default=300, ge=0, le=86400,
+        description="延后审核的最短等待时间，新候选优先处理",
+    )
+    max_attempts: int = Field(
+        label="候选审核尝试上限", default=3, ge=1, le=20,
+        description="达到上限后保留延后状态和来源，可在管理页查看积压",
     )
     background_enabled: bool = Field(
         label="启用后台巩固扫描",

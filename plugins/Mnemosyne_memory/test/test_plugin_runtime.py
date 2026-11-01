@@ -483,6 +483,7 @@ async def test_background_consolidation_reviews_observed_streams_without_confirm
     owner.proposal_service.collect_consolidation_candidates = AsyncMock(return_value=())
     owner.claim_service.sync_pending_proposals = AsyncMock(return_value=())
     owner.claim_service.review_pending = AsyncMock(return_value=())
+    owner.claim_service.pending_stream_ids = AsyncMock(return_value=())
     owner.tools.confirm_memory_update = AsyncMock()  # type: ignore[attr-defined]
     sleeps = AsyncMock(side_effect=[None, asyncio.CancelledError()])
     monkeypatch.setattr(runtime_owner.asyncio, "sleep", sleeps)
@@ -512,7 +513,8 @@ async def test_persona_close_failure_does_not_leak_other_resources(
     assert owner._initialized is False
 
 
-def test_observe_message_keeps_bounded_context_before_prefetch(
+@pytest.mark.asyncio
+async def test_observe_message_keeps_bounded_context_before_prefetch(
     owner: VNextRuntimeOwner,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -520,14 +522,15 @@ def test_observe_message_keeps_bounded_context_before_prefetch(
     owner.config.vnext.flashback.context_turns = 2
     owner._initialized = True
 
-    def prefetch(stream_id: str) -> None:
+    def prefetch(stream_id: str, **kwargs: object) -> None:
         """校验预取调度时最新消息已进入当前流上下文。"""
         assert owner._recent_messages[stream_id]
 
+    owner.episode_service.record_episode = AsyncMock(return_value=SimpleNamespace(episode_id="ep"))
     schedule = Mock(side_effect=prefetch)
     monkeypatch.setattr(owner, "_schedule_flashback_prefetch", schedule)
     for index in range(3):
-        owner.observe_message(_message(message_id=f"message-{index}"))
+        await owner.observe_message(_message(message_id=f"message-{index}"))
     assert tuple(owner._recent_messages["stream-1"]) == ("message-1", "message-2")
     assert schedule.call_count == 3
 
@@ -582,8 +585,8 @@ async def test_flashback_context_includes_unpersisted_messages(
     stored = _message(processed_plain_text="落库正文")
     load = AsyncMock(return_value=(stored,))
     monkeypatch.setattr(runtime_owner.stream_api, "get_stream_messages", load)
-    owner.observe_message(_message(processed_plain_text="更新正文"))
-    owner.observe_message(
+    await owner.observe_message(_message(processed_plain_text="更新正文"))
+    await owner.observe_message(
         _message(
             message_id="message-2",
             processed_plain_text="最新正文",

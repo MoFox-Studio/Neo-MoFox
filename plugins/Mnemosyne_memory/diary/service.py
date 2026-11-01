@@ -135,10 +135,10 @@ class DiarySource:
         details: StreamDetails,
         message: Mapping[str, Any] | None = None,
     ) -> bool:
-        """未知策略拒绝回填；私聊始终以对话对象而非 Bot 账号判断。"""
+        """仅用 OneBot Adapter 采集策略；未知策略拒绝回填，私聊按对端判断。"""
         if details.platform != "qq":
             return False
-        loaded = config_api.get_config("snowluma_adapter")
+        loaded = config_api.get_config("onebot_adapter")
         if loaded is None:
             return False
         features = cast(CollectionConfig, loaded).features

@@ -1,12 +1,12 @@
 # Mnemosyne Memory
 
-当前开发版本为 **2.1.4**，开发分支为 `engram-memory-dev`，以主 `dev` 为基线独立开发，不再依赖 `feat/mnemosyne-memory-trial` 分支。沿用 `2.x` 版本序列，误发布的 `1.1.0` 已撤下。可训练的 Transformer 记忆控制器默认关闭学习和训练，不改变既有前馈选择或已保存的正式记忆。
+当前开发版本为 **2.1.5**，开发分支为 `engram-memory-dev`，以主 `dev` 为基线独立开发，不再依赖 `feat/mnemosyne-memory-trial` 分支。沿用 `2.x` 版本序列，误发布的 `1.1.0` 已撤下。可训练的 Transformer 记忆控制器默认关闭学习和训练，不改变既有前馈选择或已保存的正式记忆。
 
-2.1.4 适配 Neo-MoFox `1.3.0-alpha.2` 的最新 dev（同步基线 [49b5ded](https://github.com/MoFox-Studio/Neo-MoFox/commit/49b5ded)）。正式记忆库和日记库在插件内部完成取消安全的查询、提交、回滚及关闭，不再依赖主程序分支独有的 `storage_api 1.1.0` 或额外数据库补丁。工具和 Action 使用宿主 `llm_api 1.2.0` 的执行与上下文绑定。数据库 Schema 仍为 v8，本次升级不迁移已有记忆数据。
+2.1.5 延续 Neo-MoFox `1.3.0-alpha.2` 的最新 dev（同步基线 [49b5ded](https://github.com/MoFox-Studio/Neo-MoFox/commit/49b5ded)）。正式记忆库和日记库在插件内部完成取消安全的查询、提交、回滚及关闭，不再依赖主程序分支独有的 `storage_api 1.1.0` 或额外数据库补丁。工具和 Action 使用宿主 `llm_api 1.2.0` 的执行与上下文绑定。数据库 Schema 仍为 v8，本次升级不迁移已有记忆数据。
 
-历史版本 2.1.3 为数据库修复的配套发布，沿用 2.1.2 的插件运行逻辑，要求主程序 `engram-memory-dev` 包含 [7550c16](https://github.com/MoFox-Studio/Neo-MoFox/commit/7550c1656e97dad5cc98f7555f3bdd339bdb47a4)。该历史要求不适用于 2.1.4；当前主程序媒体管理与消息表行为以最新 dev 为准。
+历史版本 2.1.3 为数据库修复的配套发布，沿用 2.1.2 的插件运行逻辑，要求主程序 `engram-memory-dev` 包含 [7550c16](https://github.com/MoFox-Studio/Neo-MoFox/commit/7550c1656e97dad5cc98f7555f3bdd339bdb47a4)。该历史要求不适用于 2.1.5；当前主程序媒体管理与消息表行为以最新 dev 为准。
 
-历史版本 2.1.2 修复数据库任务取消期间的连接清理，依赖分支提供的 `storage_api>=1.1.0`。2.1.4 已将插件数据库所需的资源收尾移到插件内部，关闭时仍会等待数据库使用者退出。
+历史版本 2.1.2 修复数据库任务取消期间的连接清理，依赖分支提供的 `storage_api>=1.1.0`。2.1.5 已将插件数据库所需的资源收尾移到插件内部，关闭时仍会等待数据库使用者退出。
 
 ## 安装与加载
 
@@ -196,6 +196,13 @@ Doctor 提供正式记忆、版本证据、检索入口和向量索引的检查�
 | `vnext.flashback.latency_budget_ms` | `1200` | 闪回检索的耗时预算，单位毫秒 |
 | `vnext.flashback.max_memories` | `2` | 每轮闪回最多注入条数，可设为 `0`、`1`、`2` |
 | `vnext.flashback.cooldown_turns` | `3` | 同一记忆在同一聊天中的重复闪回间隔 |
+| `vnext.flashback.cross_stream_recall_enabled` | `false` | 是否允许同人物同主题经历跨聊天流联想；默认只回忆当前流 |
+| `vnext.flashback.semantic_cache_capacity` | `1024` | Episode Embedding 的进程内 LRU 容量 |
+| `vnext.flashback.semantic_cache_ttl_seconds` | `3600` | Episode Embedding 缓存有效期 |
+| `vnext.flashback.semantic_timeout_ms` | `1000` | Episode 语义召回的独立时间预算，超时回退规则召回 |
+| `vnext.claim_review.review_timeout_seconds` | `30` | 单条 Claim 模型审核超时 |
+| `vnext.claim_review.retry_backoff_seconds` | `300` | DEFERRED 候选的最短重试间隔 |
+| `vnext.claim_review.max_attempts` | `3` | 单条候选最大审核尝试次数 |
 | `vnext.vector.worker_retry_limit` | `3` | 向量任务的失败重试上限 |
 | `vnext.learning.enabled` | `false` | 可训练 Transformer 总开关；开启后才会推理、训练和收集样本，保留已有 checkpoint |
 | `vnext.learning.shadow_mode` | `false`（启用总开关后生效） | 是否只记录学习输出而不改变现有召回排序 |
@@ -219,7 +226,7 @@ Doctor 提供正式记忆、版本证据、检索入口和向量索引的检查�
 
 首次初始化每条流时从最近 `context_days` 个自然日回填，默认七天且包含今天；缺少消息的日期不补空日记。后续处理固定本轮消息截止位置，并按消息所属时区日期分批，因此跨午夜的批次分别归入对应日期。每次生成都以目标日期已有正文为底稿，替换该日完整内容；日记正文提交与处理游标推进在同一事务中，生成或提交失败时保留原正文和原游标。旧日记不会因超过七日而删除；该天数只限制注入窗口。
 
-整理前后都会通过已有公开配置接口只读核对当前消息采集许可。当前支持 QQ 流的 SnowLuma 群聊、私聊名单与禁用用户策略，不导入或修改适配器实现；其他平台、配置未加载或许可撤回时不回填或提交。模型请求使用 `actor` 任务和独立的新请求，只携带完整人设及目标日期、时区、聊天类型、当天旧正文、少量前文和本批新消息，不复用正式记忆的提醒、工具历史或会话记录。日记只供近期交流回顾使用，不写入或修改正式 Memory 与 persona。
+整理前后都会通过已有公开配置接口只读核对当前消息采集许可。QQ 流仅使用 `onebot_adapter` 的群聊、私聊名单与禁用用户策略，不回退到其他适配器配置，也不导入或修改适配器实现；其他平台、OneBot Adapter 配置未加载或许可撤回时不回填或提交。模型请求使用 `actor` 任务和独立的新请求，只携带完整人设及目标日期、时区、聊天类型、当天旧正文、少量前文和本批新消息，不复用正式记忆的提醒、工具历史或会话记录。日记只供近期交流回顾使用，不写入或修改正式 Memory 与 persona。
 
 | 配置项 | 默认值 | 用途 |
 | --- | --- | --- |

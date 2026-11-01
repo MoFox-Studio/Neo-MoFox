@@ -809,7 +809,7 @@ class VNextFlashbackEventHandler(BaseEventHandler):
         if event_name == EventType.ON_MESSAGE_RECEIVED:
             message = params.get("message")
             if message is not None:
-                owner.observe_message(message)
+                await owner.observe_message(message)
             return EventDecision.SUCCESS, params
         if event_name == EventType.AFTER_MESSAGE_SENT:
             message = params.get("message")

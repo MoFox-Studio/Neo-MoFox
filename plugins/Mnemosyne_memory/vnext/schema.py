@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import sqlite3
 import tempfile
@@ -11,7 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from .database import MnemosyneDatabase
 
@@ -257,16 +258,20 @@ class VNextSchema:
         """在副本上识别已知结构，拒绝未知版本及缺少版本记录的已有库。"""
         if not self._db_path.is_file():
             return
-        with tempfile.TemporaryDirectory(
-            prefix="mnemosyne-schema-", dir=self._db_path.parent
-        ) as directory:
-            probe = Path(directory) / "probe.db"
-            shutil.copyfile(self._db_path, probe)
-            for suffix in ("-wal", "-shm", "-journal"):
-                sidecar = Path(f"{self._db_path}{suffix}")
-                if sidecar.exists():
-                    shutil.copyfile(sidecar, Path(f"{probe}{suffix}"))
-            with closing(sqlite3.connect(probe)) as connection:
+        # DELETE journal 未完成时，直接打开会回放并修改主文件；在同目录副本上
+        # 读取可见版本，避免 Schema 预检改变崩溃现场。正常库和 WAL 直接读取。
+        journal = Path(f"{self._db_path}-journal")
+        probe_path = self._db_path
+        temporary_directory: tempfile.TemporaryDirectory[str] | None = None
+        if journal.is_file():
+            temporary_directory = tempfile.TemporaryDirectory(
+                prefix="mnemosyne-schema-probe-", dir=self._db_path.parent
+            )
+            probe_path = Path(temporary_directory.name) / self._db_path.name
+            shutil.copyfile(self._db_path, probe_path)
+            shutil.copyfile(journal, Path(f"{probe_path}-journal"))
+        try:
+            with closing(sqlite3.connect(probe_path, timeout=10)) as connection:
                 exists = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' "
                     "AND name='mnemosyne_vnext_schema_version'"
@@ -291,6 +296,9 @@ class VNextSchema:
                         "不支持的 Mnemosyne Schema 版本，拒绝自动修改未知结构"
                     )
                 return int(row[0])
+        finally:
+            if temporary_directory is not None:
+                temporary_directory.cleanup()
 
     def _migrate_existing(self, source_version: int) -> None:
         """备份一致快照后原位升级，DDL 和版本号同事务提交或回滚。"""
@@ -390,11 +398,24 @@ class VNextSchema:
 
     async def initialize(self) -> None:
         """自动备份升级已知旧结构，再打开运行时数据库并校验版本。"""
-        source_version = self._check_existing_version()
+        source_version = await asyncio.to_thread(self._check_existing_version)
         if source_version is not None and source_version < SCHEMA_VERSION:
-            self._migrate_existing(source_version)
+            await asyncio.to_thread(self._migrate_existing, source_version)
         await self.database.initialize()
         async with self.database.session() as session:
+            # create_all 不会为已存在的表补索引；v8 旧库也必须获得这些派生索引。
+            for name, table, columns in (
+                ("episode_observed", "episode", "observed_at"),
+                ("episode_relation_type_target", "episode_relation", "relation_type, target_episode_id"),
+                ("cue_episode", "cue_set", "episode_id, created_at"),
+                ("proposal_stream_status", "memory_update_proposal", "stream_id, status, created_at"),
+                ("claim_queue", "claim_hypothesis", "status, review_attempts, stream_id, created_at"),
+                ("claim_proposal", "claim_hypothesis", "proposal_id"),
+            ):
+                await session.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS idx_mnemosyne_vnext_{name} "
+                    f"ON mnemosyne_vnext_{table} ({columns})"
+                ))
             result = await session.execute(
                 select(SchemaVersionModel).where(
                     SchemaVersionModel.schema_key == SCHEMA_KEY
