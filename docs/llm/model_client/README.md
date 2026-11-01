@@ -12,10 +12,15 @@ model_client/
 ├── openai_client.py     # OpenAI 实现
 ├── anthropic_client.py  # Anthropic 实现
 ├── responses_client.py  # OpenAI Responses API 客户端（内置 web_search 等服务端工具）
+├── gemini_client.py     # Gemini 客户端（官方 google-genai SDK，原生 Developer API）
+├── gemini_codec.py      # Gemini 负载与结果转换（消息/工具编解码、签名状态）
+├── runtime.py           # 非生成探测与默认自有资源回收
 ├── registry.py          # 客户端注册表（ModelClientRegistry）
 ├── shared.py            # 共享工具
 └── __init__.py          # 公开 API
 ```
+
+启动预检、领域配置准备及默认资源所有权见 [运行时技术边界](./runtime.md)。Bot 不构造供应商 SDK 或管理池；外部注入客户端不由默认资源入口回收。
 
 ## StreamEvent（流事件）
 

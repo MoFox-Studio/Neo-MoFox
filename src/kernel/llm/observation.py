@@ -84,7 +84,7 @@ def make_stream_stats_recorder(
     """构造一个在流式请求结束后记录最终统计信息的回调。"""
 
     def recorder(final_usage: dict[str, Any] | None, final_latency: float, *, error: BaseException | None = None) -> None:
-        """Record usage and elapsed seconds with the actual terminal error, if any."""
+        """记录 final_usage、秒级 final_latency 与真实终态 error，失败不计成功。"""
         record_request_observation(
             RequestObservation(
                 model=model,

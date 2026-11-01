@@ -28,6 +28,7 @@
 - [db](./db/README.md)
 - [event](./event/README.md)
 - [llm](./llm/README.md)
+- [LLM 运行时技术边界](./llm/model_client/runtime.md)：领域预检、供应商机制与默认资源所有权。
 - [jev](./jev/README.md)
 - [logger](./logger/README.md)
 - [scheduler](./scheduler/README.md)

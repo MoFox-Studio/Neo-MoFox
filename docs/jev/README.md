@@ -1,8 +1,12 @@
 # Jev System One
 
+## 概述
+
 `src/kernel/jev` 是 Neo-MoFox 中独立的 TypeSafe Jev 客户端。Jev 接收一个 `state` 和一组 typed `questions`，返回结构化的 Noul、Choice 或 Score 判断。它不生成聊天文本，不实现 `ChatModelClient`，也不加入 `ModelClientRegistry`，因此不会与 `kernel.llm` 的监控、重试和 failover 语义混在一起。
 
 官方 HTTP 契约：`POST https://api.typesafe.ai/v1/systemone`，认证头 `Authorization: Bearer <API_KEY>`，请求体 `{"model": ..., "state": ..., "questions": {...}}`。一次请求中的多个问题彼此独立，但都针对同一个 state 求值。响应体为 `{"model": ..., "answers": {<question_id>: <answer>}, "usage": {"input_tokens": ..., "output_tokens": ...}}`。
+
+插件应通过版本化的 `src.app.plugin_system.api.jev_api` 公共入口调用，而不是直接构造客户端；具体用法见下文“插件侧调用”。
 
 ## 快速使用
 
@@ -37,6 +41,8 @@ asyncio.run(main())
 
 完整示例见 `examples/src/kernel/jev/jev_example.py`。
 
+---
+
 ## 密钥处理
 
 - API key 只从构造参数或 `TYPESAFE_API_KEY` 环境变量读取；`JevClient.from_env(api_key=...)` 的显式参数优先。
@@ -44,14 +50,18 @@ asyncio.run(main())
 - `base_url` 必须是 HTTPS，且不允许内嵌用户名/密码；不合法时在发送密钥之前就抛出 `JevConfigurationError`。
 - 密钥不应写入源码、示例、配置仓库或日志。
 
+---
+
 ## 客户端行为
 
-- 插件应优先通过 `src.app.plugin_system.api.jev_api.evaluate_jev` 或 `create_jev_client` 调用；该公共 API 可按 `configured_model_name`/`provider_name` 复用 Core 模型配置中的 key、endpoint、timeout 和代理字段。底层仍走独立的异步 HTTP 路径，不构造 LLM payload，也不经过传统 LLM 客户端注册表；可通过 `transport=` 注入自定义 `httpx` 传输层。
+- 插件应优先通过 `src.app.plugin_system.api.jev_api.evaluate_jev` 或 `create_jev_client` 调用；该公共 API 可按 `configured_model_name`/`provider_name` 复用 Core 模型配置中的 key、endpoint、timeout 和代理字段。底层仍走独立的异步 HTTP 路径，不构造 LLM payload，也不经过传统 LLM 客户端注册表；底层 `JevClient`（不是 `create_jev_client` 的配置 overrides）可通过 `transport=` 借用自定义 `httpx` 传输层，最终关闭由调用方负责。
 - base URL 默认为 `https://api.typesafe.ai`；可以覆盖成企业网关地址，也可以直接传入完整 `/v1/systemone` 路由（尾部 query 会保留）。默认模型 `jev-latest`，可在每次 `evaluate()` 调用时覆盖。
 - Choice 的 `criteria` 必须是非空对象；Score 的有序 criteria 数量为 2 到 10；Noul 的 criteria 可省略。不符合约定的定义在本地就报 `JevConfigurationError`。
 - 默认最多重试 2 次，只对 HTTP 429、529、超时和传输层异常重试，采用带抖动的有上限指数退避；响应带合法 `Retry-After` 时优先使用它。401、400、422 等请求本身有问题的状态不重试。
 - 错误类型分别为 `JevAuthenticationError`、`JevValidationError`、`JevPayloadTooLargeError`、`JevUnsupportedMediaTypeError`、`JevRateLimitError`、`JevOverloadedError`、`JevTimeoutError`、`JevTransportError` 和兜底的 `JevAPIError`（保留 `status_code`）。
 - 成功响应必须包含 `model`、与请求 ID 完全一致的 `answers`，以及整数 `input_tokens`/`output_tokens`。任何缺失或类型不符都会失败关闭为 `JevResponseError`，不会返回部分答案。
+
+---
 
 ## 官方边界与应用责任
 
@@ -64,6 +74,8 @@ TypeSafe 的 typed answer 保证响应形状，不保证判断为真。Choice/Sc
 - TypeSafe HTTP API：<https://docs.typesafe.ai/api>
 - TypeSafe primitives：<https://docs.typesafe.ai/primitives>
 - Confidence：<https://docs.typesafe.ai/confidence>
+
+---
 
 ## 插件侧调用
 
@@ -83,6 +95,8 @@ if result.answer("is_relevant").noul is not None:
 ```
 
 `configured_model_name` 会复用 Core 的模型配置：API key、HTTPS endpoint、timeout、代理与模型标识；也可以传入 `provider_name` 或显式 `JevClientConfig`。这只是配置复用，不会把 Jev 注册为 `ChatModelClient`，也不会改变传统 LLM 的 failover/stream/tool-call 语义。
+
+---
 
 ## 生命周期事件
 
@@ -115,6 +129,16 @@ get_event_bus().subscribe(EventType.BEFORE_JEV_REQUEST.value, on_before_jev)
 - 失败事件在**每次尝试失败**时发布（含可重试的 429/529 与传输错误），与 LLM 链路一致；`retry_count` 标明当前是第几次尝试。
 - 事件发布链路本身出错（订阅者抛异常等）不会影响 Jev 请求本身。
 - Jev 调用**不进入** LLM 统计（`llm_requests` 表）与请求检视器；`usage` 只在 `JevResponse.usage` 中返回。
+
+---
+
+## 配置与资源边界
+
+具名 Core 配置的字段翻译、轮询密钥和地址绑定由 `src/core/config/jev.py` 负责；公共 API 只选择配置来源、委派并构造客户端，不解析 SDK 或传输机制。公开签名、类型、异常和覆盖优先级保持不变。Jev 原 `trust_env=True` 默认及模型显式覆盖保留，不因此改变全局 advanced 配置的历史合并语义。
+
+每次 `evaluate` 拥有临时 HTTP client 与内部创建的 transport；外部注入 transport 经借用代理转发，成功、失败和取消均不由 Jev 关闭。它可以跨多次请求或多个客户端共享，调用方仍负责并发安全与最终关闭。默认 LLM 资源关闭入口不会回收显式构造的 Jev 客户端或其借用 transport。
+
+详细契约见 [运行时技术边界](../llm/model_client/runtime.md)。
 
 ## 相关文档
 

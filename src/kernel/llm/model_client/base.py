@@ -1,4 +1,4 @@
-"""Provider client protocols, compatible result types and uniform stream events."""
+"""定义模型客户端协议、兼容结果对象和供应商无关的流事件。"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -29,7 +29,11 @@ class StreamEvent:
 
 @dataclass(slots=True)
 class ModelClientResult:
-    """Extended provider result; legacy tuple implementations remain supported."""
+    """携带响应、用量及供应商续接状态的结果对象，同时保留旧元组实现兼容。
+
+    ``stream_iter`` 由响应消费方负责耗尽或显式关闭；``provider_state`` 与
+    ``stop_reason`` 是结构化结果的扩展字段，不应在旧元组归一化时丢弃。
+    """
 
     message: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
@@ -41,6 +45,8 @@ class ModelClientResult:
 
 
 class ChatModelClient(Protocol):
+    """将单个模型配置与消息转换为缓冲结果或由调用方持有的响应流。"""
+
     async def create(
         self,
         *,
@@ -57,15 +63,23 @@ class ChatModelClient(Protocol):
         str | list[ReasoningText] | None,
         dict[str, Any] | None,
     ]:
-        """发起一次聊天请求。
+        """发起一次聊天请求，返回结构化结果或兼容的历史五元组。
 
-        返回五元组：
-        - message: 非流时的完整文本；流式则为 None
-        - tool_calls: 非流时解析出的工具调用列表；流式则为 None（将通过 StreamEvent 解析）
-        - stream_iter: 流式迭代器；非流则为 None
-        - reasoning_content: 非流时的推理内容；流式则为 None（将通过 StreamEvent 解析）
-        - usage: API 返回的 usage 字典（含 prompt_tokens/completion_tokens/cache 等）；
-          流式且未启用 usage 上报时为 None
+        Args:
+            model_name: 发送给目标供应商的模型标识。
+            payloads: 已由框架组织的会话消息，可能包含供应商续接状态。
+            tools: 工具声明；本接口不接管工具执行。
+            request_name: 用于关联请求观测的名称。
+            model_set: 当前尝试选中的单条模型配置，而非整个候选集合。
+            stream: 是否返回流事件迭代器。
+
+        Returns:
+            ``ModelClientResult``，或历史五元组
+            ``(message, tool_calls, stream_iter, reasoning_content, usage)``。
+            非流式结果直接携带文本、工具、推理与用量；流式结果通过
+            ``stream_iter`` 逐步提供这些信息，调用方负责耗尽或显式关闭。
+            结构化结果还可携带 ``stop_reason`` 与 ``provider_state``，执行层
+            需从原对象保留它们，不能只消费兼容五字段后丢弃续接状态。
         """
         ...
 

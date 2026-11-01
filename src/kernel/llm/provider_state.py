@@ -1,4 +1,4 @@
-"""Provider-owned replay snapshots, independent of any vendor SDK objects."""
+"""保存供应商续接快照，不依赖任何供应商 SDK 对象。"""
 from __future__ import annotations
 
 import hashlib
@@ -8,14 +8,14 @@ from typing import Any
 
 
 def payload_fingerprint(content: list[Any]) -> str:
-    """Hash the standard assistant view so edited content cannot reuse signatures."""
+    """对标准助手内容 content 计算指纹，禁止编辑后的内容复用原签名。"""
     view: list[dict[str, Any]] = []
     for part in content:
         if hasattr(part, "args") and hasattr(part, "name"):
             view.append({"type": "tool", "id": part.id, "name": part.name, "args": part.args})
         elif hasattr(part, "text"):
             kind = type(part).__name__
-            # Reducers may coalesce adjacent chunks; hash semantic text, not chunking.
+            # 归并器可能合并相邻分片；按语义文本计算指纹，而非绑定分片方式。
             if view and kind == "ReasoningText" and view[-1].get("type") == kind:
                 view[-1]["text"] += part.text
             else:
@@ -28,7 +28,7 @@ def payload_fingerprint(content: list[Any]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ProviderReplayState:
-    """Immutable, redacted replay data tied to its source and visible content."""
+    """绑定来源和可见内容的不可变续接数据，原始 Parts 不进入 repr 输出。"""
 
     provider: str
     target: tuple[str, str, str]
@@ -38,7 +38,7 @@ class ProviderReplayState:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        """Validate the snapshot shape without exposing its contents in errors."""
+        """验证快照形状，错误信息不暴露 Parts 或签名内容。"""
         try:
             parts = json.loads(self.parts_json)
         except (ValueError, TypeError) as exc:
@@ -47,5 +47,5 @@ class ProviderReplayState:
             raise ValueError("Unsupported provider replay snapshot")
 
     def matches(self, content: list[Any]) -> bool:
-        """Return whether the standard view still matches this snapshot."""
+        """判断标准内容 content 是否仍与当前快照指纹一致。"""
         return self.content_fingerprint == payload_fingerprint(content)
