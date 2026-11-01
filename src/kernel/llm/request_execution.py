@@ -424,9 +424,6 @@ async def execute_request(
                 raise
 
             classified_error = classify_exception(exc, model=model_identifier)
-            if type(exc).__module__.startswith("google.genai"):
-                # The raw SDK traceback includes the upstream response body.
-                setattr(classified_error, "_suppress_provider_trace", True)
             last_error = classified_error
             retry_decision = decide_retry(classified_error)
             _log_request_error(

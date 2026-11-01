@@ -1,3 +1,4 @@
+"""标准化模型调用异常并提供兼容的重试与安全日志决策。"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -248,20 +249,24 @@ def classify_exception(error: BaseException, model: str | None = None) -> BaseEx
         return error
     error_msg = str(error).lower()
 
-    # Google Gen AI SDK uses structured status codes; never expose raw details/key URLs.
+    # SDK 类型归一化同时负责安全日志标记，不依赖异常子类定义位置。
     try:
         from google.genai.errors import APIError as GeminiAPIError
         if isinstance(error, GeminiAPIError):
             code = error.code
             message = f"Gemini API failed (HTTP {code})"
+            normalized: LLMError
             if code in {401, 403}:
-                return LLMAuthenticationError(message, model=model)
-            if code == 429:
+                normalized = LLMAuthenticationError(message, model=model)
+            elif code == 429:
                 headers = getattr(getattr(error, "response", None), "headers", None)
-                return LLMRateLimitError(message, retry_after=parse_retry_after(headers), model=model)
-            if code == 404:
-                return LLMProviderUnavailableError("Gemini model or endpoint is unavailable")
-            return LLMAPIError(message, status_code=code, error_code=getattr(error, "status", None), model=model)
+                normalized = LLMRateLimitError(message, retry_after=parse_retry_after(headers), model=model)
+            elif code == 404:
+                normalized = LLMProviderUnavailableError("Gemini model or endpoint is unavailable")
+            else:
+                normalized = LLMAPIError(message, status_code=code, error_code=getattr(error, "status", None), model=model)
+            setattr(normalized, "_suppress_provider_trace", True)
+            return normalized
     except ImportError:
         pass
     try:
