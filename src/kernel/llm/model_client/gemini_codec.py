@@ -1,4 +1,10 @@
-"""转换 MoFox 与官方 Gemini SDK 的消息，并保留签名回放所需的原始 Part。"""
+"""
+Gemini 消息编解码与传输配置解析。
+
+在 MoFox payload 与官方 Gemini SDK 类型之间转换消息、工具声明和响应用量，
+并保留签名回放所需的原始 Part、调用 ID 映射与目标来源。
+"""
+
 from __future__ import annotations
 
 import base64
@@ -12,27 +18,56 @@ from urllib.parse import urlsplit, urlunsplit
 from google.genai import types
 from PIL import Image as PILImage
 
-from ..exceptions import LLMAPIError, LLMConfigurationError, LLMContentFilterError, LLMContextError
+from ..exceptions import (
+    LLMAPIError,
+    LLMConfigurationError,
+    LLMContentFilterError,
+    LLMContextError,
+)
 from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResult
 from ..provider_state import ProviderReplayState, payload_fingerprint
 from ..roles import ROLE
 from .base import ModelClientResult
-from .shared import extract_model_transport_params, inject_reason_parameter, normalize_schema_for_grammar
+from .shared import (
+    extract_model_transport_params,
+    inject_reason_parameter,
+    normalize_schema_for_grammar,
+)
 
 
 def normalize_endpoint(base_url: str | None, api_version: str = "v1beta") -> tuple[str, str]:
-    """将 base_url 的旧版本后缀与 SDK 服务根分离，并校验 api_version。"""
+    """将 base_url 的旧版本后缀与 SDK 服务根分离，并校验 api_version。
+
+    Args:
+        base_url: HTTPS 服务根，可带旧版 API 版本后缀；为空时使用官方端点。
+        api_version: 请求使用的 API 版本；默认值可由 base_url 的版本后缀覆盖。
+
+    Returns:
+        不含版本后缀的服务根与解析后的 API 版本二元组。
+
+    Raises:
+        LLMConfigurationError: 端点包含非法组成部分、版本冲突或版本不受支持。
+    """
     value = base_url or "https://generativelanguage.googleapis.com"
     parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise LLMConfigurationError("Gemini base_url must be an HTTPS service root without credentials/query")
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise LLMConfigurationError(
+            "Gemini base_url must be an HTTPS service root without credentials/query"
+        )
     path = parsed.path.rstrip("/")
     for version in ("v1beta", "v1alpha", "v1"):
         if path.endswith("/" + version):
             if api_version != "v1beta" and api_version != version:
                 raise LLMConfigurationError("Gemini API version conflicts with base_url")
             api_version = version
-            path = path[:-(len(version) + 1)]
+            path = path[: -(len(version) + 1)]
             break
     if api_version not in {"v1", "v1beta", "v1alpha"}:
         raise LLMConfigurationError("Unsupported Gemini API version")
@@ -40,12 +75,24 @@ def normalize_endpoint(base_url: str | None, api_version: str = "v1beta") -> tup
 
 
 def gemini_options(model: dict[str, Any]) -> dict[str, Any]:
-    """在使用 model 的嵌套配置前验证 extra_params 与 Gemini 参数形状。"""
+    """在使用 model 的嵌套配置前验证 extra_params 与 Gemini 参数形状。
+
+    Args:
+        model: 模型技术条目，Gemini 专属配置位于 extra_params.gemini。
+
+    Returns:
+        原始 Gemini 配置字典；未配置时返回空字典。
+
+    Raises:
+        LLMConfigurationError: extra_params、gemini 或 generation_config 不是字典。
+    """
     extra = model.get("extra_params", {})
     if not isinstance(extra, dict):
         raise LLMConfigurationError("Gemini extra_params must be an object")
     options = extra.get("gemini", {})
-    if not isinstance(options, dict) or not isinstance(options.get("generation_config", {}), dict):
+    if not isinstance(options, dict) or not isinstance(
+        options.get("generation_config", {}), dict
+    ):
         raise LLMConfigurationError("Gemini options and generation_config must be objects")
     return options
 
@@ -58,6 +105,9 @@ def resolve_gemini_endpoint(model: dict[str, Any]) -> tuple[str, str]:
 
     Returns:
         规范服务根和 API 版本；不创建网络资源，不改变原始配置。
+
+    Raises:
+        LLMConfigurationError: 嵌套配置形状、端点或 API 版本不符合要求。
     """
     extra = model.get("extra_params", {})
     if not isinstance(extra, dict):
@@ -102,11 +152,22 @@ def resolve_gemini_transport(model: dict[str, Any]) -> GeminiTransportSnapshot:
     root, version = resolve_gemini_endpoint(model)
     if query:
         raise LLMConfigurationError("Gemini query overrides are not supported")
-    if any(name.casefold() in {"authorization", "x-goog-api-key", "host", "content-type"} for name in headers):
+    if any(
+        name.casefold() in {"authorization", "x-goog-api-key", "host", "content-type"}
+        for name in headers
+    ):
         raise LLMConfigurationError("Gemini authentication/host headers cannot be overridden")
     if timeout is None or not math.isfinite(timeout) or timeout <= 0:
         raise LLMConfigurationError("Gemini timeout must be a positive finite number")
-    return GeminiTransportSnapshot(key, root, version, timeout, trust, ipv4, tuple(sorted(headers.items())))
+    return GeminiTransportSnapshot(
+        key,
+        root,
+        version,
+        timeout,
+        trust,
+        ipv4,
+        tuple(sorted(headers.items())),
+    )
 
 
 def target_identity(model: dict[str, Any]) -> tuple[str, str, str]:
@@ -118,9 +179,17 @@ def target_identity(model: dict[str, Any]) -> tuple[str, str, str]:
     Returns:
         原有 provider、服务根加版本、移除 models/ 前缀的模型标识三元组。
         本函数只解析值，不创建网络资源。
+
+    Raises:
+        LLMConfigurationError: 嵌套配置形状、端点或 API 版本不符合要求。
+        KeyError: 模型条目缺少 model_identifier。
     """
     root, version = resolve_gemini_endpoint(model)
-    return str(model.get("api_provider", "")), root + "/" + version, str(model["model_identifier"]).removeprefix("models/")
+    return (
+        str(model.get("api_provider", "")),
+        root + "/" + version,
+        str(model["model_identifier"]).removeprefix("models/"),
+    )
 
 
 def encode_payloads(
@@ -153,16 +222,29 @@ def encode_payloads(
     calls: dict[str, tuple[str, str | None]] = {}
 
     def add_tool(tool: Any) -> None:
-        """转换 tool 的 MoFox 声明，不把 Python 可调用对象交给 SDK 执行。"""
+        """转换并按名称收集工具声明，不把 Python 可调用对象交给 SDK 执行。
+
+        Args:
+            tool: 实现 to_schema() 的 MoFox 工具；同名声明必须保持一致。
+
+        Raises:
+            LLMConfigurationError: 工具缺少有效名称，或同名声明互相冲突。
+        """
         schema = tool.to_schema()
         schema = schema.get("function", schema)
         name = schema.get("name")
         if not isinstance(name, str) or not name:
             raise LLMConfigurationError("Gemini tool requires a name")
-        parameters = json.loads(json.dumps(schema.get("parameters", {"type": "object", "properties": {}})))
+        parameters = json.loads(
+            json.dumps(schema.get("parameters", {"type": "object", "properties": {}}))
+        )
         normalize_schema_for_grammar(parameters)
         parameters = inject_reason_parameter(tool, parameters)
-        declaration = types.FunctionDeclaration(name=name, description=schema.get("description", ""), parameters_json_schema=parameters)
+        declaration = types.FunctionDeclaration(
+            name=name,
+            description=schema.get("description", ""),
+            parameters_json_schema=parameters,
+        )
         if name in declarations and declarations[name] != declaration:
             raise LLMConfigurationError("Conflicting Gemini tool declarations")
         declarations[name] = declaration
@@ -183,8 +265,12 @@ def encode_payloads(
         state = payload.provider_state
         if state is not None and state.provider == "gemini":
             if state.target != target or not state.matches(payload.content):
-                raise LLMContextError("Gemini signed content was changed or belongs to another target")
-            parts = [types.Part.model_validate(item) for item in json.loads(state.parts_json)]
+                raise LLMContextError(
+                    "Gemini signed content was changed or belongs to another target"
+                )
+            parts = [
+                types.Part.model_validate(item) for item in json.loads(state.parts_json)
+            ]
             native_ids = dict(state.call_ids)
             for part in payload.content:
                 if isinstance(part, ToolCall) and part.id:
@@ -201,49 +287,127 @@ def encode_payloads(
             elif isinstance(part, ToolCall):
                 args = json.loads(part.args) if isinstance(part.args, str) else part.args
                 if not isinstance(args, dict) or not part.id:
-                    raise LLMContextError("Gemini function call needs object arguments and a stable ID")
+                    raise LLMContextError(
+                        "Gemini function call needs object arguments and a stable ID"
+                    )
                 calls[part.id] = (part.name, part.id)
-                parts.append(types.Part(function_call=types.FunctionCall(id=part.id, name=part.name, args=args)))
+                parts.append(
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            id=part.id,
+                            name=part.name,
+                            args=args,
+                        )
+                    )
+                )
             elif isinstance(part, ToolResult):
                 if not part.call_id or part.call_id not in calls:
                     raise LLMContextError("Gemini tool result has no matching function call")
                 name, native_id = calls[part.call_id]
-                value = part.value if isinstance(part.value, dict) else {"result": part.to_text()}
-                parts.append(types.Part(function_response=types.FunctionResponse(name=name, id=native_id, response=value)))
+                value = (
+                    part.value
+                    if isinstance(part.value, dict)
+                    else {"result": part.to_text()}
+                )
+                parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=name,
+                            id=native_id,
+                            response=value,
+                        )
+                    )
+                )
             elif isinstance(part, Image):
                 try:
                     data = base64.b64decode(part.value, validate=True)
                     with PILImage.open(BytesIO(data)) as image:
                         mime = PILImage.MIME.get(image.format or "")
-                    if mime not in {"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"}:
+                    if mime not in {
+                        "image/png",
+                        "image/jpeg",
+                        "image/webp",
+                        "image/heic",
+                        "image/heif",
+                    }:
                         raise ValueError("unsupported image")
                 except Exception as exc:
-                    raise LLMConfigurationError("Gemini image MIME could not be validated") from exc
+                    raise LLMConfigurationError(
+                        "Gemini image MIME could not be validated"
+                    ) from exc
                 parts.append(types.Part.from_bytes(data=data, mime_type=mime))
             else:
-                raise LLMConfigurationError("Unsupported Gemini payload content: " + type(part).__name__)
+                raise LLMConfigurationError(
+                    "Unsupported Gemini payload content: " + type(part).__name__
+                )
         if parts:
-            contents.append(types.Content(role="model" if payload.role == ROLE.ASSISTANT else "user", parts=parts))
-    declared = [types.Tool(function_declarations=list(declarations.values()))] if declarations else []
+            contents.append(
+                types.Content(
+                    role="model" if payload.role == ROLE.ASSISTANT else "user",
+                    parts=parts,
+                )
+            )
+    declared = (
+        [types.Tool(function_declarations=list(declarations.values()))]
+        if declarations
+        else []
+    )
     return contents, system, declared
 
 
 def extract_usage(usage: types.GenerateContentResponseUsageMetadata | None) -> dict[str, Any]:
-    """映射累计 usage，并将思考 token 与输出 token 分开，避免重复计费。"""
+    """映射累计 usage，并将思考 token 与输出 token 分开，避免重复计费。
+
+    Args:
+        usage: SDK 返回的累计用量；缺失的计数字段按零处理。
+
+    Returns:
+        内部标准用量字典，包含思考及缓存 token 计数；usage 为空时返回空字典。
+
+    Raises:
+        LLMAPIError: 用量计数不是非负整数，或使用了布尔值。
+    """
     if usage is None:
         return {}
+
     def number(name: str) -> int:
-        """读取 name 对应计数，只接受非负整数。"""
+        """读取 name 对应计数，只接受非负整数。
+
+        Args:
+            name: SDK 用量元数据中的计数字段名。
+
+        Returns:
+            字段的非负整数值；字段缺失或为 None 时返回零。
+
+        Raises:
+            LLMAPIError: 字段值不是非负整数，或使用了布尔值。
+        """
         value = getattr(usage, name, None)
         if value is None:
             return 0
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise LLMAPIError("Invalid Gemini usage counter", status_code=502)
         return value
-    prompt, output, thought, cache = (number(n) for n in ("prompt_token_count", "candidates_token_count", "thoughts_token_count", "cached_content_token_count"))
-    return {"prompt_tokens": prompt, "completion_tokens": output, "reasoning_tokens": thought,
-            "completion_includes_reasoning": False, "total_tokens": number("total_token_count"),
-            "cache_hit_tokens": cache, "cache_miss_tokens": max(0, prompt-cache), "cache_write_tokens": 0}
+
+    prompt, output, thought, cache = (
+        number(n)
+        for n in (
+            "prompt_token_count",
+            "candidates_token_count",
+            "thoughts_token_count",
+            "cached_content_token_count",
+        )
+    )
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": output,
+        "reasoning_tokens": thought,
+        "completion_includes_reasoning": False,
+        "total_tokens": number("total_token_count"),
+        "cache_hit_tokens": cache,
+        "cache_miss_tokens": max(0, prompt - cache),
+        "cache_write_tokens": 0,
+    }
 
 
 def decode_response(
@@ -272,15 +436,28 @@ def decode_response(
             或非空原生调用 ID 重复导致结果无法无歧义回放。
     """
     if response.prompt_feedback and response.prompt_feedback.block_reason:
-        raise LLMContentFilterError("Gemini blocked the prompt", filter_type=str(response.prompt_feedback.block_reason))
+        raise LLMContentFilterError(
+            "Gemini blocked the prompt",
+            filter_type=str(response.prompt_feedback.block_reason),
+        )
     if not response.candidates:
         raise LLMAPIError("Gemini returned no candidates", status_code=502)
     candidate = response.candidates[0]
     finish = candidate.finish_reason.value if candidate.finish_reason else None
-    if finish in {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "RECITATION"}:
+    if finish in {
+        "SAFETY",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "RECITATION",
+    }:
         raise LLMContentFilterError("Gemini blocked the response", filter_type=finish)
     if require_finish and finish not in {"STOP", "MAX_TOKENS"}:
-        raise LLMAPIError("Gemini returned an unsupported or missing finish reason", status_code=502)
+        raise LLMAPIError(
+            "Gemini returned an unsupported or missing finish reason",
+            status_code=502,
+        )
     parts = list(candidate.content.parts or []) if candidate.content else []
     texts: list[str] = []
     thoughts: list[ReasoningText] = []
@@ -296,7 +473,12 @@ def decode_response(
             reserved_ids.add(native_id)
     used_ids = set(reserved_ids)
     for index, part in enumerate(parts):
-        unsupported = set(part.model_dump(exclude_none=True)) - {"text", "thought", "thought_signature", "function_call"}
+        unsupported = set(part.model_dump(exclude_none=True)) - {
+            "text",
+            "thought",
+            "thought_signature",
+            "function_call",
+        }
         if unsupported:
             raise LLMAPIError("Unsupported Gemini response Part", status_code=422)
         if part.text:
@@ -320,15 +502,33 @@ def decode_response(
                 used_ids.add(internal_id)
             tool_calls.append({"id": internal_id, "name": call.name, "args": call.args})
             mapping.append((internal_id, call.id))
-    if require_finish and not texts and not thoughts and not tool_calls and not any(p.thought_signature for p in parts):
+    if (
+        require_finish
+        and not texts
+        and not thoughts
+        and not tool_calls
+        and not any(p.thought_signature for p in parts)
+    ):
         raise LLMAPIError("Gemini returned empty completed content", status_code=422)
     standard: list[Any] = list(thoughts)
     message = "".join(texts) or None
     if message:
         standard.append(Text(message))
-    standard.extend(ToolCall(id=c["id"], name=c["name"], args=c["args"]) for c in tool_calls)
-    replay = ProviderReplayState(provider="gemini", target=target,
+    standard.extend(
+        ToolCall(id=c["id"], name=c["name"], args=c["args"]) for c in tool_calls
+    )
+    replay = ProviderReplayState(
+        provider="gemini",
+        target=target,
         parts_json=json.dumps([p.model_dump(mode="json", exclude_none=True) for p in parts]),
-        content_fingerprint=payload_fingerprint(standard), call_ids=tuple(mapping))
-    return ModelClientResult(message=message, tool_calls=tool_calls or None, reasoning_content=thoughts or None,
-        usage=extract_usage(response.usage_metadata), stop_reason=finish, provider_state=replay)
+        content_fingerprint=payload_fingerprint(standard),
+        call_ids=tuple(mapping),
+    )
+    return ModelClientResult(
+        message=message,
+        tool_calls=tool_calls or None,
+        reasoning_content=thoughts or None,
+        usage=extract_usage(response.usage_metadata),
+        stop_reason=finish,
+        provider_state=replay,
+    )
