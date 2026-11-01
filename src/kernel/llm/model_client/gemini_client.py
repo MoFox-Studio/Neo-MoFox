@@ -167,14 +167,21 @@ class _ClientLease:
     active: int = 0
 
     async def close(self) -> None:
-        """Close both SDK-created sync resources and the injected async client."""
+        """尝试关闭 SDK 同步及异步资源和自有 HTTP 客户端，保留取消。"""
+        errors: list[BaseException] = []
         try:
             await self.sdk.aio.aclose()
-        finally:
-            try:
-                self.sdk.close()
-            finally:
-                await self.http.aclose()
+        except BaseException as error:
+            errors.append(error)
+        try:
+            self.sdk.close()
+        except BaseException as error:
+            errors.append(error)
+        try:
+            await self.http.aclose()
+        except BaseException as error:
+            errors.append(error)
+        _raise_close_errors(errors)
 
 
 class _BorrowedTransport(httpx.AsyncBaseTransport):
@@ -250,12 +257,20 @@ class GeminiChatClient:
     """将 MoFox 请求映射为官方 SDK 调用，重试仍由上层策略管理。"""
 
     def __init__(self, *, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        """Optionally inject a caller-owned transport for offline tests."""
+        """可注入调用方拥有的 transport；按事件循环管理其余自有资源。"""
         self._transport = transport
-        self._pools: WeakKeyDictionary[Any, OrderedDict[tuple[Any, ...], _ClientLease]] = WeakKeyDictionary()
+        self._pools: WeakKeyDictionary[
+            Any, OrderedDict[tuple[Any, ...], _ClientLease]
+        ] = WeakKeyDictionary()
         self._locks: WeakKeyDictionary[Any, asyncio.Lock] = WeakKeyDictionary()
 
     async def _get_client(self, model: dict[str, Any]) -> _ClientLease:
+        """在所属事件循环的锁内串行创建或回收客户端。"""
+        lock = self._locks.setdefault(asyncio.get_running_loop(), asyncio.Lock())
+        async with lock:
+            return await self._get_client_locked(model)
+
+    async def _get_client_locked(self, model: dict[str, Any]) -> _ClientLease:
         """复用有界且按循环隔离的 SDK 资源，不在导入期间创建连接。"""
         key, base, timeout, trust, ipv4, _, headers, query, _ = (
             extract_model_transport_params(model)
@@ -315,17 +330,23 @@ class GeminiChatClient:
         pool[cache_key] = lease
         return lease
 
-
     async def aclose(self) -> None:
-        """Release this event loop's idle resources; active streams retain ownership."""
+        """回收当前循环的 idle 资源；失败先摘除，普通错误不阻断后续条目。"""
         loop = asyncio.get_running_loop()
         lock = self._locks.setdefault(loop, asyncio.Lock())
         async with lock:
             pool = self._pools.get(loop, {})
+            errors: list[Exception] = []
             for key, lease in list(pool.items()):
                 if not lease.active:
-                    await lease.close()
+                    # 每项在关闭前摘除，取消后尚未尝试的项仍留池等待下一次清理。
                     del pool[key]
+                    try:
+                        await lease.close()
+                    except Exception as error:
+                        errors.append(error)
+            if errors:
+                raise ExceptionGroup("Gemini idle 客户端回收失败", errors)
 
     async def create(
         self,

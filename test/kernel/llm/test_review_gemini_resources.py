@@ -532,10 +532,89 @@ async def test_owner_aggregates_each_body_error_and_repeats_same_group() -> None
     assert [wire.closed for wire in wires] == [1, 1, 1]
 
 
+async def test_pool_aggregates_sdk_sync_and_http_errors_then_closes_later_lease() -> None:
+    """同步 SDK 与 HTTP 均失败时保留所有错误，仍关闭后项且不关闭借用传输。"""
+    transport = _BorrowedWireTransport()
+    client = GeminiChatClient(transport=transport)
+    failed, later = _lease(), await client._get_client(_model())
+    later.active -= 1
+    sdk_error = ValueError("sdk sync close failed")
+    http_error = RuntimeError("http close failed")
+    failed.sdk.close.side_effect = sdk_error
+    failed.http.aclose.side_effect = http_error
+    pool = client._pools[asyncio.get_running_loop()]
+    pool.clear()
+    pool.update([(("failed",), failed), (("later",), later)])
+    with pytest.raises(ExceptionGroup) as raised:
+        await client.aclose()
+    assert raised.value.message == "Gemini idle 客户端回收失败"
+    assert len(raised.value.exceptions) == 1
+    group = raised.value.exceptions[0]
+    assert isinstance(group, ExceptionGroup)
+    assert group.message == "Gemini 资源关闭失败"
+    assert group.exceptions == (sdk_error, http_error)
+    failed.sdk.aio.aclose.assert_awaited_once()
+    failed.sdk.close.assert_called_once()
+    failed.http.aclose.assert_awaited_once()
+    assert later.http.is_closed
+    assert not pool
+    assert transport.closed == 0
+    await client.aclose()
+    failed.sdk.close.assert_called_once()
+    failed.http.aclose.assert_awaited_once()
+    assert transport.closed == 0
 
 
+async def test_pool_detaches_idle_and_attempts_all_after_one_failure() -> None:
+    """第一项关闭失败仍尝试后续 idle，active 条目不关闭或摘除。"""
+    client = GeminiChatClient()
+    first, second, active = _lease(fail=True), _lease(), _lease(active=1)
+    pool = OrderedDict([(("first",), first), (("second",), second), (("active",), active)])
+    client._pools[asyncio.get_running_loop()] = pool
+    with pytest.raises(ExceptionGroup):
+        await client.aclose()
+    assert list(pool.values()) == [active]
+    for lease in (first, second):
+        lease.sdk.aio.aclose.assert_awaited_once()
+        lease.sdk.close.assert_called_once()
+        lease.http.aclose.assert_awaited_once()
+    active.http.aclose.assert_not_awaited()
+    await client.aclose()
+    first.http.aclose.assert_awaited_once()
 
 
+async def test_pool_recycle_serializes_new_lease_creation() -> None:
+    """回收等待期间同循环获取不能复用正在关闭的 idle 条目。"""
+    client = GeminiChatClient()
+    lease = _lease()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_close() -> None:
+        """精确暂停在 SDK 关闭中间，不依赖时间延迟。"""
+        entered.set()
+        await release.wait()
+
+    lease.sdk.aio.aclose.side_effect = delayed_close
+    pool = OrderedDict([(("idle",), lease)])
+    client._pools[asyncio.get_running_loop()] = pool
+    closing = asyncio.ensure_future(client.aclose())
+    await entered.wait()
+    started = asyncio.Event()
+
+    async def acquire() -> _ClientLease:
+        """发出获取并等待清理锁，不能在已摘除项上增加引用。"""
+        started.set()
+        return await client._get_client(_model())
+
+    getting = asyncio.ensure_future(acquire())
+    await started.wait()
+    assert not pool and not getting.done()
+    release.set()
+    await closing
+    replacement = await getting
+    assert replacement is not lease
+    replacement.active -= 1
+    await client.aclose()
 
 
 class _BorrowedWireTransport(httpx.AsyncBaseTransport):
@@ -552,3 +631,36 @@ class _BorrowedWireTransport(httpx.AsyncBaseTransport):
     async def aclose(self) -> None:
         """仅由调用方显式调用时记录关闭。"""
         self.closed += 1
+
+
+def test_pool_is_loop_local_and_does_not_close_borrowed_transport() -> None:
+    """同一 adapter 在两个循环使用独立客户端，回收不关闭调用方传输。"""
+    transport = _BorrowedWireTransport()
+    client = GeminiChatClient(transport=transport)
+    leases: list[_ClientLease] = []
+
+    async def use_loop() -> None:
+        """保留当前循环引用到外层，以检查另一循环回收没有越权。"""
+        lease = await client._get_client(_model())
+        leases.append(lease)
+        lease.active -= 1
+        await client.aclose()
+        assert lease.http.is_closed
+
+    asyncio.run(use_loop())
+    asyncio.run(use_loop())
+    assert leases[0] is not leases[1]
+    assert transport.closed == 0
+
+
+async def test_pool_close_cancellation_propagates() -> None:
+    """清理取消不是普通错误聚合，且失败条目不留在可复用池中。"""
+    client = GeminiChatClient()
+    lease = _lease()
+    lease.sdk.aio.aclose.side_effect = asyncio.CancelledError()
+    pool = OrderedDict([(("cancel",), lease)])
+    client._pools[asyncio.get_running_loop()] = pool
+    with pytest.raises(asyncio.CancelledError):
+        await client.aclose()
+    assert not pool
+    lease.http.aclose.assert_awaited_once()
