@@ -13,6 +13,7 @@ async def test_custom_transport_one_attempt_and_ownership(status: int) -> None:
     calls: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        """记录 SDK 请求，并返回参数化的可重试错误状态。"""
         calls.append(request)
         return httpx.Response(status, json={"error": {"code": status, "message": "busy", "status": "UNAVAILABLE"}})
 
@@ -44,6 +45,7 @@ async def test_stream_api_preserves_parts_and_signature() -> None:
     ]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2}}
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        """记录流式请求，并返回保留原生 Part 签名的 SSE 数据。"""
         requests.append(request)
         return httpx.Response(200, text="data: " + json.dumps(body) + "\n\n", headers={"content-type": "text/event-stream"})
 

@@ -1,5 +1,4 @@
 """End-to-end SDK retry/terminal behavior through real MoFox execution."""
-import asyncio
 import json
 from unittest.mock import patch
 
@@ -7,7 +6,7 @@ import httpx
 import pytest
 
 from src.kernel.llm import LLMRequest, LLMPayload, ROLE, Text
-from src.kernel.llm.exceptions import LLMRateLimitError, LLMTimeoutError
+from src.kernel.llm.exceptions import LLMRateLimitError
 from src.kernel.llm.model_client.gemini_client import GeminiChatClient
 from src.kernel.llm.model_client.registry import ModelClientRegistry
 from src.kernel.llm.policy.round_robin import RoundRobinPolicy
@@ -20,6 +19,7 @@ async def test_transient_stream_failure_retries_once_and_records_outcome(consume
     calls: list[int] = []
     stats: list[dict] = []
     async def handler(req: httpx.Request) -> httpx.Response:
+        """记录尝试次数，首次返回限流，随后提供成功的 SSE 响应。"""
         calls.append(1)
         if len(calls) == 1:
             return httpx.Response(429, json={"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "busy"}}, headers={"retry-after": "0"})
@@ -53,6 +53,7 @@ async def test_exhaustion_does_not_reset_budget() -> None:
     """The SDK's own retry is off, and policy cannot be reset recursively."""
     calls: list[int] = []
     async def handler(req: httpx.Request) -> httpx.Response:
+        """记录每次请求并持续返回限流，验证有限重试预算。"""
         calls.append(1)
         return httpx.Response(429, json={"error": {"code": 429, "message": "busy"}}, headers={"retry-after": "0"})
     adapter = GeminiChatClient(transport=httpx.MockTransport(handler))

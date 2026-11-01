@@ -24,7 +24,8 @@ def test_google_sdk_status_is_typed_without_upstream_details(status: int, kind: 
     classified=classify_exception(error,model="authentication-model")
     assert isinstance(classified,kind)
     assert "SECRET_UPSTREAM" not in str(classified)
-    if status==429:assert classified.retry_after==2.0
+    if status == 429:
+        assert classified.retry_after == 2.0
 
 
 def test_httpx_errors_are_normalized() -> None:
@@ -36,13 +37,17 @@ def test_httpx_errors_are_normalized() -> None:
 async def test_failed_sdk_call_does_not_log_raw_response_trace() -> None:
     """The active SDK exception traceback contains details excluded from logging."""
     async def handler(request: httpx.Request) -> httpx.Response:
+        """返回含敏感上游详情的认证失败响应，验证日志隔离。"""
         return httpx.Response(401,json={"error":{"code":401,"message":"SECRET_UPSTREAM"}})
     client=GeminiChatClient(transport=httpx.MockTransport(handler))
     req=LLMRequest(model_set=[model()],clients=ModelClientRegistry(gemini=client),policy=RoundRobinPolicy(),enable_metrics=False)
-    req.context_manager=None;req.payloads=[LLMPayload(ROLE.USER,Text("hi"))]
+    req.context_manager = None
+    req.payloads = [LLMPayload(ROLE.USER, Text("hi"))]
     try:
         with patch("src.kernel.llm.request_execution.logger") as logger:
-            with pytest.raises(LLMAuthenticationError):await req.send(stream=False)
+            with pytest.raises(LLMAuthenticationError):
+                await req.send(stream=False)
             assert logger.error.call_args.kwargs["exc_info"] is False
             assert "SECRET_UPSTREAM" not in str(logger.error.call_args)
-    finally:await client.aclose()
+    finally:
+        await client.aclose()

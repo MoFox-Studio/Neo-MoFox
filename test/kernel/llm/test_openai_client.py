@@ -1659,13 +1659,14 @@ class TestCreateRerank:
             "return_documents": False,
         }
 
-    async def test_body_cannot_override_core_rerank_fields(self):
+    async def test_body_cannot_override_core_rerank_fields(self) -> None:
         """extra_params.body 不能覆盖 model/query/documents。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
 
         seen: dict[str, Any] = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
+            """记录实际排序请求体，并返回空结果供核心字段断言。"""
             seen["body"] = json.loads(request.content)
             return httpx.Response(200, json={"results": []})
 

@@ -1,12 +1,10 @@
 """Final review regressions: thought chunk projection and best-effort cleanup."""
-import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
-from google.genai import types
 
 from src.kernel.llm import LLMRequest, LLMPayload, ROLE, Text
 from src.kernel.llm.model_client.gemini_client import GeminiChatClient, _ClientLease, _OwnedStream
@@ -24,17 +22,21 @@ async def test_multiple_thought_chunks_match_replay_fingerprint() -> None:
         {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"f","args":{}},"thoughtSignature":"c2ln"}]},"finishReason":"STOP"}]},
     ]
     async def handler(req: httpx.Request) -> httpx.Response:
+        """将多个思考片段和带签名工具调用编码为 SSE 响应。"""
         return httpx.Response(200,text=''.join('data: '+json.dumps(c)+'\n\n' for c in chunks),headers={'content-type':'text/event-stream'})
     client=GeminiChatClient(transport=httpx.MockTransport(handler))
     req=LLMRequest(model_set=[model()],clients=ModelClientRegistry(gemini=client),policy=RoundRobinPolicy(),enable_metrics=False)
-    req.context_manager=None;req.payloads=[LLMPayload(ROLE.USER,Text('hi'))]
+    req.context_manager = None
+    req.payloads = [LLMPayload(ROLE.USER, Text('hi'))]
     try:
-        result=await req.send(stream=True);await result
+        result = await req.send(stream=True)
+        await result
         payload=result.to_payload()
         assert result.provider_state.matches(payload.content)
         encoded,_,_=encode_payloads([payload],result.provider_state.target,[])
         assert [p.text for p in encoded[0].parts[:2]] == ['first','second']
-    finally:await client.aclose()
+    finally:
+        await client.aclose()
 
 
 async def test_lease_close_failure_still_closes_remaining_resources() -> None:
@@ -42,8 +44,10 @@ async def test_lease_close_failure_still_closes_remaining_resources() -> None:
     sdk=SimpleNamespace(aio=SimpleNamespace(aclose=AsyncMock(side_effect=RuntimeError('close'))),close=Mock())
     http=SimpleNamespace(aclose=AsyncMock())
     lease=_ClientLease(sdk,http)
-    with pytest.raises(RuntimeError):await lease.close()
-    sdk.close.assert_called_once();http.aclose.assert_awaited_once()
+    with pytest.raises(RuntimeError):
+        await lease.close()
+    sdk.close.assert_called_once()
+    http.aclose.assert_awaited_once()
 
 
 async def test_stream_close_failure_still_closes_source() -> None:
@@ -52,6 +56,7 @@ async def test_stream_close_failure_still_closes_source() -> None:
     source=SimpleNamespace(aclose=AsyncMock())
     lease=SimpleNamespace(active=1)
     stream=_OwnedStream(events,source,lease)
-    with pytest.raises(RuntimeError):await stream.aclose()
+    with pytest.raises(RuntimeError):
+        await stream.aclose()
     source.aclose.assert_awaited_once()
     assert lease.active == 0

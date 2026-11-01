@@ -6,6 +6,7 @@ import base64
 import json
 from io import BytesIO
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -14,13 +15,14 @@ from PIL import Image as PILImage
 
 from src.kernel.llm import LLMPayload, ROLE, Text
 from src.kernel.llm.exceptions import LLMConfigurationError, LLMContentFilterError
+from src.kernel.llm.model_client.base import ModelClientResult
 from src.kernel.llm.model_client.gemini_client import GeminiChatClient
 from src.kernel.llm.model_client.gemini_codec import encode_payloads, target_identity
 from src.kernel.llm.payload import Image
 from test.kernel.llm.test_gemini_client import model, response
 
 
-async def create(client: GeminiChatClient, entry: object, **overrides: object):
+async def create(client: GeminiChatClient, entry: object, **overrides: object) -> ModelClientResult:
     """Exercise the adapter entry point with a valid minimal conversation."""
     kwargs = dict(model_name="test-model", payloads=[LLMPayload(ROLE.USER, Text("hi"))],
                   tools=[], request_name="edges", model_set=entry, stream=False)
@@ -107,6 +109,7 @@ async def test_custom_header_and_timeout_reach_real_sdk_request() -> None:
     """Safe custom headers remain usable alongside the SDK API key header."""
     observed = []
     def handler(req: httpx.Request) -> httpx.Response:
+        """记录 SDK 实际请求，以核对自定义请求头和超时配置。"""
         observed.append(req)
         return httpx.Response(200, json=response())
     entry = model()
@@ -124,6 +127,7 @@ async def test_custom_header_and_timeout_reach_real_sdk_request() -> None:
 
 @pytest.mark.parametrize("name", ["", "models/", "a/b", "a:b", "a?b", "a&b", "a#b", "a\\b", ".", ".."])
 async def test_invalid_model_identifier_is_rejected(name: str) -> None:
+    """非法模型标识必须在发送 HTTP 请求前被拒绝。"""
     client = GeminiChatClient()
     with pytest.raises(LLMConfigurationError, match="single model ID"):
         await create(client, model(), model_name=name)
@@ -131,12 +135,14 @@ async def test_invalid_model_identifier_is_rejected(name: str) -> None:
 
 @pytest.mark.parametrize("entry", [None, [], "model"])
 async def test_model_set_requires_one_mapping(entry: object) -> None:
+    """模型配置必须是单个映射，不能使用空值、列表或字符串。"""
     with pytest.raises(LLMConfigurationError, match="one model entry"):
         await create(GeminiChatClient(), entry)
 
 
 @pytest.mark.parametrize("payloads", [[], [LLMPayload(ROLE.SYSTEM, Text("system only"))]])
 async def test_empty_conversation_is_rejected(payloads: list) -> None:
+    """空对话或只有系统指令时必须拒绝生成。"""
     with pytest.raises(LLMConfigurationError, match="no conversation contents"):
         await create(GeminiChatClient(), model(), payloads=payloads)
 
@@ -145,7 +151,8 @@ async def test_sdk_constructor_failure_closes_injected_http_client() -> None:
     """Failed construction cannot orphan the MoFox-owned HTTP client."""
     clients = []
     original = httpx.AsyncClient
-    def track_http(**kwargs):
+    def track_http(**kwargs: Any) -> httpx.AsyncClient:
+        """透传 HTTPX 构造参数，并保留客户端以检查异常后的关闭状态。"""
         client = original(**kwargs)
         clients.append(client)
         return client
@@ -188,6 +195,7 @@ async def test_pool_evicts_oldest_idle_but_preserves_active_leases() -> None:
 
 
 async def test_concurrent_same_key_shares_one_client_and_counts_borrows() -> None:
+    """同配置的并发借用必须共享客户端并准确累计占用。"""
     client = GeminiChatClient(transport=httpx.MockTransport(lambda req: pytest.fail("unexpected HTTP")))
     leases = await asyncio.gather(*(client._get_client(model()) for _ in range(8)))
     try:
@@ -204,6 +212,7 @@ async def test_concurrent_same_key_shares_one_client_and_counts_borrows() -> Non
 async def test_stream_prompt_block_is_terminal_and_releases_lease() -> None:
     """A blocked prefetched chunk is a content filter error, never an empty success."""
     def handler(req: httpx.Request) -> httpx.Response:
+        """返回提示词安全拦截事件，检查预取失败时的租约释放。"""
         body = {"promptFeedback": {"blockReason": "SAFETY"}}
         return httpx.Response(200, text="data: " + json.dumps(body) + "\n\n",
                               headers={"content-type": "text/event-stream"})
@@ -223,6 +232,7 @@ async def test_stream_prompt_block_is_terminal_and_releases_lease() -> None:
 
 @pytest.mark.parametrize("name", [None, "", 123])
 def test_tool_declaration_requires_nonempty_string_name(name: object) -> None:
+    """工具声明必须使用非空字符串名称。"""
     tool = SimpleNamespace(to_schema=lambda: {"function": {"name": name}})
     with pytest.raises(LLMConfigurationError, match="tool requires a name"):
         encode_payloads([], target_identity(model()), [tool])

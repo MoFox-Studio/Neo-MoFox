@@ -1,6 +1,5 @@
 """Real SDK / fake HTTP tests for the Gemini adapter and public request chain."""
 import json
-from unittest.mock import patch
 
 import httpx
 import pytest
@@ -30,6 +29,7 @@ async def test_request_nonstream_stream_and_signed_tool_roundtrip(stream: bool) 
     """The request result survives to_payload and a second SDK generation."""
     requests: list[dict] = []
     async def handler(req: httpx.Request) -> httpx.Response:
+        """记录两轮原生请求，并按请求路径返回流式或非流式响应。"""
         requests.append(json.loads(req.content))
         result = response(tool=len(requests) == 1)
         if ":streamGenerateContent" in req.url.path:

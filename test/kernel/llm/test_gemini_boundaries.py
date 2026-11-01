@@ -26,6 +26,7 @@ async def test_actual_http_timeout_and_unconsumed_stream_close() -> None:
     """Unstarted streams still close their prefetched source and release leases."""
     observed: list[dict] = []
     async def handler(req: httpx.Request) -> httpx.Response:
+        """记录请求超时配置，并返回可预取的 SSE 响应。"""
         observed.append(req.extensions["timeout"])
         return httpx.Response(200, text="data: "+json.dumps(response())+"\n\n", headers={"content-type":"text/event-stream"})
     client = GeminiChatClient(transport=httpx.MockTransport(handler))
@@ -41,11 +42,15 @@ async def test_actual_http_timeout_and_unconsumed_stream_close() -> None:
 async def test_borrowed_transport_not_closed() -> None:
     """A caller can safely share an injected transport with another client."""
     class Transport(httpx.AsyncBaseTransport):
+        """记录关闭次数的借用传输层，用于检查调用方所有权。"""
         def __init__(self) -> None:
+            """初始化可观测的关闭计数。"""
             self.closed = 0
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            """为传入请求返回固定的原生 Gemini 响应。"""
             return httpx.Response(200, json=response())
         async def aclose(self) -> None:
+            """记录关闭动作，不执行外部资源操作。"""
             self.closed += 1
     transport = Transport()
     client = GeminiChatClient(transport=transport)
