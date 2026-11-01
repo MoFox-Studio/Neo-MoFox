@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import base64
 import json
+import math
+from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -15,7 +17,7 @@ from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResu
 from ..provider_state import ProviderReplayState, payload_fingerprint
 from ..roles import ROLE
 from .base import ModelClientResult
-from .shared import inject_reason_parameter, normalize_schema_for_grammar
+from .shared import extract_model_transport_params, inject_reason_parameter, normalize_schema_for_grammar
 
 
 def normalize_endpoint(base_url: str | None, api_version: str = "v1beta") -> tuple[str, str]:
@@ -48,10 +50,76 @@ def gemini_options(model: dict[str, Any]) -> dict[str, Any]:
     return options
 
 
+def resolve_gemini_endpoint(model: dict[str, Any]) -> tuple[str, str]:
+    """解析模型的服务根与版本，不要求凭据或其他传输字段。
+
+    Args:
+        model: 含可选 base_url 与 extra_params.gemini.api_version 的技术条目。
+
+    Returns:
+        规范服务根和 API 版本；不创建网络资源，不改变原始配置。
+    """
+    extra = model.get("extra_params", {})
+    if not isinstance(extra, dict):
+        raise LLMConfigurationError("Gemini extra_params must be an object")
+    options = extra.get("gemini", {})
+    if not isinstance(options, dict):
+        raise LLMConfigurationError("Gemini options and generation_config must be objects")
+    return normalize_endpoint(model.get("base_url"), options.get("api_version", "v1beta"))
+
+
+@dataclass(frozen=True, slots=True)
+class GeminiTransportSnapshot:
+    """生成池与临时预检共用的不可变技术传输配置，也是完整分组键。
+
+    快照只保存值，不创建或持有网络资源；凭据和自定义头不参与 repr，
+    但仍参与相等比较与哈希，避免不同认证配置误用同一组传输。
+    """
+
+    key: str = field(repr=False)
+    root: str
+    version: str
+    timeout: float
+    trust_env: bool
+    force_ipv4: bool
+    headers: tuple[tuple[str, str], ...] = field(repr=False)
+
+
+def resolve_gemini_transport(model: dict[str, Any]) -> GeminiTransportSnapshot:
+    """验证模型传输边界并冻结快照，不校验或承诺生成能力。
+
+    Args:
+        model: 已合并的技术条目，包含认证、端点、超时及传输覆盖字段。
+
+    Returns:
+        可用于池键或预检分组的冻结值，不创建或借用网络资源。
+
+    Raises:
+        LLMConfigurationError: 端点、超时或传输覆盖不符合现有 Gemini 契约。
+        ValueError: 共用传输解析器拒绝缺失凭据或非法配置形状。
+    """
+    key, _, timeout, trust, ipv4, _, headers, query, _ = extract_model_transport_params(model)
+    root, version = resolve_gemini_endpoint(model)
+    if query:
+        raise LLMConfigurationError("Gemini query overrides are not supported")
+    if any(name.casefold() in {"authorization", "x-goog-api-key", "host", "content-type"} for name in headers):
+        raise LLMConfigurationError("Gemini authentication/host headers cannot be overridden")
+    if timeout is None or not math.isfinite(timeout) or timeout <= 0:
+        raise LLMConfigurationError("Gemini timeout must be a positive finite number")
+    return GeminiTransportSnapshot(key, root, version, timeout, trust, ipv4, tuple(sorted(headers.items())))
+
+
 def target_identity(model: dict[str, Any]) -> tuple[str, str, str]:
-    """从 model 提取不含凭据的签名来源：provider、端点版本和模型标识。"""
-    options = gemini_options(model)
-    root, version = normalize_endpoint(model.get("base_url"), options.get("api_version", "v1beta"))
+    """从 model 提取不含凭据的签名来源：provider、端点版本和模型标识。
+
+    Args:
+        model: 候选模型条目，只要求模型标识，不额外要求 api_key。
+
+    Returns:
+        原有 provider、服务根加版本、移除 models/ 前缀的模型标识三元组。
+        本函数只解析值，不创建网络资源。
+    """
+    root, version = resolve_gemini_endpoint(model)
     return str(model.get("api_provider", "")), root + "/" + version, str(model["model_identifier"]).removeprefix("models/")
 
 

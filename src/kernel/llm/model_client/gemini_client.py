@@ -7,7 +7,7 @@ import math
 from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, TypeVar
+from typing import Any, AsyncIterator, Awaitable, TypeVar, cast
 from weakref import WeakKeyDictionary
 
 import httpx
@@ -23,11 +23,12 @@ from .gemini_codec import (
     decode_response,
     encode_payloads,
     gemini_options,
-    normalize_endpoint,
+    GeminiTransportSnapshot,
+    resolve_gemini_transport,
     target_identity,
 )
+from .probe_contract import ProviderProbeResult
 from .shared import extract_model_transport_params, log_provider_request_body
-
 
 _ResultT = TypeVar("_ResultT")
 
@@ -152,7 +153,7 @@ async def _capture_response(response: httpx.Response) -> None:
     """通过 HTTPX 公开 hook 将响应登记到当前拉取阶段所属的请求。"""
     owner = _response_owner.get()
     if owner is not None:
-        body = _ResponseBody(response.stream)
+        body = _ResponseBody(cast(httpx.AsyncByteStream, response.stream))
         response.stream = body
         owner.responses.append(response)
         owner.bodies.append(body)
@@ -260,7 +261,7 @@ class GeminiChatClient:
         """可注入调用方拥有的 transport；按事件循环管理其余自有资源。"""
         self._transport = transport
         self._pools: WeakKeyDictionary[
-            Any, OrderedDict[tuple[Any, ...], _ClientLease]
+            Any, OrderedDict[GeminiTransportSnapshot, _ClientLease]
         ] = WeakKeyDictionary()
         self._locks: WeakKeyDictionary[Any, asyncio.Lock] = WeakKeyDictionary()
 
@@ -272,23 +273,13 @@ class GeminiChatClient:
 
     async def _get_client_locked(self, model: dict[str, Any]) -> _ClientLease:
         """复用有界且按循环隔离的 SDK 资源，不在导入期间创建连接。"""
-        key, base, timeout, trust, ipv4, _, headers, query, _ = (
-            extract_model_transport_params(model)
-        )
-        options = gemini_options(model)
-        root, version = normalize_endpoint(base, options.get("api_version", "v1beta"))
-        if query:
-            raise LLMConfigurationError("Gemini query overrides are not supported")
-        if any(
-            name.casefold() in {"authorization", "x-goog-api-key", "host", "content-type"}
-            for name in headers
-        ):
-            raise LLMConfigurationError("Gemini authentication/host headers cannot be overridden")
-        if timeout is None or not math.isfinite(timeout) or timeout <= 0:
-            raise LLMConfigurationError("Gemini timeout must be a positive finite number")
+        snapshot = resolve_gemini_transport(model)
+        key, root, version = snapshot.key, snapshot.root, snapshot.version
+        timeout, trust, ipv4 = snapshot.timeout, snapshot.trust_env, snapshot.force_ipv4
+        headers = dict(snapshot.headers)
         loop = asyncio.get_running_loop()
-        pool = self._pools.setdefault(loop, OrderedDict())
-        cache_key = (key, root, version, timeout, trust, ipv4, tuple(sorted(headers.items())))
+        pool: OrderedDict[GeminiTransportSnapshot, _ClientLease] = self._pools.setdefault(loop, OrderedDict())
+        cache_key = snapshot
         if cache_key in pool:
             pool.move_to_end(cache_key)
             pool[cache_key].active += 1
@@ -335,7 +326,7 @@ class GeminiChatClient:
         loop = asyncio.get_running_loop()
         lock = self._locks.setdefault(loop, asyncio.Lock())
         async with lock:
-            pool = self._pools.get(loop, {})
+            pool: dict[GeminiTransportSnapshot, _ClientLease] = self._pools.get(loop, {})
             errors: list[Exception] = []
             for key, lease in list(pool.items()):
                 if not lease.active:
@@ -383,6 +374,7 @@ class GeminiChatClient:
         name = model_name.removeprefix("models/")
         if not name or any(char in name for char in "/:?&#\\") or name in {".", ".."}:
             raise LLMConfigurationError("Gemini model_identifier must be a single model ID")
+        gemini_options(model_set)
         target = target_identity(model_set)
         contents, system, declared = encode_payloads(payloads, target, tools)
         if not contents:
@@ -517,6 +509,122 @@ class GeminiChatClient:
                 provider_state=result.provider_state,
             )
         return ModelClientResult(stream_iter=_OwnedStream(events(), source, lease, owner))
+
+
+class GeminiProviderProbe:
+    """用独占临时资源执行官方 models.list，不借用或访问生成共享池。"""
+
+    requires_model_entries = True
+    requires_provider_entry = True
+    allows_anonymous_probe = False
+
+    async def _check_group(self, snapshot: GeminiTransportSnapshot, timeout: float) -> None:
+        """等待单组真实 SDK 请求及所有自有资源关闭，不重试且保留取消。
+
+        Args:
+            snapshot: 已验证的冻结技术配置，不涉及生成池或借用传输。
+            timeout: 此组预检上限，和条目超时取较小值。
+
+        Returns:
+            无返回值；成功前等待真实响应、临时 SDK 和自有 HTTP 全部关闭。
+            普通请求错误交由外层隔离，取消原样传播且不被普通清理错误替换。
+        """
+        effective_timeout = min(timeout, snapshot.timeout)
+        owner = _ResponseOwner()
+        http = httpx.AsyncClient(
+            timeout=build_httpx_timeout(effective_timeout),
+            trust_env=snapshot.trust_env,
+            transport=build_httpx_transport(force_ipv4=snapshot.force_ipv4),
+            follow_redirects=False,
+            event_hooks={"response": [_capture_response]},
+        )
+        token = _response_owner.set(owner)
+        lease: _ClientLease | None = None
+        primary_error: BaseException | None = None
+        try:
+            try:
+                sdk = genai.Client(
+                    vertexai=False, api_key=snapshot.key,
+                    http_options=types.HttpOptions(
+                        base_url=snapshot.root, api_version=snapshot.version,
+                        httpx_async_client=http, headers=dict(snapshot.headers),
+                        timeout=max(1, int(effective_timeout * 1000)),
+                        retry_options=types.HttpRetryOptions(attempts=1),
+                    ),
+                )
+                lease = _ClientLease(sdk, http)
+                await asyncio.wait_for(
+                    sdk.aio.models.list(config={"page_size": 1}), timeout=effective_timeout,
+                )
+            except BaseException as primary:
+                await _close_after_error(owner, primary)
+                raise
+            else:
+                await owner.aclose()
+        except BaseException as error:
+            primary_error = error
+            raise
+        finally:
+            _response_owner.reset(token)
+            try:
+                if lease is None:
+                    await http.aclose()
+                else:
+                    await lease.close()
+            except Exception:
+                if primary_error is None:
+                    raise
+                primary_error.add_note("Gemini 预检资源清理也发生错误；主异常保持不变。")
+
+    async def check(
+        self, entries: list[dict[str, Any]], timeout: float, *, provider_only: bool = False,
+    ) -> list[ProviderProbeResult]:
+        """按完整传输快照分组并隔离普通失败，全坏条目不回退默认配置。
+
+        Args:
+            entries: Core 已合并的模型配置，或无模型时显式给出的 provider 默认条目。
+            timeout: 单组预检上限，和模型超时取较小值。
+            provider_only: 只检查 provider 默认传输，不将其计为模型覆盖。
+
+        Returns:
+            每个坏条目和每组探测各一项安全结果，不携带配置或 SDK 原文。
+        """
+        results: list[ProviderProbeResult] = []
+        groups: dict[GeminiTransportSnapshot, int] = {}
+        scope = "仅 provider 默认配置，未覆盖模型；" if provider_only else ""
+        for entry_index, entry in enumerate(entries, 1):
+            try:
+                if not math.isfinite(timeout) or timeout <= 0:
+                    raise ValueError("invalid probe timeout")
+                snapshot = resolve_gemini_transport(entry)
+                groups[snapshot] = groups.get(snapshot, 0) + 1
+            except Exception as error:
+                results.append(ProviderProbeResult(
+                    "unverified", scope + f"条目 {entry_index} 传输配置无效（{type(error).__name__}），该项未验证",
+                    entry_index=entry_index,
+                ))
+        for group_index, (snapshot, count) in enumerate(groups.items(), 1):
+            covered = 0 if provider_only else count
+            group_scope = scope + f"组 {group_index}/{len(groups)}："
+            try:
+                await self._check_group(snapshot, timeout)
+            except Exception as error:
+                if getattr(error, "code", None) in {404, 405, 501}:
+                    results.append(ProviderProbeResult(
+                        "unsupported", group_scope + "跳过不支持 models.list 的网关，未验证生成能力",
+                        covered, 1, group_index=group_index,
+                    ))
+                else:
+                    results.append(ProviderProbeResult(
+                        "unverified", group_scope + f"models.list 失败（{type(error).__name__}），未验证生成能力",
+                        covered, 1, group_index=group_index,
+                    ))
+            else:
+                results.append(ProviderProbeResult(
+                    "available", group_scope + "models.list 可用（非生成检查）",
+                    covered, 1, group_index=group_index,
+                ))
+        return results
 
 
 _default_client: GeminiChatClient | None = None

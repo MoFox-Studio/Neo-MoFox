@@ -46,6 +46,9 @@ def _normalize_client_type(client_type: Any) -> str | None:
     return client_type.strip().casefold().replace("-", "_")
 
 
+def is_jev_client_type(client_type: object) -> bool:
+    """按注册表归一规则识别独立评估协议及需拒绝聊天回退的近似别名。"""
+    return _normalize_client_type(client_type) in _JEV_LOOSE_CLIENT_TYPES
 
 
 def is_gemini_client_type(client_type: Any) -> bool:
