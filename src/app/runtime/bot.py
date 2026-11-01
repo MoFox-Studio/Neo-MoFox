@@ -475,134 +475,37 @@ class Bot:
         await initialize_cloud_telemetry_runtime(self.config)
         self.ui.update_phase_status("云端遥测", "已初始化")
 
-    async def _preflight_gemini_provider(
-        self, provider: Any, models: list[Any], timeout: float,
-    ) -> None:
-        """使用官方 SDK 非生成 models.list 检查连通性；不代表模型生成验收。"""
-        import httpx
-        from google import genai
-        from google.genai import types
-        from src.kernel.llm.model_client.gemini_codec import normalize_endpoint
-
-        assert self.config is not None
-        versions = {
-            model.extra_params.get("gemini", {}).get("api_version", "v1beta")
-            for model in models if model.api_provider == provider.name
-        }
-        if len(versions) > 1:
-            raise ValueError("Gemini preflight requires one API version per provider")
-        root, version = normalize_endpoint(provider.base_url, next(iter(versions), "v1beta"))
-        effective_timeout = min(timeout, float(provider.timeout))
-        async with httpx.AsyncClient(
-            timeout=effective_timeout, trust_env=self.config.advanced.trust_env,
-            follow_redirects=False,
-        ) as http:
-            sdk = genai.Client(
-                vertexai=False, api_key=provider.get_api_key(),
-                http_options=types.HttpOptions(
-                    base_url=root, api_version=version, httpx_async_client=http,
-                    timeout=max(1, int(effective_timeout * 1000)),
-                    retry_options=types.HttpRetryOptions(attempts=1),
-                ),
-            )
-            try:
-                await asyncio.wait_for(
-                    sdk.aio.models.list(config={"page_size": 1}),
-                    timeout=effective_timeout,
-                )
-            finally:
-                try:
-                    await sdk.aio.aclose()
-                finally:
-                    sdk.close()
 
     async def _preflight_llm_providers(self) -> None:
-        """按显式 provider 协议执行非生成连通性预检。"""
+        """安排领域预检并报告安全结果，不掌握供应商协议或资源机制。"""
         assert self.config is not None
         if not self.config.bot.llm_preflight_check:
             self.ui.update_phase_status("LLM 预检", "已跳过")
             return
 
         assert self.logger is not None
-
         from src.core.config import get_model_config
-        from src.kernel.jev import JEV_CLIENT_TYPES
-        import httpx
-        import time
+        from src.core.managers.llm_runtime import preflight_llm_providers
 
-        model_config = get_model_config()
-        providers = model_config.api_providers
-        if not providers:
+        self.ui.update_phase_status("LLM 预检", "进行中...")
+        results = await preflight_llm_providers(
+            get_model_config(),
+            timeout=float(self.config.bot.llm_preflight_timeout or 5.0),
+            trust_env=self.config.advanced.trust_env,
+        )
+        if not results:
             self.logger.warning("LLM 预检: 未配置任何 API 提供商")
             self.ui.update_phase_status("LLM 预检", "无配置")
             return
-
-        timeout = float(self.config.bot.llm_preflight_timeout or 5.0)
-        self.ui.update_phase_status("LLM 预检", "进行中...")
-        logger = self.logger
-
-        async with httpx.AsyncClient(
-            timeout=timeout, trust_env=self.config.advanced.trust_env,
-        ) as client:
-            async def _check_provider(provider: Any) -> None:
-                """隔离单个 provider 的预检失败，不切换协议或记录凭据。"""
-                # JEv 是独立的 typed-evaluation provider，只提供 /v1/systemone，
-                # 没有 /models 路由；按聊天 provider 探测只会得到无意义的 404。
-                client_type = str(getattr(provider, "client_type", "") or "").casefold()
-                if client_type in JEV_CLIENT_TYPES:
-                    logger.info(
-                        "LLM 预检: 跳过 Jev provider %s（非聊天 provider，无 /models 路由）",
-                        provider.name,
-                    )
-                    return
-
-                if client_type in {"gemini", "aiohttp_gemini", "google", "gemini_v2"}:
-                    start = time.perf_counter()
-                    try:
-                        await self._preflight_gemini_provider(provider, model_config.models, timeout)
-                        logger.info(
-                            "LLM 预检: Gemini models.list 可用 %.2fs（非生成检查）",
-                            time.perf_counter() - start,
-                        )
-                    except Exception as exc:
-                        # SDK 错误文本、URL、provider 名称均可能包含凭据；只记录异常类型。
-                        if getattr(exc, "code", None) in {404, 405, 501}:
-                            logger.info("LLM 预检: 跳过不支持 models.list 的 Gemini 网关，未验证生成能力")
-                        else:
-                            logger.warning(
-                                "LLM 预检失败: Gemini models.list %.2fs (%s)，未切换协议",
-                                time.perf_counter() - start, type(exc).__name__,
-                            )
-                    return
-
-                base_url = str(provider.base_url).rstrip("/")
-                url = f"{base_url}/models"
-                headers: dict[str, str] = {}
-                try:
-                    api_key = provider.get_api_key()
-                except Exception:
-                    api_key = ""
-                if api_key:
-                    headers["Authorization"] = f"Bearer {api_key}"
-
-                start = time.perf_counter()
-                try:
-                    resp = await client.get(url, headers=headers)
-                    elapsed = time.perf_counter() - start
-                    logger.info(
-                        f"LLM 预检: {provider.name} {resp.status_code} {elapsed:.2f}s ({url})"
-                    )
-                except Exception as e:
-                    elapsed = time.perf_counter() - start
-                    logger.warning(
-                        f"LLM 预检失败: {provider.name} {elapsed:.2f}s ({url}) -> {e}"
-                    )
-
-            await asyncio.gather(
-                *(_check_provider(provider) for provider in providers),
-                return_exceptions=True,
-            )
-
+        for result in results:
+            if result.status == "unverified":
+                self.logger.warning(f"LLM 预检: {result.detail}")
+            else:
+                self.logger.info(f"LLM 预检: {result.detail}")
+        self.logger.info(
+            f"LLM 预检: 有效配置覆盖 {sum(result.covered_models for result in results)} 项、"
+            f"{sum(result.groups for result in results)} 组；不验证生成能力"
+        )
         self.ui.update_phase_status("LLM 预检", "已完成")
 
     def _check_http_security(self, host: str, api_keys: list[str]) -> None:
