@@ -11,7 +11,7 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine
 from urllib.parse import urlparse
 
 from src.core.config import CORE_VERSION
@@ -474,7 +474,6 @@ class Bot:
 
         await initialize_cloud_telemetry_runtime(self.config)
         self.ui.update_phase_status("云端遥测", "已初始化")
-
 
     async def _preflight_llm_providers(self) -> None:
         """安排领域预检并报告安全结果，不掌握供应商协议或资源机制。"""
@@ -1065,6 +1064,83 @@ class Bot:
         self._stats["plugins_loaded"] = 0
         self._stats["plugins_failed"] = 0
 
+    async def _await_shutdown_step(
+        self, operation: Coroutine[Any, Any, Any], deadline: float, phase: str,
+    ) -> Any:
+        """在共同截止时间内等待步骤；超时只请求取消，不无期限等待其 finally。
+
+        Args:
+            operation: 当前关闭步骤，任务由全局任务管理器追踪。
+            deadline: 当前事件循环单调时钟的共同截止时间。
+            phase: 不含配置或凭据的固定阶段名称，用于诊断超时来源。
+        """
+        from src.kernel.concurrency import get_task_manager
+
+        manager = self.task_manager or get_task_manager()
+        task = manager.create_task(operation, name=f"shutdown_{phase}", daemon=True).task
+        assert task is not None
+
+        def retrieve_error(completed: asyncio.Task[Any]) -> None:
+            """回收超时后迟到的步骤异常，避免未取回异常告警。"""
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(retrieve_error)
+        try:
+            done, _ = await asyncio.wait(
+                {task}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+            )
+            if not done:
+                raise BotShutdownError(f"关闭超时: {phase}，活动资源未确认回收") from TimeoutError(phase)
+            return task.result()
+        finally:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+
+    async def _wait_shutdown_tasks(
+        self, tasks: list[asyncio.Task[Any]], deadline: float, phase: str,
+    ) -> None:
+        """只等待已捕获且非当前的任务；截止后报告失败，不强制关闭活动池。"""
+        pending = {task for task in tasks if task is not asyncio.current_task() and not task.done()}
+        if pending:
+            _, pending = await asyncio.wait(
+                pending, timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+            )
+            if pending:
+                raise BotShutdownError(f"关闭超时: {phase}，{len(pending)} 个活动任务未完成清理") from TimeoutError(phase)
+
+    async def _stop_chat_tasks(self, deadline: float) -> None:
+        """停止聊天来源并等待捕获的 daemon 句柄完成，保留全局等待语义。
+
+        管理器 stop 的带超时等待不涵盖被替换的旧流句柄，因此先从
+        TaskManager 捕获仍登记的聊天 daemon（含未清理的已退出句柄）。仅取消尚未取消的任务，避免
+        二次取消打断其 lease 清理；外部取消本方法仍正常传播。
+        """
+        from src.core.transport.distribution.stream_loop_manager import get_stream_loop_manager
+
+        current = asyncio.current_task()
+        tasks = [
+            info.task for info in self.task_manager.get_active_tasks()
+            if info.daemon and info.name is not None and info.name.startswith("chat_stream_")
+            and info.task is not None and info.task is not current
+        ] if self.task_manager else []
+        if self.watchdog:
+            self.watchdog.stop()
+        manager = get_stream_loop_manager()
+        try:
+            if manager.is_running:
+                await self._await_shutdown_step(manager.stop(), deadline, "停止聊天来源")
+        except BotShutdownError:
+            raise
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"停止聊天来源失败 ({type(exc).__name__})，继续等待已捕获任务")
+        finally:
+            for task in tasks:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+        await self._wait_shutdown_tasks(tasks, deadline, "聊天请求释放")
+
     async def shutdown(self, timeout: float = 30.0) -> None:
         """优雅关闭 Bot
 
@@ -1085,7 +1161,10 @@ class Bot:
         else:
             print("正在关闭 Neo-MoFox Bot...")
 
-        gemini_clients_closed = False
+        deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+        model_clients_closed = False
+        chat_tasks_stopped = False
+        shutdown_timed_out = False
         try:
             await self._record_telemetry_event(
                 domain="runtime",
@@ -1106,6 +1185,10 @@ class Bot:
             except Exception as e:
                 if self.logger:
                     self.logger.warning(f"触发 ON_STOP 事件失败: {e}")
+
+            # 先关闭聊天任务来源并等待请求释放，再卸载插件和最终回收池。
+            await self._stop_chat_tasks(deadline)
+            chat_tasks_stopped = True
 
             # 3. 卸载插件
             await self._unload_all_plugins()
@@ -1142,25 +1225,35 @@ class Bot:
             # 8. 停止任务管理器（取消所有活动任务）
             if self.task_manager:
                 active_tasks = self.task_manager.get_active_tasks()
+                current = asyncio.current_task()
+                handles = [
+                    info.task for info in active_tasks
+                    if info.task is not None and info.task is not current
+                ]
                 for task_info in active_tasks:
-                    self.task_manager.cancel_task(task_info.task_id)
+                    if task_info.task is not current and (
+                        task_info.task is None or not task_info.task.cancelling()
+                    ):
+                        self.task_manager.cancel_task(task_info.task_id)
 
-                # 等待所有非守护任务完成
-                await self.task_manager.wait_all_tasks()
+                # 仅等待捕获的非当前句柄，不能调用会包含托管 shutdown 自身的全局等待。
+                await self._wait_shutdown_tasks(handles, deadline, "任务请求释放")
 
                 # 清理已完成的任务
                 self.task_manager.cleanup_tasks()
                 self.task_manager.shutdown_process_pool(wait=False)
 
-            # 活动 LLM 任务结束后、事件循环和线程池结束前释放 Gemini 连接。
-            from src.kernel.llm.model_client.gemini_client import close_gemini_clients
+            # 活动 LLM 任务结束后、事件循环和线程池结束前回收内核拥有的默认资源。
+            from src.kernel.llm.model_client.runtime import close_default_model_clients
 
-            gemini_clients_closed = True
+            model_clients_closed = True
             try:
-                await close_gemini_clients()
+                await self._await_shutdown_step(close_default_model_clients(), deadline, "关闭默认模型资源")
+            except BotShutdownError:
+                raise
             except Exception as exc:
                 if self.logger:
-                    self.logger.warning("关闭 Gemini 客户端失败 (%s)", type(exc).__name__)
+                    self.logger.warning(f"关闭默认模型客户端失败 ({type(exc).__name__})")
 
             # 9. 关闭数据库
             from src.kernel.db import close_engine
@@ -1181,14 +1274,6 @@ class Bot:
             # 10.6 关闭 LLM 统计数据库
             from src.kernel.llm.stats import close_llm_stats_db
             await close_llm_stats_db()
-
-            # 10.6.1 停止 StreamLoopManager
-            from src.core.transport.distribution.stream_loop_manager import (
-                get_stream_loop_manager,
-            )
-            stream_loop_manager = get_stream_loop_manager()
-            if stream_loop_manager.is_running:
-                await stream_loop_manager.stop()
 
             # 10.6.2 恢复 DNS patch 并关闭 DNS 线程池
             loop = asyncio.get_running_loop()
@@ -1233,6 +1318,9 @@ class Bot:
 
             self.ui.display_success("关闭完成")
 
+        except BotShutdownError as error:
+            shutdown_timed_out = str(error).startswith("关闭超时:")
+            raise
         except Exception as e:
             await self._record_telemetry_event(
                 domain="error",
@@ -1248,26 +1336,37 @@ class Bot:
                 print(f"关闭过程中出错: {e}")
             raise BotShutdownError(f"关闭失败: {e}") from e
         finally:
-            if not gemini_clients_closed:
-                try:
-                    from src.kernel.llm.model_client.gemini_client import close_gemini_clients
+            try:
+                if not model_clients_closed and not shutdown_timed_out:
+                    try:
+                        from src.kernel.llm.model_client.runtime import close_default_model_clients
 
-                    await close_gemini_clients()
-                except Exception as exc:
-                    if self.logger:
-                        self.logger.warning("关闭 Gemini 客户端失败 (%s)", type(exc).__name__)
-            # 关闭命令解析器：input worker 活到现在，shutdown 期间的第二次
-            # Ctrl+C 仍能被它读取并 raise_signal 触发强制退出。shutdown 完成
-            # 后才关闭，并通过 app.exit 注入 EOF 让阻塞中的 prompt() 返回，
-            # 避免终端残留 raw 模式。
-            if self._command_parser is not None:
-                self._command_parser.close()
-                self._command_parser = None
-            # 卸下信号处理器：shutdown 已完成（或失败），不再需要拦截 SIGINT。
-            # 此后 Ctrl+C 恢复为 asyncio/Python 默认行为。
-            if self._signal_handler is not None:
-                self._signal_handler.restore_handlers()
-                self._signal_handler = None
+                        if not chat_tasks_stopped:
+                            await self._stop_chat_tasks(deadline)
+                        await self._await_shutdown_step(close_default_model_clients(), deadline, "兜底关闭默认模型资源")
+                    except Exception as exc:
+                        if self.logger:
+                            self.logger.warning(f"关闭默认模型客户端失败 ({type(exc).__name__})")
+            finally:
+                # 网络清理可取消，但不能跳过终端和信号的同步恢复。
+                try:
+                    parser = self._command_parser
+                    self._command_parser = None
+                    if parser is not None:
+                        try:
+                            parser.close()
+                        except Exception as exc:
+                            if self.logger:
+                                self.logger.warning(f"关闭命令解析器失败 ({type(exc).__name__})")
+                finally:
+                    handler = self._signal_handler
+                    self._signal_handler = None
+                    if handler is not None:
+                        try:
+                            handler.restore_handlers()
+                        except Exception as exc:
+                            if self.logger:
+                                self.logger.warning(f"恢复信号处理器失败 ({type(exc).__name__})")
 
     async def start(self) -> None:
         """完整的启动流程（初始化 + 运行 + 关闭）
