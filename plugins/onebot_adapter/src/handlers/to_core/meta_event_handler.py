@@ -27,7 +27,7 @@ class MetaEventHandler:
         self._interval_checking = False
         self._heartbeat_task: TaskInfo | None = None
         self._reconnecting = False
-        self._last_reconnect_at = 0.0
+        self._last_reconnect_at: float | None = None
 
     def set_plugin_config(self, config: dict[str, Any]) -> None:
         """设置插件配置"""
@@ -62,19 +62,11 @@ class MetaEventHandler:
             # 心跳到达即证明传输层存活，任何心跳都刷新存活时钟；
             # good 是端侧业务状态，不应让传输层超时判定（心跳超时）误伤。
             self.last_heart_beat = time.time()
+            self_id = raw.get("self_id")
             if raw["status"].get("online") and raw["status"].get("good"):
-                self_id = raw.get("self_id")
                 interval = raw.get("interval")
                 if interval:
                     self.interval = interval / 1000
-                if not self._interval_checking and self_id:
-                    # 第一次收到心跳包时才启动心跳检查
-                    tm = get_task_manager()
-                    self._heartbeat_task = tm.create_task(
-                        self.check_heartbeat(self_id),
-                        name="onebot_adapter_heartbeat_check",
-                        daemon=True,
-                    )
             else:
                 self_id = raw.get("self_id")
                 status = raw.get("status") or {}
@@ -91,30 +83,42 @@ class MetaEventHandler:
                     logger.info(
                         f"Bot {self_id} OneBot 端状态降级（good=false），保持连接观察"
                     )
+            if not self._interval_checking and self_id and not self._reconnecting:
+                # 任意首个心跳即启动心跳监控（含降级心跳）：降级期间若心跳
+                # 彻底停止，超时判定依然要能触发重连兜底。
+                tm = get_task_manager()
+                self._heartbeat_task = tm.create_task(
+                    self.check_heartbeat(self_id),
+                    name="onebot_adapter_heartbeat_check",
+                    daemon=True,
+                )
 
     async def _reconnect_after_heartbeat_failure(
         self,
         bot_id: int | None,
         reason: str,
-    ) -> None:
-        """在心跳异常后触发一次重连。"""
+    ) -> bool:
+        """在心跳异常后触发一次重连。返回 True 表示实际执行了重连。"""
         if self._reconnecting:
-            return
-
-        now = time.time()
-        if now - self._last_reconnect_at < 60.0:
+            return False
+        if (
+            self._last_reconnect_at is not None
+            and time.monotonic() - self._last_reconnect_at < 60.0
+        ):
             logger.warning(
                 f"Bot {bot_id} 距上次重连不足 60s，跳过本次自动重连：{reason}"
             )
-            return
-        self._last_reconnect_at = now
-
+            return False
         self._reconnecting = True
         try:
             logger.error(f"Bot {bot_id} 检测到 OneBot 连接异常，开始重连：{reason}")
             await self.adapter.reconnect()
+            # 仅成功执行后记录时间戳：失败重连允许下一周期立即重试。
+            self._last_reconnect_at = time.monotonic()
+            return True
         except Exception as e:
             logger.error(f"Bot {bot_id} OneBot 自动重连失败: {e}")
+            return False
         finally:
             self._reconnecting = False
 
@@ -124,11 +128,13 @@ class MetaEventHandler:
             while True:
                 now_time = time.time()
                 if now_time - self.last_heart_beat > self.interval * 2:
-                    await self._reconnect_after_heartbeat_failure(
+                    # 重连被节流跳过时不退出监控：冷却结束后下一轮继续尝试。
+                    reconnected = await self._reconnect_after_heartbeat_failure(
                         id,
                         "心跳超时",
                     )
-                    break
+                    if reconnected:
+                        break
                 await asyncio.sleep(self.interval)
         finally:
             self._interval_checking = False
