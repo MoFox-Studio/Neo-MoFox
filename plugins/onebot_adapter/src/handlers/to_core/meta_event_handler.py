@@ -27,6 +27,7 @@ class MetaEventHandler:
         self._interval_checking = False
         self._heartbeat_task: TaskInfo | None = None
         self._reconnecting = False
+        self._last_reconnect_at = 0.0
 
     def set_plugin_config(self, config: dict[str, Any]) -> None:
         """设置插件配置"""
@@ -58,6 +59,9 @@ class MetaEventHandler:
                 logger.info(f"Bot {self_id} 连接成功")
                 # 不在连接时立即启动心跳检查，等第一个心跳包到达后再启动
         elif event_type == MetaEventType.heartbeat:
+            # 心跳到达即证明传输层存活，任何心跳都刷新存活时钟；
+            # good 是端侧业务状态，不应让传输层超时判定（心跳超时）误伤。
+            self.last_heart_beat = time.time()
             if raw["status"].get("online") and raw["status"].get("good"):
                 self_id = raw.get("self_id")
                 interval = raw.get("interval")
@@ -71,14 +75,22 @@ class MetaEventHandler:
                         name="onebot_adapter_heartbeat_check",
                         daemon=True,
                     )
-                self.last_heart_beat = time.time()
             else:
                 self_id = raw.get("self_id")
-                logger.warning(f"Bot {self_id} OneBot 端异常！")
-                await self._reconnect_after_heartbeat_failure(
-                    self_id,
-                    "心跳状态异常",
-                )
+                status = raw.get("status") or {}
+                if status.get("online") is False:
+                    # 端侧明确上报离线才重连
+                    logger.warning(f"Bot {self_id} OneBot 端已离线，开始重连")
+                    await self._reconnect_after_heartbeat_failure(
+                        self_id,
+                        "OneBot 端离线",
+                    )
+                else:
+                    # good=false 但 online 仍为 true：多为端侧瞬时状态降级
+                    # （如接收链路静默），保持连接仅记录，避免重连风暴
+                    logger.info(
+                        f"Bot {self_id} OneBot 端状态降级（good=false），保持连接观察"
+                    )
 
     async def _reconnect_after_heartbeat_failure(
         self,
@@ -88,6 +100,14 @@ class MetaEventHandler:
         """在心跳异常后触发一次重连。"""
         if self._reconnecting:
             return
+
+        now = time.time()
+        if now - self._last_reconnect_at < 60.0:
+            logger.warning(
+                f"Bot {bot_id} 距上次重连不足 60s，跳过本次自动重连：{reason}"
+            )
+            return
+        self._last_reconnect_at = now
 
         self._reconnecting = True
         try:
