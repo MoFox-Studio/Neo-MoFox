@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.core.components.loader import clear_registry
+from src.core.components.loader import PluginManifest, clear_registry
 from src.core.components.registry import get_global_registry
 from src.core.components.state_manager import get_global_state_manager
 from src.core.managers.config_manager import reset_config_manager
@@ -287,3 +288,32 @@ async def test_config_toggle_rebuilds_plugin_components(
     assert get_global_registry().get("demo:action:demo_action") is None
 
     await manager.unload_plugin("demo")
+
+
+@pytest.mark.asyncio
+async def test_manifest_python_dependencies_use_dependency_installer() -> None:
+    manager = PluginManager()
+    manifest = PluginManifest(
+        name="dependency_plugin",
+        version="1.0.0",
+        description="test",
+        author="test",
+        python_dependencies=["demo-package>=1.0"],
+    )
+    install_for_plugins = AsyncMock(return_value={"dependency_plugin": True})
+
+    with (
+        patch(
+            "src.core.config.get_core_config",
+            side_effect=RuntimeError("core config not initialized"),
+        ),
+        patch(
+            "src.core.components.utils.DependencyInstaller.install_for_plugins",
+            install_for_plugins,
+        ),
+    ):
+        assert await manager._ensure_manifest_dependencies(manifest) is True
+
+    spec = install_for_plugins.await_args.args[0][0]
+    assert spec.plugin_name == "dependency_plugin"
+    assert spec.packages == ["demo-package>=1.0"]
