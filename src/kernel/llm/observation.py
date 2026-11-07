@@ -88,7 +88,8 @@ def make_stream_stats_recorder(
 ) -> Callable[[dict[str, Any] | None, float], None]:
     """构造一个在流式请求结束后记录最终统计信息的回调。"""
 
-    def recorder(final_usage: dict[str, Any] | None, final_latency: float) -> None:
+    def recorder(final_usage: dict[str, Any] | None, final_latency: float, *, error: BaseException | None = None) -> None:
+        """记录 final_usage、秒级 final_latency 与真实终态 error，失败不计成功。"""
         record_request_observation(
             RequestObservation(
                 model=model,
@@ -97,10 +98,11 @@ def make_stream_stats_recorder(
                 meta_data=meta_data,
                 latency=final_latency,
                 usage=final_usage,
-                success=True,
+                success=error is None,
                 stream=True,
                 retry_count=retry_count,
                 model_index=model_index,
+                error=error,
             )
         )
 

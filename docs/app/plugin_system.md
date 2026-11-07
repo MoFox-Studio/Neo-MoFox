@@ -30,7 +30,7 @@ src/app/plugin_system/api/__init__.py 聚合各插件 API 子模块：
 - 插件与配置：plugin_api、config_api、permission_api、person_api。
 - 组件能力：action_api、agent_api、adapter_api、command_api、tool_api。
 - 业务支撑：service_api、router_api、event_api。
-- 基础设施：database_api、storage_api、llm_api、log_api、media_api、prompt_api、request_inspector_api。
+- 基础设施：database_api、storage_api、llm_api、jev_api、log_api、media_api、prompt_api、request_inspector_api。
 
 建议优先从聚合入口导入，减少插件与底层模块的耦合深度。
 

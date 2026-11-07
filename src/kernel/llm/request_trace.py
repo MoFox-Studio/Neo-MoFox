@@ -14,11 +14,15 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, AsyncIterator, TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 
+from ._stream_close import CloseOutcome, close_outcome, select_close_error
 from .request_inspector import get_inspector
+
+if TYPE_CHECKING:
+    from .model_client.base import StreamEvent
 
 logger = get_logger("kernel.llm.inspection", display="LLM 请求观测")
 
@@ -138,6 +142,8 @@ class Attempt:
         self._metadata: dict[str, Any] = {}
         self._has_raw = False
         self._usage_fields: set[str] = set()
+        self._stream_handed_off = False
+        self._stream_consumed = False
         try:
             self._inspector = get_inspector()
             self.record_id = self._inspector.capture(
@@ -363,6 +369,36 @@ class Attempt:
                 resource, "close", None
             )
 
+    def handoff_stream(self) -> None:
+        """将流终态交给 ManagedStream，适配器仍负责已消费的 SDK 资源关闭。"""
+        self._stream_handed_off = True
+
+    def observe_stream(self, source: AsyncIterator[StreamEvent]) -> _ObservedStream:
+        """给统一事件源补齐未绑定适配器观测，不包装 SDK 或解析供应商协议。
+
+        Args:
+            source: 已建立、即将交给 ManagedStream 的统一流事件源。
+
+        Returns:
+            委托读取与关闭的事件源；只有未绑定原生观测时才补记标准事件。
+        """
+        return _ObservedStream(source, self)
+
+    async def close_unconsumed_resource(self) -> None:
+        """回收尚未消费生成器持有的 SDK 资源，关闭错误交给上层仲裁。
+
+        已进入 consume() 的适配器自行执行 finally，不重复调用其关闭方法。
+        没有进入生成器时，单纯 generator.aclose() 不会运行其中的 finally，
+        因而在这里使用 opened() 登记的回调。回调只取一次。
+        """
+        if self._stream_consumed:
+            return
+        close, self._close = self._close, None
+        if callable(close):
+            value = close()
+            if inspect.isawaitable(value):
+                await value
+
     async def close_resource(self) -> None:
         """至多关闭一次资源，清理失败不得覆盖模型执行异常。"""
         close, self._close = self._close, None
@@ -403,13 +439,72 @@ class Attempt:
         Returns:
             Iterator[None]: 跟踪流消费结束、失败与取消的上下文管理器。
         """
+        self._stream_consumed = True
         try:
             yield
         except BaseException as error:
-            self.finish(error)
+            if not self._stream_handed_off:
+                self.finish(error)
             raise
         else:
-            self.finish()
+            if not self._stream_handed_off:
+                self.finish()
+        finally:
+            # 适配器的消费作用域已经执行清理，不保留第二份 SDK 关闭权。
+            self._close = None
+
+
+class _ObservedStream:
+    """将统一事件观测与未消费资源交接给托管层，不拥有第二套重试策略。"""
+
+    def __init__(self, source: AsyncIterator[StreamEvent], trace: Attempt) -> None:
+        """保存事件源与观测句柄，串行缓存一次关闭结果。
+
+        Args:
+            source: 适配器返回的统一事件源。
+            trace: 当前尝试的观测句柄，不与替代请求共享终态。
+        """
+        self.source = source
+        self.trace = trace
+        self._lock = asyncio.Lock()
+        self._closed = False
+        self._close_error: BaseException | None = None
+
+    def __aiter__(self) -> _ObservedStream:
+        """返回当前统一事件迭代器。"""
+        return self
+
+    async def __anext__(self) -> StreamEvent:
+        """原样读取事件；原生适配器已观测的事件不再重复归并。"""
+        event = await anext(self.source)
+        return event
+
+    async def _close_outcome(self) -> CloseOutcome:
+        """交接一次源关闭及未消费资源关闭结果，保留控制异常来源。"""
+        try:
+            async with self._lock:
+                if self._closed:
+                    return CloseOutcome(self._close_error)
+                self._closed = True
+                outcome = await close_outcome(self.source)
+                try:
+                    await self.trace.close_unconsumed_resource()
+                except BaseException as error:
+                    secondary = CloseOutcome(error, not isinstance(error, Exception))
+                    selected = select_close_error(outcome.error, secondary)
+                    outcome = CloseOutcome(
+                        selected, outcome.fresh_control or secondary.fresh_control,
+                    )
+                self._close_error = outcome.error
+                return outcome
+        except BaseException as error:
+            return CloseOutcome(error, not isinstance(error, Exception))
+
+    async def aclose(self) -> None:
+        """显式关闭事件源，重复调用仅重放缓存错误。"""
+        outcome = await self._close_outcome()
+        if outcome.error is not None:
+            raise outcome.error
 
 
 @contextmanager

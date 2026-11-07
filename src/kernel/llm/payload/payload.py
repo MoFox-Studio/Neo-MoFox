@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from ..provider_state import ProviderReplayState
 from ..roles import ROLE
 from .content import Content
 from .tooling import LLMUsable
@@ -24,7 +25,13 @@ def _normalize_content(content: Content | LLMUsable | list[Content | LLMUsable])
 class LLMPayload:
     role: ROLE
     content: list[Content | LLMUsable]
+    provider_state: ProviderReplayState | None = field(default=None, repr=False)
 
-    def __init__(self, role: ROLE, content: Content | LLMUsable | list[Content | LLMUsable]):
+    def __init__(
+        self, role: ROLE, content: Content | LLMUsable | list[Content | LLMUsable],
+        *, provider_state: ProviderReplayState | None = None,
+    ) -> None:
+        """Build a payload, optionally preserving an opaque provider snapshot."""
         self.role = role
         self.content = _normalize_content(content)
+        self.provider_state = provider_state

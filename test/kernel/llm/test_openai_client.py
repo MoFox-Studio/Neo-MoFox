@@ -4,9 +4,11 @@
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from typing import cast, Any
 
+import httpx
 import pytest
 
 from src.kernel.llm import (
@@ -1534,4 +1536,404 @@ async def test_create_keeps_stream_options_as_top_level_param():
     call_kwargs = mock_chat.completions.create.call_args.kwargs
     assert call_kwargs["stream_options"] == {"include_usage": False}
     assert "stream_options" not in call_kwargs.get("extra_body", {})
+
+
+class TestCreateRerank:
+    """测试基于 HTTP endpoint 的 rerank 请求。
+
+    OpenAI SDK 没有通用的 rerank namespace，因此 create_rerank 直接走 httpx；
+    这里用 MockTransport 拦截请求，验证 URL、鉴权、请求体与响应解析。
+    """
+
+    @staticmethod
+    def _patch_transport(handler) -> Any:
+        """把 httpx.AsyncClient 换成携带 MockTransport 的真实客户端。"""
+        # 必须先取出真实类：patch 之后 httpx.AsyncClient 已指向 factory。
+        client_cls = httpx.AsyncClient
+
+        def factory(**kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return client_cls(**kwargs)
+
+        return patch("httpx.AsyncClient", factory)
+
+    @staticmethod
+    def _model_set(**overrides: Any) -> dict[str, Any]:
+        model_set: dict[str, Any] = {
+            "api_key": "test-key",
+            "base_url": "https://rerank.example/v1",
+            "extra_params": {},
+        }
+        model_set.update(overrides)
+        return model_set
+
+    @staticmethod
+    def _ok(results: Any) -> Any:
+        def handler(request: httpx.Request) -> httpx.Response:
+            del request
+            return httpx.Response(200, json={"results": results})
+
+        return handler
+
+    async def test_posts_to_derived_endpoint_and_sorts_results(self):
+        """默认 endpoint 由 base_url 拼接，并按 score 降序截断 top_n。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["authorization"] = request.headers["Authorization"]
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"index": 1, "relevance_score": 0.9},
+                        {"index": 0, "score": 0.2},
+                        {"index": 2, "score": 0.5},
+                    ]
+                },
+            )
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            results = await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["java", "python", "go"],
+                top_n=2,
+                request_name="test",
+                model_set=self._model_set(),
+            )
+
+        assert results == [
+            {"index": 1, "score": 0.9, "document": "python"},
+            {"index": 2, "score": 0.5, "document": "go"},
+        ]
+        assert seen["url"] == "https://rerank.example/v1/rerank"
+        assert seen["authorization"] == "Bearer test-key"
+        assert seen["body"] == {
+            "model": "rerank-v1",
+            "query": "python",
+            "documents": ["java", "python", "go"],
+            "top_n": 2,
+        }
+
+    async def test_uses_explicit_rerank_endpoint_and_http_overrides(self):
+        """rerank_url、headers/query/body 覆盖均生效。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["trace"] = request.headers["X-Trace"]
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"results": []})
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["python"],
+                top_n=None,
+                request_name="test",
+                model_set=self._model_set(
+                    rerank_url="https://rerank.example/custom/sort",
+                    extra_params={
+                        "headers": {"X-Trace": "trace-1"},
+                        "query": {"tenant": "t1"},
+                        "body": {"return_documents": False},
+                    },
+                ),
+            )
+
+        assert seen["url"] == "https://rerank.example/custom/sort?tenant=t1"
+        assert seen["trace"] == "trace-1"
+        assert seen["body"] == {
+            "model": "rerank-v1",
+            "query": "python",
+            "documents": ["python"],
+            "return_documents": False,
+        }
+
+    async def test_body_cannot_override_core_rerank_fields(self) -> None:
+        """extra_params.body 不能覆盖 model/query/documents。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            """记录实际排序请求体，并返回空结果供核心字段断言。"""
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"results": []})
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["python"],
+                top_n=None,
+                request_name="test",
+                model_set=self._model_set(
+                    extra_params={
+                        "body": {
+                            "model": "hijacked",
+                            "query": "hijacked",
+                            "documents": ["hijacked"],
+                            "return_documents": False,
+                        }
+                    }
+                ),
+            )
+
+        assert seen["body"] == {
+            "model": "rerank-v1",
+            "query": "python",
+            "documents": ["python"],
+            "return_documents": False,
+        }
+
+    async def test_reads_endpoint_from_extra_params(self):
+        """endpoint 也可以写在 extra_params 中。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            return httpx.Response(200, json={"data": [{"index": 0, "score": 1}]})
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            results = await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["python"],
+                top_n=None,
+                request_name="test",
+                model_set=self._model_set(
+                    extra_params={"rerank_endpoint": "https://rerank.example/v2/rerank"}
+                ),
+            )
+
+        assert seen["url"] == "https://rerank.example/v2/rerank"
+        assert results == [{"index": 0, "score": 1.0, "document": "python"}]
+
+    async def test_defaults_endpoint_without_base_url(self):
+        """没有 base_url 时回落到 OpenAI 兼容地址。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            return httpx.Response(200, json={"results": []})
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["python"],
+                top_n=None,
+                request_name="test",
+                model_set={"api_key": "test-key"},
+            )
+
+        assert seen["url"] == "https://api.openai.com/v1/rerank"
+
+    @pytest.mark.parametrize("top_n", [True, 0, -1, None])
+    async def test_omits_invalid_top_n(self, top_n):
+        """bool、非正数与 None 都不应作为 top_n 发给 provider。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"results": []})
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["python"],
+                top_n=top_n,
+                request_name="test",
+                model_set=self._model_set(),
+            )
+
+        assert "top_n" not in seen["body"]
+
+    @pytest.mark.parametrize(
+        ("status_code", "error_name"),
+        [
+            (401, "LLMAuthenticationError"),
+            (403, "LLMAuthenticationError"),
+            (429, "LLMRateLimitError"),
+            (500, "LLMAPIError"),
+            (404, "LLMAPIError"),
+        ],
+    )
+    async def test_maps_http_errors_to_llm_exceptions(self, status_code, error_name):
+        """HTTP 状态码映射为标准 LLM 异常，便于上层 failover。"""
+        import src.kernel.llm as llm_module
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            del request
+            return httpx.Response(status_code, json={"error": "rejected"})
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            with pytest.raises(getattr(llm_module, error_name)):
+                await client.create_rerank(
+                    model_name="rerank-v1",
+                    query="python",
+                    documents=["python"],
+                    top_n=None,
+                    request_name="test",
+                    model_set=self._model_set(),
+                )
+
+    async def test_api_error_carries_status_code(self):
+        """非 2xx 的 LLMAPIError 保留状态码，便于监控归类。"""
+        from src.kernel.llm import LLMAPIError
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            del request
+            return httpx.Response(503, text="unavailable")
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            with pytest.raises(LLMAPIError) as exc_info:
+                await client.create_rerank(
+                    model_name="rerank-v1",
+                    query="python",
+                    documents=["python"],
+                    top_n=None,
+                    request_name="test",
+                    model_set=self._model_set(),
+                )
+
+        assert exc_info.value.status_code == 503
+
+    async def test_maps_timeout_and_transport_errors(self):
+        """超时与传输层失败分别映射为 LLMTimeoutError 与 ConnectionError。"""
+        from src.kernel.llm import LLMTimeoutError
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        def timeout_handler(request: httpx.Request) -> httpx.Response:
+            del request
+            raise httpx.ReadTimeout("read timeout")
+
+        def transport_handler(request: httpx.Request) -> httpx.Response:
+            del request
+            raise httpx.ConnectError("connection refused")
+
+        client = OpenAIChatClient()
+        arguments = {
+            "model_name": "rerank-v1",
+            "query": "python",
+            "documents": ["python"],
+            "top_n": None,
+            "request_name": "test",
+            "model_set": self._model_set(),
+        }
+        with self._patch_transport(timeout_handler):
+            with pytest.raises(LLMTimeoutError):
+                await client.create_rerank(**arguments)
+        with self._patch_transport(transport_handler):
+            with pytest.raises(ConnectionError):
+                await client.create_rerank(**arguments)
+
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            ("not-json", "valid JSON"),
+            ({"model": "rerank-v1"}, "results/data"),
+            ({"results": "oops"}, "must be a list"),
+            ({"results": [1]}, "must be an object"),
+            ({"results": [{"index": "0", "score": 1.0}]}, "index must be an integer"),
+            ({"results": [{"index": 0}]}, "score must be numeric"),
+        ],
+    )
+    async def test_maps_protocol_errors_to_api_error(self, body, message):
+        """成功状态但协议不符时抛出 LLMAPIError，由 policy 决定 failover。"""
+        from src.kernel.llm import LLMAPIError
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            del request
+            if isinstance(body, str):
+                return httpx.Response(200, text=body)
+            return httpx.Response(200, json=body)
+
+        client = OpenAIChatClient()
+        with self._patch_transport(handler):
+            with pytest.raises(LLMAPIError, match=message):
+                await client.create_rerank(
+                    model_name="rerank-v1",
+                    query="python",
+                    documents=["python"],
+                    top_n=None,
+                    request_name="test",
+                    model_set=self._model_set(),
+                )
+
+    async def test_out_of_range_index_yields_none_document(self):
+        """provider 返回越界 index 时不崩溃，document 置空。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        client = OpenAIChatClient()
+        with self._patch_transport(self._ok([{"index": 7, "score": 0.1}])):
+            results = await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["python"],
+                top_n=None,
+                request_name="test",
+                model_set=self._model_set(),
+            )
+
+        assert results == [{"index": 7, "score": 0.1, "document": None}]
+
+    async def test_validates_request_arguments(self):
+        """query/documents 为空时仍在本地失败，不产生网络请求。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        client = OpenAIChatClient()
+        with pytest.raises(ValueError, match="query"):
+            await client.create_rerank(
+                model_name="rerank-v1",
+                query="",
+                documents=["python"],
+                top_n=None,
+                request_name="test",
+                model_set=self._model_set(),
+            )
+        with pytest.raises(ValueError, match="documents"):
+            await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=[],
+                top_n=None,
+                request_name="test",
+                model_set=self._model_set(),
+            )
+        with pytest.raises(TypeError):
+            await client.create_rerank(
+                model_name="rerank-v1",
+                query="python",
+                documents=["python"],
+                top_n=None,
+                request_name="test",
+                model_set="not-a-dict",
+            )
 

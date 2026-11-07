@@ -44,7 +44,7 @@ async def test_shutdown_continues_after_failures_in_dependency_order(bot, monkey
     bot._command_parser = parser
     bot._signal_handler = signals
 
-    with pytest.raises(BotShutdownError, match="media"):
+    with pytest.raises(BotShutdownError, match="媒体管理器: RuntimeError"):
         await bot.shutdown()
     assert order == ["streams", "plugin", "media", "scheduler", "database"]
     parser.close.assert_called_once()
@@ -111,7 +111,7 @@ async def test_parser_failure_still_restores_signals(bot):
     bot._command_parser.close.side_effect = RuntimeError("terminal failed")
     signals = MagicMock()
     bot._signal_handler = signals
-    with pytest.raises(BotShutdownError, match="terminal failed"):
+    with pytest.raises(BotShutdownError, match="命令解析器: RuntimeError"):
         await bot.shutdown()
     signals.restore_handlers.assert_called_once()
 
@@ -154,13 +154,15 @@ async def test_shutdown_preserves_unrelated_tasks_and_executor(bot, monkeypatch)
     loop = asyncio.get_running_loop()
     previous = loop._default_executor
     unrelated = asyncio.create_task(asyncio.Event().wait())
-    owned = asyncio.create_task(asyncio.Event().wait())
-    manager = MagicMock()
-    manager.get_active_tasks.return_value = [
-        SimpleNamespace(task=owned, task_id="owned"),
-        SimpleNamespace(task=asyncio.current_task(), task_id="self"),
-    ]
-    manager.cancel_task.side_effect = lambda task_id: owned.cancel()
+    from src.kernel.concurrency import TaskManager
+
+    manager = TaskManager()
+    manager.shutdown_process_pool(wait=False)
+    info = manager.create_task(asyncio.Event().wait(), name="owned", daemon=True)
+    owned = info.task
+    assert owned is not None
+    cancel_task = MagicMock(wraps=manager.cancel_task)
+    monkeypatch.setattr(manager, "cancel_task", cancel_task)
     bot.task_manager = manager
     original_dns = loop.getaddrinfo
     monkeypatch.setattr(bot, "_extract_provider_hosts_from_model_config", lambda _: [])
@@ -170,7 +172,7 @@ async def test_shutdown_preserves_unrelated_tasks_and_executor(bot, monkeypatch)
         await bot.shutdown()
         assert owned.cancelled()
         assert not unrelated.done()
-        manager.cancel_task.assert_called_once_with("owned")
+        cancel_task.assert_called_once_with(info.task_id)
         assert loop._default_executor is previous
         assert loop.getaddrinfo == original_dns
     finally:

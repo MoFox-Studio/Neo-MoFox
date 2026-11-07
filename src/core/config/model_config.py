@@ -30,7 +30,7 @@
 from threading import Lock as ThreadLock
 from typing import Any, ClassVar, Literal, cast
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, field_validator
 from src.kernel.config import ConfigBase, SectionBase, config_section, Field
 from src.kernel.llm.types import ModelSet
 
@@ -58,9 +58,26 @@ class APIProviderSection(SectionBase):
         default="your-siliconflow-api-key-here",
         description="API 密钥，支持单个密钥或密钥列表轮询",
     )
-    client_type: Literal["openai", "openai_response", "anthropic", "gemini", "aiohttp_gemini", "bedrock"] = Field(
+    client_type: Literal[
+        "openai",
+        "openai_response",
+        "anthropic",
+        "gemini",
+        "aiohttp_gemini",
+        "google",
+        "gemini_v2",
+        "bedrock",
+        "jev",
+        "typesafe",
+        "type_safe",
+    ] = Field(
         default="openai",
-        description="客户端类型（openai/openai_response/anthropic/gemini/bedrock 等）",
+        description=(
+            "客户端类型（openai/openai_response/anthropic/gemini/bedrock/jev 等）。"
+            "jev/typesafe/type_safe 三个名字等价，都指向独立的 Jev System One provider，"
+            "必须通过插件 API jev_api 调用，不能作为传统聊天 provider 使用"
+        ),
+        strict_choices=True,
     )
     max_retry: int = Field(
         default=2,
@@ -74,6 +91,18 @@ class APIProviderSection(SectionBase):
         default=10,
         description="重试间隔时间（秒）",
     )
+
+    @field_validator("client_type", mode="before")
+    @classmethod
+    def normalize_client_type(cls, value: Any) -> Any:
+        """归一原生 Gemini 别名，不导入 SDK 或自动切换认证后端。"""
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized == "vertex_ai":
+                raise ValueError("Vertex AI is unsupported; use Gemini Developer API")
+            if normalized in {"gemini", "aiohttp_gemini", "google", "gemini_v2"}:
+                return "gemini"
+        return value
 
     # 私有属性，用于密钥轮询
     _api_key_lock: "ThreadLock | None" = None

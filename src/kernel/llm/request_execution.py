@@ -28,8 +28,10 @@ from .exceptions import (
 from .payload import LLMPayload, ReasoningText, Text, ToolCall, ToolResult
 from .roles import ROLE
 from .response import LLMResponse
-from .request_trace import Attempt, attempt_scope, new_logical_request
+from .request_trace import Attempt, attempt_scope, new_logical_request, retry_scope
 from .types import ModelEntry, ModelSet
+from .model_client.base import ModelClientResult
+from .request_attempt import AttemptContext, ManagedStream
 
 if TYPE_CHECKING:
     from .request import LLMRequest
@@ -71,7 +73,7 @@ def extract_tools(payloads: list[LLMPayload]) -> list[LLMUsable]:
 
 
 def normalize_client_create_result(
-    result: tuple[Any, ...],
+    result: tuple[Any, ...] | ModelClientResult,
 ) -> tuple[
     str | None,
     list[dict[str, Any]] | None,
@@ -79,7 +81,22 @@ def normalize_client_create_result(
     str | list[ReasoningText] | None,
     dict[str, Any] | None,
 ]:
-    """把历史上的 3/4/5 元组 provider 返回值统一成一种形态。"""
+    """把结构化结果或历史 3/4/5 元组转换为标准五元组。
+
+    Args:
+        result: provider 返回的 ModelClientResult，或依次包含消息、工具调用、
+            流迭代器及可选思考内容、用量的兼容元组。
+
+    Returns:
+        消息、工具调用、流迭代器、思考内容、用量组成的五元组；兼容元组缺少的
+        可选项补 None。provider_state 和 stop_reason 不在此返回，执行流程会
+        从原始 ModelClientResult 单独写入 LLMResponse，避免丢失签名回放状态。
+
+    Raises:
+        ValueError: 兼容元组的长度不是 3、4 或 5。
+    """
+    if isinstance(result, ModelClientResult):
+        return result.message, result.tool_calls, result.stream_iter, result.reasoning_content, result.usage
     if len(result) == 5:
         message, tool_calls, stream_iter, reasoning_content, usage = result
         return message, tool_calls, stream_iter, reasoning_content, usage
@@ -121,7 +138,6 @@ async def execute_request(
 ) -> LLMResponse:
     """执行一次逻辑上的 LLM 请求，并带上策略驱动的重试行为。"""
     model_set = validate_model_set(request.model_set)
-    request_started_at = time.perf_counter()
     logical = new_logical_request()
 
     # 先统一一次 payload 形态，确保每次重试看到的输入结构完全一致。
@@ -129,13 +145,25 @@ async def execute_request(
     tools = extract_tools(payloads)
 
     assert request.policy is not None
-    session = request.policy.new_session(
-        model_set=model_set, request_name=request.request_name
-    )
+    if request._locked_target is not None:
+        assert request.clients is not None
+        model_set = [
+            model for model in model_set
+            if request.clients.matches_replay_target(model, request._locked_target)
+        ]
+        if not model_set:
+            from .exceptions import LLMContextError
+            raise LLMContextError("The active Gemini tool round has no matching configured target")
+    context = request._attempt_context
+    if context is None:
+        session = request.policy.new_session(model_set=model_set, request_name=request.request_name)
+        context = AttemptContext(session=session, step=session.first())
+    else:
+        session = context.session
 
     last_error: BaseException | None = None
-    retry_count = 0
-    step = session.first()
+    retry_count = context.retry_count
+    step = context.step
 
     while step.model is not None:
         # 每次循环都是一次具体的 provider 调用尝试，由当前重试策略会话决定。
@@ -161,16 +189,21 @@ async def execute_request(
             request.context_manager.validate_for_send(list(trimmed_payloads))
 
         assert request.clients is not None
-        client = request.clients.get_client_for_model(model)
 
         from .monitor import RequestTimer
 
         timer = RequestTimer()
-        trace = Attempt(logical, model, request.request_name, stream=actual_stream,
-                        metadata=request.meta_data)
+        attempt_started = time.perf_counter()
+        tools = extract_tools(payloads)
+        trace = Attempt(
+            logical, model, request.request_name,
+            stream=actual_stream, metadata=request.meta_data,
+        )
 
         try:
             with timer:
+                # Include registry resolution in both timing and failure accounting.
+                client = request.clients.get_client_for_model(model)
                 timeout_seconds = model.get("timeout")
 
                 # 触发大模型请求前事件
@@ -248,6 +281,9 @@ async def execute_request(
                 reasoning_parts=reasoning_parts,
                 call_list=[],
             )
+            if isinstance(result, ModelClientResult):
+                resp.provider_state = result.provider_state
+                resp.stop_reason = result.stop_reason
             # 保存原始 payloads 副本，供流式消费重试时恢复使用
             resp._original_payloads = list(trimmed_payloads)
 
@@ -276,29 +312,90 @@ async def execute_request(
                     retry_count=retry_count,
                     model_index=model_index,
                 )
-            elif request.enable_metrics and actual_stream:
-                resp._stream_stats_recorder = (
-                    lambda final_usage, final_latency: stats_recorder(
-                        model=model,
-                        model_identifier=model_identifier,
-                        request_name=request.request_name,
-                        meta_data=request.meta_data,
-                        latency=final_latency,
-                        usage=final_usage,
-                        success=True,
-                        stream=True,
-                        retry_count=retry_count,
-                        model_index=step.meta.get("model_index", 0) if step.meta else 0,
-                    )
-                )
-                resp._stream_started_at = request_started_at
+            if actual_stream and stream_iter is not None:
+                async def terminal(
+                    error: BaseException | None, final_usage: dict[str, Any] | None,
+                    latency: float, phase: str,
+                ) -> None:
+                    """按流的实际终态记账并发布事件，而不是把创建成功当作完成。
 
-            if not trace.bound:
-                trace.result(message=message, tool_calls=tool_calls,
-                             reasoning_content=reasoning_text, reasoning_parts=reasoning_parts, usage=usage)
-            if stream_iter is None:
+                    error 为终态异常或 None，final_usage 为最终累计用量，latency
+                    为整次尝试的秒数，phase 区分完成、失败及放弃；仅 completed
+                    且无异常时记录策略成功。事件发布失败不覆盖原流结果。
+                    """
+                    from src.kernel.event import get_event_bus
+                    success = error is None and phase == "completed"
+                    trace.finish(
+                        error,
+                        cancelled=phase == "cancelled" or (
+                            phase == "abandoned" and error is None
+                        ),
+                    )
+                    if request.enable_metrics:
+                        stats_recorder(model=model, model_identifier=model_identifier,
+                            request_name=request.request_name, meta_data=request.meta_data,
+                            latency=latency, usage=final_usage, success=success, stream=True,
+                            retry_count=retry_count, model_index=step.meta.get("model_index", 0) if step.meta else 0,
+                            error=error)
+                    if success:
+                        session.record_success(latency=latency)
+                    params = {"request_name": request.request_name, "model_identifier": model_identifier,
+                        "stream": True, "success": success, "phase": phase, "terminal": True,
+                        "error": error, "error_type": type(error).__name__ if error else None,
+                        "error_message": str(error) if error else "", "usage": final_usage,
+                        "latency": latency, "retry_count": retry_count, "meta_data": request.meta_data}
+                    try:
+                        bus = get_event_bus()
+                        if error is not None and phase == "failed":
+                            await bus.publish("on_llm_request_failed", params)
+                        await bus.publish("on_llm_stream_finished", params)
+                    except Exception:
+                        logger.debug("LLM stream terminal event failed", exc_info=True)
+
+                async def resume(next_context: AttemptContext) -> LLMResponse:
+                    """用 next_context 的同一策略会话和剩余重试预算续接流。
+
+                    从原始消息重建请求，保留客户端、来源锁及上下文管理器；
+                    返回新的流式响应，交由 ManagedStream 接管消费与关闭责任，
+                    不在此函数消费替代流或重新建立独立重试预算。
+                    """
+                    from .request import LLMRequest
+                    retry = LLMRequest(model_set=request.model_set, request_name=request.request_name,
+                        meta_data=dict(request.meta_data), payloads=list(payloads), clients=request.clients,
+                        policy=request.policy, context_manager=request.context_manager,
+                        enable_metrics=request.enable_metrics, _attempt_context=next_context,
+                        _locked_target=request._locked_target)
+                    with retry_scope(logical):
+                        replacement = await retry.send(
+                            auto_append_response=auto_append_response, stream=True,
+                        )
+                    resp.tool_call_compat = replacement.tool_call_compat
+                    resp._inspection = replacement._inspection
+                    return replacement
+
+                def adopt_replacement(final_response: LLMResponse) -> None:
+                    """将最终替代响应的协议及观测句柄交接给原响应。"""
+                    resp.tool_call_compat = final_response.tool_call_compat
+                    resp._inspection = final_response._inspection
+
+                context.step, context.retry_count = step, retry_count
+                trace.handoff_stream()
+                resp._stream = ManagedStream(
+                    trace.observe_stream(stream_iter), timeout=model.get("timeout"),
+                    started_at=attempt_started, context=context,
+                    terminal=terminal, resume=resume,
+                )
+                resp._stream.on_replacement = adopt_replacement
+            else:
+                if not trace.bound:
+                    trace.result(
+                        message=message, tool_calls=tool_calls,
+                        reasoning_content=reasoning_text,
+                        reasoning_parts=reasoning_parts, usage=usage,
+                        stop_reason=resp.stop_reason,
+                    )
                 trace.finish()
-            session.record_success(latency=timer.elapsed)
+                session.record_success(latency=timer.elapsed)
 
             # 触发大模型请求后事件
             # 事件订阅者可以修改 message、reasoning_content、reasoning_parts、
@@ -315,7 +412,9 @@ async def execute_request(
                             "request_name": request.request_name,
                             "model_identifier": model_identifier,
                             "stream": actual_stream,
-                            "success": True,
+                            "success": True,  # Legacy opened-stage compatibility, not final success.
+                            "phase": "opened" if actual_stream else "completed",
+                            "terminal": not actual_stream,
                             "latency": timer.elapsed,
                             "retry_count": retry_count,
                             "message": message,
@@ -464,6 +563,7 @@ def _log_request_error(
         logger.debug(
             f"LLM 请求暂时失败（详情）：model={model_identifier}, "
             f"request={request_name or '__default__'}, error_type={error_type}",
+            exc_info=False,
         )
         return
 
@@ -471,4 +571,5 @@ def _log_request_error(
         f"LLM 请求失败：model={model_identifier}, "
         f"request={request_name or '__default__'}, "
         f"error_type={error_type}",
+        exc_info=False,
     )
