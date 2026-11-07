@@ -6,6 +6,7 @@ Neo-MoFox 框架的核心协调器，负责系统初始化、插件加载和生�
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import socket
 import sys
 import tomllib
@@ -596,8 +597,11 @@ class Bot:
         }
 
         # 检查是否对外开放
-        is_public = host == "0.0.0.0"
-        
+        try:
+            is_public = ipaddress.ip_address(host.strip()).is_unspecified
+        except ValueError:
+            is_public = host.strip() in {"0.0.0.0", "::", "::0"}
+
         # 检查密钥是否不安全（空或包含示例密钥）
         has_insecure_keys = (
             not api_keys or any(key.lower() in INSECURE_KEYS for key in api_keys)
@@ -627,12 +631,10 @@ class Bot:
             self.logger.warning("")
             self.logger.warning("=" * 80)
             self.logger.warning("")
-            from .console_input import prompt_console_input
-
-            prompt_console_input("输入回车来继续:")
-
             # 同时在 UI 中显示警告状态
             self.ui.update_phase_status("HTTP服务器", "⚠️ 不安全配置")
+
+            return
             
     async def _initialize_core(self) -> None:
         """在数据库就绪后准备媒体、传输和管理器，再加载插件。"""
