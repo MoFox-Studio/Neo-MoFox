@@ -91,6 +91,19 @@ result = inspector.clear_snapshot()
 部分响应，清理资源不会吞掉原始异常。观测失败不改变业务返回或重试决策，最多
 按尝试记录一条只含错误类型的诊断，不输出异常正文或异常堆栈。
 
+## Gemini 安全摘要与标准结果
+
+Gemini 在最终生成配置完成、SDK 请求发出前，只提交 `model`、`contents_count`、
+`tool_count` 三字段安全摘要，记录 `capture_kind=summary`。活动 Attempt 更新同一记录，
+没有外层 Attempt 的直接适配器调用保留既有手工捕获方式。原生 Parts、回放状态和
+thought signature 不进入该摘要；`raw_unavailable` 仍为 true，不伪称完整原生请求。
+
+内部 `request_captured` 与 `native_result_observed` 分开：摘要只满足请求捕获，
+统一层继续补记 Gemini 的标准文本、工具、usage 与真实终态。OpenAI、Anthropic、
+Responses 的原生 start 同时接管请求和结果观测，通用层不重复归并。
+`bound` 作为内部兼容读取仅表示原生结果观测权，不再表示请求摘要是否存在。
+跨任务消费和框架多次 attempt 仍分别使用已持有句柄和同一 logical ID。
+
 ## 提前停止消费
 
 ```python

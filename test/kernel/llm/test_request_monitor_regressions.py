@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterator
-from dataclasses import asdict
 from typing import Any, Self
 
 import httpx
@@ -16,6 +15,7 @@ from openai import AsyncOpenAI
 
 from src.kernel.llm import ROLE, LLMPayload, Text
 from src.kernel.llm import request_inspector as inspector_module
+from src.kernel.llm.model_client.base import StreamEvent
 from src.kernel.llm.request_inspector import RequestInspector
 from src.kernel.llm.request_trace import Attempt, LogicalRequest, attempt_scope
 from test.kernel.llm.test_request_monitor import (
@@ -131,9 +131,10 @@ async def test_startup_marker_never_becomes_a_model_event(
     sdk = TrackedStream(sdk_events(protocol))
     result = await invoke(monkeypatch, protocol, stream=True, sdk_stream=sdk)
     events = [event async for event in result[2]]
-    assert all(
-        any(value is not None for value in asdict(event).values()) for event in events
-    )
+    # reset=False 也是非 None，不能用所有字段的 is not None 判定占位。
+    assert StreamEvent() not in events
+    assert all(event.reset is False for event in events)
+    assert "".join(event.text_delta or "" for event in events) == "hello"
     completed = isolated_inspector.get_record(1)
     assert completed["status"] == "succeeded"
     assert len(completed["raw_events"]) == len(sdk.events)
@@ -142,6 +143,56 @@ async def test_startup_marker_never_becomes_a_model_event(
     await result[2].aclose()
     assert isolated_inspector.get_record(1) == completed
     assert sdk.closed == 1
+
+
+@pytest.mark.parametrize("reset", [False, True], ids=["no-reset", "reset"])
+def test_standard_reset_changes_result_without_mutating_snapshot(
+    isolated_inspector: RequestInspector, reset: bool,
+) -> None:
+    """重置与不重置产生不同精确结果，旧快照不能随 reducer 后续事件变化。"""
+    trace = Attempt(LogicalRequest(), model(), "reset-observation", stream=True)
+    trace.start("offline", {"model": "demo", "stream": True})
+    first = StreamEvent(
+        text_delta="old", reasoning_delta="thinking",
+        tool_call_id="old_call", tool_name="lookup", tool_args_delta='{"n":1}',
+        usage={"prompt_tokens": 4, "completion_tokens": 2}, stop_reason="old_stop",
+    )
+    assert trace.event(first) is first
+    before = isolated_inspector.get_record(trace.record_id)
+    assert before is not None
+    assert before["response"]["message"] == "old"
+    assert before["response"]["tool_calls"] == [
+        {"id": "old_call", "name": "lookup", "args": {"n": 1}},
+    ]
+    if reset:
+        marker = StreamEvent(reset=True)
+        assert marker != StreamEvent()
+        assert trace.event(marker) is marker
+        cleared = isolated_inspector.get_record(trace.record_id)
+        assert cleared is not None
+        assert cleared["response"]["message"] == ""
+        assert cleared["response"]["reasoning_content"] is None
+        assert cleared["response"]["reasoning_parts"] == []
+        assert cleared["response"]["tool_calls"] == []
+        assert cleared["response"]["usage"] is None
+        assert cleared["response"]["stop_reason"] is None
+    last = StreamEvent(text_delta="new")
+    assert trace.event(last) is last
+    after = isolated_inspector.get_record(trace.record_id)
+    assert after is not None
+    assert after["response"]["message"] == ("new" if reset else "oldnew")
+    assert after["response"]["tool_calls"] == (
+        [] if reset else before["response"]["tool_calls"]
+    )
+    assert after["response"]["usage"] == (
+        None if reset else {"prompt_tokens": 4, "completion_tokens": 2}
+    )
+    assert before["response"]["message"] == "old"
+    assert before["response"]["reasoning_content"] == "thinking"
+    assert before["response"]["usage"] == {"prompt_tokens": 4, "completion_tokens": 2}
+    assert before["response"]["stop_reason"] == "old_stop"
+    assert after["version"] == before["version"] + (2 if reset else 1)
+    trace.finish()
 
 
 @pytest.mark.parametrize("protocol", ["openai", "responses"])

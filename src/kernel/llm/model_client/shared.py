@@ -217,8 +217,9 @@ def log_provider_request_body(
     payloads: list[Any] | None = None,
     request_name: str | None = None,
     token_counter: Any = None,
+    summary_only: bool = False,
 ) -> None:
-    """把 provider 请求快照转发到统一的观测链路。"""
+    """把 provider 请求快照转发到统一观测链路，显式区分安全摘要。"""
     capture_provider_request(
         api_name,
         params,
@@ -226,4 +227,5 @@ def log_provider_request_body(
         payloads=payloads,
         request_name=request_name,
         token_counter=token_counter,
+        summary_only=summary_only,
     )

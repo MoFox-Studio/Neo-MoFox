@@ -131,7 +131,8 @@ class Attempt:
         self.managed = managed
         self.kind = kind
         self.streaming = stream
-        self.bound = False
+        self.request_captured = False
+        self.native_result_observed = False
         self.ready = False
         self.done = False
         self._reducer: Any = None
@@ -190,6 +191,29 @@ class Attempt:
         except Exception as error:  # noqa: BLE001 - 可选观测逻辑的异常隔离边界
             self._warn(error)
 
+    @property
+    def bound(self) -> bool:
+        """兼容既有通用结果补记判断，仅表示原生适配器接管结果观测。
+
+        安全摘要只声明请求已捕获，不阻断统一层的标准事件和非流式结果补记。
+        """
+        return self.native_result_observed
+
+    def capture_summary(
+        self,
+        api_name: str,
+        params: dict[str, Any],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """把预先筛选的安全摘要写入同一尝试，不取得原生结果观测权。"""
+        self.request_captured = True
+        self._emit(
+            "start", params, api_name=api_name,
+            metadata={**self._metadata, **(metadata or {}), "capture_kind": "summary"},
+        )
+        self._emit("update", {"kind": self.kind})
+
     def start(
         self,
         api_name: str,
@@ -204,7 +228,8 @@ class Attempt:
             params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
             metadata: 需要合并到记录中的请求元数据。
         """
-        self.bound = True
+        self.request_captured = True
+        self.native_result_observed = True
         self._emit(
             "start",
             params,
@@ -423,7 +448,7 @@ class Attempt:
         if self.done:
             return
         self.done = True
-        self._emit("mark_unavailable", request=not self.bound, raw=not self._has_raw)
+        self._emit("mark_unavailable", request=not self.request_captured, raw=not self._has_raw)
         self._emit(
             "finish",
             error=error,
@@ -477,6 +502,8 @@ class _ObservedStream:
     async def __anext__(self) -> StreamEvent:
         """原样读取事件；原生适配器已观测的事件不再重复归并。"""
         event = await anext(self.source)
+        if not self.trace.bound:
+            self.trace.event(event)
         return event
 
     async def _close_outcome(self) -> CloseOutcome:
@@ -532,7 +559,7 @@ def provider_attempt(
     # 嵌套的提供商调用不能复用已经绑定到其他调用的句柄。
     trace = (
         active
-        if active is not None and not active.bound
+        if active is not None and not active.request_captured
         else Attempt(
             LogicalRequest(),
             model if isinstance(model, Mapping) else {},

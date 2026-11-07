@@ -46,6 +46,19 @@ class LLMResponse:
 
 可运行的纯内存示例：`examples/src/kernel/llm/stream_cleanup_example.py`，不访问模型服务或读取密钥。
 
+## 原生请求观测
+
+`LLMResponse` 已集成 `Attempt` 观测句柄，支持请求生命周期跟踪和重试关联：
+
+- **重试关联**：内部重试通过 `retry_scope()` 传递 `logical` 请求标识，确保跨尝试关联。
+- **统计句柄接力**：重试后更新 `_inspection`、`_stream_stats_recorder` 和 `_stream_started_at`。
+- **终态发布**：
+  - **ManagedStream路径**：由 ManagedStream 的 `terminal` 回调负责调用 `trace.finish()` 发布终态。
+  - **非ManagedStream正常消费**：在 `_finalize_after_consumption()` 中根据实际异常调用 `trace.finish()` 或 `trace.finish(error)`。
+  - **未消费资源**：在 `_close_response()` 和 `aclose()` 中调用 `trace.finish(cancelled=True)` 和 `trace.close_unconsumed_resource()` 回收未开始消费的资源。
+
+详见 [原生请求监视器](./request_inspector.md)。
+
 ## 核心属性
 
 ### message

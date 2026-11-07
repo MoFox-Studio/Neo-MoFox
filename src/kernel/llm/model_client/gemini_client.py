@@ -572,6 +572,7 @@ class GeminiChatClient:
             },
             model_set=model_set,
             request_name=request_name,
+            summary_only=True,
         )
         lease = await self._get_client(model_set)
         owner = _ResponseOwner()

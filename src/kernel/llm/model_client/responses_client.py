@@ -25,7 +25,6 @@ OpenAI Responses API 模型客户端实现。
 
 from __future__ import annotations
 
-import inspect
 import json
 from collections.abc import Mapping
 from typing import Any, AsyncIterator

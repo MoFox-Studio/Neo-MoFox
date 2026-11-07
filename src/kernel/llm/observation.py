@@ -41,8 +41,9 @@ def capture_provider_request(
     payloads: list[LLMPayload] | None = None,
     request_name: str | None = None,
     token_counter: Callable[[list[LLMPayload], str], int] | None = None,
+    summary_only: bool = False,
 ) -> None:
-    """捕获 provider 请求输入，供调试和检查工具使用。"""
+    """捕获 provider 请求输入；显式安全摘要不接管原生结果观测。"""
     metadata: dict[str, Any] = {}
     if isinstance(model_set, Mapping):
         provider = model_set.get("api_provider") or model_set.get("base_url")
@@ -62,8 +63,11 @@ def capture_provider_request(
         from .request_trace import current_attempt
         trace = current_attempt()
         if trace is not None:
-            # 提供商仅在最终流式参数确定后开始采集。
-            trace.annotate(metadata)
+            if summary_only:
+                trace.capture_summary(api_name, params, metadata=metadata)
+            else:
+                # 原生提供商仍在最终 SDK 参数确定后调用 start_provider。
+                trace.annotate(metadata)
         else:
             from .request_inspector import capture
             capture(api_name, params, metadata)
