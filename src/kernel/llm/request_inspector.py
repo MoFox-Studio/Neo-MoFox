@@ -1,34 +1,37 @@
-"""LLM 请求体调试检视器。
+"""LLM 原生调用生命周期检视器。
 
-提供一个基于 FastAPI + SSE 的 Web 界面，实时记录并展示每次
-OpenAI 兼容 API 的完整请求体，方便调试 payload 结构。
+本模块以线程安全的内存缓冲保存请求、标准化响应和 SDK 原始 JSON。
+数据不脱敏，键名及内容原样保留；外部读取必须认证并限制访问。
+原生适配器直接报告生命周期，不包装 SDK、不提供 HTTP 端点。
 
-除原始 JSON 外，本模块还会将请求体转换为结构化渲染模型，
-用于以对话式布局展示 role、工具调用、工具结果与 Markdown 文本。
+**本模块是纯进程内工具，不对外提供任何 HTTP 端点。** 可视化调试请使用官方 WebUI：
+https://github.com/MoFox-Studio/MoFox-Core-Webui
 
 使用方式：
-    # 在 HTTP 服务器启动后调用一次
-    from src.kernel.llm.request_inspector import get_inspector
-    get_inspector().mount(fastapi_app)
+    # 读取：供 WebUI / 调试工具消费
+    from src.kernel.llm import get_inspector
+    inspector = get_inspector()
+    inspector.list_summaries()      # 摘要列表
+    inspector.get_record(record_id) # 单条完整请求体
 
-    # 在发起请求前调用
+    # 在发起请求前调用（内部由 model_client 自动调用）
     from src.kernel.llm.request_inspector import capture
     capture("chat.completions.create", params)
-
-WebUI 地址：http://<host>:<port>/_inspector/
 """
 
 from __future__ import annotations
 
-import asyncio
+import copy
 import json
 import time
-from collections import deque
+import math
+import threading
+import uuid
+from collections import Counter
+from dataclasses import field, fields, is_dataclass
+from types import SimpleNamespace
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
-
-from fastapi import APIRouter, Body
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from typing import Any
 
 
 _OVERVIEW_FIELDS: list[tuple[str, str]] = [
@@ -57,8 +60,8 @@ def _json_dumps(value: Any) -> str:
     """将值安全序列化为 JSON 字符串。"""
     try:
         return json.dumps(value, ensure_ascii=False, indent=2)
-    except Exception:
-        return str(value)
+    except (TypeError, ValueError, RecursionError):
+        return "[unavailable]"
 
 
 def _format_scalar(value: Any) -> str:
@@ -331,9 +334,47 @@ def _get_inspector_messages(params: dict[str, Any]) -> list[Any]:
     elif isinstance(system, list):
         rendered_messages.append({"role": "system", "content": system})
 
-    messages = params.get("messages", [])
+    instructions = params.get("instructions")
+    if isinstance(instructions, str):
+        rendered_messages.append({"role": "system", "content": instructions})
+    messages = params.get("messages", params.get("input", []))
+    if isinstance(messages, str):
+        messages = [{"role": "user", "content": messages}]
     if isinstance(messages, list):
-        rendered_messages.extend(messages)
+        for message in messages:
+            if isinstance(message, str):
+                rendered_messages.append({"role": "user", "content": message})
+            elif (
+                isinstance(message, dict)
+                and message.get("type") == "function_call_output"
+            ):
+                rendered_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": message.get("call_id"),
+                        "content": message.get("output"),
+                    }
+                )
+            elif isinstance(message, dict) and message.get("type") == "function_call":
+                rendered_messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": message.get("call_id"),
+                                "name": message.get("name"),
+                                "args": message.get("arguments"),
+                            }
+                        ],
+                    }
+                )
+            else:
+                rendered_messages.append(message)
+    if "query" in params:
+        rendered_messages.append({"role": "user", "content": params["query"]})
+    if isinstance(params.get("documents"), list):
+        for document in params["documents"]:
+            rendered_messages.append({"role": "user", "content": document})
 
     return rendered_messages
 
@@ -458,9 +499,151 @@ def build_render_view(
     }
 
 
+_TERMINAL = frozenset({"captured", "succeeded", "failed", "cancelled"})
+_UNAVAILABLE = "[unavailable]"
+
+
+def _json_size(value: Any) -> int:
+    """计算快照中紧凑 UTF-8 JSON 表示的准确字节数。
+
+    Args:
+        value: 待观测或转换的原始数据。
+
+    Returns:
+        int: 紧凑 JSON 编码后的 UTF-8 字节数。
+    """
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
+class _JsonConverter:
+    """转换为独立的 JSON 兼容数据，不脱敏、不改写字符串键或内容。"""
+
+    def __init__(self) -> None:
+        """初始化无法转换与超出预算的标记。"""
+        self.unavailable = False
+        self.truncated = False
+
+    def convert(self, value: Any, limit: int | None = None) -> Any:
+        """转换为独立的 JSON 兼容数据，并按需严格限制输出字节数。
+
+        Args:
+            value: 待观测或转换的原始数据。
+            limit: 允许保留的 JSON 字节数；为 None 时不设置字节上限。
+
+        Returns:
+            Any: 独立的 JSON 兼容数据，必要时仅保留部分结构或使用不可用标记。
+        """
+        seen: set[int] = set()
+
+        def visit(item: Any, budget: int | None, depth: int) -> Any:
+            """仅遍历可保留的子节点，并预留 JSON 容器自身的字节开销。
+
+            Args:
+                item: 当前待转换的节点。
+                budget: 当前节点可使用的 JSON 字节预算。
+                depth: 当前递归层级。
+
+            Returns:
+                Any: 当前节点在预算内转换得到的安全值。
+            """
+            if depth > 64 or id(item) in seen:
+                self.unavailable = True
+                item = _UNAVAILABLE
+            if item is None or isinstance(item, (bool, int, float, str)):
+                if isinstance(item, float) and not math.isfinite(item):
+                    self.unavailable = True
+                    item = None
+                if isinstance(item, str) and budget is not None and len(item) > budget:
+                    # 避免对单个超大的 SDK 文本增量执行无上限的 JSON 编码。
+                    item = item[:budget]
+                    self.truncated = True
+                if budget is None or _json_size(item) <= budget:
+                    return item
+                self.truncated = True
+                if not isinstance(item, str):
+                    return None
+                lo, hi = 0, len(item)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if _json_size(item[:mid]) <= budget:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                return item[:lo]
+            seen.add(id(item))
+            original_id = id(item)
+            try:
+                if not isinstance(item, (dict, list, tuple)):
+                    if is_dataclass(item) and not isinstance(item, type):
+                        item = {f.name: getattr(item, f.name) for f in fields(item)}
+                    elif isinstance(item, SimpleNamespace):
+                        item = vars(item)
+                    elif callable(getattr(item, "model_dump", None)):
+                        item = item.model_dump(mode="json")
+                    else:
+                        self.unavailable = True
+                        return visit(_UNAVAILABLE, budget, depth + 1)
+                    return visit(item, budget, depth + 1)
+                out: Any = {} if isinstance(item, dict) else []
+                used = 2
+                entries = item.items() if isinstance(item, dict) else enumerate(item)
+                for key, child in entries:
+                    if isinstance(out, dict) and not isinstance(key, str):
+                        self.unavailable = True
+                        continue
+                    overhead = (1 if out else 0) + (
+                        _json_size(key) + 1 if isinstance(out, dict) else 0
+                    )
+                    remaining = None if budget is None else budget - used - overhead
+                    if remaining is not None and remaining < 4:
+                        self.truncated = True
+                        break
+                    result = visit(child, remaining, depth + 1)
+                    size = _json_size(result)
+                    if budget is not None and used + overhead + size > budget:
+                        self.truncated = True
+                        break
+                    if isinstance(out, dict):
+                        out[key] = result
+                    else:
+                        out.append(result)
+                    used += overhead + size
+                    if self.truncated:
+                        break
+                return out
+            except Exception:
+                self.unavailable = True
+                return visit(_UNAVAILABLE, budget, depth + 1)
+            finally:
+                seen.discard(original_id)
+
+        return visit(value, limit, 0)
+
+
+def _empty_response() -> dict[str, Any]:
+    """创建包含公共标准化响应全部字段的空结果。
+
+    Returns:
+        dict[str, Any]: 具有完整标准化响应字段的空结果。
+    """
+    return {
+        "kind": None,
+        "message": None,
+        "reasoning_content": None,
+        "reasoning_parts": [],
+        "tool_calls": [],
+        "usage": None,
+        "stop_reason": None,
+        "embeddings": [],
+        "results": [],
+    }
+
+
 @dataclass
 class CapturedRequest:
-    """单条捕获记录。"""
+    """有界缓冲中的单条记录，对外转换不暴露内部字段。"""
 
     id: int
     ts: float
@@ -468,211 +651,476 @@ class CapturedRequest:
     model: str
     params: dict[str, Any]
     metadata: dict[str, Any]
+    version: int = 1
+    status: str = "captured"
+    logical_request_id: str = ""
+    attempt: int = 1
+    stream: bool = False
+    started_at: float | None = None
+    finished_at: float | None = None
+    duration_ms: float | None = None
+    first_token_ms: float | None = None
+    response: dict[str, Any] = field(default_factory=_empty_response)
+    raw_response: Any = None
+    raw_events: list[Any] = field(default_factory=list)
+    error: dict[str, Any] | None = None
+    capture_info: dict[str, Any] = field(
+        default_factory=lambda: {
+            # 保留既有读取契约；当前不执行脱敏，该字段恒为 False。
+            "redacted": False,
+            "raw_bytes": 0,
+            "raw_limit_bytes": 2 * 1024 * 1024,
+            "raw_truncated": False,
+            "raw_unavailable": False,
+            "request_unavailable": False,
+            "metadata_unavailable": False,
+        }
+    )
+    _clock: float | None = field(default=None, repr=False)
+    _raw_response_bytes: int = field(default=0, repr=False)
 
     def to_summary(self) -> dict[str, Any]:
-        """返回列表展示用的摘要。"""
-        msg_count = len(self.params.get("messages", []))
-        tool_count = len(self.params.get("tools", []))
+        """返回记录摘要，不包含请求正文或响应正文。
+
+        Returns:
+            dict[str, Any]: 不含正文的记录摘要。
+        """
+        usage = self.response.get("usage") or {}
         return {
             "id": self.id,
+            "version": self.version,
             "ts": self.ts,
             "ts_str": time.strftime("%H:%M:%S", time.localtime(self.ts)),
             "api_name": self.api_name,
             "model": self.model,
             "api_provider": str(self.metadata.get("api_provider", "-")),
             "request_name": str(self.metadata.get("request_name", "")),
-            "estimated_input_tokens": self.metadata.get("estimated_input_tokens"),
-            "msg_count": msg_count,
-            "tool_count": tool_count,
+            "estimated_input_tokens": copy.deepcopy(
+                self.metadata.get("estimated_input_tokens")
+            ),
+            "msg_count": len(_get_inspector_messages(self.params)),
+            "tool_count": len(self.params.get("tools", []))
+            if isinstance(self.params.get("tools"), list)
+            else 0,
+            "status": self.status,
+            "logical_request_id": self.logical_request_id,
+            "attempt": self.attempt,
+            "stream": self.stream,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "duration_ms": self.duration_ms,
+            "first_token_ms": self.first_token_ms,
+            "tokens_in": usage.get("prompt_tokens", usage.get("input_tokens")),
+            "tokens_out": usage.get("completion_tokens", usage.get("output_tokens")),
         }
 
     def to_full(self) -> dict[str, Any]:
-        """返回完整记录与结构化渲染模型。"""
-        summary = self.to_summary()
-        summary["params"] = self.params
-        summary["metadata"] = self.metadata
-        summary["rendered"] = build_render_view(
-            self.api_name, self.model, self.params, self.metadata
+        """生成与内部状态隔离的详情，所有展示视图均来自同一参数快照。
+
+        Returns:
+            dict[str, Any]: 包含安全参数、派生视图、响应与采集状态的独立详情。
+        """
+        return copy.deepcopy(
+            {
+                **self.to_summary(),
+                "params": self.params,
+                "metadata": self.metadata,
+                "rendered": build_render_view(
+                    self.api_name, self.model, self.params, self.metadata
+                ),
+                "response": self.response,
+                "raw_response": self.raw_response,
+                "raw_events": self.raw_events,
+                "error": self.error,
+                "capture_info": self.capture_info,
+            }
         )
-        return summary
 
 
 class RequestInspector:
-    """LLM 请求体检视器，保存最近 N 条请求并通过 Web 界面展示。"""
+    """线程安全的内存生命周期记录器，不接管模型执行。"""
 
-    def __init__(self, max_records: int = 200) -> None:
+    def __init__(
+        self, max_records: int = 200, *, raw_limit_bytes: int = 2 * 1024 * 1024
+    ) -> None:
+        if max_records < 1 or raw_limit_bytes < 4:
+            raise ValueError("max_records must be positive and raw_limit_bytes >= 4")
         self._max_records = max_records
-        self._records: deque[CapturedRequest] = deque(maxlen=max_records)
-        self._counter: int = 0
-        self._subscribers: list[asyncio.Queue[CapturedRequest | None]] = []
-        self._mounted: bool = False
+        self._raw_limit = raw_limit_bytes
+        self._records: dict[int, CapturedRequest] = {}
+        self._counter = 0
+        self._revision = 0
+        self._instance_id = uuid.uuid4().hex
+        self._lock = threading.RLock()
+
+    def _touch(self, record: CapturedRequest) -> None:
+        """在持锁期间递增缓冲版本与记录版本。
+
+        Args:
+            record: 需要处理的内部记录。
+        """
+        record.version += 1
+        self._revision += 1
+
+    def _serialize(
+        self, record: CapturedRequest, value: Any, unavailable: str | None = None
+    ) -> Any:
+        """在保留数据前转换为独立的 JSON 兼容值，并更新完整性标记。
+
+        Args:
+            record: 需要处理的内部记录。
+            value: 待观测或转换的原始数据。
+            unavailable: 需要更新的不可用标记字段名；为 None 时不更新该标记。
+
+        Returns:
+            Any: 不改写键名及内容的独立 JSON 兼容数据。
+        """
+        converter = _JsonConverter()
+        result = converter.convert(value)
+        if unavailable:
+            record.capture_info[unavailable] |= converter.unavailable
+        return result
 
     def capture(
         self,
         api_name: str,
         params: dict[str, Any],
         metadata: dict[str, Any] | None = None,
+        *,
+        native: bool = False,
+        logical_request_id: str | None = None,
+        attempt: int = 1,
+        stream: bool = False,
+    ) -> int:
+        """创建手工捕获记录或原生待执行记录，返回单调递增的记录 ID。
+
+        Args:
+            api_name: 用于标识 SDK 调用入口的接口名称。
+            params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+            metadata: 需要合并到记录中的请求元数据。
+            native: 是否创建原生调用的 pending 记录；否则创建 captured 记录。
+            logical_request_id: 关联重试的逻辑请求 ID；未提供时自动生成。
+            attempt: 本逻辑请求的尝试序号，通常从 1 开始。
+            stream: 是否以流式方式执行本次调用。
+
+        Returns:
+            int: 新记录的单调递增 ID，清空后也不重复使用。
+        """
+        with self._lock:
+            self._counter += 1
+            record = CapturedRequest(self._counter, time.time(), "", "", {}, {})
+            record.api_name = self._serialize(record, api_name)
+            record.params = self._serialize(record, params, "request_unavailable")
+            record.metadata = self._serialize(
+                record, metadata or {}, "metadata_unavailable"
+            )
+            if not isinstance(record.params, dict):
+                record.params = {"_unavailable": True}
+                record.capture_info["request_unavailable"] = True
+            if not isinstance(record.metadata, dict):
+                record.metadata = {"_unavailable": True}
+                record.capture_info["metadata_unavailable"] = True
+            record.model = str(record.params.get("model", "—"))
+            record.status = "pending" if native else "captured"
+            record.logical_request_id = logical_request_id or uuid.uuid4().hex
+            record.attempt = attempt
+            record.stream = stream or record.params.get("stream") is True
+            record.capture_info["raw_limit_bytes"] = self._raw_limit
+            self._records[record.id] = record
+            if len(self._records) > self._max_records:
+                del self._records[next(iter(self._records))]
+            self._revision += 1
+            return record.id
+
+    def start(
+        self,
+        record_id: int,
+        params: dict[str, Any] | None = None,
+        *,
+        api_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """捕获一条请求体，存入内存并推送给所有 SSE 订阅者。"""
-        self._counter += 1
-        try:
-            copied = json.loads(json.dumps(params, default=str))
-        except Exception:
-            copied = {"_raw": str(params)}
-        effective_metadata = metadata.copy() if isinstance(metadata, dict) else {}
+        """在调用提供商前记录最终 SDK 参数，并将记录设为执行中。
 
-        model = str(copied.get("model", "—"))
-        record = CapturedRequest(
-            id=self._counter,
-            ts=time.time(),
-            api_name=api_name,
-            model=model,
-            params=copied,
-            metadata=effective_metadata,
-        )
-        self._records.append(record)
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+            api_name: 用于标识 SDK 调用入口的接口名称。
+            metadata: 需要合并到记录中的请求元数据。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status in _TERMINAL:
+                return
+            if params is not None:
+                record.params = self._serialize(record, params, "request_unavailable")
+                record.model = str(record.params.get("model", record.model))
+                record.stream = record.params.get("stream") is True or record.stream
+            if api_name is not None:
+                record.api_name = self._serialize(record, api_name)
+            if metadata:
+                record.metadata.update(
+                    self._serialize(record, metadata, "metadata_unavailable")
+                )
+            if record.started_at is None:
+                record.started_at = time.time()
+                record._clock = time.perf_counter()
+            record.status = "running"
+            self._touch(record)
 
-        for queue in list(self._subscribers):
-            try:
-                queue.put_nowait(record)
-            except asyncio.QueueFull:
-                pass
+    def update(
+        self, record_id: int, response: dict[str, Any], *, content: bool = False
+    ) -> None:
+        """更新标准化部分结果，不受原始数据预算限制。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            response: 已经解析的标准化响应字段。
+            content: 是否收到有效内容增量，用于推进流状态与首个内容耗时。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status in _TERMINAL:
+                return
+            record.response.update(self._serialize(record, response))
+            if record.stream and (content or record.raw_events):
+                record.status = "streaming"
+            if content and record.first_token_ms is None and record._clock is not None:
+                record.first_token_ms = (time.perf_counter() - record._clock) * 1000
+            self._touch(record)
+
+    def raw(self, record_id: int, value: Any, *, event: bool = False) -> None:
+        """在响应与事件共用预算内保留 SDK JSON，不使用对象文本表示兜底。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            value: 待观测或转换的原始数据。
+            event: 是否将原始数据作为流事件追加，而非替换原始响应。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if (
+                record is None
+                or record.status in _TERMINAL
+                or record.capture_info["raw_truncated"]
+            ):
+                return
+            info = record.capture_info
+            overhead = (1 if record.raw_events else 2) if event else 0
+            available = (
+                self._raw_limit
+                - info["raw_bytes"]
+                - overhead
+                + (0 if event else record._raw_response_bytes)
+            )
+            if available < 4:
+                info["raw_truncated"] = True
+                self._touch(record)
+                return
+            converter = _JsonConverter()
+            data = converter.convert(value, available)
+            info["raw_unavailable"] |= converter.unavailable
+            info["raw_truncated"] |= converter.truncated
+            size = _json_size(data)
+            if event:
+                record.raw_events.append(data)
+                record.status = "streaming"
+                info["raw_bytes"] += overhead + size
+            else:
+                record.raw_response = data
+                info["raw_bytes"] += size - record._raw_response_bytes
+                record._raw_response_bytes = size
+            self._touch(record)
+
+    def finish(
+        self,
+        record_id: int,
+        response: dict[str, Any] | None = None,
+        *,
+        error: BaseException | None = None,
+        cancelled: bool = False,
+    ) -> None:
+        """幂等地记录执行终态，失败时保留已接收的部分输出。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            response: 已经解析的标准化响应字段。
+            error: 执行或观测过程中捕获的异常。
+            cancelled: 是否因调用方取消而结束。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status in _TERMINAL:
+                return
+            if response:
+                record.response.update(self._serialize(record, response))
+            if error is not None:
+                # 异常的 __str__ 可能不安全，因此仅保留其字符串参数。
+                message = next(
+                    (arg for arg in error.args if isinstance(arg, str)),
+                    type(error).__name__,
+                )
+                code = getattr(error, "status_code", None)
+                record.error = self._serialize(
+                    record,
+                    {
+                        "type": type(error).__name__,
+                        "message": message,
+                        "status_code": code if isinstance(code, int) else None,
+                    },
+                )
+            record.status = (
+                "cancelled"
+                if cancelled
+                else "failed"
+                if error is not None
+                else "succeeded"
+            )
+            record.finished_at = time.time()
+            record.duration_ms = (
+                (time.perf_counter() - record._clock) * 1000
+                if record._clock is not None
+                else None
+            )
+            self._touch(record)
+
+    def mark_unavailable(
+        self, record_id: int, *, request: bool = False, raw: bool = False
+    ) -> None:
+        """标记确实不可用的数据，不伪造提供商请求或响应。
+
+        Args:
+            record_id: 待操作的记录 ID；记录已清空或淘汰时忽略更新。
+            request: 是否标记原始请求参数不可用。
+            raw: 是否标记原始 SDK 响应或事件不可用。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            if record is None or record.status in _TERMINAL:
+                return
+            record.capture_info["request_unavailable"] |= request
+            record.capture_info["raw_unavailable"] |= raw
+            self._touch(record)
+
+    def snapshot(self) -> dict[str, Any]:
+        """原子地读取记录摘要及当前缓冲统计，不返回请求或响应正文。
+
+        Returns:
+            dict[str, Any]: 包含 instance_id、revision、capacity、records 和 stats 的快照。
+        """
+        with self._lock:
+            summaries = [record.to_summary() for record in self._records.values()]
+            return {
+                "instance_id": self._instance_id,
+                "revision": self._revision,
+                "capacity": self._max_records,
+                "records": summaries,
+                "stats": {
+                    "total": len(summaries),
+                    "by_status": dict(Counter(r["status"] for r in summaries)),
+                    "tokens_in": sum(r["tokens_in"] or 0 for r in summaries),
+                    "tokens_out": sum(r["tokens_out"] or 0 for r in summaries),
+                },
+            }
+
+    def list_summaries(self) -> list[dict[str, Any]]:
+        """保留按捕获顺序返回摘要的原有接口，不暴露正文。
+
+        Returns:
+            list[dict[str, Any]]: 按捕获顺序排列的独立记录摘要。
+        """
+        return self.snapshot()["records"]
+
+    def get_record(self, record_id: int) -> dict[str, Any] | None:
+        """返回与内部状态隔离的详情；记录已清空或淘汰时返回 None。
+
+        Args:
+            record_id: 需要读取详情的记录 ID。
+
+        Returns:
+            dict[str, Any] | None: 包含实例标识的独立详情；记录不存在时返回 None。
+        """
+        with self._lock:
+            record = self._records.get(record_id)
+            return (
+                {"instance_id": self._instance_id, **record.to_full()}
+                if record is not None
+                else None
+            )
+
+    def clear_snapshot(self) -> dict[str, Any]:
+        """清空已保留的记录，不取消实际调用，也不重置记录 ID。
+
+        Returns:
+            dict[str, Any]: 包含实例标识、更新后的缓冲版本及删除数量的结果。
+        """
+        with self._lock:
+            count = len(self._records)
+            self._records.clear()
+            self._revision += 1
+            return {
+                "instance_id": self._instance_id,
+                "revision": self._revision,
+                "cleared_count": count,
+            }
+
+    def clear(self) -> int:
+        """保留仅返回删除数量的原有清空接口。
+
+        Returns:
+            int: 本次删除的记录数量。
+        """
+        return self.clear_snapshot()["cleared_count"]
 
     def import_json(self, payload: Any) -> list[CapturedRequest]:
-        """导入外部 JSON，并转换为可渲染的捕获记录。"""
-        imported: list[CapturedRequest] = []
-        for api_name, params, metadata in _normalize_import_payload(payload):
-            next_id = self._counter + 1
-            self.capture(api_name, params, metadata)
-            record = self._records[-1]
-            if record.id != next_id:
-                raise RuntimeError("导入记录 ID 不连续")
-            imported.append(record)
-        return imported
+        """导入为手工捕获状态，返回与内部状态隔离、保留原始字段的记录副本。
 
-    def mount(self, app: Any, prefix: str = "/_inspector") -> None:
-        """将 WebUI 路由挂载到 FastAPI 应用。"""
-        if self._mounted:
-            return
-        self._mounted = True
-        router = self._build_router()
-        app.include_router(router, prefix=prefix)
+        Args:
+            payload: 待导入的 JSON 对象、对象列表或包含 requests 的包装对象。
 
-    def _build_router(self) -> APIRouter:
-        """构建 FastAPI router，包含 WebUI、REST 与 SSE 端点。"""
-        router = APIRouter()
-
-        @router.get("/", response_class=HTMLResponse, include_in_schema=False)
-        async def webui() -> HTMLResponse:  # type: ignore[return-value]
-            return HTMLResponse(_WEBUI_HTML)
-
-        @router.get("/api/requests")
-        async def list_requests() -> JSONResponse:
-            return JSONResponse([record.to_summary() for record in self._records])
-
-        @router.get("/api/requests/{req_id}")
-        async def get_request(req_id: int) -> JSONResponse:
-            for record in reversed(self._records):
-                if record.id == req_id:
-                    return JSONResponse(record.to_full())
-            return JSONResponse({"error": "not found"}, status_code=404)
-
-        @router.delete("/api/requests")
-        async def clear_requests() -> JSONResponse:
-            self._records.clear()
-            return JSONResponse({"ok": True})
-
-        @router.post("/api/import")
-        async def import_requests(payload: Any = Body(...)) -> JSONResponse:
-            try:
-                imported = self.import_json(payload)
-            except ValueError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
-            return JSONResponse(
-                {
-                    "ok": True,
-                    "count": len(imported),
-                    "items": [record.to_summary() for record in imported],
-                }
-            )
-
-        @router.get("/api/analytics")
-        async def get_analytics() -> JSONResponse:
-            """返回综合统计指标。"""
-            try:
-                from src.kernel.llm.stats import get_llm_stats_collector
-                collector = get_llm_stats_collector()
-                summary = await collector.get_summary()
-                by_model = await collector.get_by_model()
-                by_request = await collector.get_by_request_name()
-                by_stream = await collector.get_by_stream()
-                return JSONResponse({
-                    "summary": summary,
-                    "by_model": by_model,
-                    "by_request_name": by_request,
-                    "by_stream": by_stream,
-                })
-            except Exception as e:
-                return JSONResponse({"error": str(e)}, status_code=500)
-
-        @router.get("/api/stream", include_in_schema=False)
-        async def sse_stream() -> StreamingResponse:
-            queue: asyncio.Queue[CapturedRequest | None] = asyncio.Queue(maxsize=50)
-            self._subscribers.append(queue)
-
-            async def generate() -> AsyncIterator[str]:
-                try:
-                    snapshot = [record.to_summary() for record in self._records]
-                    yield f"event: snapshot\ndata: {json.dumps(snapshot)}\n\n"
-                    while True:
-                        try:
-                            record = await asyncio.wait_for(queue.get(), timeout=25)
-                        except asyncio.TimeoutError:
-                            yield ": heartbeat\n\n"
-                            continue
-                        if record is None:
-                            break
-                        yield f"event: new\ndata: {json.dumps(record.to_summary())}\n\n"
-                finally:
-                    try:
-                        self._subscribers.remove(queue)
-                    except ValueError:
-                        pass
-
-            return StreamingResponse(
-                generate(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-
-        @router.get("/analytics", response_class=HTMLResponse, include_in_schema=False)
-        async def analytics_page() -> HTMLResponse:
-            return HTMLResponse(_ANALYTICS_HTML)
-
-        return router
+        Returns:
+            list[CapturedRequest]: 导入记录的独立副本，状态均为 captured。
+        """
+        with self._lock:
+            imported = []
+            for api_name, params, metadata in _normalize_import_payload(payload):
+                record_id = self.capture(api_name, params, metadata)
+                record = copy.deepcopy(self._records[record_id])
+                imported.append(record)
+            return imported
 
 
 _inspector: RequestInspector | None = None
+_inspector_lock = threading.Lock()
 
 
 def get_inspector() -> RequestInspector:
-    """获取全局 RequestInspector 单例。"""
+    """获取进程级监视器单例，并保证并发首次访问安全。
+
+    Returns:
+        RequestInspector: 当前进程共享的线程安全监视器。
+    """
     global _inspector
-    if _inspector is None:
-        _inspector = RequestInspector()
-    return _inspector
+    with _inspector_lock:
+        if _inspector is None:
+            _inspector = RequestInspector()
+        return _inspector
 
 
 def capture(
-    api_name: str,
-    params: dict[str, Any],
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    """捕获一条 OpenAI 请求体。"""
-    get_inspector().capture(api_name, params, metadata)
+    api_name: str, params: dict[str, Any], metadata: dict[str, Any] | None = None
+) -> int:
+    """手工捕获请求输入，不表示该请求已经执行。
+
+    Args:
+        api_name: 用于标识 SDK 调用入口的接口名称。
+        params: 最终传入 SDK 的请求参数；允许为空时保留原参数。
+        metadata: 需要合并到记录中的请求元数据。
+
+    Returns:
+        int: 新建手工捕获记录的 ID。
+    """
+    return get_inspector().capture(api_name, params, metadata)
 
 
 def _normalize_import_payload(
@@ -713,14 +1161,16 @@ def _normalize_import_entries(
     metadata = metadata_raw.copy() if isinstance(metadata_raw, dict) else {}
     metadata.setdefault("imported", True)
 
-    api_name = str(payload.get("api_name") or payload.get("api") or "imported.request")
+    api_name = payload.get("api_name") or payload.get("api") or "imported.request"
+    if not isinstance(api_name, str):
+        raise ValueError("api_name must be a string")
 
     if "params" in payload:
         params = payload.get("params")
         if not isinstance(params, dict):
             raise ValueError("params 字段必须是对象")
         if "source" in payload and "import_source" not in metadata:
-            metadata["import_source"] = str(payload.get("source"))
+            metadata["import_source"] = payload.get("source")
         return [(api_name, params, metadata)]
 
     if any(key in payload for key in ("messages", "tools", "model", "input")):
@@ -731,1361 +1181,3 @@ def _normalize_import_entries(
     raise ValueError(
         "无法识别导入 JSON 结构；请提供原始请求体、包含 params 的对象，或 requests 数组"
     )
-
-
-_WEBUI_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LLM 请求检视器</title>
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  :root {
-    --bg: #f4efe7;
-    --bg-strong: #ebe2d5;
-    --panel: rgba(255, 252, 246, 0.9);
-    --panel-strong: #fffaf3;
-    --border: rgba(70, 53, 32, 0.12);
-    --shadow: 0 18px 48px rgba(78, 60, 37, 0.08);
-    --text: #2f261d;
-    --muted: #7a6856;
-    --accent: #0e7490;
-    --accent-soft: rgba(14, 116, 144, 0.12);
-    --success: #1f7a4d;
-    --danger: #aa3a2a;
-    --system: #5e3ebc;
-    --user: #0f766e;
-    --assistant: #b45309;
-    --tool: #2563eb;
-    --code-bg: #221c16;
-    --code-text: #f8efe2;
-  }
-  html, body { height: 100%; }
-  body {
-    height: 100vh;
-    min-height: 100vh;
-    background:
-      radial-gradient(circle at top left, rgba(14, 116, 144, 0.16), transparent 28%),
-      radial-gradient(circle at top right, rgba(180, 83, 9, 0.14), transparent 32%),
-      linear-gradient(180deg, var(--bg) 0%, #f8f3eb 100%);
-    color: var(--text);
-    font-family: 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
-    font-size: 14px;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-  header {
-    padding: 18px 22px;
-    display: flex;
-    gap: 16px;
-    align-items: center;
-    border-bottom: 1px solid var(--border);
-    background: rgba(255, 250, 243, 0.78);
-    backdrop-filter: blur(18px);
-  }
-  .brand { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
-  .brand-mark {
-    width: 44px;
-    height: 44px;
-    border-radius: 14px;
-    background: linear-gradient(135deg, rgba(14,116,144,0.95), rgba(180,83,9,0.88));
-    color: #fff;
-    display: grid;
-    place-items: center;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    box-shadow: 0 10px 24px rgba(14, 116, 144, 0.18);
-  }
-  .brand-copy h1 { font-size: 19px; font-weight: 700; }
-  .brand-copy p { color: var(--muted); margin-top: 4px; font-size: 12px; }
-  .status-group { display: flex; align-items: center; gap: 10px; }
-  #status-dot {
-    width: 10px; height: 10px; border-radius: 50%; background: #baa995;
-    box-shadow: 0 0 0 6px rgba(122, 104, 86, 0.08);
-  }
-  #status-dot.live { background: var(--success); box-shadow: 0 0 0 6px rgba(31, 122, 77, 0.14); }
-  .badge {
-    min-width: 38px;
-    text-align: center;
-    padding: 6px 10px;
-    border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--accent);
-    font-weight: 700;
-  }
-  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-  .toolbar-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  button {
-    border: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.72);
-    color: var(--text);
-    padding: 9px 14px;
-    border-radius: 12px;
-    cursor: pointer;
-    font-size: 13px;
-    transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
-  }
-  button:hover {
-    transform: translateY(-1px);
-    border-color: rgba(14, 116, 144, 0.28);
-    box-shadow: 0 10px 20px rgba(78, 60, 37, 0.08);
-  }
-  button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  button.danger { color: var(--danger); }
-  input[type=text] {
-    width: 220px;
-    border: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.72);
-    color: var(--text);
-    border-radius: 12px;
-    padding: 10px 14px;
-    outline: none;
-  }
-  input[type=text]:focus { border-color: rgba(14, 116, 144, 0.45); }
-  textarea {
-    width: 100%;
-    min-height: 220px;
-    resize: vertical;
-    border: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.8);
-    color: var(--text);
-    border-radius: 16px;
-    padding: 14px;
-    outline: none;
-    font-family: 'JetBrains Mono', 'Consolas', monospace;
-    font-size: 12px;
-    line-height: 1.6;
-  }
-  textarea:focus { border-color: rgba(14, 116, 144, 0.45); }
-  .main { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-  .import-panel {
-    display: none;
-    padding: 16px 18px;
-    border-bottom: 1px solid var(--border);
-    background: rgba(255, 250, 243, 0.82);
-    backdrop-filter: blur(12px);
-    flex-direction: column;
-    gap: 12px;
-  }
-  .import-panel.open { display: flex; }
-  .import-row {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-  }
-  .import-hint { color: var(--muted); font-size: 12px; }
-  .import-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .status-text { color: var(--muted); font-size: 12px; min-height: 18px; }
-  .status-text.error { color: var(--danger); }
-  .status-text.success { color: var(--success); }
-  .list-panel {
-    width: 360px;
-    flex-shrink: 0;
-    border-right: 1px solid var(--border);
-    background: rgba(248, 242, 233, 0.68);
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
-  .list-scroll { padding: 14px; overflow-y: auto; min-height: 0; }
-  .req-item {
-    padding: 14px;
-    border: 1px solid transparent;
-    border-radius: 18px;
-    background: rgba(255, 255, 255, 0.72);
-    box-shadow: 0 10px 28px rgba(78, 60, 37, 0.04);
-    cursor: pointer;
-    margin-bottom: 12px;
-    transition: transform .15s ease, border-color .15s ease, background .15s ease;
-  }
-  .req-item:hover { transform: translateY(-1px); border-color: rgba(14, 116, 144, 0.18); }
-  .req-item.active {
-    border-color: rgba(14, 116, 144, 0.35);
-    background: linear-gradient(180deg, rgba(14, 116, 144, 0.08), rgba(255, 255, 255, 0.8));
-  }
-  .row1 { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
-  .api-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
-    border-radius: 999px;
-    background: rgba(14, 116, 144, 0.1);
-    color: var(--accent);
-    font-size: 11px;
-    font-weight: 700;
-  }
-  .ts { color: var(--muted); font-size: 12px; }
-  .model { margin-top: 9px; font-weight: 700; word-break: break-word; }
-  .meta { margin-top: 6px; color: var(--muted); font-size: 12px; }
-  .meta-row { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .mini-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 8px;
-    border-radius: 999px;
-    background: rgba(94, 62, 188, 0.08);
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 600;
-  }
-  .detail-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  .detail-toolbar {
-    padding: 14px 18px;
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    border-bottom: 1px solid var(--border);
-    background: rgba(255, 250, 243, 0.72);
-    backdrop-filter: blur(12px);
-    flex-wrap: wrap;
-  }
-  .detail-title { flex: 1; min-width: 240px; color: var(--muted); }
-  .detail-body { flex: 1; min-height: 0; overflow: auto; padding: 22px; }
-  .empty-tip {
-    padding: 36px;
-    border: 1px dashed rgba(122, 104, 86, 0.24);
-    border-radius: 22px;
-    text-align: center;
-    color: var(--muted);
-    background: rgba(255, 255, 255, 0.5);
-  }
-  .section { margin-bottom: 18px; }
-  .section-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 12px;
-  }
-  .section-head h2 { font-size: 15px; }
-  .section-hint { color: var(--muted); font-size: 12px; }
-  .overview-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 10px;
-  }
-  .overview-item {
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    background: var(--panel);
-    padding: 14px;
-    box-shadow: var(--shadow);
-  }
-  .overview-item .label { color: var(--muted); font-size: 12px; }
-  .overview-item .value {
-    margin-top: 8px;
-    font-weight: 700;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: 'Segoe UI', 'PingFang SC', sans-serif;
-  }
-  details.tool-card {
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    background: var(--panel);
-    margin-bottom: 12px;
-    box-shadow: var(--shadow);
-    overflow: hidden;
-  }
-  details.tool-card > summary {
-    list-style: none;
-    cursor: pointer;
-    padding: 14px 16px;
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: center;
-  }
-  details.tool-card > summary::-webkit-details-marker { display: none; }
-  .tool-name { font-weight: 700; }
-  .tool-kind { color: var(--muted); font-size: 12px; }
-  .tool-body { padding: 0 16px 16px; }
-  .tool-desc { color: var(--muted); margin-bottom: 12px; }
-  .tool-props {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 10px;
-    margin-bottom: 12px;
-  }
-  .tool-prop {
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 12px;
-    background: rgba(255, 255, 255, 0.62);
-  }
-  .tool-prop .name { font-weight: 700; }
-  .tool-prop .meta { margin-top: 6px; }
-  .message-stack { display: flex; flex-direction: column; gap: 14px; }
-  .message-card {
-    border-radius: 22px;
-    border: 1px solid var(--border);
-    background: var(--panel);
-    box-shadow: var(--shadow);
-    overflow: hidden;
-  }
-  .message-head {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 14px 16px;
-    border-bottom: 1px solid var(--border);
-    background: rgba(255, 255, 255, 0.5);
-    flex-wrap: wrap;
-  }
-  .message-role {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    font-weight: 700;
-  }
-  .message-role .dot { width: 10px; height: 10px; border-radius: 50%; }
-  .role-system .dot { background: var(--system); }
-  .role-user .dot { background: var(--user); }
-  .role-assistant .dot { background: var(--assistant); }
-  .role-tool .dot { background: var(--tool); }
-  .role-unknown .dot { background: var(--muted); }
-  .message-meta { color: var(--muted); font-size: 12px; }
-  .message-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-  .message-card.cache-hit-candidate {
-    background: linear-gradient(180deg, rgba(221, 247, 227, 0.92), rgba(248, 255, 249, 0.94));
-    border-color: rgba(58, 138, 83, 0.22);
-  }
-  .message-card.cache-miss-candidate {
-    background: linear-gradient(180deg, rgba(254, 236, 232, 0.92), rgba(255, 248, 246, 0.95));
-    border-color: rgba(181, 78, 58, 0.18);
-  }
-  .cache-probe-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    border-radius: 999px;
-    padding: 4px 10px;
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-  }
-  .cache-probe-chip.hit {
-    color: #215b34;
-    background: rgba(132, 204, 151, 0.2);
-    border: 1px solid rgba(58, 138, 83, 0.2);
-  }
-  .cache-probe-chip.miss {
-    color: #8a3428;
-    background: rgba(244, 114, 102, 0.14);
-    border: 1px solid rgba(181, 78, 58, 0.16);
-  }
-  .block {
-    border: 1px solid rgba(70, 53, 32, 0.08);
-    border-radius: 16px;
-    background: rgba(255, 255, 255, 0.62);
-    padding: 14px;
-  }
-  .block-label { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-  .markdown-body { color: var(--text); line-height: 1.7; word-break: break-word; }
-  .markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 {
-    margin: 14px 0 8px;
-    line-height: 1.3;
-  }
-  .markdown-body p + p { margin-top: 10px; }
-  .markdown-body ul, .markdown-body ol { padding-left: 20px; margin: 8px 0; }
-  .markdown-body code {
-    background: rgba(14, 116, 144, 0.12);
-    padding: 2px 6px;
-    border-radius: 6px;
-    font-family: 'JetBrains Mono', 'Consolas', monospace;
-    font-size: 12px;
-  }
-  .markdown-body pre {
-    background: var(--code-bg);
-    color: var(--code-text);
-    padding: 14px;
-    border-radius: 14px;
-    overflow: auto;
-    margin: 10px 0;
-  }
-  .markdown-body pre code { background: transparent; padding: 0; color: inherit; }
-  .tool-call { border-left: 4px solid rgba(14, 116, 144, 0.5); }
-  .tool-result { border-left: 4px solid rgba(37, 99, 235, 0.45); }
-  .media-block { border-left: 4px solid rgba(180, 83, 9, 0.45); }
-  .unknown-block { border-left: 4px solid rgba(170, 58, 42, 0.42); }
-  .code-panel {
-    background: var(--code-bg);
-    color: var(--code-text);
-    border-radius: 14px;
-    padding: 14px;
-    overflow: auto;
-    font-family: 'JetBrains Mono', 'Consolas', monospace;
-    font-size: 12px;
-    line-height: 1.6;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .json-key { color: #8ed7ff; }
-  .json-str { color: #9fe3a7; }
-  .json-num { color: #f7b56d; }
-  .json-bool { color: #f3d070; }
-  .json-null { color: #d0bfa8; }
-  .new-flash { animation: flash .6s ease; }
-  @keyframes flash {
-    0%,100% { box-shadow: 0 10px 28px rgba(78, 60, 37, 0.04); }
-    50% { box-shadow: 0 18px 32px rgba(14, 116, 144, 0.18); }
-  }
-  @media (max-width: 980px) {
-    header { flex-direction: column; align-items: stretch; }
-    .toolbar { justify-content: stretch; }
-    .main { flex-direction: column; }
-    .list-panel { width: 100%; border-right: 0; border-bottom: 1px solid var(--border); max-height: 42vh; }
-  }
-</style>
-</head>
-<body>
-<header>
-  <div class="brand">
-    <div class="brand-mark">LLM</div>
-    <div class="brand-copy">
-      <h1>LLM 请求检视器</h1>
-      <p>默认展示结构化对话视图，保留原始 JSON 便于精确调试。</p>
-    </div>
-  </div>
-  <div class="status-group">
-    <span id="status-dot"></span>
-    <span class="badge" id="total-badge">0</span>
-  </div>
-  <div class="toolbar">
-    <div class="toolbar-group">
-      <input type="text" id="filter-input" placeholder="过滤 model / api…">
-      <a href="/_inspector/analytics"><button type="button">统计页</button></a>
-      <button id="import-toggle-btn">导入 JSON</button>
-      <button id="auto-scroll-btn" class="active" title="自动滚动到最新">跟随最新</button>
-    </div>
-    <div class="toolbar-group">
-      <button id="pretty-btn" class="active">渲染视图</button>
-      <button id="json-btn">JSON 视图</button>
-      <button id="copy-btn">复制 JSON</button>
-      <button id="clear-btn" class="danger">清空</button>
-    </div>
-  </div>
-</header>
-<div class="main">
-  <div class="list-panel">
-    <div class="import-panel" id="import-panel">
-      <div class="import-row">
-        <div>
-          <strong>导入外部请求 JSON</strong>
-          <div class="import-hint">支持原始请求体、包含 params 的对象、对象数组，或带 requests 数组的导出文件。</div>
-        </div>
-        <div class="import-actions">
-          <input type="file" id="import-file-input" accept=".json,application/json" multiple hidden>
-          <button id="import-file-btn">选择文件</button>
-          <button id="import-submit-btn">导入文本</button>
-        </div>
-      </div>
-      <textarea id="import-textarea" placeholder='可直接粘贴 JSON，例如：
-{
-  "api_name": "chat.completions.create",
-  "params": {
-    "model": "gpt-4.1",
-    "messages": [{"role": "user", "content": "hello"}]
-  },
-  "metadata": {"api_provider": "OpenAI"}
-}'></textarea>
-      <div class="status-text" id="import-status"></div>
-    </div>
-    <div class="list-scroll" id="list-scroll">
-      <div class="empty-tip" id="empty-tip">等待请求捕获…</div>
-    </div>
-  </div>
-  <div class="detail-panel">
-    <div class="detail-toolbar">
-      <span class="detail-title" id="detail-title">选择左侧记录查看结构化对话视图</span>
-    </div>
-    <div class="detail-body" id="detail-body">
-      <div class="empty-tip">左侧选择一条请求后，这里会显示摘要、工具定义和消息渲染。</div>
-    </div>
-  </div>
-</div>
-<script>
-const listScroll = document.getElementById('list-scroll');
-const detailBody = document.getElementById('detail-body');
-const detailTitle = document.getElementById('detail-title');
-const totalBadge = document.getElementById('total-badge');
-const filterInput = document.getElementById('filter-input');
-const statusDot = document.getElementById('status-dot');
-const autoScrollBtn = document.getElementById('auto-scroll-btn');
-const prettyBtn = document.getElementById('pretty-btn');
-const jsonBtn = document.getElementById('json-btn');
-const importToggleBtn = document.getElementById('import-toggle-btn');
-const importPanel = document.getElementById('import-panel');
-const importTextarea = document.getElementById('import-textarea');
-const importStatus = document.getElementById('import-status');
-const importFileInput = document.getElementById('import-file-input');
-const importFileBtn = document.getElementById('import-file-btn');
-const importSubmitBtn = document.getElementById('import-submit-btn');
-
-let requests = [];
-let activeId = null;
-let autoScroll = true;
-let viewMode = 'pretty';
-let fullCache = {};
-const CACHE_PROBE_WINDOW = 50;
-
-function connectSSE() {
-  const es = new EventSource('/_inspector/api/stream');
-  statusDot.classList.remove('live');
-  es.addEventListener('snapshot', event => {
-    statusDot.classList.add('live');
-    requests = JSON.parse(event.data);
-    renderList();
-  });
-  es.addEventListener('new', event => {
-    const record = JSON.parse(event.data);
-    requests.push(record);
-    appendItem(record, true);
-    totalBadge.textContent = requests.length;
-    if (autoScroll) listScroll.scrollTop = listScroll.scrollHeight;
-  });
-  es.onerror = () => {
-    statusDot.classList.remove('live');
-    es.close();
-    setTimeout(connectSSE, 3000);
-  };
-}
-connectSSE();
-
-async function refreshRequests() {
-  const response = await fetch('/_inspector/api/requests');
-  requests = await response.json();
-  renderList();
-}
-
-function filterText() {
-  return filterInput.value.trim().toLowerCase();
-}
-
-function matchFilter(record) {
-  const f = filterText();
-  if (!f) return true;
-  return String(record.model || '').toLowerCase().includes(f) || String(record.api_name || '').toLowerCase().includes(f);
-}
-
-function renderList() {
-  listScroll.innerHTML = '';
-  const filtered = requests.filter(matchFilter);
-  if (filtered.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-tip';
-    empty.textContent = requests.length ? '无匹配记录' : '等待请求捕获…';
-    listScroll.appendChild(empty);
-    totalBadge.textContent = requests.length;
-    return;
-  }
-  filtered.forEach(record => appendItem(record, false));
-  totalBadge.textContent = requests.length;
-  if (autoScroll) listScroll.scrollTop = listScroll.scrollHeight;
-}
-
-function appendItem(record, flash) {
-  if (!matchFilter(record)) return;
-  const item = document.createElement('div');
-  item.className = 'req-item' + (record.id === activeId ? ' active' : '') + (flash ? ' new-flash' : '');
-  item.dataset.id = record.id;
-  const provider = record.api_provider ? escHtml(record.api_provider) : '-';
-  const tokens = record.estimated_input_tokens == null ? '-' : escHtml(record.estimated_input_tokens);
-  item.innerHTML = `<div class="row1"><span class="api-chip">${escHtml(record.api_name)}</span><span class="ts">${escHtml(record.ts_str)}</span></div>
-    <div class="model">${escHtml(record.model)}</div>
-    <div class="meta">${record.msg_count} 条消息 · ${record.tool_count} 个工具</div>
-    <div class="meta-row"><span class="mini-chip">Provider · ${provider}</span><span class="mini-chip">Tokens · ${tokens}</span></div>`;
-  item.addEventListener('click', () => selectItem(record.id));
-  listScroll.appendChild(item);
-}
-
-filterInput.addEventListener('input', renderList);
-
-async function selectItem(id) {
-  activeId = id;
-  document.querySelectorAll('.req-item').forEach(el => el.classList.toggle('active', +el.dataset.id === id));
-  detailTitle.textContent = '加载中…';
-  await ensureRequestDetails([id, ...getProbeCandidateIds(id)]);
-  renderActiveDetail();
-}
-
-function getProbeCandidateIds(id) {
-  const currentIndex = requests.findIndex(item => item.id === id);
-  if (currentIndex <= 0) {
-    return [];
-  }
-  const currentRecord = requests[currentIndex] || {};
-  const currentGroup = getCacheProbeGroupKey(currentRecord, null);
-  return requests
-    .slice(0, currentIndex)
-    .filter(item => getCacheProbeGroupKey(item, null) === currentGroup)
-    .slice(-CACHE_PROBE_WINDOW)
-    .map(item => item.id);
-}
-
-async function ensureRequestDetails(ids) {
-  const pending = ids.filter(reqId => reqId != null && !fullCache[reqId]).map(async reqId => {
-    const res = await fetch(`/_inspector/api/requests/${reqId}`);
-    fullCache[reqId] = await res.json();
-  });
-  if (pending.length) {
-    await Promise.all(pending);
-  }
-}
-
-function renderActiveDetail() {
-  if (activeId == null || !fullCache[activeId]) {
-    detailBody.innerHTML = '<div class="empty-tip">左侧选择一条请求后，这里会显示详情。</div>';
-    detailTitle.textContent = '选择左侧记录查看结构化对话视图';
-    return;
-  }
-  const data = fullCache[activeId];
-  const record = requests.find(item => item.id === activeId);
-  detailTitle.textContent = record ? `#${activeId} · ${record.api_name} · ${record.ts_str}` : `#${activeId}`;
-  if (viewMode === 'json') {
-    renderJsonDetail(data.params);
-    return;
-  }
-  renderPrettyDetail(data.rendered || {});
-}
-
-function renderPrettyDetail(rendered) {
-  detailBody.innerHTML = '';
-  const fragment = document.createDocumentFragment();
-  fragment.appendChild(renderOverviewSection(rendered.overview || []));
-  fragment.appendChild(renderToolsSection(rendered.tools || []));
-  fragment.appendChild(renderMessagesSection(rendered.messages || [], buildCacheProbeStates(rendered.messages || [])));
-  detailBody.appendChild(fragment);
-}
-
-function renderOverviewSection(items) {
-  const section = document.createElement('section');
-  section.className = 'section';
-  section.innerHTML = '<div class="section-head"><h2>请求摘要</h2><span class="section-hint">顶层参数与统计</span></div>';
-  const grid = document.createElement('div');
-  grid.className = 'overview-grid';
-  if (!items.length) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-tip';
-    empty.textContent = '没有可展示的顶层参数。';
-    section.appendChild(empty);
-    return section;
-  }
-  items.forEach(item => {
-    const card = document.createElement('div');
-    card.className = 'overview-item';
-    card.innerHTML = `<div class="label">${escHtml(item.label || '')}</div><div class="value">${escHtml(item.value || '')}</div>`;
-    grid.appendChild(card);
-  });
-  section.appendChild(grid);
-  return section;
-}
-
-function renderToolsSection(tools) {
-  const section = document.createElement('section');
-  section.className = 'section';
-  section.innerHTML = '<div class="section-head"><h2>Tools 定义</h2><span class="section-hint">函数签名、参数要求与原始 schema</span></div>';
-  if (!tools.length) {
-    section.innerHTML += '<div class="empty-tip">本次请求没有携带 tools 定义。</div>';
-    return section;
-  }
-  tools.forEach(tool => {
-    const details = document.createElement('details');
-    details.className = 'tool-card';
-    details.open = tool.index === 0;
-    const propertyHtml = (tool.properties || []).map(prop => {
-      const requiredLabel = prop.required ? '必填' : '可选';
-      return `<div class="tool-prop"><div class="name">${escHtml(prop.name || '')}</div><div class="meta">${escHtml(prop.type || '')} · ${requiredLabel}</div><div class="meta">${escHtml(prop.description || '无描述')}</div></div>`;
-    }).join('');
-    details.innerHTML = `<summary><div><div class="tool-name">${escHtml(tool.name || '')}</div><div class="tool-kind">${escHtml(tool.kind || '')}</div></div><div class="section-hint">${(tool.required || []).length} 个必填参数</div></summary>
-      <div class="tool-body">
-        <div class="tool-desc">${escHtml(tool.description || '无描述')}</div>
-        ${(tool.properties || []).length ? `<div class="tool-props">${propertyHtml}</div>` : '<div class="empty-tip">没有显式参数定义。</div>'}
-        <div class="code-panel">${syntaxHighlight(tool.raw_json || '{}')}</div>
-      </div>`;
-    section.appendChild(details);
-  });
-  return section;
-}
-
-function renderMessagesSection(messages, cacheProbeStates) {
-  const section = document.createElement('section');
-  section.className = 'section';
-  section.innerHTML = `<div class="section-head"><h2>Messages 对话流</h2><span class="section-hint">按 role 拆分板块，渲染 Markdown、工具调用与结果。绿色表示最近 ${CACHE_PROBE_WINDOW} 条同类请求中存在相同前缀，红色表示本地模拟未命中或前缀在此断开。</span></div>`;
-  if (!messages.length) {
-    section.innerHTML += '<div class="empty-tip">本次请求没有 messages，或并非 chat 类型请求。</div>';
-    return section;
-  }
-  const stack = document.createElement('div');
-  stack.className = 'message-stack';
-  messages.forEach((message, index) => stack.appendChild(renderMessageCard(message, cacheProbeStates[index] || null)));
-  section.appendChild(stack);
-  return section;
-}
-
-function renderMessageCard(message, cacheProbeState) {
-  const card = document.createElement('article');
-  const role = normalizeRoleClass(message.role || 'unknown');
-  const probeClass = cacheProbeState && cacheProbeState.hit ? ' cache-hit-candidate' : (cacheProbeState ? ' cache-miss-candidate' : '');
-  card.className = `message-card role-${role}${probeClass}`;
-  const metaText = message.meta ? escHtml(message.meta) : '&nbsp;';
-  const probeChip = cacheProbeState
-    ? `<span class="cache-probe-chip ${cacheProbeState.hit ? 'hit' : 'miss'}">${escHtml(cacheProbeState.label || '')}</span>`
-    : '';
-  card.innerHTML = `<div class="message-head"><div class="message-role"><span class="dot"></span><span>${escHtml(message.label || role)}</span></div><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end">${probeChip}<span class="message-meta">${metaText}</span></div></div>`;
-  const body = document.createElement('div');
-  body.className = 'message-body';
-  (message.blocks || []).forEach(block => body.appendChild(renderBlock(block)));
-  card.appendChild(body);
-  return card;
-}
-
-function buildCacheProbeStates(messages) {
-  if (activeId == null || !messages.length) {
-    return [];
-  }
-
-  const currentData = fullCache[activeId] || {};
-  const currentRecord = requests.find(item => item.id === activeId) || {};
-  const currentGroup = getCacheProbeGroupKey(currentRecord, currentData);
-  const currentFingerprints = messages.map(message => fingerprintMessageForCacheProbe(message));
-  const candidates = getProbeCandidateIds(activeId)
-    .map(reqId => ({ record: requests.find(item => item.id === reqId) || {}, data: fullCache[reqId] || null }))
-    .filter(entry => entry.data && getCacheProbeGroupKey(entry.record, entry.data) === currentGroup)
-    .map(entry => (entry.data.rendered && Array.isArray(entry.data.rendered.messages) ? entry.data.rendered.messages : []))
-    .map(candidateMessages => candidateMessages.map(message => fingerprintMessageForCacheProbe(message)));
-
-  return currentFingerprints.map((fingerprint, index) => {
-    let hit = false;
-    let prefixBreak = false;
-    for (const candidate of candidates) {
-      if (index > 0 && hasMatchingPrefix(candidate, currentFingerprints, index - 1) && !hasMatchingPrefix(candidate, currentFingerprints, index)) {
-        prefixBreak = true;
-      }
-      if (hasMatchingPrefix(candidate, currentFingerprints, index)) {
-        hit = true;
-        break;
-      }
-    }
-
-    if (hit) {
-      return { hit: true, label: '命中候选' };
-    }
-    if (prefixBreak) {
-      return { hit: false, label: '前缀在此断开' };
-    }
-    return { hit: false, label: candidates.length ? '历史样本未命中' : '无对照样本' };
-  });
-}
-
-function hasMatchingPrefix(candidateFingerprints, currentFingerprints, endIndex) {
-  if (!Array.isArray(candidateFingerprints) || candidateFingerprints.length <= endIndex) {
-    return false;
-  }
-  for (let index = 0; index <= endIndex; index += 1) {
-    if (candidateFingerprints[index] !== currentFingerprints[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function getCacheProbeGroupKey(record, data) {
-  const metadata = data && data.metadata ? data.metadata : {};
-  const provider = metadata.api_provider || record.api_provider || '-';
-  const requestName = metadata.request_name || record.request_name || '';
-  return [record.api_name || '', provider, record.model || '', requestName].join('|');
-}
-
-function fingerprintMessageForCacheProbe(message) {
-  const blocks = Array.isArray(message.blocks) ? message.blocks.map(block => normalizeBlockForCacheProbe(block)) : [];
-  return JSON.stringify({ role: message.role || 'unknown', blocks });
-}
-
-function normalizeBlockForCacheProbe(block) {
-  if (!block || typeof block !== 'object') {
-    return block;
-  }
-  return {
-    type: block.type || 'unknown',
-    text: block.text || '',
-    label: block.label || '',
-    call_id: block.call_id || '',
-    name: block.name || '',
-    arguments_text: block.arguments_text || '',
-    title: block.title || '',
-    meta: block.meta || '',
-    media_type: block.media_type || '',
-  };
-}
-
-function renderBlock(block) {
-  const container = document.createElement('div');
-  const type = block.type || 'unknown';
-  container.className = 'block';
-  if (block.label) {
-    const label = document.createElement('div');
-    label.className = 'block-label';
-    label.textContent = block.label;
-    container.appendChild(label);
-  }
-  if (type === 'markdown') {
-    const body = document.createElement('div');
-    body.className = 'markdown-body';
-    body.innerHTML = renderMarkdown(block.text || '');
-    container.appendChild(body);
-    return container;
-  }
-  if (type === 'tool_call') {
-    container.classList.add('tool-call');
-    container.innerHTML += `<div class="block-label">工具调用 ${block.call_id ? '· ' + escHtml(block.call_id) : ''}</div><div><strong>${escHtml(block.name || '')}</strong></div><div class="code-panel">${syntaxHighlight(block.arguments_text || '{}')}</div>`;
-    return container;
-  }
-  if (type === 'tool_result') {
-    container.classList.add('tool-result');
-    container.innerHTML += `<div class="block-label">工具结果${block.call_id ? ' · ' + escHtml(block.call_id) : ''}${block.name ? ' · ' + escHtml(block.name) : ''}</div><div class="markdown-body">${renderMarkdown(block.text || '')}</div>`;
-    return container;
-  }
-  if (type === 'media') {
-    container.classList.add('media-block');
-    container.innerHTML += `<div><strong>${escHtml(block.title || '媒体内容')}</strong></div><div class="message-meta">${escHtml(block.meta || '')}</div><div class="markdown-body">${renderMarkdown(block.text || '')}</div>`;
-    return container;
-  }
-  if (type === 'empty') {
-    container.innerHTML += `<div class="message-meta">${escHtml(block.text || '')}</div>`;
-    return container;
-  }
-  container.classList.add('unknown-block');
-  container.innerHTML += `<div class="block-label">${escHtml(block.label || '未知内容')}</div><div class="code-panel">${syntaxHighlight(block.text || '{}')}</div>`;
-  return container;
-}
-
-function renderJsonDetail(params) {
-  detailBody.innerHTML = '';
-  const section = document.createElement('section');
-  section.className = 'section';
-  section.innerHTML = '<div class="section-head"><h2>原始 JSON</h2><span class="section-hint">保留完整调试视图</span></div>';
-  const code = document.createElement('div');
-  code.className = 'code-panel';
-  code.innerHTML = syntaxHighlight(JSON.stringify(params, null, 2));
-  section.appendChild(code);
-  detailBody.appendChild(section);
-}
-
-function normalizeRoleClass(role) {
-  return ['system', 'user', 'assistant', 'tool'].includes(role) ? role : 'unknown';
-}
-
-autoScrollBtn.addEventListener('click', () => {
-  autoScroll = !autoScroll;
-  autoScrollBtn.classList.toggle('active', autoScroll);
-  autoScrollBtn.textContent = autoScroll ? '跟随最新' : '暂停跟随';
-});
-
-prettyBtn.addEventListener('click', () => {
-  viewMode = 'pretty';
-  prettyBtn.classList.add('active');
-  jsonBtn.classList.remove('active');
-  renderActiveDetail();
-});
-
-jsonBtn.addEventListener('click', () => {
-  viewMode = 'json';
-  jsonBtn.classList.add('active');
-  prettyBtn.classList.remove('active');
-  renderActiveDetail();
-});
-
-document.getElementById('clear-btn').addEventListener('click', async () => {
-  if (!confirm('确定清空所有记录？')) return;
-  await fetch('/_inspector/api/requests', { method: 'DELETE' });
-  requests = [];
-  fullCache = {};
-  activeId = null;
-  renderList();
-  renderActiveDetail();
-  totalBadge.textContent = '0';
-});
-
-document.getElementById('copy-btn').addEventListener('click', async () => {
-  if (activeId == null || !fullCache[activeId]) return;
-  await navigator.clipboard.writeText(JSON.stringify(fullCache[activeId].params, null, 2));
-});
-
-function setImportStatus(message, kind = '') {
-  importStatus.textContent = message;
-  importStatus.className = 'status-text' + (kind ? ` ${kind}` : '');
-}
-
-async function importJsonPayload(payload) {
-  setImportStatus('正在导入…');
-  const response = await fetch('/_inspector/api/import', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const result = await response.json();
-  if (!response.ok) {
-    throw new Error(result.error || '导入失败');
-  }
-  await refreshRequests();
-  fullCache = {};
-  const latest = (result.items || []).at(-1);
-  if (latest) {
-    await selectItem(latest.id);
-  } else {
-    renderActiveDetail();
-  }
-  const count = Number(result.count || 0);
-  setImportStatus(`已导入 ${count} 条记录`, 'success');
-}
-
-importToggleBtn.addEventListener('click', () => {
-  const isOpen = importPanel.classList.toggle('open');
-  importToggleBtn.classList.toggle('active', isOpen);
-  if (isOpen) {
-    importTextarea.focus();
-  }
-});
-
-importSubmitBtn.addEventListener('click', async () => {
-  const text = importTextarea.value.trim();
-  if (!text) {
-    setImportStatus('请输入或粘贴 JSON 内容', 'error');
-    return;
-  }
-  try {
-    await importJsonPayload(JSON.parse(text));
-  } catch (error) {
-    setImportStatus(error.message || '导入失败', 'error');
-  }
-});
-
-importFileBtn.addEventListener('click', () => importFileInput.click());
-
-importFileInput.addEventListener('change', async event => {
-  const files = Array.from(event.target.files || []);
-  if (!files.length) return;
-  try {
-    const payloads = [];
-    for (const file of files) {
-      const text = await file.text();
-      payloads.push(JSON.parse(text));
-    }
-    await importJsonPayload(payloads.length === 1 ? payloads[0] : payloads);
-  } catch (error) {
-    setImportStatus(error.message || '文件导入失败', 'error');
-  } finally {
-    importFileInput.value = '';
-  }
-});
-
-function escHtml(text) {
-  return String(text)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function renderInlineMarkdown(text) {
-  let rendered = escHtml(text);
-  rendered = rendered.replace(/`([^`]+)`/g, '<code>$1</code>');
-  rendered = rendered.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  rendered = rendered.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  return rendered;
-}
-
-function renderParagraph(lines) {
-  if (!lines.length) return '';
-  return `<p>${lines.map(renderInlineMarkdown).join('<br>')}</p>`;
-}
-
-function renderMarkdown(text) {
-  const source = String(text || '');
-  const codeBlocks = [];
-  const placeholderPrefix = '__CODE_BLOCK__';
-  const withoutCode = source.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, language = '', code = '') => {
-    const index = codeBlocks.length;
-    codeBlocks.push(`<pre><code>${escHtml(code.replace(/\n$/, ''))}</code></pre>`);
-    return `${placeholderPrefix}${index}__`;
-  });
-  const lines = withoutCode.split(/\r?\n/);
-  const parts = [];
-  let paragraph = [];
-  let listType = null;
-  let listItems = [];
-
-  function flushParagraph() {
-    if (paragraph.length) {
-      parts.push(renderParagraph(paragraph));
-      paragraph = [];
-    }
-  }
-
-  function flushList() {
-    if (listType && listItems.length) {
-      parts.push(`<${listType}>${listItems.map(item => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</${listType}>`);
-    }
-    listType = null;
-    listItems = [];
-  }
-
-  lines.forEach(line => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flushParagraph();
-      flushList();
-      return;
-    }
-
-    const placeholderMatch = trimmed.match(new RegExp(`^${placeholderPrefix}(\\d+)__$`));
-    if (placeholderMatch) {
-      flushParagraph();
-      flushList();
-      parts.push(codeBlocks[Number(placeholderMatch[1])] || '');
-      return;
-    }
-
-    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      flushParagraph();
-      flushList();
-      const level = Math.min(heading[1].length, 6);
-      parts.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
-      return;
-    }
-
-    const unordered = trimmed.match(/^[-*+]\s+(.+)$/);
-    if (unordered) {
-      flushParagraph();
-      if (listType && listType !== 'ul') flushList();
-      listType = 'ul';
-      listItems.push(unordered[1]);
-      return;
-    }
-
-    const ordered = trimmed.match(/^\d+\.\s+(.+)$/);
-    if (ordered) {
-      flushParagraph();
-      if (listType && listType !== 'ol') flushList();
-      listType = 'ol';
-      listItems.push(ordered[1]);
-      return;
-    }
-
-    flushList();
-    paragraph.push(trimmed);
-  });
-
-  flushParagraph();
-  flushList();
-
-  if (!parts.length) {
-    return `<p>${renderInlineMarkdown(source).replace(/\n/g, '<br>')}</p>`;
-  }
-  return parts.join('');
-}
-
-function syntaxHighlight(json) {
-  const normalized = typeof json === 'string' ? json : JSON.stringify(json, null, 2);
-  return escHtml(normalized).replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(?:\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, match => {
-    let cls = 'json-num';
-    if (/^"/.test(match)) cls = /:$/.test(match) ? 'json-key' : 'json-str';
-    else if (/true|false/.test(match)) cls = 'json-bool';
-    else if (/null/.test(match)) cls = 'json-null';
-    return `<span class="${cls}">${match}</span>`;
-  });
-}
-</script>
-</body>
-</html>"""
-
-
-_ANALYTICS_HTML = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LLM 统计仪表盘</title>
-<style>
-  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-  :root{--bg:#f4efe7;--panel:rgba(255,252,246,0.92);--border:rgba(70,53,32,0.12);--text:#2f261d;--muted:#7a6856;--accent:#0e7490;--accent-soft:rgba(14,116,144,0.14);--success:#1f7a4d;--danger:#aa3a2a;--amber:#b45309;--rose:#c2416c;--ink:#3b3228}
-  body{background:radial-gradient(circle at top left,rgba(14,116,144,0.14),transparent 28%),radial-gradient(circle at top right,rgba(180,83,9,0.12),transparent 32%),linear-gradient(180deg,var(--bg) 0%,#f8f3eb 100%);color:var(--text);font-family:'Segoe UI','PingFang SC',sans-serif;font-size:14px;padding:24px;min-height:100vh}
-  header{margin-bottom:24px;display:flex;justify-content:space-between;align-items:center}
-  h1{font-size:22px;font-weight:700}
-  .nav{display:flex;gap:12px}
-  .nav a{padding:8px 16px;border-radius:12px;border:1px solid var(--border);text-decoration:none;color:var(--text);font-size:13px}
-  .nav a:hover{background:var(--panel);border-color:var(--accent)}
-  .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:24px}
-  .kpi{border:1px solid var(--border);border-radius:18px;background:var(--panel);padding:18px;box-shadow:0 12px 32px rgba(78,60,37,0.06)}
-  .kpi .kpi-label{color:var(--muted);font-size:12px}
-  .kpi .kpi-value{margin-top:10px;font-size:26px;font-weight:700}
-  .kpi .kpi-sub{color:var(--muted);font-size:11px;margin-top:4px}
-  .chart-grid{display:grid;grid-template-columns:1.15fr 1fr;gap:18px;margin-bottom:18px}
-  .chart-card{background:var(--panel);border:1px solid var(--border);border-radius:22px;padding:20px;box-shadow:0 12px 32px rgba(78,60,37,0.06);overflow:hidden}
-  .chart-card h2{font-size:16px;margin-bottom:6px}
-  .chart-subtitle{color:var(--muted);font-size:12px;margin-bottom:16px}
-  .chart-stack{display:grid;gap:18px}
-  .ring-layout{display:grid;grid-template-columns:160px 1fr;gap:20px;align-items:center}
-  .ring{width:160px;height:160px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--accent) 0deg, var(--accent) 180deg, rgba(0,0,0,0.08) 180deg 360deg);position:relative;margin:auto}
-  .ring::after{content:"";position:absolute;inset:18px;border-radius:50%;background:linear-gradient(180deg,#fffaf2 0%,#fbf6ee 100%);box-shadow:inset 0 1px 0 rgba(255,255,255,0.8)}
-  .ring-center{position:relative;z-index:1;text-align:center}
-  .ring-value{font-size:28px;font-weight:700;line-height:1}
-  .ring-label{font-size:12px;color:var(--muted);margin-top:6px}
-  .legend{display:grid;gap:10px}
-  .legend-item{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-items:center}
-  .swatch{width:10px;height:10px;border-radius:999px}
-  .legend-name{font-size:13px;color:var(--ink)}
-  .legend-value{font-size:12px;color:var(--muted)}
-  .metric-rail{height:12px;border-radius:999px;background:rgba(60,50,40,0.08);overflow:hidden;display:flex}
-  .metric-fill{height:100%}
-  .chart-list{display:grid;gap:12px}
-  .chart-row{display:grid;grid-template-columns:minmax(0,160px) 1fr auto;gap:12px;align-items:center}
-  .chart-label{font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .chart-value{font-size:12px;color:var(--muted)}
-  .bar-track{height:14px;border-radius:999px;background:rgba(60,50,40,0.08);overflow:hidden;position:relative}
-  .bar-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--accent),#2aa1b7)}
-  .bar-fill.alt{background:linear-gradient(90deg,#d97706,#f59e0b)}
-  .bar-fill.rose{background:linear-gradient(90deg,#be185d,#ec4899)}
-  .two-up{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-  .section2{background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:20px;margin-bottom:18px;box-shadow:0 12px 32px rgba(78,60,37,0.06)}
-  .section2 h2{font-size:16px;margin-bottom:14px}
-  table{width:100%;border-collapse:collapse}
-  th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--border);font-size:13px}
-  th{color:var(--muted);font-weight:600;font-size:11px}
-  .tag{padding:3px 8px;border-radius:999px;font-size:11px;font-weight:600}
-  .tag-ok{background:rgba(31,122,77,0.12);color:var(--success)}
-  .tag-warn{background:rgba(180,83,9,0.12);color:#b45309}
-  .empty{text-align:center;color:var(--muted);padding:48px}
-  .refresh-bar{display:flex;gap:10px;align-items:center;margin-bottom:18px}
-  .refresh-bar button{padding:8px 14px;border:1px solid var(--border);border-radius:10px;background:var(--panel);cursor:pointer;font-size:12px}
-  .refresh-bar button:hover{border-color:var(--accent)}
-  .mono{font-family:'JetBrains Mono','Consolas',monospace;font-size:12px}
-  @media (max-width: 980px){.chart-grid,.two-up,.ring-layout{grid-template-columns:1fr}.chart-row{grid-template-columns:minmax(0,110px) 1fr auto}}
-</style>
-</head>
-<body>
-<header>
-  <h1>LLM 消耗统计仪表盘</h1>
-  <div class="nav">
-    <a href="/_inspector/">请求检视器</a>
-    <a href="/_inspector/analytics" style="background:var(--accent);color:#fff;border-color:var(--accent)">统计</a>
-  </div>
-</header>
-<div class="refresh-bar">
-  <button onclick="loadData()">刷新数据</button>
-  <span id="last-update" style="color:var(--muted);font-size:12px"></span>
-</div>
-<div class="kpi-grid" id="kpi-grid"></div>
-<div class="chart-grid">
-  <div class="chart-card">
-    <h2>缓存与 Token 结构</h2>
-    <div class="chart-subtitle">快速查看整体命中率与输入输出比例</div>
-    <div class="chart-stack">
-      <div class="ring-layout">
-        <div class="ring" id="cache-ring">
-          <div class="ring-center">
-            <div class="ring-value" id="cache-ring-value">0.0%</div>
-            <div class="ring-label">全局缓存命中</div>
-          </div>
-        </div>
-        <div class="legend" id="cache-legend"></div>
-      </div>
-      <div>
-        <div class="chart-subtitle" style="margin-bottom:10px">Token 构成</div>
-        <div class="metric-rail" id="token-composition"></div>
-        <div class="legend" id="token-legend" style="margin-top:12px"></div>
-      </div>
-    </div>
-  </div>
-  <div class="chart-card">
-    <h2>流量分布</h2>
-    <div class="chart-subtitle">按模型和请求名称查看占比</div>
-    <div class="two-up">
-      <div>
-        <div class="chart-subtitle" style="margin-bottom:10px">模型请求占比</div>
-        <div class="chart-list" id="model-share-chart"></div>
-      </div>
-      <div>
-        <div class="chart-subtitle" style="margin-bottom:10px">请求名称占比</div>
-        <div class="chart-list" id="request-share-chart"></div>
-      </div>
-    </div>
-  </div>
-</div>
-<div class="chart-card" style="margin-bottom:18px">
-  <h2>聊天流比例视图</h2>
-  <div class="chart-subtitle">观察最活跃聊天流的请求量与缓存命中差异</div>
-  <div class="chart-list" id="stream-share-chart"></div>
-</div>
-<div class="section2"><h2>按模型统计</h2><div id="by-model"></div></div>
-<div class="section2"><h2>按请求名称统计</h2><div id="by-request"></div></div>
-<div class="section2"><h2>按聊天流统计（含缓存命中率）</h2><div id="by-stream"></div></div>
-<script>
-async function loadData() {
-  try {
-    const resp = await fetch('/_inspector/api/analytics');
-    const data = await resp.json();
-    renderKPIs(data.summary || {});
-    renderVisualOverview(data.summary || {}, data.by_model || [], data.by_request_name || [], data.by_stream || []);
-    renderTable('by-model', data.by_model || [], ['model_name','api_provider','total_requests','total_tokens','total_cost','avg_latency']);
-    renderTable('by-request', data.by_request_name || [], ['request_name','total_requests','total_tokens','total_cost','avg_latency']);
-    renderStreamTable('by-stream', data.by_stream || []);
-    document.getElementById('last-update').textContent = '最后更新: ' + new Date().toLocaleTimeString();
-  } catch(e) { console.error(e); }
-}
-function renderKPIs(s) {
-  const grid = document.getElementById('kpi-grid');
-  const f = (n) => n != null ? Number(n).toLocaleString() : '-';
-  const p = (n) => n != null ? (Number(n)*100).toFixed(1)+'%' : '-';
-  const c = (n) => n != null ? '$'+Number(n).toFixed(4) : '-';
-  const cacheObserved = Number(s.total_cache_hit_tokens || 0) + Number(s.total_cache_miss_tokens || 0) > 0;
-  const items = [
-    {l:'总请求数',v:f(s.total_requests)},
-    {l:'成功率',v:p(s.success_rate),sub:(s.success_count||0)+' / '+(s.error_count||0)},
-    {l:'总 Token',v:f(s.total_tokens),sub:'in:'+f(s.total_prompt_tokens)+' out:'+f(s.total_completion_tokens)},
-    {l:'缓存命中率',v:p(s.cache_hit_rate),sub:cacheObserved ? 'hit:'+f(s.total_cache_hit_tokens)+' miss:'+f(s.total_cache_miss_tokens) : ((s.total_requests||0) > 0 ? '当前记录未返回缓存指标' : 'hit:0 miss:0')},
-    {l:'总成本',v:c(s.total_cost)},
-    {l:'平均延迟',v:s.avg_latency != null ? Number(s.avg_latency).toFixed(2)+'s' : '-'},
-  ];
-  grid.innerHTML = items.map(i=>`<div class="kpi"><div class="kpi-label">${i.l}</div><div class="kpi-value">${i.v}</div>${i.sub?`<div class="kpi-sub">${i.sub}</div>`:''}</div>`).join('');
-}
-function clampPercent(value) {
-  const num = Number(value || 0);
-  return Math.max(0, Math.min(100, num));
-}
-function renderVisualOverview(summary, byModel, byRequest, byStream) {
-  renderCacheChart(summary);
-  renderTokenComposition(summary);
-  renderShareChart('model-share-chart', byModel, 'model_name', 'total_requests', '请求', 'accent');
-  renderShareChart('request-share-chart', byRequest, 'request_name', 'total_requests', '请求', 'rose');
-  renderStreamShareChart(byStream);
-}
-function renderCacheChart(summary) {
-  const ring = document.getElementById('cache-ring');
-  const ringValue = document.getElementById('cache-ring-value');
-  const legend = document.getElementById('cache-legend');
-  const hit = Number(summary.total_cache_hit_tokens || 0);
-  const miss = Number(summary.total_cache_miss_tokens || 0);
-  const total = hit + miss;
-  const hitRate = total > 0 ? hit / total : 0;
-  const angle = clampPercent(hitRate * 100) * 3.6;
-  ring.style.background = `conic-gradient(var(--accent) 0deg ${angle}deg, rgba(60,50,40,0.09) ${angle}deg 360deg)`;
-  ringValue.textContent = total > 0 ? `${(hitRate * 100).toFixed(1)}%` : ((summary.total_requests || 0) > 0 ? 'N/A' : '0.0%');
-  legend.innerHTML = [
-    {label:'缓存命中',value:hit,color:'var(--accent)'},
-    {label:'缓存未命中',value:miss,color:'var(--amber)'},
-    {label:'指标状态',value:total > 0 ? '已采集' : ((summary.total_requests || 0) > 0 ? '未返回' : '暂无数据'),color:'rgba(60,50,40,0.32)'}
-  ].map(item => `
-    <div class="legend-item">
-      <span class="swatch" style="background:${item.color}"></span>
-      <span class="legend-name">${item.label}</span>
-      <span class="legend-value">${typeof item.value === 'number' ? Number(item.value).toLocaleString() : item.value}</span>
-    </div>
-  `).join('');
-}
-function renderTokenComposition(summary) {
-  const track = document.getElementById('token-composition');
-  const legend = document.getElementById('token-legend');
-  const prompt = Number(summary.total_prompt_tokens || 0);
-  const completion = Number(summary.total_completion_tokens || 0);
-  const total = prompt + completion;
-  const promptWidth = total > 0 ? (prompt / total) * 100 : 0;
-  const completionWidth = total > 0 ? (completion / total) * 100 : 0;
-  track.innerHTML = `
-    <div class="metric-fill" style="width:${promptWidth}%;background:linear-gradient(90deg,var(--accent),#2aa1b7)"></div>
-    <div class="metric-fill" style="width:${completionWidth}%;background:linear-gradient(90deg,#c2416c,#ec4899)"></div>
-  `;
-  legend.innerHTML = [
-    {label:'Prompt Tokens',value:prompt,color:'var(--accent)'},
-    {label:'Completion Tokens',value:completion,color:'var(--rose)'}
-  ].map(item => `
-    <div class="legend-item">
-      <span class="swatch" style="background:${item.color}"></span>
-      <span class="legend-name">${item.label}</span>
-      <span class="legend-value">${Number(item.value).toLocaleString()}</span>
-    </div>
-  `).join('');
-}
-function renderShareChart(id, rows, labelKey, valueKey, unitLabel, tone) {
-  const container = document.getElementById(id);
-  if (!rows.length) {
-    container.innerHTML = '<div class="empty">暂无数据</div>';
-    return;
-  }
-  const items = rows.slice(0, 6);
-  const maxValue = Math.max(...items.map(row => Number(row[valueKey] || 0)), 1);
-  const fillClass = tone === 'rose' ? 'bar-fill rose' : tone === 'accent' ? 'bar-fill' : 'bar-fill alt';
-  container.innerHTML = items.map(row => {
-    const value = Number(row[valueKey] || 0);
-    const width = (value / maxValue) * 100;
-    const label = String(row[labelKey] || '(未命名)');
-    return `
-      <div class="chart-row">
-        <div class="chart-label" title="${label}">${label}</div>
-        <div class="bar-track"><div class="${fillClass}" style="width:${width}%"></div></div>
-        <div class="chart-value">${value.toLocaleString()} ${unitLabel}</div>
-      </div>
-    `;
-  }).join('');
-}
-function renderStreamShareChart(rows) {
-  const container = document.getElementById('stream-share-chart');
-  if (!rows.length) {
-    container.innerHTML = '<div class="empty">暂无按聊天流的数据</div>';
-    return;
-  }
-  const items = rows.slice(0, 8);
-  const maxRequests = Math.max(...items.map(row => Number(row.total_requests || 0)), 1);
-  container.innerHTML = items.map(row => {
-    const requests = Number(row.total_requests || 0);
-    const width = (requests / maxRequests) * 100;
-    const hitRate = Number(row.cache_hit_rate || 0);
-    const label = String(row.stream_id || '-').slice(0, 24);
-    return `
-      <div class="chart-row">
-        <div class="chart-label mono" title="${row.stream_id || '-'}">${label}</div>
-        <div class="bar-track"><div class="bar-fill alt" style="width:${width}%"></div></div>
-        <div class="chart-value">${requests.toLocaleString()} 请求 / ${(hitRate * 100).toFixed(1)}%</div>
-      </div>
-    `;
-  }).join('');
-}
-function renderTable(id, rows, cols) {
-  const container = document.getElementById(id);
-  if (!rows.length) { container.innerHTML = '<div class="empty">暂无数据</div>'; return; }
-  const labels = cols.map(c=>c.replace(/_/g,' ').replace(/\b\w/g,l=>l.toUpperCase()));
-  const fmt = (v,k) => {
-    if (k === 'total_cost') return v != null ? '$'+Number(v).toFixed(4) : '-';
-    if (k === 'avg_latency') return v != null ? Number(v).toFixed(2)+'s' : '-';
-    if (k && k.includes('token')) return v != null ? Number(v).toLocaleString() : '-';
-    return v != null ? String(v) : '-';
-  };
-  container.innerHTML = `<table><thead><tr>${labels.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${fmt(r[c],c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
-}
-function renderStreamTable(id, rows) {
-  const container = document.getElementById(id);
-  if (!rows.length) { container.innerHTML = '<div class="empty">暂无按聊天流的数据</div>'; return; }
-  container.innerHTML = `<table><thead><tr><th>Stream ID</th><th>请求数</th><th>Prompt</th><th>Completion</th><th>缓存命中</th><th>缓存未命中</th><th>命中率</th><th>成本</th></tr></thead><tbody>${rows.map(r=>`<tr>
-    <td class="mono">${String(r.stream_id||'-').slice(0,24)}</td>
-    <td>${r.total_requests}</td>
-    <td>${Number(r.total_prompt_tokens).toLocaleString()}</td>
-    <td>${Number(r.total_completion_tokens).toLocaleString()}</td>
-    <td>${Number(r.total_cache_hit).toLocaleString()}</td>
-    <td>${Number(r.total_cache_miss).toLocaleString()}</td>
-    <td><span class="tag ${r.cache_hit_rate>0.5?'tag-ok':'tag-warn'}">${(r.cache_hit_rate*100).toFixed(1)}%</span></td>
-    <td>$${Number(r.total_cost).toFixed(4)}</td>
-  </tr>`).join('')}</tbody></table>`;
-}
-loadData();
-setInterval(loadData, 30000);
-</script>
-</body>
-</html>"""

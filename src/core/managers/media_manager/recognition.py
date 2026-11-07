@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from src.core.components.types import EventType, MediaEngine
@@ -45,6 +46,49 @@ class MediaRecognition:
         self._cache = cache
         self._vlm_engine = vlm_engine
         self._asr_engine = asr_engine
+
+    async def store_media(self, base64_data: str, media_type: str) -> bool:
+        """保存发出的媒体文件及索引，不调用识别引擎。
+
+        已登记且文件仍存在的媒体直接复用；仅在文件和索引均可回查时成功。
+
+        Args:
+            base64_data: 待存储的 base64 媒体数据。
+            media_type: 媒体类型，支持 image、emoji、voice、video。
+
+        Returns:
+            媒体文件和索引可回查时返回 True；类型不支持或回查校验失败时返回 False。
+        """
+        if media_type not in {"image", "emoji", "voice", "video"}:
+            return False
+        media_hash = compute_hash(base64_data)
+        if media_type == "voice":
+            existing = await self._repository.get_voice_info(media_hash)
+        elif media_type == "video":
+            existing = await self._repository.get_video_info(media_hash)
+        else:
+            existing = await self._repository.get_media_info(media_hash)
+        if existing and existing.get("path") and Path(existing["path"]).is_file():
+            return True
+        pending_path = await self._file_store.save_to_pending(
+            base64_data, media_hash, media_type
+        )
+        await self._file_store.move_to_category_folder(
+            pending_path, media_type, media_hash
+        )
+        target_path = self._file_store.category_folder_for(media_type) / pending_path.name
+        if not target_path.is_file():
+            return False
+        await self._repository.save_recognized_media(
+            media_hash, media_type, str(target_path), description=None, processed=False
+        )
+        if media_type == "voice":
+            info = await self._repository.get_voice_info(media_hash)
+        elif media_type == "video":
+            info = await self._repository.get_video_info(media_hash)
+        else:
+            info = await self._repository.get_media_info(media_hash)
+        return bool(info and info.get("path") == str(target_path))
 
     async def recognize_media(
         self,

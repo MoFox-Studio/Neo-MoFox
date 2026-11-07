@@ -39,6 +39,10 @@
 - [guides](./guides/)
 - [插件市场设计总览](./guides/plugin-market/README.md)
 
+## 重构计划
+
+- [启动循环重写：任务注册前置与显式初始化](./plan/startup-lifecycle-redesign.md)
+
 ## 建议维护规则
 
 1. 新增模块文档时，先更新对应子目录 README，再更新本总目录。

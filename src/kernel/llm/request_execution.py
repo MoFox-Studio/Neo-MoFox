@@ -28,6 +28,7 @@ from .exceptions import (
 from .payload import LLMPayload, ReasoningText, Text, ToolCall, ToolResult
 from .roles import ROLE
 from .response import LLMResponse
+from .request_trace import Attempt, attempt_scope, new_logical_request
 from .types import ModelEntry, ModelSet
 
 if TYPE_CHECKING:
@@ -121,6 +122,7 @@ async def execute_request(
     """执行一次逻辑上的 LLM 请求，并带上策略驱动的重试行为。"""
     model_set = validate_model_set(request.model_set)
     request_started_at = time.perf_counter()
+    logical = new_logical_request()
 
     # 先统一一次 payload 形态，确保每次重试看到的输入结构完全一致。
     payloads = [normalize_tool_result_payload(p) for p in request.payloads]
@@ -164,6 +166,8 @@ async def execute_request(
         from .monitor import RequestTimer
 
         timer = RequestTimer()
+        trace = Attempt(logical, model, request.request_name, stream=actual_stream,
+                        metadata=request.meta_data)
 
         try:
             with timer:
@@ -203,21 +207,22 @@ async def execute_request(
                     # 事件触发失败不中断 LLM 请求，静默降级
                     pass
 
-                create_task = client.create(
-                    model_name=model_identifier,
-                    payloads=trimmed_payloads,
-                    tools=tools,
-                    request_name=request.request_name,
-                    model_set=model,
-                    stream=actual_stream,
-                )
-                if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0:
-                    result = await asyncio.wait_for(
-                        create_task,
-                        timeout=float(timeout_seconds),
+                with attempt_scope(trace):
+                    create_task = client.create(
+                        model_name=model_identifier,
+                        payloads=trimmed_payloads,
+                        tools=tools,
+                        request_name=request.request_name,
+                        model_set=model,
+                        stream=actual_stream,
                     )
-                else:
-                    result = await create_task
+                    if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0:
+                        result = await asyncio.wait_for(
+                            create_task,
+                            timeout=float(timeout_seconds),
+                        )
+                    else:
+                        result = await create_task
                 (
                     message,
                     tool_calls,
@@ -237,6 +242,7 @@ async def execute_request(
                 model_set=model_set,
                 context_manager=request.context_manager,
                 tool_call_compat=bool(model.get("tool_call_compat", False)),
+                _inspection=trace,
                 message=message,
                 reasoning_content=reasoning_text,
                 reasoning_parts=reasoning_parts,
@@ -287,6 +293,11 @@ async def execute_request(
                 )
                 resp._stream_started_at = request_started_at
 
+            if not trace.bound:
+                trace.result(message=message, tool_calls=tool_calls,
+                             reasoning_content=reasoning_text, reasoning_parts=reasoning_parts, usage=usage)
+            if stream_iter is None:
+                trace.finish()
             session.record_success(latency=timer.elapsed)
 
             # 触发大模型请求后事件
@@ -341,11 +352,12 @@ async def execute_request(
 
             return resp
         except BaseException as exc:
+            trace.finish(exc)
+            await trace.close_resource()
             if isinstance(exc, asyncio.CancelledError):
                 logger.debug(
                     f"LLM 请求已取消：model={model_identifier}, "
                     f"request={request.request_name or '__default__'}",
-                    exc_info=True,
                 )
                 raise
 
@@ -374,8 +386,39 @@ async def execute_request(
                     error=classified_error,
                 )
 
+            # 分类完成后立即触发失败事件，供插件统一检测所有 LLM 错误
+            try:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                event_bus = get_event_bus()
+                if event_bus.get_subscribers(EventType.ON_LLM_REQUEST_FAILED):
+                    _, final_params = await event_bus.publish(
+                        EventType.ON_LLM_REQUEST_FAILED,
+                        {
+                            "request_name": request.request_name,
+                            "model_identifier": model_identifier,
+                            "payloads": list(trimmed_payloads),
+                            "tools": list(tools),
+                            "stream": actual_stream,
+                            "error": classified_error,
+                            "error_type": type(classified_error).__name__,
+                            "error_message": str(classified_error),
+                            "retry_count": retry_count,
+                            "latency": timer.elapsed,
+                            "meta_data": request.meta_data,
+                        },
+                    )
+                    # 回写事件订阅者修改后的错误信息
+                    final_error = final_params.get("error")
+                    if isinstance(final_error, BaseException):
+                        last_error = final_error
+            except Exception:
+                # 事件触发失败不中断异常传播，静默降级
+                pass
+
             if not retry_decision.retryable:
-                raise classified_error
+                raise last_error
 
             retry_count += 1
             next_step = session.next_after_error(classified_error)
@@ -383,41 +426,8 @@ async def execute_request(
                 logger.error(
                     f"LLM 重试已耗尽：request={request.request_name or '__default__'}, "
                     f"retry_count={retry_count}, "
-                    f"last_error={type(classified_error).__name__}: {classified_error}",
+                    f"last_error={type(classified_error).__name__}",
                 )
-
-                # 重试耗尽，触发大模型请求失败事件
-                # 事件订阅者可以修改 payloads、tools、stream、error、error_message
-                # 等字段，修改后的 error 会作为最终抛出的异常。
-                try:
-                    from src.core.components.types import EventType
-                    from src.kernel.event import get_event_bus
-
-                    event_bus = get_event_bus()
-                    if event_bus.get_subscribers(EventType.ON_LLM_REQUEST_FAILED):
-                        _, final_params = await event_bus.publish(
-                            EventType.ON_LLM_REQUEST_FAILED,
-                            {
-                                "request_name": request.request_name,
-                                "model_identifier": model_identifier,
-                                "payloads": list(trimmed_payloads),
-                                "tools": list(tools),
-                                "stream": actual_stream,
-                                "error": classified_error,
-                                "error_type": type(classified_error).__name__,
-                                "error_message": str(classified_error),
-                                "retry_count": retry_count,
-                                "latency": timer.elapsed,
-                                "meta_data": request.meta_data,
-                            },
-                        )
-                        # 回写事件订阅者修改后的错误信息
-                        final_error = final_params.get("error")
-                        if isinstance(final_error, BaseException):
-                            last_error = final_error
-                except Exception:
-                    # 事件触发失败不中断异常传播，静默降级
-                    pass
             else:
                 next_model_identifier = next_step.model.get("model_identifier")
                 next_model_name = (
@@ -449,18 +459,16 @@ def _log_request_error(
         logger.warning(
             f"LLM 请求暂时失败：model={model_identifier}, "
             f"request={request_name or '__default__'}, "
-            f"error_type={error_type}, reason={str(error)}",
+            f"error_type={error_type}",
         )
         logger.debug(
             f"LLM 请求暂时失败（详情）：model={model_identifier}, "
-            f"request={request_name or '__default__'}, reason={str(error)}",
-            exc_info=True,
+            f"request={request_name or '__default__'}, error_type={error_type}",
         )
         return
 
     logger.error(
         f"LLM 请求失败：model={model_identifier}, "
         f"request={request_name or '__default__'}, "
-        f"error_type={error_type}, reason={str(error)}",
-        exc_info=True,
+        f"error_type={error_type}",
     )

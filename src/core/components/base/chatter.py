@@ -180,7 +180,8 @@ class BaseChatter(BaseComponent):
         """修改 LLMUsable 组件列表。
 
         将传入的组件类按 Action/Agent/Tool 分流，委托给各 ``*_api`` 封装
-        的筛选逻辑做上下文过滤（chatter_allow、关联类型、激活判定等）。
+        的筛选逻辑做上下文过滤（chat_type、chatter_allow、关联类型、
+        激活判定等）。
         仅对传入列表筛选，不从聊天流或全局注册表获取组件。
 
         Args:
@@ -190,6 +191,7 @@ class BaseChatter(BaseComponent):
             list[type[LLMUsable]]: 修改后的组件列表
         """
         from src.app.plugin_system.api import action_api, agent_api, tool_api
+        from src.core.managers import get_stream_manager
 
         logger = get_logger("chatter", display="聊天器", color=COLOR.MAGENTA)
 
@@ -220,23 +222,32 @@ class BaseChatter(BaseComponent):
 
         chatter_signature = self.get_signature() or ""
 
+        # 读取当前流的聊天类型，供筛选判定组件声明的 chat_type；
+        # 缺失时筛选会按 ChatType.ALL 判定，声明了具体类型的组件将被全部剔除
+        chat_stream = await get_stream_manager().get_or_create_stream(
+            stream_id=self.stream_id
+        )
+
         filtered_actions = await action_api.filter_actions(
             action_classes,
             stream_id=self.stream_id,
             chatter_name=self.name,
             chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
         )
         filtered_agents = await agent_api.filter_agents(
             agent_classes,
             stream_id=self.stream_id,
             chatter_name=self.name,
             chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
         )
         filtered_tools = await tool_api.filter_tools(
             tool_classes,
             stream_id=self.stream_id,
             chatter_name=self.name,
             chatter_signature=chatter_signature,
+            chat_type=chat_stream.chat_type,
         )
 
         logger.info(
@@ -439,9 +450,9 @@ class BaseChatter(BaseComponent):
     ) -> list[tuple[bool, bool]]:
         """执行一次响应中的普通 tool calls 并写回 TOOL_RESULT。
 
-        此方法面向一批 call，实际执行会委托统一调度器：可并发的 coroutine
-        会并发运行，顺序敏感的异步生成器会在 ``"_READY"`` 阶段按原始顺序门控。
-        控制流工具（pass_and_wait / stop_conversation 等）仍应由调用方先行处理。
+        此方法面向一批 call，实际执行会委托 ``llm_api``，再由对应的
+        Tool/Action/Agent Manager 负责组件级执行。控制流工具
+        （pass_and_wait / stop_conversation 等）仍应由调用方先行处理。
 
         Args:
             calls: LLM 返回的一批工具调用对象，按模型输出顺序排列。
@@ -455,7 +466,7 @@ class BaseChatter(BaseComponent):
         """
         from src.app.plugin_system.api import llm_api
 
-        return await llm_api.run_tool_call(
+        return await llm_api.dispatch_llm_tool_calls(
             calls=calls,
             response=response,
             usable_map=usable_map,
@@ -463,8 +474,6 @@ class BaseChatter(BaseComponent):
             plugin=self.plugin,
             stream_id=self.stream_id,
             resolve_component_plugin=self._resolve_component_plugin,
-            display_name=self.name,
-            task_observer=task_observer,
         )
 
     @staticmethod

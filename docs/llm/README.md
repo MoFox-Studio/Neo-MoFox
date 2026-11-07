@@ -24,7 +24,7 @@ kernel/llm/
 ├── roles.py                 # 消息角色枚举
 ├── request.py               # LLMRequest 门面 + 模型校验
 ├── request_execution.py     # 请求执行主流程（生命周期管理）
-├── request_inspector.py     # 请求调试与检查工具
+├── request_inspector.py     # 请求捕获与结构化视图（进程内，不提供 Web 端点）
 ├── response.py              # LLMResponse 包装层
 ├── stream_state.py          # 流式状态归并（LLMStreamReducer）
 ├── tool_call_compat.py      # 工具调用兼容解析
@@ -251,6 +251,32 @@ by_model = await collector.get_by_model()
 cache_rate = await collector.get_cache_hit_rate()
 ```
 
+### 9. 请求检视器（RequestInspector）
+
+在进程内记录原生模型调用的最终 SDK 参数、标准化响应和原始 SDK JSON，
+默认保留最近 200 条。覆盖 Chat Completions、Responses、Anthropic、Embedding、Rerank，
+包含流式、重试、失败和取消；不内置 HTTP 端点、SDK 包装器或 monkey patch。
+
+```python
+from src.kernel.llm import get_inspector
+
+inspector = get_inspector()
+snapshot = inspector.snapshot()          # 原子摘要 + 当前缓冲统计，无正文
+record = inspector.get_record(record_id) # 独立详情；不存在返回 None
+result = inspector.clear_snapshot()      # 清空数量 + 实例/缓冲版本
+```
+
+- `instance_id / revision / version` 区分重启、缓冲变化和单条记录更新。
+- `logical_request_id / attempt` 关联框架重试、模型切换和流消费重试。
+- `params` 保留实际 SDK 参数层级，可直接用于请求结构树；`rendered` 提供消息/工具视图。
+- 不执行脱敏，保留原始字段名和内容；原始响应/事件默认共享 2 MiB 预算，截断会显式标记，不停止标准化响应采集。
+- 清空、淘汰不取消实际调用，迟到更新不会复活记录；ID 不重置。
+- 旧 `capture/import_json/list_summaries/clear` 入口保留；手工捕获/导入使用 `captured` 状态。
+- 线程安全并返回隔离快照；不支持的对象使用不可用标记，不再以任意 `str/repr` 降级。
+- 请求头、正文、响应和错误可能包含明文密钥及个人信息，外部读取必须认证并限制访问；导出或分享前自行处理敏感内容。
+
+完整字段、生命周期、安全边界与流关闭用法见 [原生请求监视器](./request_inspector.md)。
+
 ## 详细文档索引
 
 - [Exceptions](./exceptions.md) - 异常类和错误分类（含 `classify_exception`）
@@ -309,6 +335,16 @@ extra_params = {headers = {"X-API-Version" = "2024-06", "X-Priority" = "high"}, 
 ### Q: 指标收集是否有性能开销？
 
 A: 内存级指标可以通过 `enable_metrics=False` 关闭。持久化统计仅在显式调用 `init_llm_stats` 后生效。
+
+### Q: 如何可视化查看 LLM 请求体？
+
+A: 框架本体不再内置调试 WebUI，请安装官方 WebUI：
+[MoFox-Core-Webui](https://github.com/MoFox-Studio/MoFox-Core-Webui)。
+
+`src/kernel/llm/request_inspector.py` 仅在**进程内**保留请求捕获与结构化视图构造，
+不对外提供任何 HTTP 端点。需要程序内调试时用 `get_inspector()` 获取实例，
+再调用 `snapshot()` / `get_record()` 读取记录，
+详见 [第 9 节](#9-请求检视器requestinspector)。
 
 ## 相关资源
 

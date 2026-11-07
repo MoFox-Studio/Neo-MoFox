@@ -237,10 +237,10 @@ class UnifiedScheduler:
         logger.debug("统一调度器已启动")
 
     async def stop(self) -> None:
-        """停止调度器（优雅关闭）"""
-        if not self._running:
-            return
+        """停止执行并清空任务，包括首次启动前注册的任务。
 
+        关闭后禁止注册和触发；再次 start() 后可以注册新任务。
+        """
         logger.debug("正在停止统一调度器...")
         self._stopping = True
         self._running = False
@@ -270,6 +270,9 @@ class UnifiedScheduler:
         self._tasks_by_name.clear()
         self._event_subscriptions.clear()
         self._completed_tasks.clear()
+        self._check_loop_task_id = None
+        self._cleanup_task_id = None
+        self._check_trigger_task_id = None
 
         logger.info("统一调度器已停止")
 
@@ -609,7 +612,11 @@ class UnifiedScheduler:
         Args:
             event_name: 事件名称
             event_params: 事件参数
+
+        Raises:
+            RuntimeError: 调度器尚未启动或正在关闭；事件不会缓存重放。
         """
+        self._require_running()
         task_ids = self._event_subscriptions.get(event_name, set())
         if not task_ids:
             return
@@ -738,7 +745,11 @@ class UnifiedScheduler:
         timeout: float | None = None,
         max_retries: int = 0,
     ) -> str:
-        """创建调度任务
+        """注册调度任务，不立即执行回调。
+
+        首次 start() 前可以注册；延迟和周期从注册时间计算。
+        启动时已到期的任务在首轮检查执行，周期任务跳过错过的周期。
+        stop() 清空任务并禁止注册，重新 start() 后可以注册新任务。
 
         Args:
             callback: 回调函数（必须是异步函数）
@@ -757,10 +768,12 @@ class UnifiedScheduler:
 
         Raises:
             ValueError: 如果同名任务已存在且未启用强制覆盖
-            RuntimeError: 如果调度器未运行
+            RuntimeError: 调度器正在关闭或已经停止
         """
-        if not self._running:
-            raise RuntimeError("调度器未运行，请先调用 start()")
+        if self._stopping:
+            raise RuntimeError("调度器正在关闭或已经停止，请先调用 start()")
+        if trigger_type == TriggerType.EVENT and not trigger_config.get("event_name"):
+            raise ValueError("事件触发类型必须提供 event_name")
 
         # 生成任务ID和名称
         schedule_id = str(uuid.uuid4())
@@ -806,13 +819,25 @@ class UnifiedScheduler:
         # 如果是事件触发，注册事件订阅
         if trigger_type == TriggerType.EVENT:
             event_name = trigger_config.get("event_name")
-            if not event_name:
-                raise ValueError("事件触发类型必须提供 event_name")
             self._event_subscriptions[event_name].add(schedule_id)
             logger.debug(f"任务 {task_name} 订阅事件: {event_name}")
 
         logger.debug(f"创建调度任务: {task_name} (ID: {schedule_id[:8]}...)")
         return schedule_id
+
+    @property
+    def is_started(self) -> bool:
+        """返回调度器检查循环是否正在运行。"""
+        return self._running
+
+    def list_schedule_names(self) -> list[str]:
+        """返回当前已注册的调度任务名称。"""
+        return list(self._tasks_by_name)
+
+    def _require_running(self) -> None:
+        """禁止在启动前或关闭期间通过公开接口执行任务。"""
+        if not self._running or self._stopping:
+            raise RuntimeError("调度器未运行，请先调用 start()")
 
     async def remove_schedule(self, schedule_id: str) -> bool:
         """移除调度任务
@@ -887,7 +912,11 @@ class UnifiedScheduler:
 
         Returns:
             bool: 是否成功触发
+
+        Raises:
+            RuntimeError: 调度器尚未启动或正在关闭
         """
+        self._require_running()
         task = self._tasks.get(schedule_id)
         if not task:
             logger.warning(f"尝试触发不存在的任务: {schedule_id[:8]}...")

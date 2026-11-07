@@ -95,18 +95,18 @@ class ChatStreams(Base):
 
     # 时间管理
     created_at: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         comment="聊天流创建时间"
     )
     last_active_time: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         index=True,
         comment="最后活跃时间"
     )
     context_cleared_at: Mapped[float | None] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=True,
         default=None,
         comment="上下文清空时间戳；加载消息时仅取此时间点之后的消息"
@@ -152,7 +152,7 @@ class Messages(Base):
 
     # 时间与顺序
     time: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         index=True,
         comment="消息时间戳（Unix timestamp）"
@@ -225,7 +225,7 @@ class ActionRecords(Base):
 
     # 时间
     time: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         index=True,
         comment="动作发生时间"
@@ -280,7 +280,7 @@ class Images(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     path: Mapped[str] = mapped_column(get_string_field(500), nullable=False, unique=True)
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    timestamp: Mapped[float] = mapped_column(Float, nullable=False)
+    timestamp: Mapped[float] = mapped_column(Float(precision=53), nullable=False)
     type: Mapped[str] = mapped_column(Text, nullable=False)
     vlm_processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
@@ -298,7 +298,7 @@ class ImageDescriptions(Base):
     type: Mapped[str] = mapped_column(Text, nullable=False)
     image_description_hash: Mapped[str] = mapped_column(get_string_field(64), nullable=False, index=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
-    timestamp: Mapped[float] = mapped_column(Float, nullable=False)
+    timestamp: Mapped[float] = mapped_column(Float(precision=53), nullable=False)
 
     __table_args__ = (
         Index("idx_imagedesc_hash", "image_description_hash"),
@@ -316,7 +316,7 @@ class Voices(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="ASR 识别文字")
     path: Mapped[str] = mapped_column(get_string_field(500), nullable=False, unique=True, comment="语音文件路径")
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="出现次数")
-    timestamp: Mapped[float] = mapped_column(Float, nullable=False, comment="记录时间戳")
+    timestamp: Mapped[float] = mapped_column(Float(precision=53), nullable=False, comment="记录时间戳")
     type: Mapped[str] = mapped_column(Text, nullable=False, comment="媒体类型，固定为 voice")
     asr_processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否已通过 ASR 识别")
 
@@ -334,7 +334,7 @@ class VoiceDescriptions(Base):
     type: Mapped[str] = mapped_column(Text, nullable=False, comment="媒体类型，固定为 voice")
     voice_description_hash: Mapped[str] = mapped_column(get_string_field(64), nullable=False, index=True, comment="语音哈希值")
     description: Mapped[str] = mapped_column(Text, nullable=False, comment="ASR 识别文字")
-    timestamp: Mapped[float] = mapped_column(Float, nullable=False, comment="记录时间戳")
+    timestamp: Mapped[float] = mapped_column(Float(precision=53), nullable=False, comment="记录时间戳")
 
     __table_args__ = (
         Index("idx_voicedesc_hash", "voice_description_hash"),
@@ -352,7 +352,7 @@ class Videos(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True, comment="视频识别文字")
     path: Mapped[str] = mapped_column(get_string_field(500), nullable=False, unique=True, comment="视频文件路径")
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="出现次数")
-    timestamp: Mapped[float] = mapped_column(Float, nullable=False, comment="记录时间戳")
+    timestamp: Mapped[float] = mapped_column(Float(precision=53), nullable=False, comment="记录时间戳")
     type: Mapped[str] = mapped_column(Text, nullable=False, comment="媒体类型，固定为 video")
     video_processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, comment="是否已通过视频识别")
 
@@ -370,7 +370,7 @@ class VideoDescriptions(Base):
     type: Mapped[str] = mapped_column(Text, nullable=False, comment="媒体类型，固定为 video")
     video_description_hash: Mapped[str] = mapped_column(get_string_field(64), nullable=False, index=True, comment="视频哈希值")
     description: Mapped[str] = mapped_column(Text, nullable=False, comment="视频识别文字")
-    timestamp: Mapped[float] = mapped_column(Float, nullable=False, comment="记录时间戳")
+    timestamp: Mapped[float] = mapped_column(Float(precision=53), nullable=False, comment="记录时间戳")
 
     __table_args__ = (
         Index("idx_videodesc_hash", "video_description_hash"),
@@ -462,12 +462,12 @@ class PersonInfo(Base):
 
     # 时间字段（统一为 float Unix 时间戳）
     first_interaction: Mapped[float | None] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=True,
         comment="首次交互时间（Unix timestamp）"
     )
     last_interaction: Mapped[float | None] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=True,
         index=True,
         comment="最后交互时间（Unix timestamp）"
@@ -489,12 +489,12 @@ class PersonInfo(Base):
 
     # 元数据
     created_at: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         comment="记录创建时间（Unix timestamp）"
     )
     updated_at: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         comment="记录最后更新时间（Unix timestamp）"
     )
@@ -666,12 +666,12 @@ class PermissionGroups(Base):
 
     # 时间戳（使用 float Unix 时间戳）
     created_at: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         comment="设置时间（Unix timestamp）"
     )
     updated_at: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         comment="更新时间（Unix timestamp）"
     )
@@ -730,12 +730,12 @@ class CommandPermissions(Base):
 
     # 时间戳（使用 float Unix 时间戳）
     created_at: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         comment="创建时间（Unix timestamp）"
     )
     updated_at: Mapped[float] = mapped_column(
-        Float,
+        Float(precision=53),
         nullable=False,
         comment="更新时间（Unix timestamp）"
     )

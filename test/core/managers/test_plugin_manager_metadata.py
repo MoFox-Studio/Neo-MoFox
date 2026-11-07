@@ -2,7 +2,7 @@
 
 验证 ``PluginManager._inject_manifest_metadata``：
 - 以 ``manifest.version`` 为准注入 ``plugin_version``；
-- 插件类显式声明冗余元数据时触发 ``DeprecationWarning``；
+- 插件类显式声明冗余元数据时无条件触发 ``DeprecationWarning``；
 - 未声明冗余元数据时不触发警告。
 """
 
@@ -111,3 +111,254 @@ def test_warning_when_declared_version_mismatches_manifest() -> None:
     assert "9.9.9" in messages
     assert "3.0.0" in messages
     assert plugin.plugin_version == "3.0.0"
+
+
+def test_warning_when_declared_version_matches_manifest() -> None:
+    """声明版本与 manifest 一致时也应触发警告：声明即冗余。"""
+    manager = PluginManager()
+    plugin = _RedundantPlugin()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        manager._inject_manifest_metadata(plugin, _make_manifest("redundant_plugin", version="9.9.9"))
+
+    deprecations = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    messages = " | ".join(str(w.message) for w in deprecations)
+    assert "plugin_version" in messages
+    assert plugin.plugin_version == "9.9.9"
+
+
+def test_warning_when_manifest_description_empty() -> None:
+    """manifest 描述为空时，声明 plugin_description 仍应触发警告。"""
+    manager = PluginManager()
+    plugin = _RedundantPlugin()
+    manifest = PluginManifest(
+        name="redundant_plugin",
+        version="2.0.0",
+        description="",
+        author="manifest 作者",
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        manager._inject_manifest_metadata(plugin, manifest)
+
+    deprecations = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    messages = " | ".join(str(w.message) for w in deprecations)
+    assert "plugin_description" in messages
+
+
+def test_plugin_version_accessible_during_init() -> None:
+    """插件构造期间应可安全读取 plugin_version（基类空字符串兜底）。"""
+    class _InitReaderPlugin(BasePlugin):
+        """在构造期间读取 plugin_version 的插件。"""
+
+        plugin_name = "init_reader_plugin"
+
+        def __init__(self, config: object | None = None) -> None:
+            super().__init__(config)  # type: ignore[arg-type]
+            self.version_seen_in_init = self.plugin_version
+
+        def get_components(self) -> list[type]:
+            return []
+
+    plugin = _InitReaderPlugin()
+    assert plugin.version_seen_in_init == ""
+
+    manager = PluginManager()
+    manager._inject_manifest_metadata(plugin, _make_manifest("init_reader_plugin"))
+    # 注入后版本被 manifest 值覆盖
+    assert plugin.plugin_version == "2.0.0"
+
+
+def test_plugin_description_accessible_during_init() -> None:
+    """插件构造期间应可安全读取 plugin_description（基类空字符串兜底）。"""
+    class _DescReaderPlugin(BasePlugin):
+        """在构造期间读取 plugin_description 的插件。"""
+
+        plugin_name = "desc_reader_plugin"
+
+        def __init__(self, config: object | None = None) -> None:
+            super().__init__(config)  # type: ignore[arg-type]
+            self.description_seen_in_init = self.plugin_description
+
+        def get_components(self) -> list[type]:
+            return []
+
+    plugin = _DescReaderPlugin()
+    assert plugin.description_seen_in_init == ""
+
+    manager = PluginManager()
+    manager._inject_manifest_metadata(plugin, _make_manifest("desc_reader_plugin"))
+    # 注入后描述被 manifest 值覆盖
+    assert plugin.plugin_description == "manifest 描述"
+
+
+def test_manifest_metadata_accessible_before_super_init() -> None:
+    """调用 BasePlugin.__init__ 前也应能安全读取运行时元数据。"""
+    class _PreSuperReaderPlugin(BasePlugin):
+        """在调用父类构造函数前读取元数据的插件。"""
+
+        plugin_name = "pre_super_reader_plugin"
+
+        def __init__(self, config: object | None = None) -> None:
+            self.version_seen_before_super = self.plugin_version
+            self.description_seen_before_super = self.plugin_description
+            super().__init__(config)  # type: ignore[arg-type]
+
+        def get_components(self) -> list[type]:
+            return []
+
+    plugin = _PreSuperReaderPlugin()
+
+    assert plugin.version_seen_before_super == ""
+    assert plugin.description_seen_before_super == ""
+
+    manager = PluginManager()
+    manager._inject_manifest_metadata(plugin, _make_manifest("pre_super_reader_plugin"))
+    assert plugin.plugin_version == "2.0.0"
+    assert plugin.plugin_description == "manifest 描述"
+
+
+def test_legacy_declared_metadata_not_shadowed_during_init() -> None:
+    """旧插件类级声明的元数据在构造期间不应被基类兜底遮蔽。"""
+    class _LegacyDeclaredPlugin(BasePlugin):
+        """类级声明了旧元数据的插件。"""
+
+        plugin_name = "legacy_declared_plugin"
+        plugin_version = "1.2.3"
+        plugin_description = "legacy 描述"
+
+        def __init__(self, config: object | None = None) -> None:
+            super().__init__(config)  # type: ignore[arg-type]
+            self.version_seen_in_init = self.plugin_version
+            self.description_seen_in_init = self.plugin_description
+
+        def get_components(self) -> list[type]:
+            return []
+
+    plugin = _LegacyDeclaredPlugin()
+    # 构造期间仍能读到插件自己声明的值
+    assert plugin.version_seen_in_init == "1.2.3"
+    assert plugin.description_seen_in_init == "legacy 描述"
+
+    manager = PluginManager()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        manager._inject_manifest_metadata(plugin, _make_manifest("legacy_declared_plugin"))
+
+    deprecations = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    assert len(deprecations) == 2
+    # 注入后被 manifest 值覆盖（manifest 为最终权威来源）
+    assert plugin.plugin_version == "2.0.0"
+    assert plugin.plugin_description == "manifest 描述"
+
+
+def test_warning_on_metadata_declared_in_intermediate_base() -> None:
+    """中间基类声明的冗余元数据也应触发警告（MRO 遍历检测）。"""
+    class _LegacyBase(BasePlugin):
+        """声明了冗余元数据的中间基类。"""
+
+        plugin_version = "1.0.0"
+        plugin_description = "legacy"
+        plugin_author = "legacy"
+
+    class _ConcretePlugin(_LegacyBase):
+        """自身未声明冗余元数据的具体插件。"""
+
+        plugin_name = "concrete_plugin"
+
+        def get_components(self) -> list[type]:
+            return []
+
+    manager = PluginManager()
+    plugin = _ConcretePlugin()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        manager._inject_manifest_metadata(plugin, _make_manifest("concrete_plugin"))
+
+    deprecations = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    messages = " | ".join(str(w.message) for w in deprecations)
+
+    assert "plugin_version" in messages
+    assert "plugin_description" in messages
+    assert "plugin_author" in messages
+    assert "1.0.0" in messages
+    assert "2.0.0" in messages
+    # 运行值仍以 manifest 为准
+    assert plugin.plugin_version == "2.0.0"
+    assert plugin.plugin_description == "manifest 描述"
+
+
+def test_warning_on_metadata_declared_in_trailing_mixin() -> None:
+    """BasePlugin 后置 mixin 中的冗余元数据也应触发警告。"""
+    class _MetadataMixin:
+        """声明旧元数据的 mixin。"""
+
+        plugin_version = "1.2.3"
+        plugin_description = "legacy"
+        plugin_author = "legacy"
+
+    class _MixedPlugin(BasePlugin, _MetadataMixin):
+        """通过后置 mixin 继承旧元数据的插件。"""
+
+        plugin_name = "mixed_plugin"
+
+        def get_components(self) -> list[type]:
+            return []
+
+    manager = PluginManager()
+    plugin = _MixedPlugin()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        manager._inject_manifest_metadata(plugin, _make_manifest("mixed_plugin"))
+
+    deprecations = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    messages = " | ".join(str(w.message) for w in deprecations)
+
+    assert len(deprecations) == 3
+    assert "plugin_version" in messages
+    assert "plugin_description" in messages
+    assert "plugin_author" in messages
+    assert "1.2.3" in messages
+    assert "2.0.0" in messages
+    assert plugin.plugin_version == "2.0.0"
+    assert plugin.plugin_description == "manifest 描述"
+
+
+def test_no_warning_for_clean_mro() -> None:
+    """MRO 各层级均未声明冗余元数据时不应触发警告。"""
+    class _CleanBase(BasePlugin):
+        """未声明冗余元数据的中间基类。"""
+
+    class _CleanPlugin(_CleanBase):
+        """继承干净中间基类的具体插件。"""
+
+        plugin_name = "clean_plugin"
+
+        def get_components(self) -> list[type]:
+            return []
+
+    manager = PluginManager()
+    plugin = _CleanPlugin()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        manager._inject_manifest_metadata(plugin, _make_manifest("clean_plugin"))
+
+    deprecations = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    assert deprecations == []

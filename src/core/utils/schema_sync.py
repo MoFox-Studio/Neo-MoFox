@@ -10,9 +10,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-from sqlalchemy import inspect, text
+from sqlalchemy import DDL, inspect, text
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.schema import MetaData, Table
@@ -170,8 +171,8 @@ async def _sync_table(
         if model_col.primary_key:
             continue
 
-        model_type = _normalize_type(str(model_col.type.compile(dialect=dialect)))
-        db_col_type = _normalize_type(str(db_col["type"]))
+        model_type = _normalize_type(str(model_col.type.compile(dialect=dialect)), db_type)
+        db_col_type = _normalize_type(str(db_col["type"]), db_type)
 
         if model_type != db_col_type:
             await _alter_column_type(conn, model_table, col_name, model_col, db_type)
@@ -254,9 +255,14 @@ async def _alter_column_type(
 
     if "postgresql" in db_type:
         await conn.execute(
-            text(
-                f"ALTER TABLE {table_ref} ALTER COLUMN {quoted_col} "
-                f"TYPE {target_type_sql} USING {quoted_col}::{target_type_sql}"
+            DDL(
+                "ALTER TABLE %(table_ref)s ALTER COLUMN %(column_ref)s "
+                "TYPE %(target_type)s USING %(column_ref)s::%(target_type)s",
+                context={
+                    "table_ref": table_ref,
+                    "column_ref": quoted_col,
+                    "target_type": target_type_sql,
+                },
             )
         )
         return
@@ -336,15 +342,28 @@ def _quote_identifier(dialect: Dialect, name: str) -> str:
     return dialect.identifier_preparer.quote(name)
 
 
-def _normalize_type(raw: str) -> str:
-    """归一化类型字符串用于比较。"""
+def _normalize_type(raw: str, db_type: str = "") -> str:
+    """归一化类型名称，PostgreSQL 浮点类型保留二进制精度差异。"""
     value = " ".join(raw.lower().replace('"', "").split())
+
+    if "postgresql" in db_type:
+        if value in {"real", "float4"}:
+            return "real"
+        if value in {"float", "double", "double precision", "float8"}:
+            return "double precision"
+        precision_match = re.fullmatch(r"float\s*\(\s*(\d+)\s*\)", value)
+        if precision_match is not None:
+            precision = int(precision_match.group(1))
+            if 1 <= precision <= 53:
+                return "real" if precision <= 24 else "double precision"
 
     aliases = {
         "int": "integer",
         "int4": "integer",
+        "double": "float",
         "double precision": "float",
         "real": "float",
+        "float4": "float",
         "float8": "float",
         "bool": "boolean",
         # 时间类型统一归一化为 "datetime"（SQLite 中 TIMESTAMP/DATE/DATETIME 都是 NUMERIC 亲和性，等价）

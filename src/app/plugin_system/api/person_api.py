@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-API_VERSION = "1.0.0"
+API_VERSION = "1.1.0"
 
 if TYPE_CHECKING:
     from src.core.models.message import Message
@@ -150,6 +150,25 @@ async def get_person(
         platform=platform,
         user_id=user_id,
     )
+
+
+async def get_person_by_id(person_id: str) -> "PersonInfo | None":
+    """按内部人物 ID 查询人物，不创建记录或更新任何字段。
+
+    聊天流返回的 person_id 可直接传入。该 ID 是内部关联标识，
+    不是平台用户 ID；平台用户 ID 从返回记录的 user_id 字段读取。
+
+    Args:
+        person_id: 内部人物 ID
+
+    Returns:
+        人物记录，不存在时返回 None
+
+    Raises:
+        ValueError: person_id 不是非空字符串
+    """
+    _validate_non_empty(person_id, "person_id")
+    return await _get_user_query_helper().get_person_by_id(person_id)
 
 
 async def update_person_info(
@@ -376,6 +395,7 @@ __all__ = [
     # 用户记录管理
     "get_or_create_person",
     "get_person",
+    "get_person_by_id",
     "update_person_info",
     "update_user_impression",
     "update_user_attitude",

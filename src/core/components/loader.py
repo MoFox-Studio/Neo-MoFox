@@ -126,7 +126,6 @@ def register_plugin(cls: type["BasePlugin"]) -> type["BasePlugin"]:
         >>> @register_plugin
         ... class MyPlugin(BasePlugin):
         ...     plugin_name = "my_plugin"
-        ...     plugin_description = "我的超棒插件"
         ...
         >>> # 插件现已注册，可以通过 get_plugin_class() 检索
     """

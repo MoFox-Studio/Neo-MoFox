@@ -24,9 +24,8 @@ from src.core.components.loader import register_plugin
 
 from .config import OneBotAdapterConfig
 from .src.handlers import utils as handler_utils
+from .src.handlers.to_core.event_handler import EventHandler
 from .src.handlers.to_core.message_handler import MessageHandler
-from .src.handlers.to_core.meta_event_handler import MetaEventHandler
-from .src.handlers.to_core.notice_handler import NoticeHandler
 from .src.handlers.to_napcat.send_handler import SendHandler
 
 logger = get_logger("onebot_adapter")
@@ -88,8 +87,9 @@ class OneBotAdapter(BaseAdapter):
 
         # 初始化处理器
         self.message_handler = MessageHandler(self)
-        self.notice_handler = NoticeHandler(self)
-        self.meta_event_handler = MetaEventHandler(self)
+        self.event_handler = EventHandler(self)
+        self.notice_handler = self.event_handler.notice_handler
+        self.meta_event_handler = self.event_handler.meta_event_handler
         self.send_handler = SendHandler(self)
 
         # 响应池：用于存储等待的 API 响应
@@ -107,7 +107,7 @@ class OneBotAdapter(BaseAdapter):
         """
         检查事件是否应该被处理（黑白名单过滤）
 
-        此方法在 from_platform_message 顶层调用，对所有类型的事件（消息、通知、元事件）进行过滤。
+        此方法在 from_platform_message 顶层调用，对消息、通知和请求事件进行过滤。
 
         Args:
             raw: OneBot 原始事件数据
@@ -129,6 +129,11 @@ class OneBotAdapter(BaseAdapter):
             user_id = str(sender_info.get("user_id", ""))
         elif post_type == "notice":
             user_id = str(raw.get("user_id", ""))
+        elif post_type == "request":
+            request_type = raw.get("request_type")
+            if request_type not in {"friend", "group"}:
+                return True
+            user_id = str(raw.get("user_id", ""))
         else:
             # 元事件或其他类型不需要过滤
             return True
@@ -143,9 +148,11 @@ class OneBotAdapter(BaseAdapter):
         message_type = raw.get("message_type")
         group_id = raw.get("group_id")
 
-        # 如果是通知事件，根据是否有 group_id 判断是群通知还是私聊通知
+        # 通知与请求事件根据 group_id 判断群聊或私聊场景。
         if post_type == "notice":
             message_type = "group" if group_id else "private"
+        elif post_type == "request":
+            message_type = "group" if raw.get("request_type") == "group" else "private"
 
         # 群聊/群通知过滤
         if message_type == "group" and group_id:
@@ -214,7 +221,7 @@ class OneBotAdapter(BaseAdapter):
 
         这是核心转换方法，处理：
         - message 事件 → 消息
-        - notice 事件 → 通知（戳一戳、表情回复等）
+        - notice / request / 未知事件 → 统一事件处理器
         - meta_event 事件 → 元事件（心跳、生命周期）
         - API 响应 → 存入响应池
 
@@ -240,18 +247,13 @@ class OneBotAdapter(BaseAdapter):
             if post_type == "message":
                 return await self.message_handler.handle_raw_message(raw) 
 
-            # 通知事件
+            # notice 事件由专用处理器处理。
             elif post_type == "notice":
-                return await self.notice_handler.handle_notice(raw)  
+                return await self.notice_handler.handle_notice(raw)
 
-            # 元事件
-            elif post_type == "meta_event":
-                return await self.meta_event_handler.handle_meta_event(raw)  
-
-            # 未知事件类型
+            # request、meta_event 及未知事件由统一事件处理器处理。
             else:
-                logger.warning(f"未知事件类型:{post_type},raw={raw}")
-                return None
+                return await self.event_handler.handle_event(raw)
         except ValueError as ve:
             logger.warning(f"处理 OneBot 事件时数据无效: {ve}")
             return None

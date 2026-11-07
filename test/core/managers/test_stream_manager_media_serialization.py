@@ -51,6 +51,13 @@ def test_serialize_content_for_db_keeps_text_message() -> None:
     assert _serialize_content_for_db("你好") == "你好"
 
 
+@pytest.mark.parametrize("media_url", ["https://example.org/clip.mp4", "file:///media/clip.mp4"])
+def test_serialize_content_for_db_keeps_url_media_data(media_url: str) -> None:
+    """URL 是媒体引用，不是二进制数据，历史中应保留原始地址。"""
+    content = {"text": "[视频]", "media": [{"type": "video", "data": media_url}]}
+    assert _parse_db_content(_serialize_content_for_db(content)) == content
+
+
 def test_content_to_plain_text_extracts_text_field() -> None:
     """含媒体 content 应提取 text 字段，不把 base64 当文本。"""
     content: dict[str, Any] = {
@@ -109,6 +116,62 @@ async def test_restore_media_data_from_db_fills_missing_base64() -> None:
     assert restored["media"][0]["data"] == "iVBORw0KGgo="
     assert restored["media"][0]["image_id"] == "img1"
     mock_manager.get_media_file.assert_awaited_once_with("img1")
+
+
+@pytest.mark.asyncio
+async def test_context_image_marker_survives_history_round_trip() -> None:
+    """原图仅在运行时回填，Bot 图片内联标记持久保留。"""
+    content = {
+        "text": "[图片(img1)]",
+        "media": [{"type": "image", "image_id": "img1", "data": "aGVsbG8=", "include_in_context": True}],
+    }
+    serialized = _serialize_content_for_db(content)
+    assert "aGVsbG8=" not in serialized
+    manager = AsyncMock()
+    manager.get_media_file.return_value = "aGVsbG8="
+    with patch("src.core.managers.media_manager.get_media_manager", return_value=manager):
+        restored = await _restore_media_data_from_db(serialized)
+    assert restored == content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("media_type", "id_key", "mode"),
+    [("image", "image_id", "native"), ("emoji", "image_id", "description"),
+     ("voice", "voice_id", "placeholder"), ("video", "video_id", "description"),
+     ("image", "image_id", "provided"), ("emoji", "image_id", "provided"),
+     ("voice", "voice_id", "provided"), ("video", "video_id", "provided")],
+)
+async def test_media_context_mode_survives_history_round_trip(
+    media_type: str, id_key: str, mode: str,
+) -> None:
+    """四类媒体上下文模式随历史保存，并在恢复时保留。"""
+    content = {"text": "  开发者提供的内容  " if mode == "provided" else "[媒体]", "media": [{
+        "type": media_type, id_key: "media1", "data": "aGVsbG8=", "context_mode": mode,
+    }]}
+    serialized = _serialize_content_for_db(content)
+    assert "aGVsbG8=" not in serialized
+    manager = AsyncMock()
+    manager.get_media_file.return_value = "aGVsbG8="
+    with patch("src.core.managers.media_manager.get_media_manager", return_value=manager):
+        restored = await _restore_media_data_from_db(serialized)
+    assert restored == content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_type,id_key", [("voice", "voice_id"), ("video", "video_id")])
+async def test_restore_media_data_from_db_fills_voice_and_video(
+    media_type: str, id_key: str
+) -> None:
+    """语音和视频历史用各自的 ID 字段回填媒体数据。"""
+    content = {"text": "", "media": [{"type": media_type, id_key: "media1"}]}
+    mock_manager = AsyncMock()
+    mock_manager.get_media_file.return_value = "aGVsbG8="
+    with patch("src.core.managers.media_manager.get_media_manager", return_value=mock_manager):
+        restored = await _restore_media_data_from_db(_serialize_content_for_db(content))
+
+    assert restored["media"][0]["data"] == "aGVsbG8="
+    mock_manager.get_media_file.assert_awaited_once_with("media1")
 
 
 @pytest.mark.asyncio

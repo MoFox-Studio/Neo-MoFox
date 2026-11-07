@@ -1,7 +1,7 @@
 {
     "name": "onebot_adapter",
     "display_name": "OneBot 适配器",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "description": "OneBot 11 适配器（基于 Neo-MoFox 重写）",
     "author": "MoFox Team",
     "dependencies": {

@@ -725,6 +725,10 @@ class MessageHandler:
                     )
                     if ref_result:
                         reply_segments.append(ref_result)
+            elif reply_data.get("text"):
+                # 未能定位被引用消息：回退使用 reply 段自带的内嵌文本预览
+                embedded_text = str(reply_data["text"])
+                reply_segments.append({"type": "text", "data": embedded_text})
 
             prefix_text = f"[回复<{sender_nickname}({sender_id})>：" if sender_id else f"[回复<{sender_nickname}>："
             brief_segments = [

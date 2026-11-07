@@ -19,7 +19,6 @@ from typing import Any
 from src.core.managers.media_manager.cache import MediaCache
 from src.core.managers.media_manager.cleanup import (
     MediaCleanup,
-    start_cleanup_scheduler_async,
 )
 from src.core.managers.media_manager.config import MediaConfig
 from src.core.managers.media_manager.engines import ASREngine, VLMEngine
@@ -84,7 +83,30 @@ class MediaManager:
 
         # 清理调度
         self._cleanup = MediaCleanup(self._config)
-        start_cleanup_scheduler_async(self._cleanup)
+        self._initialized = False
+        self._running = False
+
+    async def initialize(self) -> None:
+        """初始化媒体管理器，但不启动其后台服务。"""
+        if self._initialized:
+            return
+        self._initialized = True
+
+    async def start(self) -> None:
+        """启动媒体管理器的周期清理任务。"""
+        if self._running:
+            return
+        if not self._initialized:
+            await self.initialize()
+        await self._cleanup.start_scheduler()
+        self._running = True
+
+    async def shutdown(self) -> None:
+        """停止媒体管理器注册的周期清理任务。"""
+        if not self._running:
+            return
+        await self._cleanup.stop_scheduler()
+        self._running = False
 
     # ──────────────────────────────────────────
     # 公共 API：媒体识别控制
@@ -130,6 +152,18 @@ class MediaManager:
     # ──────────────────────────────────────────
     # 公共 API：媒体识别
     # ──────────────────────────────────────────
+
+    async def store_media(self, base64_data: str, media_type: str) -> bool:
+        """持久化发出的媒体文件与索引，不触发 VLM/ASR。
+
+        Args:
+            base64_data: 待存储的 base64 媒体数据。
+            media_type: 媒体类型，支持 image、emoji、voice、video。
+
+        Returns:
+            媒体文件和索引可回查时返回 True；类型不支持或回查校验失败时返回 False。
+        """
+        return await self._recognition.store_media(base64_data, media_type)
 
     async def recognize_media(
         self,
@@ -306,7 +340,7 @@ class MediaManager:
     async def get_media_file(self, media_hash: str) -> str | None:
         """根据媒体哈希读取落盘文件的 base64 内容。
 
-        先经 ``get_media_info`` 获取媒体记录的 path，再按该路径读文件并
+        按图片、语音、视频顺序查询媒体记录的 path，再按该路径读文件并
         编码为 base64。文件不存在或读取失败时返回 None（例如已被清理）。
 
         Args:
@@ -315,7 +349,11 @@ class MediaManager:
         Returns:
             base64 编码的文件内容；文件不存在或读取失败时返回 None
         """
-        info = await self._repository.get_media_info(media_hash)
+        info = (
+            await self._repository.get_media_info(media_hash)
+            or await self._repository.get_voice_info(media_hash)
+            or await self._repository.get_video_info(media_hash)
+        )
         if not info:
             return None
         file_path = info.get("path")

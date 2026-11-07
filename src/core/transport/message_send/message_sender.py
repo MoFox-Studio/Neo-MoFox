@@ -121,6 +121,8 @@ class MessageSender:
                 )
                 return True  # 返回成功，因为拦截是预期行为
 
+            await self._store_sent_media(message)
+
             # 6. 发送，并使用平台返回的消息 ID 记录已发送消息。
             result = await adapter._send_platform_message(envelope)
             if result is None:
@@ -173,6 +175,53 @@ class MessageSender:
         if isinstance(message_id, str) and message_id:
             message.message_id = message_id
 
+    async def _store_sent_media(self, message: "Message") -> None:
+        """发送前登记二进制媒体，并在历史文本中标出可回查 ID。"""
+        labels = {"image": "图片", "emoji": "表情包", "voice": "语音", "video": "视频"}
+        if not isinstance(message.content, dict):
+            if message.message_type in labels:
+                raise ValueError("媒体消息缺少可缓存的数据，无法发送")
+            return
+        media_items = message.content.get("media")
+        if not isinstance(media_items, list) or not media_items:
+            if message.message_type in labels:
+                raise ValueError("媒体消息缺少可缓存的数据，无法发送")
+            return
+
+        from src.core.managers.media_manager import MediaManager, get_media_manager
+
+        manager = None
+        id_keys = {"image": "image_id", "emoji": "image_id", "voice": "voice_id", "video": "video_id"}
+        for item in media_items:
+            if not isinstance(item, dict) or item.get("type") not in labels:
+                raise ValueError("媒体消息包含不支持的媒体类型")
+            media_type = item["type"]
+            data = item.get("data")
+            if not isinstance(data, str) or not data.startswith(("base64|", "data:")):
+                raise ValueError(f"{media_type} 媒体未缓存，无法发送")
+            if manager is None:
+                manager = get_media_manager()
+            if not await manager.store_media(data, media_type):
+                raise ValueError(f"{media_type} 媒体缓存失败，无法发送")
+            media_id = MediaManager.compute_media_hash(data)
+            item[id_keys[media_type]] = media_id
+
+            placeholder = f"[{labels[media_type]}]"
+            identified = f"[{labels[media_type]}({media_id})]"
+            text = message.processed_plain_text or message.content.get("text") or ""
+            described_prefix = f"[{labels[media_type]}:"
+            if described_prefix in text:
+                message.processed_plain_text = text.replace(
+                    described_prefix, f"[{labels[media_type]}({media_id}):", 1,
+                )
+            else:
+                message.processed_plain_text = (
+                    text.replace(placeholder, identified, 1)
+                    if placeholder in text
+                    else f"{text} {identified}".strip()
+                )
+            message.content["text"] = message.processed_plain_text
+
     async def _apply_bot_sender_info(self, message: "Message", adapter: Any) -> None:
         """在发送前将消息发送者信息设置为 Bot 信息。"""
         try:
@@ -220,7 +269,7 @@ class MessageSender:
             group_id=group_id,
             chat_type=message.chat_type,
         )
-        await sm.add_sent_message_to_history(message)
+        await sm.add_message_to_history(message)
 
     def _infer_adapter_signature(self, message: "Message") -> str | None:
         """推断目标 Adapter 签名。

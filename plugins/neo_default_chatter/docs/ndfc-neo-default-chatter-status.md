@@ -238,6 +238,8 @@ WAIT_USER ──(收到未读/恢复事件)──▶ MODEL_TURN ──(LLM 响�
 
 - `process_tool_calls` 按模型输出顺序逐条处理，遇到控制流边界前会先把累积的普通调用批量 `flush` 给 `run_tool_call`，保证顺序。
 - 跨轮去重通过 `seen_signatures: set[str]` 维护，签名形如 `"<call_name>:<json args>"`，`reason` 字段在签名计算前剥离。
+- **控制流调用（`action-pass_and_wait` / `action-stop_conversation`）不参与去重、不登记 `seen_signatures`**：它们是幂等的状态转换意图，若被去重，上一轮「普通工具 + pass」走 FOLLOW_UP 时被丢弃的等待意图会在下一轮重复 pass 时被跳过，导致 `should_wait` 恒 False 的无限 FOLLOW_UP 空转。
+- `session.py` 4.5 分支（`has_pending_tool_results and not outcome.should_wait`）保证「同轮普通工具 + pass」时优先兑现 pass 的等待意图，而不是把 pass 丢给 FOLLOW_UP。
 - `append_suspend_payload_if_tool_result_tail`：在 `pass_and_wait` 进入 Wait 前补一条 `ASSISTANT __SUSPEND__`，闭合裸 `TOOL_RESULT` 尾巴，避免下一轮 LLM 把工具回执当成自己的发言续写。
 
 ## 7. Service 对外契约（与设计严格一致）

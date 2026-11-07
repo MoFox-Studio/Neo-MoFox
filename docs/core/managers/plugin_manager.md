@@ -11,6 +11,7 @@ PluginManager 负责单个插件的加载与卸载执行，不负责插件发现
 - 按 manifest 加载插件模块（目录、zip、mfp）。
 - 获取 register_plugin 注册的插件类并实例化。
 - 加载插件配置并注入插件实例。
+- 以 manifest 为唯一权威来源注入插件运行时元数据（plugin_version / plugin_description）。
 - 注册组件到全局注册表并更新组件状态。
 - 卸载时调用生命周期钩子并清理注册信息。
 
