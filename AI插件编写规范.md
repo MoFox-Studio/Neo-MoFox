@@ -335,7 +335,7 @@ class DemoConfig(BaseConfig):
 - `dependencies` 内的每一项都必须是完整组件签名。
 - `entry_point` 默认语义是插件根目录下的 `plugin.py`。
 - 如果声明了 `python_dependencies`，要确保运行环境可安装这些依赖。
-- `api_version` 声明插件用到的插件 API 模块版本，支持字符串（等价于对全部 23 个 `*_api` 模块应用同一要求）与 `dict[str, str]`（仅校验声明模块，key 必须是合法 API 模块名）两种形式。插件 `import` 了任何 `*_api` 模块就应声明此项，优先用 dict 形式精确声明。与 `min_core_version` 同等判断（声明即校验，都声明则都须满足）。
+- `api_version` 声明插件用到的插件 API 模块版本，支持字符串（等价于对全部 24 个 `*_api` 模块应用同一要求）与 `dict[str, str]`（仅校验声明模块，key 必须是合法 API 模块名）两种形式。插件 `import` 了任何 `*_api` 模块就应声明此项，优先用 dict 形式精确声明。与 `min_core_version` 同等判断（声明即校验，都声明则都须满足）。
 
 ### 5.1 真实加载行为补充
 
@@ -367,9 +367,9 @@ class DemoConfig(BaseConfig):
 
 ##### `api_version`（推荐，声明插件 API 模块版本）
 
-声明插件用到的 **插件 API 模块** 版本（按 23 个 `*_api` 模块逐一校验）。支持两种形式：
+声明插件用到的 **插件 API 模块** 版本（按 24 个 `*_api` 模块逐一校验）。支持两种形式：
 
-- **字符串形式**（最简）：`"api_version": "1.0.0"`，等价于对该版本声明时全部 23 个 API 模块都要求该版本。
+- **字符串形式**（最简）：`"api_version": "1.0.0"`，等价于对该版本声明时全部 24 个 API 模块都要求该版本。
 - **dict 形式**（推荐，精确声明）：`"api_version": {"llm_api": "1.0.0", "send_api": "1.2.0"}`，仅校验声明的 keys，未声明的模块不校验。
 
 格式为 `x.y.z`（语义化版本）：
@@ -395,7 +395,7 @@ dict 形式示例：
 }
 ```
 
-合法 API 模块名（23 个，与 `src/app/plugin_system/api/` 一一对应）：`action_api`、`adapter_api`、`agent_api`、`chat_api`、`command_api`、`config_api`、`database_api`、`event_api`、`jev_api`、`llm_api`、`log_api`、`media_api`、`message_api`、`permission_api`、`person_api`、`plugin_api`、`prompt_api`、`router_api`、`send_api`、`service_api`、`storage_api`、`stream_api`、`tool_api`。任何不在此清单中的 key 都会被拒绝加载（防止拼写错误被静默接受）。
+合法 API 模块名（24 个，与 `src/app/plugin_system/api/` 一一对应）：`action_api`、`adapter_api`、`agent_api`、`chat_api`、`command_api`、`config_api`、`database_api`、`event_api`、`jev_api`、`llm_api`、`log_api`、`media_api`、`message_api`、`permission_api`、`person_api`、`plugin_api`、`prompt_api`、`request_inspector_api`、`router_api`、`send_api`、`service_api`、`storage_api`、`stream_api`、`tool_api`。任何不在此清单中的 key 都会被拒绝加载（防止拼写错误被静默接受）。
 
 ##### `min_core_version`（声明核心能力版本）
 
@@ -409,7 +409,7 @@ dict 形式示例：
 
 | 字段 | 校验对象 | 适用场景 |
 |---|---|---|
-| `api_version` | 23 个 `*_api` 插件 API 模块（逐一语义化版本校验） | 插件 `import` 了 `*_api` 模块 |
+| `api_version` | 24 个 `*_api` 插件 API 模块（逐一语义化版本校验） | 插件 `import` 了 `*_api` 模块 |
 | `min_core_version` | `CORE_VERSION`（简单 `>=` 比较） | 插件依赖核心新事件 / 新内核接口 / 新组件机制 |
 
 两个字段是「或」关系，**按需填写**：插件 `import` 了任何 `*_api` 模块就写 `api_version`；插件用到「必须更高版本核心才支持」的能力（新事件、新内核接口、新组件机制）就写 `min_core_version`；两者都不需要也可都不写（仅警告但加载）。一旦声明，即按 AND 同等判断：声明了哪一项就校验哪一项，只要任一项声明且不满足即拒绝注册。
@@ -704,7 +704,7 @@ dependencies = ["other_plugin:service:storage"]
 
 ### 9.1 manifest.json
 
-最简形式（字符串 `api_version`，等价于对全部 23 个 API 模块要求 `1.0.0`）：
+最简形式（字符串 `api_version`，等价于对全部 24 个 API 模块要求 `1.0.0`）：
 
 ```json
 {

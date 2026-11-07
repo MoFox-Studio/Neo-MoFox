@@ -14,7 +14,7 @@
 
 Neo-MoFox 当前使用单一全局常量 `PLUGIN_API_VERSION = "1.0.0"` 描述「插件 API」的整体版本。该常量在 `src/core/config/core_config.py:12` 定义，仅被 `src/core/components/loader.py` 中的 `_check_api_version_compatibility` 消费，用于在加载阶段比对插件 manifest 中声明的 `api_version` 字符串。
 
-随着插件系统对外暴露的 API 模块数量增长到 19 个（`action_api`、`adapter_api`、`agent_api`、`chat_api`、`command_api`、`config_api`、`database_api`、`event_api`、`jev_api`、`llm_api`、`log_api`、`media_api`、`message_api`、`permission_api`、`person_api`、`plugin_api`、`prompt_api`、`router_api`、`send_api`、`service_api`、`storage_api`、`stream_api`、`tool_api`），单一版本号面临以下问题：
+随着插件系统对外暴露的 API 模块数量增长到 24 个（`action_api`、`adapter_api`、`agent_api`、`chat_api`、`command_api`、`config_api`、`database_api`、`event_api`、`jev_api`、`llm_api`、`log_api`、`media_api`、`message_api`、`permission_api`、`person_api`、`plugin_api`、`prompt_api`、`request_inspector_api`、`router_api`、`send_api`、`service_api`、`storage_api`、`stream_api`、`tool_api`），单一版本号面临以下问题：
 
 1. **演进粒度过粗**：任何一个 API 模块发生破坏性变更都需要整体 major 升级，导致所有插件被强制重新声明版本，即便它们并未使用该模块。
 2. **版本号信息失真**：维护者无法从 manifest 中看出插件实际依赖哪些 API 模块，也无法判断一次 minor 升级是否会影响某个具体插件。
@@ -62,7 +62,7 @@ Neo-MoFox 当前使用单一全局常量 `PLUGIN_API_VERSION = "1.0.0"` 描述�
 
 ### 2.4 API 模块现状
 
-`src/app/plugin_system/api/__init__.py` 显式 import 并 `__all__` 导出 19 个 `*_api` 模块。每个模块是薄 facade，内部通过 lazy import 拿到对应 manager 进行委托。模块对 core 的引用全部走 `TYPE_CHECKING` 或函数内 lazy import，运行期不存在 `app → core` 的导入环。
+`src/app/plugin_system/api/__init__.py` 显式 import 并 `__all__` 导出 24 个 `*_api` 模块。每个模块是薄 facade，内部通过 lazy import 拿到对应 manager 进行委托。模块对 core 的引用全部走 `TYPE_CHECKING` 或函数内 lazy import，运行期不存在 `app → core` 的导入环。
 
 ### 2.5 测试现状
 
@@ -98,7 +98,7 @@ Neo-MoFox 当前使用单一全局常量 `PLUGIN_API_VERSION = "1.0.0"` 描述�
 
 两个字段各司其职，**不存在二流声明**：
 
-- `api_version`：声明插件依赖的 **插件 API 模块** 版本（按 23 个 `*_api` 模块逐一校验）。用于表达「这个插件用到了哪些 API 模块、要求它们的版本」。
+- `api_version`：声明插件依赖的 **插件 API 模块** 版本（按 24 个 `*_api` 模块逐一校验）。用于表达「这个插件用到了哪些 API 模块、要求它们的版本」。
 - `min_core_version`：声明插件依赖的 **核心能力** 版本（基于 `CORE_VERSION` 做简单 `>=` 比较）。适用于插件依赖核心某些新功能——例如某些新的事件、新的核心组件机制、新的内核接口等——这些能力不通过 `*_api` 模块暴露，无法被 `api_version` 覆盖，必须由 `min_core_version` 兜底。
 
 **何时该用哪个**：
@@ -116,12 +116,12 @@ Neo-MoFox 当前使用单一全局常量 `PLUGIN_API_VERSION = "1.0.0"` 描述�
 
 | 决策点 | 选择 | 说明 |
 |---|---|---|
-| 版本粒度 | 按 23 个 `*_api.py` 模块 | 与 `src/app/plugin_system/api/` 模块一一对应 |
+| 版本粒度 | 按 24 个 `*_api.py` 模块 | 与 `src/app/plugin_system/api/` 模块一一对应 |
 | 核心侧版本源 | 每个模块顶部 `API_VERSION` 常量，在 `api/__init__.py` 聚合为 `PLUGIN_API_VERSIONS` | 单一事实源；版本随 API 文件演进 |
 | `core_config.py` 中的 `PLUGIN_API_VERSION` | **删除** | 旧常量被 `PLUGIN_API_VERSIONS` 取代 |
 | manifest `api_version` 字段类型 | `str \| dict[str, str]` | 字符串形式继续合法 |
 | dict key 命名 | 完整模块名（如 `llm_api`、`send_api`） | 与 Python import 路径完全对应，零歧义 |
-| 字符串形式语义 | 等价于「对全部 23 个 API 模块都要求该版本」 | 现存第三方插件零改动兼容 |
+| 字符串形式语义 | 等价于「对全部 24 个 API 模块都要求该版本」 | 现存第三方插件零改动兼容 |
 | 未知 API key | **拒绝加载** | 防止拼写错误被静默接受 |
 | Major 不匹配语义 | 保持现规则 | major 不一致 → 拒绝；core 低于要求 → 拒绝；core 高于要求 → 警告但加载 |
 | `min_core_version` 与 `api_version` 关系 | **AND 同等判断** | 两者都声明 → 都须满足；只声明其一 → 只校验该项；均未声明 → 警告但加载。`min_core_version` 不再是「弃用回退」，而是表达核心能力依赖的一等字段 |
@@ -136,13 +136,13 @@ Neo-MoFox 当前使用单一全局常量 `PLUGIN_API_VERSION = "1.0.0"` 描述�
 
 #### 5.1.1 每个 `*_api.py` 顶部新增 `API_VERSION`
 
-文件清单（共 23 个，路径前缀 `src/app/plugin_system/api/`）：
+文件清单（共 24 个，路径前缀 `src/app/plugin_system/api/`）：
 
 ```
 action_api.py、adapter_api.py、agent_api.py、chat_api.py、command_api.py、
-config_api.py、database_api.py、event_api.py、llm_api.py、log_api.py、
-media_api.py、message_api.py、permission_api.py、plugin_api.py、prompt_api.py、
-router_api.py、send_api.py、service_api.py、storage_api.py、stream_api.py
+config_api.py、database_api.py、event_api.py、jev_api.py、llm_api.py、log_api.py、
+media_api.py、message_api.py、permission_api.py、person_api.py、plugin_api.py、prompt_api.py、
+request_inspector_api.py、router_api.py、send_api.py、service_api.py、storage_api.py、stream_api.py、tool_api.py
 ```
 
 每个文件在首行 docstring 与 imports 之后追加：
@@ -157,7 +157,7 @@ API_VERSION = "1.0.0"
 
 #### 5.1.2 `api/__init__.py` 聚合
 
-在现有 23 个 `from src.app.plugin_system.api import xxx_api` 之后追加：
+在现有 24 个 `from src.app.plugin_system.api import xxx_api` 之后追加：
 
 ```python
 PLUGIN_API_VERSIONS: dict[str, str] = {
@@ -169,18 +169,22 @@ PLUGIN_API_VERSIONS: dict[str, str] = {
     "config_api": config_api.API_VERSION,
     "database_api": database_api.API_VERSION,
     "event_api": event_api.API_VERSION,
+    "jev_api": jev_api.API_VERSION,
     "llm_api": llm_api.API_VERSION,
     "log_api": log_api.API_VERSION,
     "media_api": media_api.API_VERSION,
     "message_api": message_api.API_VERSION,
     "permission_api": permission_api.API_VERSION,
+    "person_api": person_api.API_VERSION,
     "plugin_api": plugin_api.API_VERSION,
     "prompt_api": prompt_api.API_VERSION,
+    "request_inspector_api": request_inspector_api.API_VERSION,
     "router_api": router_api.API_VERSION,
     "send_api": send_api.API_VERSION,
     "service_api": service_api.API_VERSION,
     "storage_api": storage_api.API_VERSION,
     "stream_api": stream_api.API_VERSION,
+    "tool_api": tool_api.API_VERSION,
 }
 ```
 
@@ -237,7 +241,7 @@ else:
 
 #### 5.2.3 字段语义说明
 
-- 字符串形式 `"1.0.0"`：等价于「对该版本声明时全部 19 个 API 模块都要求 `1.0.0`」。当核心新增 API 模块时，已发布的字符串 manifest 会自动覆盖新模块（要求新模块版本 ≤ 该字符串），不会因新模块引入而被拒绝。
+- 字符串形式 `"1.0.0"`：等价于「对该版本声明时全部 24 个 API 模块都要求 `1.0.0`」。当核心新增 API 模块时，已发布的字符串 manifest 会自动覆盖新模块（要求新模块版本 ≤ 该字符串），不会因新模块引入而被拒绝。
 - dict 形式 `{"llm_api": "1.0.0", "send_api": "1.2.0"}`：仅校验声明的 keys，未声明的模块不校验。
 
 ### 5.3 兼容性校验算法
@@ -339,7 +343,7 @@ def _check_version_compatibility(
     - 两者都未声明 → 允许加载但发出警告。
 
     两字段各司其职：
-    - api_version：声明插件 API 模块版本（按 23 个 *_api 模块逐一校验）。
+    - api_version：声明插件 API 模块版本（按 24 个 *_api 模块逐一校验）。
     - min_core_version：声明核心能力版本（基于 CORE_VERSION 做简单 >= 比较），
       适用于插件依赖核心某些新功能（如某些新事件、新的核心组件机制）。
     """
@@ -422,9 +426,9 @@ def _check_core_version_compatibility(
 
 ### 5.5 字符串形式向后兼容
 
-字符串形式归一化为「全部 23 个模块的 dict」。这意味着：
+字符串形式归一化为「全部 24 个模块的 dict」。这意味着：
 
-- 现存使用 `"api_version": "1.0.0"` 的第三方插件被等价处理为对所有 23 个 API 模块要求 `1.0.0`，由于所有 `*_api.py` 的初始 `API_VERSION` 也是 `"1.0.0"`，校验结果为「兼容」。
+- 现存使用 `"api_version": "1.0.0"` 的第三方插件被等价处理为对所有 24 个 API 模块要求 `1.0.0`，由于所有 `*_api.py` 的初始 `API_VERSION` 也是 `"1.0.0"`，校验结果为「兼容」。
 - 未来核心新增 API 模块时，已发布字符串 manifest 会自动覆盖新模块；只要新模块的 `API_VERSION` 仍为 `1.0.0`，旧 manifest 不会因新模块引入而被拒绝。
 - 一旦某个 API 模块升级到 `2.0.0`，使用字符串 `"1.0.0"` 的插件将因该模块 major 不匹配而被拒绝——这是预期行为，因为该插件事实上无法使用破坏性升级后的 API。
 
@@ -450,7 +454,7 @@ def _check_api_version_compatibility(self, manifest: PluginManifest) -> tuple[bo
 
 | 文件 | 变更类型 | 内容 |
 |---|---|---|
-| `src/app/plugin_system/api/{23 个 *_api.py}` | 修改 | 顶部新增 `API_VERSION = "1.0.0"` 并加入 `__all__` |
+| `src/app/plugin_system/api/{24 个 *_api.py}` | 修改 | 顶部新增 `API_VERSION = "1.0.0"` 并加入 `__all__` |
 | `src/app/plugin_system/api/__init__.py` | 修改 | 聚合 `PLUGIN_API_VERSIONS` dict 并加入 `__all__` |
 | `src/core/config/core_config.py` | 修改 | 删除 `PLUGIN_API_VERSION = "1.0.0"`（行 12） |
 | `src/core/config/__init__.py` | 修改 | 移除 `PLUGIN_API_VERSION` 的 import 与 `__all__` 条目 |
@@ -476,7 +480,7 @@ def _check_api_version_compatibility(self, manifest: PluginManifest) -> tuple[bo
 
 ### 7.1 字符串 → dict 自动归一化
 
-加载器在 `_check_api_version_compatibility` 内部将字符串形式自动展开为「全 23 模块 dict」，与 dict 形式走同一条校验路径。无需 manifest 作者感知差异。
+加载器在 `_check_api_version_compatibility` 内部将字符串形式自动展开为「全 24 模块 dict」，与 dict 形式走同一条校验路径。无需 manifest 作者感知差异。
 
 ### 7.3 文档迁移建议
 
@@ -531,7 +535,7 @@ def _check_api_version_compatibility(self, manifest: PluginManifest) -> tuple[bo
 #### 5.1.3 节（行 334-367）
 
 - 将 `api_version` 字段说明从「字符串」更新为「字符串 | dict[str, str]」。
-- 说明字符串形式语义：等价于对该版本声明时全部 23 个 API 模块应用同一要求。
+- 说明字符串形式语义：等价于对该版本声明时全部 24 个 API 模块应用同一要求。
 - 说明 dict 形式语义：仅校验声明模块，未声明模块不校验。
 - 说明未知 API key 行为：拒绝加载。
 - **去除 `min_core_version` 的「已弃用」措辞**，改为说明其与 `api_version` 同等判断（AND 语义），用于声明核心能力依赖。
@@ -545,7 +549,7 @@ def _check_api_version_compatibility(self, manifest: PluginManifest) -> tuple[bo
   }
   ```
 
-- 列出全部合法 API 名称（23 个模块名）。
+- 列出全部合法 API 名称（24 个模块名）。
 
 #### 9.1 节（行 601-626）
 
@@ -556,7 +560,7 @@ def _check_api_version_compatibility(self, manifest: PluginManifest) -> tuple[bo
 
 在「注意事项」补充：
 
-> - API 版本兼容性按 23 个 `*_api` 模块逐一校验。manifest 中 `api_version` 支持字符串（等价于对所有模块应用同一要求）与 dict（仅校验声明模块）两种形式。
+> - API 版本兼容性按 24 个 `*_api` 模块逐一校验。manifest 中 `api_version` 支持字符串（等价于对所有模块应用同一要求）与 dict（仅校验声明模块）两种形式。
 > - `api_version` 与 `min_core_version` **同等判断（AND 语义）**：声明了哪一项就校验哪一项，只要任一项声明且不满足即拒绝注册。前者面向插件 API 模块版本，后者面向核心能力版本（如新事件、新内核接口）。
 > - 详见 [plugin-api-versioning.md](./plugin-api-versioning.md)。
 
@@ -599,7 +603,7 @@ def _check_api_version_compatibility(self, manifest: PluginManifest) -> tuple[bo
    python -c "from src.app.plugin_system.api import PLUGIN_API_VERSIONS; import json; print(json.dumps(PLUGIN_API_VERSIONS, indent=2, ensure_ascii=False))"
    ```
 
-   应输出包含 23 个 key 的 dict（与 `api/__init__.py` 中导入的 23 个 `*_api` 模块一一对应）。
+   应输出包含 24 个 key 的 dict（与 `api/__init__.py` 中导入的 24 个 `*_api` 模块一一对应）。
 
 2. **旧常量已删除**
 
@@ -641,7 +645,7 @@ def _check_api_version_compatibility(self, manifest: PluginManifest) -> tuple[bo
 
 ## 13. 附录：合法 API 模块名称清单
 
-以下 23 个名称是 manifest `api_version` dict 形式中合法的 key（与 `src/app/plugin_system/api/__init__.py` 导入的模块一一对应）：
+以下 24 个名称是 manifest `api_version` dict 形式中合法的 key（与 `src/app/plugin_system/api/__init__.py` 导入的模块一一对应）：
 
 ```
 action_api
@@ -652,18 +656,22 @@ command_api
 config_api
 database_api
 event_api
+jev_api
 llm_api
 log_api
 media_api
 message_api
 permission_api
+person_api
 plugin_api
 prompt_api
+request_inspector_api
 router_api
 send_api
 service_api
 storage_api
 stream_api
+tool_api
 ```
 
 任何不在此清单中的 key 都会被拒绝加载。
