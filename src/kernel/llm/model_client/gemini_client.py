@@ -472,11 +472,13 @@ class GeminiChatClient:
         """构建官方 SDK 请求，并返回统一结果或拥有请求资源的流。
 
         Args:
-            model_name: Gemini 模型 ID，允许单个 ``models/`` 前缀。
+            model_name: 实际 Gemini 模型 ID，允许单个 ``models/`` 前缀；规范化后
+                同时用于 SDK 出站、历史来源校验和新响应的回放状态。
             payloads: 按时间顺序排列的消息及可验证来源的续轮状态。
             tools: 本轮声明的工具；执行仍属于 MoFox，不启用 SDK 自动调用。
             request_name: 仅用于请求观测的名称。
-            model_set: 单个已合并模型配置，包含凭据、传输和 Gemini 生成参数。
+            model_set: 单个已合并模型配置，包含凭据、传输和 Gemini 生成参数；
+                model_identifier 无需与 model_name 相同，不回写调用方配置。
             stream: 是否返回流；流模式会在返回前预取一个 SDK 块。
 
         Returns:
@@ -487,6 +489,7 @@ class GeminiChatClient:
 
         Raises:
             LLMConfigurationError: 模型、传输或生成参数不符合 Gemini 契约。
+            LLMContextError: 历史回放状态的来源或内容不匹配，在 HTTP 前拒绝。
             Exception: SDK 请求、解码或资源关闭失败，交由上层异常归一化及策略处理。
         """
         if not isinstance(model_set, dict):
@@ -499,7 +502,8 @@ class GeminiChatClient:
             )
 
         gemini_options(model_set)
-        target = target_identity(model_set)
+        # 出站与回放共用实际模型名，仅覆盖局部副本，避免回写调用方配置。
+        target = target_identity({**model_set, "model_identifier": name})
         contents, system, declared = encode_payloads(payloads, target, tools)
         if not contents:
             raise LLMConfigurationError("Gemini request has no conversation contents")

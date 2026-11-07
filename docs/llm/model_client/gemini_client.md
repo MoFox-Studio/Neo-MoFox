@@ -59,6 +59,8 @@ model = {
 
 `model_identifier` 可带一次 `models/` 前缀，之后必须是单模型 ID；拒绝路径/操作注入和 Vertex 资源名。认证使用 SDK 的 API key 机制，禁止覆盖 `Authorization`、`x-goog-api-key`、`Host`、`Content-Type`；禁用自动重定向。
 
+直接调用 `GeminiChatClient.create()` 时，实际模型由 `model_name` 决定，同样允许一次 `models/` 前缀；规范化后的同一 ID 用于 SDK 出站、历史来源校验和新响应的 replay state。不要求它等于 `model_set["model_identifier"]`，适配器也不会回写调用方配置。普通 `LLMRequest` 仍按所选配置传入模型名。
+
 ### 参数边界
 
 - 仅在 `extra_params.gemini.generation_config` 下放 SDK 生成参数。未知字段及保留字段会报配置错误，不接受 OpenAI 风格的任意参数透传。
@@ -103,7 +105,9 @@ model = {
 
 Gemini 请求观测只提交模型名及内容/工具数量，不提交原始 Parts 或签名；这不代表调用方自行 dump `provider_state` 是安全的。普通用户文本、工具结果同样应按敏感数据处理。
 
-重放会核对来源 **`api_provider` + 规范化 endpoint/API 版本 + 模型 ID** 以及标准内容指纹；修改签名绑定的文本、工具名称或参数，或切换目标，会抛 `LLMContextError`。用现有响应继续工具回合：
+重放会核对来源 **`api_provider` + 规范化 endpoint/API 版本 + 实际模型 ID** 以及标准内容指纹；修改签名绑定的文本、工具名称或参数，或切换目标，会在发送 HTTP 前抛 `LLMContextError`。即使保留 A 的配置而直接指定 `model_name="B"`，也不能把 A 的历史签名发给 B；没有 Gemini 回放状态的历史可正常请求 B，新响应状态记录 B。
+
+用现有响应继续工具回合：
 
 ```python
 # response 已完整消费，且其 assistant payload 已自动追加（默认行为）。
