@@ -226,15 +226,15 @@ async def test_retry_delay_honors_http_date_retry_after() -> None:
     assert 25 <= delay <= 30
 
 
-async def test_retry_delay_caps_http_date_by_max_backoff() -> None:
-    """服务端给出的等待时间仍然受本地退避上限约束。"""
+async def test_retry_delay_honors_http_date_above_max_backoff() -> None:
+    """合法 HTTP 日期指定的等待时间优先于本地退避上限。"""
     target = datetime.now(timezone.utc) + timedelta(seconds=600)
     response = httpx.Response(
         429,
         headers={"Retry-After": format_datetime(target, usegmt=True)},
     )
     client = _client(lambda request: httpx.Response(200), max_retry_backoff_seconds=5)
-    assert client._retry_delay(0, response) == 5
+    assert 595 <= client._retry_delay(0, response) <= 600
 
 
 async def test_retry_delay_ignores_past_http_date() -> None:

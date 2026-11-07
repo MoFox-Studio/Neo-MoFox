@@ -265,7 +265,11 @@ class JevClient:
             meta_data=meta_data,
         )
         body = self._build_request_body(state=state, questions=questions, model=model)
-        expected_ids = set(body["questions"])
+        # 以事件改写后实际发送的规范化问题为准，而非调用方的原始定义。
+        expected_types: dict[str, str] = {
+            question_id: question["type"]
+            for question_id, question in body["questions"].items()
+        }
 
         async with httpx.AsyncClient(
             timeout=build_httpx_timeout(self.config.timeout_seconds),
@@ -298,7 +302,21 @@ class JevClient:
                         )
                         raise error
                     else:
-                        parsed = self._parse_response(response, expected_ids=expected_ids)
+                        try:
+                            parsed = self._parse_response(
+                                response, expected_types=expected_types,
+                            )
+                        except JevResponseError as error:
+                            # 已收到成功 HTTP 响应，但契约解析失败不进入重试。
+                            await self._publish_failed(
+                                error=error,
+                                state=state,
+                                questions=questions,
+                                request_name=request_name,
+                                meta_data=meta_data,
+                                retry_count=attempt,
+                            )
+                            raise
                         return await self._publish_after_request(
                             response=parsed,
                             state=state,
@@ -457,9 +475,10 @@ class JevClient:
     ) -> tuple[Exception | None, httpx.Response | None]:
         """发起一次请求，把传输层异常转换成可重试的 Jev 异常。"""
         try:
+            # 先合并 query，避免 httpx 的 params 参数整体替换 URL 中的原值。
+            endpoint = httpx.URL(self.config.endpoint).copy_merge_params(self.config.extra_query)
             return None, await client.post(
-                self.config.endpoint,
-                params=self.config.extra_query,
+                endpoint,
                 headers=headers,
                 json=body,
             )
@@ -608,17 +627,21 @@ class JevClient:
         except (TypeError, ValueError, OverflowError):
             return None
         if math.isfinite(delay) and delay >= 0:
-            # 服务端给出的等待时间优先于本地退避上限。
-            return min(delay, self.config.max_retry_backoff_seconds)
+            # 与数字秒数一致，服务端等待时间优先于本地退避上限。
+            return delay
         return None
 
     @staticmethod
     def _parse_response(
         response: httpx.Response,
         *,
-        expected_ids: set[str],
+        expected_types: Mapping[str, str],
     ) -> JevResponse:
         """校验并解析成功响应。
+
+        Args:
+            response: 上游成功 HTTP 响应。
+            expected_types: 实际请求体中的问题 ID 到预期题型的映射。
 
         Raises:
             JevResponseError: JSON、model、answers 或 usage 不符合契约。
@@ -634,7 +657,7 @@ class JevClient:
         answers_raw = payload.get("answers")
         if not isinstance(model, str) or not isinstance(answers_raw, dict):
             raise JevResponseError("Jev 响应缺少合法的 model 或 answers")
-        if set(answers_raw) != expected_ids:
+        if set(answers_raw) != set(expected_types):
             # 宁可整体失败，也不把错位的答案交给业务。
             raise JevResponseError("Jev answers 的 question ID 与请求不一致")
 
@@ -652,8 +675,12 @@ class JevClient:
                 question_id: JevAnswer.from_payload(answer)
                 for question_id, answer in answers_raw.items()
             }
-        except ValueError as exc:
+        except (ValueError, OverflowError) as exc:
             raise JevResponseError(f"Jev answer 结构非法：{exc}") from exc
+
+        for question_id, answer in answers.items():
+            if answer.type != expected_types[question_id]:
+                raise JevResponseError(f"Jev answer {question_id!r} 的 type 与请求不一致")
 
         return JevResponse(
             model=model,
