@@ -96,6 +96,7 @@ class Bot:
         self.sink_manager: SinkManager | None = None
         self.plugin_loader: PluginLoader | None = None
         self.plugin_manager: PluginManager | None = None
+        self.plugin_hot_reload: Any | None = None
         self.mcp_manager: MCPManager | None = None
         self.media_manager: MediaManager | None = None
         self.http_server: HTTPServer | None = None
@@ -721,6 +722,16 @@ class Bot:
         self.ui.begin_plugin_loading(len(self.load_order))
         await self._load_plugins()
 
+        from src.core.managers.plugin_hot_reload import PluginHotReloadService
+
+        if self.plugin_manager is not None:
+            self.plugin_hot_reload = PluginHotReloadService(
+                self.plugin_manager,
+                plugins_dir=self.plugins_dir,
+                config_dir="config/plugins",
+            )
+            await self.plugin_hot_reload.start()
+
     def _validate_startup_contract(self) -> None:
         """检查必需资源已准备完成，并记录预注册任务供诊断。
 
@@ -1158,18 +1169,13 @@ class Bot:
         try:
             if plugin_name:
                 # 单插件重载
-                if plugin_name not in self.manifests:
+                if plugin_name not in self.manifests and not self.plugin_manager.is_plugin_loaded(
+                    plugin_name
+                ):
                     self.ui.display_error(f"未知插件: {plugin_name}")
                     return {plugin_name: False}
 
-                # 卸载
-                await self.plugin_manager.unload_plugin(plugin_name)
-
-                # 重新加载
-                manifest = self.manifests[plugin_name]
-                success = await self.plugin_manager.load_plugin_from_manifest(
-                    manifest._source_path, manifest
-                )
+                success = await self.plugin_manager.reload_plugin(plugin_name)
                 results[plugin_name] = success
 
             else:
@@ -1191,7 +1197,10 @@ class Bot:
             return
 
         # 按相反顺序卸载
-        for plugin_name in reversed(self.load_order):
+        list_loaded_plugins = getattr(self.plugin_manager, "list_loaded_plugins", None)
+        loaded_names = list_loaded_plugins() if callable(list_loaded_plugins) else []
+        plugin_names = list(dict.fromkeys(self.load_order + loaded_names))
+        for plugin_name in reversed(plugin_names):
             try:
                 await self.plugin_manager.unload_plugin(plugin_name)
                 if self.logger:
@@ -1248,8 +1257,20 @@ class Bot:
             await step("聊天流", self._stop_stream_loops)
 
             # 步骤 3：逐个逆序卸载插件，每个插件拥有独立的超时与错误记录。
+            if self.plugin_hot_reload is not None:
+                await step("停止插件热加载", self.plugin_hot_reload.stop)
+                self.plugin_hot_reload = None
             if self.plugin_manager is not None:
-                for name in reversed(self.load_order):
+                list_loaded_plugins = getattr(
+                    self.plugin_manager,
+                    "list_loaded_plugins",
+                    None,
+                )
+                loaded_names = (
+                    list_loaded_plugins() if callable(list_loaded_plugins) else []
+                )
+                plugin_names = list(dict.fromkeys(self.load_order + loaded_names))
+                for name in reversed(plugin_names):
                     await step(f"插件 {name}", partial(self._shutdown_plugin, name))
             self.load_results.clear()
             self._stats.update(plugins_loaded=0, plugins_failed=0)
