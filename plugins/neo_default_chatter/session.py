@@ -682,8 +682,12 @@ class ConversationSession:
                     )
                     return
 
-                # 4.5) 还有未消费的工具结果：进入 FOLLOW_UP，让 LLM 二次请求消化
-                if outcome.has_pending_tool_results:
+                # 4.5) 还有未消费的工具结果：进入 FOLLOW_UP，让 LLM 二次请求消化。
+                #     但当模型同一轮已显式调用 pass_and_wait（should_wait=True）时，
+                #     优先尊重它「本轮收尾并等待」的意图，直接落到 4.8 等待分支——
+                #     否则 pass 的等待意图会被 4.5 抢先丢弃，模型下一轮重复 pass 又会
+                #     撞上跨轮去重被跳过，最终在 FOLLOW_UP 里无限空转（见 tool_flow）。
+                if outcome.has_pending_tool_results and not outcome.should_wait:
                     await self._transition(
                         state=state,
                         to_phase=_Phase.FOLLOW_UP,

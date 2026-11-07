@@ -236,17 +236,12 @@ async def test_anthropic_client_logs_request_to_inspector(monkeypatch) -> None:
         def __init__(self) -> None:
             self.messages = _FakeMessagesAPI()
 
-    captured: dict[str, Any] = {}
-
-    def fake_capture(api_name, params, metadata=None):
-        captured["api_name"] = api_name
-        captured["params"] = params
-        captured["metadata"] = metadata or {}
+    inspector = RequestInspector()
 
     client = AnthropicChatClient()
     monkeypatch.setattr(client, "_get_client", lambda **_: _FakeClient())
     import src.kernel.llm.request_inspector as inspector_module
-    monkeypatch.setattr(inspector_module, "capture", fake_capture)
+    monkeypatch.setattr(inspector_module, "_inspector", inspector)
 
     await client.create(
         model_name="claude-sonnet-4-6",
@@ -263,6 +258,8 @@ async def test_anthropic_client_logs_request_to_inspector(monkeypatch) -> None:
         stream=False,
     )
 
+    captured = inspector.get_record(1)
+    assert captured["status"] == "succeeded"
     assert captured["api_name"] == "messages.create"
     assert captured["params"]["model"] == "claude-sonnet-4-6"
     assert captured["metadata"]["api_provider"] == "Anthropic"
@@ -515,7 +512,7 @@ def test_read_api_is_safe_against_concurrent_capture() -> None:
 
 
 def test_capture_degrades_uncopyable_metadata_instead_of_raising() -> None:
-    """metadata 含不可深拷贝对象时应降级为 _raw，而不是抛异常。"""
+    """不安全对象使用不可用标记，保留其余元数据且不调用 repr。"""
     inspector = RequestInspector()
 
     inspector.capture(
@@ -525,8 +522,9 @@ def test_capture_degrades_uncopyable_metadata_instead_of_raising() -> None:
     )
 
     metadata = inspector.get_record(1)["metadata"]
-    assert "_raw" in metadata, "不可拷贝的 metadata 应降级为 _raw"
-    assert "api_provider" not in metadata
+    assert metadata["lock"] == "[unavailable]"
+    assert metadata["api_provider"] == "OpenAI"
+    assert inspector.get_record(1)["capture_info"]["metadata_unavailable"]
 
 
 def test_capture_failure_leaves_no_id_gap() -> None:
@@ -543,12 +541,7 @@ def test_capture_failure_leaves_no_id_gap() -> None:
 
 
 def test_capture_falls_back_like_params_side() -> None:
-    """params 与 metadata 应共用同一套 _raw 降级约定。
-
-    注意 params 侧走的是 ``json.dumps(..., default=str)``，不可序列化的值会被
-    ``str()`` 转换而非抛错；只有连 ``str()`` 都无法处理的对象才会触发降级。
-    这里用一个 ``__str__`` 自身抛错的对象构造该路径。
-    """
+    """请求和元数据均不再使用可能泄露凭据的 str/repr 兜底。"""
 
     class Unstringable:
         def __str__(self) -> str:
@@ -563,5 +556,7 @@ def test_capture_falls_back_like_params_side() -> None:
     )
 
     record = inspector.get_record(1)
-    assert "_raw" in record["params"], "无法 str() 的 params 应降级为 _raw"
-    assert "_raw" in record["metadata"], "不可拷贝的 metadata 应降级为 _raw"
+    assert record["params"]["bad"] == "[unavailable]"
+    assert record["metadata"]["also_bad"] == "[unavailable]"
+    assert record["capture_info"]["request_unavailable"]
+    assert record["capture_info"]["metadata_unavailable"]

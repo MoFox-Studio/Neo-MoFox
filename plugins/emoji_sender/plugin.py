@@ -17,7 +17,11 @@ from src.core.components import BasePlugin, register_plugin
 from src.kernel.concurrency import get_task_manager
 from src.kernel.logger import get_logger
 
-from .action import SendEmojiMemeAction, SendEmojiMemeByIdAction
+from .action import (
+    DeleteEmojiMemeByIdAction,
+    SendEmojiMemeAction,
+    SendEmojiMemeByIdAction,
+)
 from .config import EmojiSenderConfig
 from .service import EmojiSenderService
 from .tool import SearchEmojiMemesTool
@@ -108,11 +112,19 @@ class EmojiSenderPlugin(BasePlugin):
     dependent_components: list[str] = []
 
     def __init__(self, config: EmojiSenderConfig | None = None) -> None:
-        """初始化插件的调度状态与运行期拒绝哈希集合。"""
+        """初始化插件的调度状态、拒绝哈希集合与删除哈希集合。"""
         super().__init__(config)
         self._schedule_ids: list[str] = []
         self._register_task_id: str | None = None
         self._rejected_hashes: set[str] = set()
+        # 用户显式删除的表情包哈希，与 VLM 拒收分开存放
+        self._deleted_hashes: set[str] = set()
+        # 正在入库中的表情包哈希：文件已落盘但向量记录尚未写入。
+        # 对齐任务据此跳过这些文件，避免把「刚写入、还没写库」的文件
+        # 误判成孤儿文件删除，留下指向不存在文件的僵尸记录。
+        # Service 不是单例（get_service 每次新建实例），因此共享状态
+        # 必须放在插件上，与其余哈希集合同层。
+        self._pending_ingest_hashes: set[str] = set()
 
     def get_components(self) -> list[type]:
         """返回本插件提供的组件类（按 interaction_mode 分模式注册）。"""
@@ -120,7 +132,12 @@ class EmojiSenderPlugin(BasePlugin):
         if isinstance(config, EmojiSenderConfig) and not config.plugin.enabled:
             return []
         if _get_interaction_mode(self) == MODE_PICKER:
-            return [EmojiSenderService, SearchEmojiMemesTool, SendEmojiMemeByIdAction]
+            return [
+                EmojiSenderService,
+                SearchEmojiMemesTool,
+                SendEmojiMemeByIdAction,
+                DeleteEmojiMemeByIdAction,
+            ]
         return [EmojiSenderService, SendEmojiMemeAction]
 
     async def on_plugin_loaded(self) -> None:

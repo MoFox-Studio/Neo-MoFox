@@ -540,3 +540,24 @@ async for chunk in response:
 - [Exceptions 模块](./exceptions.md) - 异常处理
 - [Monitor 模块](./monitor.md) - 指标收集
 
+
+
+## 提前关闭流
+
+提前结束消费或决定不消费返回的响应时，在 `finally` 中调用
+`await response.aclose()`。该方法幂等、不主动读取余下内容，并会关闭已取得的
+SDK 资源；未结束的原生请求监视记录标记为 `cancelled`，已完成的终态保持不变。
+普通 `break` 不保证立即关闭异步生成器，调用方应显式关闭。
+
+```python
+response = await request.send(stream=True)
+try:
+    async for chunk in response:
+        print(chunk)
+        if should_stop:
+            break
+finally:
+    await response.aclose()
+```
+
+更多观测约定见 [原生请求监视器](./request_inspector.md)。
