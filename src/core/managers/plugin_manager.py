@@ -116,7 +116,11 @@ class PluginManager:
         logger.info("插件管理器初始化完成")
 
     async def load_plugin_from_manifest(
-        self, plugin_path: str, manifest: PluginManifest
+        self,
+        plugin_path: str,
+        manifest: PluginManifest,
+        *,
+        start_runtime_resources: bool = True,
     ) -> bool:
         """加载单个插件（manifest 已由 loader 宏观层校验并提供）。"""
         plugin_name = manifest.name
@@ -137,6 +141,22 @@ class PluginManager:
             )
             return True
 
+        if not await self._ensure_manifest_dependencies(manifest):
+            error_msg = "插件声明的 Python 依赖未满足"
+            self._failed_plugins[plugin_name] = error_msg
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_load_failed",
+                summary="plugin load failed",
+                severity="error",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                stage="dependency_install",
+                error=RuntimeError(error_msg),
+            )
+            return False
+
         # 2. 加载插件模块（导入会触发 @register_plugin 执行）
         if plugin_path.endswith((".zip", ".mfp")):
             plugin_module = await self._load_from_archive(plugin_path, manifest)
@@ -146,6 +166,7 @@ class PluginManager:
         if not plugin_module:
             error_msg = "插件模块加载失败"
             self._failed_plugins[plugin_name] = error_msg
+            await self._rollback_failed_load(plugin_name, plugin_path)
             await _record_plugin_telemetry_event(
                 plugin_name=plugin_name,
                 event_name="plugin_load_failed",
@@ -166,6 +187,7 @@ class PluginManager:
         if not plugin_class:
             error_msg = "插件类未注册（未使用 @register_plugin 装饰器）"
             self._failed_plugins[plugin_name] = error_msg
+            await self._rollback_failed_load(plugin_name, plugin_path)
             logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
             await _record_plugin_telemetry_event(
                 plugin_name=plugin_name,
@@ -194,11 +216,31 @@ class PluginManager:
             )
             config_classes = []
 
-        for config_cls in config_classes:
-            if isinstance(config_cls, type) and issubclass(config_cls, BaseConfig):
-                config_instance = get_config_manager().load_config(plugin_name, config_cls)
-                has_config = True
-                break
+        try:
+            for config_cls in config_classes:
+                if isinstance(config_cls, type) and issubclass(config_cls, BaseConfig):
+                    config_instance = get_config_manager().load_config(
+                        plugin_name, config_cls
+                    )
+                    has_config = True
+                    break
+        except Exception as e:
+            error_msg = f"插件配置加载失败: {e}"
+            self._failed_plugins[plugin_name] = error_msg
+            await self._rollback_failed_load(plugin_name, plugin_path)
+            logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_load_failed",
+                summary="plugin load failed",
+                severity="error",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                stage="config_load",
+                error=e,
+            )
+            return False
 
         # 5. 实例化插件（注入已加载配置）
         try:
@@ -206,6 +248,7 @@ class PluginManager:
         except Exception as e:
             error_msg = f"插件实例化失败: {e}"
             self._failed_plugins[plugin_name] = error_msg
+            await self._rollback_failed_load(plugin_name, plugin_path)
             logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
             await _record_plugin_telemetry_event(
                 plugin_name=plugin_name,
@@ -227,7 +270,25 @@ class PluginManager:
         self._inject_manifest_metadata(plugin_instance, manifest)
 
         # 6. 注册组件到全局注册表
-        await self._register_components(plugin_instance)
+        try:
+            await self._register_components(plugin_instance)
+        except Exception as e:
+            error_msg = f"插件组件注册失败: {e}"
+            self._failed_plugins[plugin_name] = error_msg
+            await self._rollback_failed_load(plugin_name, plugin_path)
+            logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_load_failed",
+                summary="plugin load failed",
+                severity="error",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                stage="component_registration",
+                error=e,
+            )
+            return False
 
         # 7. 记录并更新状态（须在调用 on_plugin_loaded 之前完成，
         #    以便插件自身的钩子能通过 get_plugin_path / get_plugin 查询到自己）
@@ -258,10 +319,28 @@ class PluginManager:
 
         from src.core.managers.event_manager import get_event_manager
 
-        await get_event_manager().register_plugin_handlers(
-            plugin_name,
-            plugin_instance=plugin_instance,
-        )
+        try:
+            await get_event_manager().register_plugin_handlers(
+                plugin_name,
+                plugin_instance=plugin_instance,
+            )
+        except Exception as e:
+            error_msg = f"插件事件处理器注册失败: {e}"
+            self._failed_plugins[plugin_name] = error_msg
+            await self._rollback_failed_load(plugin_name, plugin_path)
+            logger.error(f"插件 '{plugin_name}' 加载失败: {error_msg}")
+            await _record_plugin_telemetry_event(
+                plugin_name=plugin_name,
+                event_name="plugin_load_failed",
+                summary="plugin load failed",
+                severity="error",
+                manifest=manifest,
+                plugin_path=plugin_path,
+                duration_ms=(time.perf_counter() - started_at) * 1000,
+                stage="event_registration",
+                error=e,
+            )
+            return False
 
         await _record_plugin_telemetry_event(
             plugin_name=plugin_name,
@@ -275,6 +354,8 @@ class PluginManager:
         )
 
         logger.info(f"✅ 插件加载成功: {plugin_name} v{manifest.version}")
+        if start_runtime_resources:
+            await self._start_plugin_runtime_resources(plugin_name)
         return True
 
     async def load_plugin(self, plugin_path: str) -> bool:
@@ -457,6 +538,119 @@ class PluginManager:
         get_action_manager().clear_schema_cache()
         get_tool_manager().clear_schema_cache()
 
+    @staticmethod
+    def _same_plugin_path(left: str | None, right: str | None) -> bool:
+        if not left or not right:
+            return left == right
+        return Path(left).resolve() == Path(right).resolve()
+
+    @staticmethod
+    def _same_manifest_content(
+        left: "PluginManifest | None",
+        right: "PluginManifest | None",
+    ) -> bool:
+        if left is None or right is None:
+            return left is right
+        left_values = vars(left).copy()
+        right_values = vars(right).copy()
+        left_values.pop("_source_path", None)
+        right_values.pop("_source_path", None)
+        return left_values == right_values
+
+    @staticmethod
+    def _dependency_name(dependency: str) -> str:
+        from src.core.components.loader import _split_plugin_dependency_ref
+
+        return _split_plugin_dependency_ref(dependency)[0]
+
+    async def _ensure_manifest_dependencies(self, manifest: "PluginManifest") -> bool:
+        """按 manifest 的 python_dependencies 安装动态加载所需依赖。"""
+        if not manifest.python_dependencies:
+            return True
+
+        enabled = True
+        install_command = "uv pip install"
+        skip_if_satisfied = True
+        try:
+            from src.core.config import get_core_config
+
+            dependency_config = get_core_config().plugin_deps
+            enabled = bool(dependency_config.enabled)
+            install_command = str(dependency_config.install_command)
+            skip_if_satisfied = bool(dependency_config.skip_if_satisfied)
+        except RuntimeError:
+            logger.debug("核心配置尚未初始化，使用默认插件依赖安装策略")
+
+        if not enabled:
+            logger.debug(f"插件依赖自动安装已禁用: {manifest.name}")
+            return True
+
+        from src.core.components.utils import DependencyInstaller, PluginDepSpec
+
+        results = await DependencyInstaller().install_for_plugins(
+            [
+                PluginDepSpec(
+                    plugin_name=manifest.name,
+                    packages=list(manifest.python_dependencies),
+                    required=manifest.dependencies_required,
+                )
+            ],
+            command=install_command,
+            skip_if_satisfied=skip_if_satisfied,
+        )
+        return results.get(manifest.name, True) or not manifest.dependencies_required
+
+    async def _rollback_failed_load(
+        self,
+        plugin_name: str,
+        plugin_path: str,
+    ) -> None:
+        """清理失败加载留下的注册、缓存和运行时引用。"""
+        plugin = self._loaded_plugins.get(plugin_name)
+        if plugin is not None:
+            try:
+                await plugin.on_plugin_unloaded()
+            except Exception as error:
+                logger.warning(
+                    f"回滚插件 '{plugin_name}' 的卸载钩子失败: {error}"
+                )
+            try:
+                from src.core.managers.event_manager import get_event_manager
+
+                await get_event_manager().unregister_plugin_handlers(plugin_name)
+            except Exception as error:
+                logger.warning(
+                    f"回滚插件 '{plugin_name}' 的事件处理器失败: {error}"
+                )
+            try:
+                await self._stop_plugin_runtime_resources(plugin_name)
+            except Exception as error:
+                logger.warning(
+                    f"回滚插件 '{plugin_name}' 的运行时资源失败: {error}"
+                )
+            self._loaded_plugins.pop(plugin_name, None)
+
+        try:
+            await self._unregister_plugin_components(plugin_name)
+        except Exception as error:
+            logger.warning(f"回滚插件 '{plugin_name}' 的组件失败: {error}")
+
+        from src.core.components.loader import unregister_plugin
+        from src.core.managers.config_manager import get_config_manager
+
+        unregister_plugin(plugin_name)
+        get_config_manager().remove_config(plugin_name)
+        self._cleanup_sys_modules(plugin_name, plugin_path)
+
+        if plugin_name in self._archive_tmpdirs:
+            tmpdir = self._archive_tmpdirs.pop(plugin_name)
+            try:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            except Exception as error:
+                logger.warning(f"回滚插件临时目录失败 ({tmpdir}): {error}")
+
+        self._clear_plugin_schema_caches()
+
     def _cleanup_sys_modules(self, plugin_name: str, plugin_path: str) -> None:
         """从 sys.modules 中清理插件相关的所有模块。
 
@@ -625,9 +819,7 @@ class PluginManager:
                     return False
 
             success = await self.load_plugin(plugin_path)
-            if success:
-                await self._start_plugin_runtime_resources(plugin_name)
-            else:
+            if not success:
                 self._plugin_paths[plugin_name] = plugin_path
                 if previous_manifest is not None:
                     self._manifests[plugin_name] = previous_manifest
@@ -674,6 +866,7 @@ class PluginManager:
             load_order, manifests = await loader.plan_plugins(plugins_dir)
             desired_names = set(manifests)
             known_names = set(self.list_known_plugins())
+            added_names = desired_names - known_names
 
             for plugin_name in sorted(known_names - desired_names):
                 if plugin_name in self._loaded_plugins:
@@ -683,35 +876,67 @@ class PluginManager:
                 self._failed_plugins.pop(plugin_name, None)
 
             current_loaded = set(self._loaded_plugins)
-            manifest_changed = any(
-                plugin_name in current_loaded
-                and (
-                    self._manifests.get(plugin_name) != manifests[plugin_name]
-                    or self._plugin_paths.get(plugin_name)
-                    != manifests[plugin_name]._source_path
+            changed_names = {
+                plugin_name
+                for plugin_name in desired_names & current_loaded
+                if not self._same_manifest_content(
+                    self._manifests.get(plugin_name),
+                    manifests[plugin_name],
                 )
-                for plugin_name in desired_names
-            )
+                or not self._same_plugin_path(
+                    self._plugin_paths.get(plugin_name),
+                    manifests[plugin_name]._source_path,
+                )
+            }
 
-            if manifest_changed:
-                for plugin_name in reversed(load_order):
-                    if plugin_name in self._loaded_plugins:
-                        await self.unload_plugin(plugin_name)
+            affected_names = set(changed_names)
+            while True:
+                dependent_names = {
+                    plugin_name
+                    for plugin_name in desired_names - affected_names
+                    if any(
+                        self._dependency_name(dependency)
+                        in affected_names
+                        for dependency in manifests[plugin_name].dependencies.get(
+                            "plugins", []
+                        )
+                    )
+                }
+                if not dependent_names:
+                    break
+                affected_names.update(dependent_names)
+
+            reload_all = bool(added_names)
+            reload_names = (
+                current_loaded & desired_names if reload_all else affected_names
+            )
+            for plugin_name in reversed(load_order):
+                if plugin_name in reload_names and plugin_name in self._loaded_plugins:
+                    await self.unload_plugin(plugin_name)
 
             results: dict[str, bool] = {}
             for plugin_name in load_order:
                 manifest = manifests[plugin_name]
                 if plugin_name in self._loaded_plugins:
+                    self._manifests[plugin_name] = manifest
+                    self._plugin_paths[plugin_name] = manifest._source_path
                     results[plugin_name] = True
                     continue
 
                 success = await self.load_plugin_from_manifest(
                     manifest._source_path,
                     manifest,
+                    start_runtime_resources=False,
                 )
                 results[plugin_name] = success
-                if success:
+                if success and not reload_all:
                     await self._start_plugin_runtime_resources(plugin_name)
+
+            if reload_all:
+                from src.core.components.types import EventType
+                from src.kernel.event import get_event_bus
+
+                await get_event_bus().publish(EventType.ON_ALL_PLUGIN_LOADED, {})
 
             return results
 

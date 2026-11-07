@@ -17,6 +17,8 @@
 
 插件 `.py`、helper、模板和其他源码文件变化只被监听器忽略，不会触发插件重载。
 
+当前实现已经接入 `PluginHotReloadService`。配置变化重载单个插件，删除插件只卸载被删除的插件，新增插件会重新加载当前插件组合并发布 `ON_ALL_PLUGIN_LOADED`。动态依赖只读取 `manifest.json` 的 `python_dependencies`，不读取 `requirements.txt`。
+
 ## 当前 Git 与目录基线
 
 当前探索分支为 `feat/plugin-hot-reload-exploration`，基于 `dev` 的提交 `0bc8a4e`。
@@ -254,7 +256,7 @@ config/plugins/
 enabled = true
 debounce_ms = 200
 write_stability_ms = 500
-watch_plugin_code = true
+watch_plugin_code = false
 watch_plugin_config = true
 watch_manifest = true
 retry_failed_reload = true
@@ -269,9 +271,9 @@ retry_failed_reload = true
 | `_conf_schema.json` 或配置 schema | 视为配置结构变化，重载对应插件 |
 | `manifest.json` | 重新读取 manifest，重新校验并重载 |
 | `config/plugins/<name>/` | 重载对应插件 |
-| 新增插件目录 | 重新规划依赖并尝试加载 |
+| 新增插件目录 | 重新规划依赖并重新加载当前插件组合 |
 | 删除插件目录 | 卸载插件并移除运行状态 |
-| `requirements.txt` | 标记依赖变更，默认报告需要人工处理或独立依赖事务 |
+| `requirements.txt` | 忽略，不作为插件依赖来源 |
 | 核心 `src/` 文件 | 不进行插件级替换，报告需要重启 |
 
 ### 统一事务模型
@@ -449,7 +451,7 @@ B -> A
 
 ### 新增和删除插件
 
-新增插件不能只调用单插件加载，因为它可能改变依赖计划。正确流程是重新扫描目录、读取 manifest、执行版本校验、计算依赖顺序，再只应用变化的条目。
+新增插件不能只调用单插件加载，因为它可能改变依赖计划。当前流程会重新扫描目录、读取 manifest、执行版本校验、计算依赖顺序，并重新加载当前插件组合。
 
 删除插件时需要先卸载其资源，再从失败列表、manifest 表、路径表和注册表中删除记录。
 
@@ -538,7 +540,7 @@ restart_required
 ```toml
 [runtime.plugin_hot_reload]
 enabled = true
-watch_plugin_code = true
+watch_plugin_code = false
 watch_plugin_config = true
 watch_manifest = true
 debounce_ms = 200

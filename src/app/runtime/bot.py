@@ -873,7 +873,9 @@ class Bot:
             manifest = self.manifests[plugin_name]
             try:
                 success = await self.plugin_manager.load_plugin_from_manifest(
-                    manifest._source_path, manifest
+                    manifest._source_path,
+                    manifest,
+                    start_runtime_resources=False,
                 )
                 self.load_results[plugin_name] = success
                 self.ui.update_plugin_progress(plugin_name, success)
