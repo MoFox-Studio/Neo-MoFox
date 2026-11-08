@@ -597,7 +597,7 @@ class JevClient:
         """计算退避时长，优先遵守合法的 Retry-After 响应头。"""
         server_delay = self._retry_after_seconds(response)
         if server_delay is not None:
-            return server_delay
+            return min(server_delay, self.config.max_retry_backoff_seconds)
         ceiling = min(
             self.config.retry_backoff_seconds * (2**attempt),
             self.config.max_retry_backoff_seconds,
@@ -627,7 +627,7 @@ class JevClient:
         except (TypeError, ValueError, OverflowError):
             return None
         if math.isfinite(delay) and delay >= 0:
-            # 与数字秒数一致，服务端等待时间优先于本地退避上限。
+            # 将上限统一应用于解析后的服务端等待时间。
             return delay
         return None
 

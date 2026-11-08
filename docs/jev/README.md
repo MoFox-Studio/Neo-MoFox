@@ -57,7 +57,7 @@ asyncio.run(main())
 - 插件应优先通过 `src.app.plugin_system.api.jev_api.evaluate_jev` 或 `create_jev_client` 调用；该公共 API 可按 `configured_model_name`/`provider_name` 复用 Core 模型配置中的 key、endpoint、timeout 和代理字段。底层仍走独立的异步 HTTP 路径，不构造 LLM payload，也不经过传统 LLM 客户端注册表；底层 `JevClient`（不是 `create_jev_client` 的配置 overrides）可通过 `transport=` 借用自定义 `httpx` 传输层，最终关闭由调用方负责。
 - base URL 默认为 `https://api.typesafe.ai`；可以覆盖成企业网关地址，也可以直接传入完整 `/v1/systemone` 路由。实际出站 URL 保留原 query（包括重复键）；`extra_query` 只覆盖显式给出的同名键并添加新键，默认或空字典不会清空原 query。默认模型 `jev-latest`，可在每次 `evaluate()` 调用时覆盖。
 - Choice 的 `criteria` 必须是非空对象；Score 的有序 criteria 数量为 2 到 10；Noul 的 criteria 可省略。不符合约定的定义在本地就报 `JevConfigurationError`。
-- 默认最多重试 2 次，只对 HTTP 429、529、超时和传输层异常重试，采用带抖动的有上限指数退避；合法 `Retry-After` 的数字秒数和 HTTP 日期均优先于本地退避上限，不改变重试预算。过期或非法响应头回退到原有本地退避。401、400、422 等请求本身有问题的状态不重试。
+- 默认最多重试 2 次，只对 HTTP 429、529、超时和传输层异常重试，采用带抖动的有上限指数退避；合法 `Retry-After` 的数字秒数和 HTTP 日期会作为等待提示，但等待时长不超过 `max_retry_backoff_seconds`，也不改变重试预算。过期或非法响应头回退到原有本地退避。401、400、422 等请求本身有问题的状态不重试。
 - 错误类型分别为 `JevAuthenticationError`、`JevValidationError`、`JevPayloadTooLargeError`、`JevUnsupportedMediaTypeError`、`JevRateLimitError`、`JevOverloadedError`、`JevTimeoutError`、`JevTransportError` 和兜底的 `JevAPIError`（保留 `status_code`）。
 - 成功响应必须包含 `model`、与请求 ID 完全一致且逐 ID 题型匹配的 `answers`，以及整数 `input_tokens`/`output_tokens`。预期题型以发送前事件处理后实际构建的请求体为准。任何缺失或类型不符都会失败关闭为 `JevResponseError`，不会返回部分答案；该上游校验不收紧 `after_jev_request` 已有的合法答案改写。
 

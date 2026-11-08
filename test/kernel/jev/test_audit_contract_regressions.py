@@ -401,10 +401,10 @@ async def test_cancellation_propagates_without_http_retry_or_failure(
     assert terminal_events == []
 
 
-def test_equivalent_retry_after_formats_both_override_local_cap(
+def test_equivalent_retry_after_formats_respect_local_cap(
     fixed_clock: datetime,
 ) -> None:
-    """等价数字和 HTTP 日期都等待 600 秒，不受本地 8 秒上限截断。"""
+    """等价数字和 HTTP 日期均遵守本地 8 秒退避上限。"""
     client = _client(_ok_handler, max_retry_backoff_seconds=8)
     numeric = httpx.Response(429, headers={"Retry-After": "600"})
     dated = httpx.Response(
@@ -414,7 +414,7 @@ def test_equivalent_retry_after_formats_both_override_local_cap(
         },
     )
 
-    assert client._retry_delay(0, numeric) == client._retry_delay(0, dated) == 600.0
+    assert client._retry_delay(0, numeric) == client._retry_delay(0, dated) == 8.0
 
 
 @pytest.mark.parametrize("retry_after", ["past-http-date", "not-a-date"])
@@ -448,13 +448,13 @@ def test_expired_or_invalid_retry_after_keeps_bounded_jitter(
 
 
 @pytest.mark.parametrize("header_format", ["seconds", "http-date"])
-async def test_retry_after_changes_delay_without_extending_retry_budget(
+async def test_retry_after_is_capped_without_extending_retry_budget(
     header_format: str,
     fixed_clock: datetime,
     retry_waits: list[float],
     terminal_events: EventLog,
 ) -> None:
-    """两种合法格式均只等待预算内的两次重试，失败尝试编号保持不变。"""
+    """两种合法格式均遵守等待上限，且不改变重试预算。"""
     retry_after = "600"
     if header_format == "http-date":
         retry_after = format_datetime(fixed_clock + timedelta(seconds=600), usegmt=True)
@@ -471,7 +471,7 @@ async def test_retry_after_changes_delay_without_extending_retry_budget(
         )
 
     assert len(requests) == 3
-    assert retry_waits == [600.0, 600.0]
+    assert retry_waits == [8.0, 8.0]
     assert [name for name, _ in terminal_events] == [ON_JEV_REQUEST_FAILED] * 3
     assert [params["retry_count"] for _, params in terminal_events] == [0, 1, 2]
     assert terminal_events[-1][1]["error"] is info.value
