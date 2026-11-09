@@ -619,6 +619,92 @@ class TestSignatureRoundTrip:
         assert rebuilt.thought_signature == b"sig3"
         assert rebuilt.function_call.id == "native-1"
 
+    def test_empty_text_part_is_filtered_without_losing_tool_signature_replay(self) -> None:
+        """过滤空文本 Part 时仍须回放原生工具调用、ID 和 thought signature。"""
+        result = decode_response(
+            build_response(
+                [
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            id="native-1", name="t", args={"a": 1}
+                        ),
+                        thought_signature=b"sig3",
+                    ),
+                    types.Part(text=""),
+                ]
+            ),
+            TARGET,
+        )
+        assert result.tool_calls == [{"id": "native-1", "name": "t", "args": {"a": 1}}]
+        saved_parts = json.loads(result.provider_state.parts_json)
+        assert len(saved_parts) == 1
+        payload = LLMPayload(
+            ROLE.ASSISTANT,
+            [ToolCall(id="native-1", name="t", args={"a": 1})],
+            provider_state=result.provider_state,
+        )
+
+        contents, _system, _tools = encode_payloads(
+            [
+                payload,
+                LLMPayload(
+                    ROLE.TOOL_RESULT,
+                    ToolResult(value={"ok": 1}, call_id="native-1", name="t"),
+                ),
+            ],
+            TARGET,
+            [],
+        )
+
+        assert len(contents) == 2
+        replayed_call = contents[0].parts[0]
+        assert replayed_call.function_call.id == "native-1"
+        assert replayed_call.thought_signature == b"sig3"
+        replayed_result = contents[1].parts[0].function_response
+        assert replayed_result.id == "native-1"
+        assert replayed_result.name == "t"
+        assert replayed_result.response == {"ok": 1}
+
+    def test_legacy_replay_filters_empty_part_and_keeps_tool_result_link(self) -> None:
+        """旧回放快照中的空 Part 不得上行，原生调用 ID 和签名仍须保留。"""
+        from src.kernel.llm.provider_state import ProviderReplayState, payload_fingerprint
+
+        call = ToolCall(id="native-1", name="t", args={"a": 1})
+        state = ProviderReplayState(
+            provider="gemini",
+            target=TARGET,
+            parts_json=json.dumps(
+                [
+                    {
+                        "function_call": {"id": "native-1", "name": "t", "args": {"a": 1}},
+                        "thought_signature": base64.b64encode(b"sig3").decode("ascii"),
+                    },
+                    {"text": ""},
+                ]
+            ),
+            content_fingerprint=payload_fingerprint([call]),
+            call_ids=(("native-1", "native-1"),),
+        )
+        payload = LLMPayload(ROLE.ASSISTANT, [call], provider_state=state)
+
+        contents, _system, _tools = encode_payloads(
+            [
+                payload,
+                LLMPayload(
+                    ROLE.TOOL_RESULT,
+                    ToolResult(value={"ok": 1}, call_id="native-1", name="t"),
+                ),
+            ],
+            TARGET,
+            [],
+        )
+
+        assert len(contents) == 2
+        assert len(contents[0].parts) == 1
+        assert contents[0].parts[0].function_call.id == "native-1"
+        assert contents[0].parts[0].thought_signature == b"sig3"
+        assert contents[1].parts[0].function_response.id == "native-1"
+
     def test_replay_rejects_unsupported_media_generation(self) -> None:
         """首期 Chat adapter 不把媒体输出当作空的成功回答。"""
         png = b"\x89PNG\r\n\x1a\n" + b"\x00\x01"

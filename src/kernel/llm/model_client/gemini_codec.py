@@ -192,6 +192,25 @@ def target_identity(model: dict[str, Any]) -> tuple[str, str, str]:
     )
 
 
+def _is_empty_gemini_part(part: types.Part) -> bool:
+    """识别没有数据且没有签名的空 Part，避免发送未初始化的 protobuf oneof。
+
+    Args:
+        part: Gemini SDK 原生 Part。
+
+    Returns:
+        True 表示 Part 没有可回放内容；有数据或非空 thought signature 时返回 False。
+    """
+    if part.thought_signature:
+        return False
+    fields = part.model_dump(mode="python", exclude_none=True)
+    for metadata_field in ("thought", "thought_signature", "media_resolution", "part_metadata", "speech_metadata"):
+        fields.pop(metadata_field, None)
+    if fields.get("text") == "":
+        fields.pop("text")
+    return not fields
+
+
 def encode_payloads(
     payloads: list[LLMPayload],
     target: tuple[str, str, str],
@@ -260,7 +279,8 @@ def encode_payloads(
             for part in payload.content:
                 if not isinstance(part, Text):
                     raise LLMConfigurationError("Gemini system instructions require text")
-                system.append(types.Part(text=part.text))
+                if part.text:
+                    system.append(types.Part(text=part.text))
             continue
         state = payload.provider_state
         if state is not None and state.provider == "gemini":
@@ -268,9 +288,11 @@ def encode_payloads(
                 raise LLMContextError(
                     "Gemini signed content was changed or belongs to another target"
                 )
-            parts = [
-                types.Part.model_validate(item) for item in json.loads(state.parts_json)
-            ]
+            parts: list[types.Part] = []
+            for item in json.loads(state.parts_json):
+                part = types.Part.model_validate(item)
+                if not _is_empty_gemini_part(part):
+                    parts.append(part)
             native_ids = dict(state.call_ids)
             for part in payload.content:
                 if isinstance(part, ToolCall) and part.id:
@@ -280,7 +302,8 @@ def encode_payloads(
         parts: list[types.Part] = []
         for part in payload.content:
             if isinstance(part, Text):
-                parts.append(types.Part(text=part.text))
+                if part.text:
+                    parts.append(types.Part(text=part.text))
             elif isinstance(part, ReasoningText):
                 # 其他供应商的推理摘要不是带签名的 Gemini 思考内容。
                 continue
@@ -459,6 +482,7 @@ def decode_response(
             status_code=502,
         )
     parts = list(candidate.content.parts or []) if candidate.content else []
+    parts = [part for part in parts if not _is_empty_gemini_part(part)]
     texts: list[str] = []
     thoughts: list[ReasoningText] = []
     tool_calls: list[dict[str, Any]] = []
