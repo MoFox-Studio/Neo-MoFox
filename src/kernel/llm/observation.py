@@ -42,8 +42,9 @@ def capture_provider_request(
     request_name: str | None = None,
     token_counter: Callable[[list[LLMPayload], str], int] | None = None,
     summary_only: bool = False,
+    request_only: bool = False,
 ) -> None:
-    """捕获 provider 请求输入；显式安全摘要不接管原生结果观测。"""
+    """捕获 provider 入参，摘要及独立入参采集不接管标准化结果观测。"""
     metadata: dict[str, Any] = {}
     if isinstance(model_set, Mapping):
         provider = model_set.get("api_provider") or model_set.get("base_url")
@@ -59,12 +60,18 @@ def capture_provider_request(
             )
         except Exception:
             pass
+    if summary_only:
+        metadata["capture_kind"] = "summary"
+    elif request_only:
+        metadata["capture_kind"] = "sdk_request"
     try:
         from .request_trace import current_attempt
         trace = current_attempt()
         if trace is not None:
             if summary_only:
                 trace.capture_summary(api_name, params, metadata=metadata)
+            elif request_only:
+                trace.capture_request(api_name, params, metadata=metadata)
             else:
                 # 原生提供商仍在最终 SDK 参数确定后调用 start_provider。
                 trace.annotate(metadata)

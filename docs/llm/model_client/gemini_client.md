@@ -64,6 +64,19 @@ model = {
 ### 参数边界
 
 - 仅在 `extra_params.gemini.generation_config` 下放 SDK 生成参数。未知字段及保留字段会报配置错误，不接受 OpenAI 风格的任意参数透传。
+- 原生 Gemini 不接受顶层 `extra_params.tool_choice`。如果没有额外 Gemini 选项，使用：
+
+  ```toml
+  extra_params = {}
+  ```
+
+  Gemini 适配器已经根据本轮工具声明启用原生工具调用；不需要用 OpenAI 的 `tool_choice = "auto"` 打开它。若需显式指定自动工具选择，使用 Gemini 原生结构：
+
+  ```toml
+  extra_params = { gemini = { generation_config = { tool_config = { function_calling_config = { mode = "AUTO" } } } } }
+  ```
+
+  `tool_choice` 会导致配置错误，并提示使用上述结构；不要把它直接改名后放进 `generation_config`。
 - `candidate_count` 固定为 1；`max_output_tokens`、`temperature` 必须用上面的 MoFox 字段设置。`tools`、`system_instruction`、`http_options`、AFC、自动续接和 continuation token 由适配器控制，不能覆盖。
 - `extra_params.headers` 可加非保留请求头；非空 `query` / `body` 不支持。SDK 类型校验不等于目标模型能力校验，thinking 等参数必须另行确认。
 - `force_ipv4=True` 会安装显式 transport，当前 httpx 下会绕过环境代理。需要环境代理时使用 `trust_env=True`、`force_ipv4=False`；不要声称两者可同时生效。
@@ -103,7 +116,7 @@ model = {
 
 `thought_signature` 是原始 **Part 级**不透明数据，不是公开的 reasoning signature 文本。codec 将原始 Parts、原生/内部 call ID 映射、标准内容指纹放进内部 `provider_state`，`response.to_payload()` 和自动追加路径会保留状态。不要手工只拼文本和 `ToolCall` 来替代完整 assistant payload，也不要打印、序列化到公开日志或编辑原始状态。
 
-Gemini 请求观测只提交模型名及内容/工具数量，不提交原始 Parts 或签名；这不代表调用方自行 dump `provider_state` 是安全的。普通用户文本、工具结果同样应按敏感数据处理。
+Gemini 请求观测会将最终 SDK `model`、`contents`、`config` 与 `stream` 参数保存在进程内请求检查记录中，并以标准化消息/工具视图供已通过 WebUI 鉴权的用户检查；SDK 响应及流事件也按公共检视器契约记录。原生 Parts 中的 thought signature 与其他 SDK JSON 字段原样保留；不会额外采集内部 `provider_state`、客户端配置的 API key 或自动认证头。数据仅保留在进程内、容量有限且不脱敏；消息正文、工具参数与响应可能含敏感业务数据，应只通过受鉴权 WebUI 查看，不要直接导出或分享记录。
 
 重放会核对来源 **`api_provider` + 规范化 endpoint/API 版本 + 实际模型 ID** 以及标准内容指纹；修改签名绑定的文本、工具名称或参数，或切换目标，会在发送 HTTP 前抛 `LLMContextError`。即使保留 A 的配置而直接指定 `model_name="B"`，也不能把 A 的历史签名发给 B；没有 Gemini 回放状态的历史可正常请求 B，新响应状态记录 B。
 

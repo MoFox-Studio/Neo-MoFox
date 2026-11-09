@@ -514,9 +514,20 @@ class GeminiChatClient:
             "api_version", "generation_config"
         }:
             raise LLMConfigurationError("Unknown Gemini configuration option")
-        if extras or body:
+        if "tool_choice" in extras:
             raise LLMConfigurationError(
-                "Use extra_params.gemini.generation_config for Gemini settings"
+                "Gemini 不支持 extra_params.tool_choice（OpenAI 参数）。"
+                "使用自动工具选择时删除该字段；如需显式设置，请使用 "
+                "extra_params.gemini.generation_config.tool_config."
+                "function_calling_config.mode = 'AUTO'。"
+            )
+        if extras or body:
+            fields = ", ".join(sorted(str(key) for key in extras))
+            if body:
+                fields = f"{fields}, body" if fields else "body"
+            raise LLMConfigurationError(
+                f"Gemini 不支持这些 extra_params 字段：{fields}；"
+                "请使用 extra_params.gemini.generation_config 配置原生生成参数。"
             )
 
         config_values = dict(options.get("generation_config", {}))
@@ -566,18 +577,17 @@ class GeminiChatClient:
             raise LLMConfigurationError(
                 "Invalid Gemini generation_config field types"
             ) from None
-        # 签名等敏感原始内容不进入请求观测视图。
+        # 保存实际 SDK 入参供 WebUI 检查，不复制客户端配置或认证头。
         log_provider_request_body(
             "gemini.generate_content",
-            {
-                "model": name,
-                "contents_count": len(contents),
-                "tool_count": len(declared),
-            },
+            {"model": name, "contents": contents, "config": config, "stream": stream},
             model_set=model_set,
             request_name=request_name,
-            summary_only=True,
+            request_only=True,
         )
+        from ..request_trace import current_attempt
+
+        trace = current_attempt()
         lease = await self._get_client(model_set)
         owner = _ResponseOwner()
         token = _response_owner.set(owner)
@@ -591,6 +601,8 @@ class GeminiChatClient:
                             config=config,
                         ),
                     )
+                    if trace is not None:
+                        trace.raw(response)
                     result = decode_response(response, target)
                 except BaseException as primary:
                     await _close_after_error(owner, primary)
@@ -639,6 +651,8 @@ class GeminiChatClient:
             chunk = first
 
             while True:
+                if trace is not None:
+                    trace.raw(chunk, event=True)
                 if chunk.prompt_feedback and chunk.prompt_feedback.block_reason:
                     decode_response(chunk, target)
                 if chunk.usage_metadata is not None:

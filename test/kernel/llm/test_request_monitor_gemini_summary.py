@@ -95,22 +95,21 @@ def make_request(client: GeminiChatClient) -> LLMRequest:
     return request
 
 
-def assert_safe_summary(record: dict[str, Any]) -> None:
-    """只允许三个安全摘要字段，排除原生 Parts、签名和回放状态。"""
+def assert_gemini_request(record: dict[str, Any]) -> None:
+    """核对 Gemini 最终 SDK 入参及 WebUI 派生消息/工具视图。"""
     assert record["api_name"] == "gemini.generate_content"
     assert record["model"] == "test-model"
-    assert record["params"] == {
-        "model": "test-model", "contents_count": 1, "tool_count": 1,
-    }
+    assert record["params"]["model"] == "test-model"
+    assert len(record["params"]["contents"]) == 1
+    assert record["params"]["config"]["tools"]
     assert record["metadata"]["request_name"] == "gemini-summary"
+    assert record["metadata"]["capture_kind"] == "sdk_request"
     assert record["capture_info"]["request_unavailable"] is False
-    assert record["raw_response"] is None
-    assert record["raw_events"] == []
+    assert record["rendered"]["messages"]
+    assert record["rendered"]["tools"]
     text = json.dumps(record, ensure_ascii=False)
     for forbidden in (
-        "private-system-text", "private-user-text", '"parts"',
-        '"provider_state"', "thought_signature", "thoughtSignature", "c2ln",
-        "GOOGLE_REPR_CALLED", "GOOGLE_STR_CALLED",
+        '"provider_state"', "GOOGLE_REPR_CALLED", "GOOGLE_STR_CALLED",
     ):
         assert forbidden not in text
 
@@ -173,7 +172,7 @@ async def test_public_gemini_summary_preserves_standard_result(
         assert len(calls) == len(traces) == 1
         assert len(calls[0]["contents"]) == 1
         assert len(calls[0]["tools"]) == 1
-        assert_safe_summary(before_response[0])
+        assert_gemini_request(before_response[0])
         assert before_response[0]["status"] == "running"
         trace = traces[0]
         assert trace.request_captured is True
@@ -181,7 +180,7 @@ async def test_public_gemini_summary_preserves_standard_result(
         assert trace.bound is False
         record = inspector.get_record(trace.record_id)
         assert record is not None
-        assert_safe_summary(record)
+        assert_gemini_request(record)
         assert record["status"] == "succeeded"
         assert record["stream"] is stream
         assert record["attempt"] == 1
@@ -198,7 +197,10 @@ async def test_public_gemini_summary_preserves_standard_result(
         }
         assert record["response"]["stop_reason"] == "STOP"
         assert (record["tokens_in"], record["tokens_out"]) == (7, 3)
-        assert record["capture_info"]["raw_unavailable"] is True
+        assert record["capture_info"]["raw_unavailable"] is False
+        raw = record["raw_events"][0] if stream else record["raw_response"]
+        assert isinstance(raw, dict)
+        assert raw["candidates"]
         snapshot = inspector.snapshot()
         assert snapshot["stats"] == {
             "total": 1, "by_status": {"succeeded": 1}, "tokens_in": 7, "tokens_out": 3,
@@ -235,7 +237,7 @@ async def test_public_gemini_failure_keeps_safe_request_summary(
         assert len(records) == 1
         record = inspector.get_record(records[0]["id"])
         assert record is not None
-        assert_safe_summary(record)
+        assert_gemini_request(record)
         assert record["status"] == "failed"
         assert record["error"]["type"] == type(raised.value.__context__).__name__
         assert record["error"]["status_code"] is None
@@ -276,11 +278,12 @@ async def test_public_gemini_partial_error_preserves_text_and_summary(
         assert len(records) == 1
         record = inspector.get_record(records[0]["id"])
         assert record is not None
-        assert_safe_summary(record)
+        assert_gemini_request(record)
         assert record["status"] == "failed"
         assert record["error"]["type"] == type(caught.value).__name__
         assert record["response"]["message"] == "partial"
-        assert record["capture_info"]["raw_unavailable"] is True
+        assert record["capture_info"]["raw_unavailable"] is False
+        assert record["raw_events"][0]["candidates"]
     finally:
         await client.aclose()
 
@@ -318,7 +321,7 @@ async def test_direct_gemini_adapter_retains_capture_only_summary(
         assert len(records) == 1
         record = inspector.get_record(records[0]["id"])
         assert record is not None
-        assert_safe_summary(record)
+        assert_gemini_request(record)
         assert record["status"] == "captured"
         assert record["response"]["message"] is None
     finally:
@@ -416,8 +419,9 @@ async def test_gemini_retry_attempts_keep_one_logical_safe_summary(inspector: Re
         assert [row["attempt"] for row in records] == [1, 2]
         assert [row["status"] for row in records] == ["failed", "succeeded"]
         for record in records:
-            assert_safe_summary(record)
-            assert record["capture_info"]["raw_unavailable"] is True
+            assert_gemini_request(record)
+        assert records[0]["capture_info"]["raw_unavailable"] is True
+        assert records[1]["capture_info"]["raw_unavailable"] is False
         assert records[0]["response"]["message"] is None
         assert records[1]["response"]["message"] == "hello"
     finally:

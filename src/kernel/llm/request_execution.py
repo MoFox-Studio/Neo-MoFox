@@ -552,8 +552,19 @@ def _log_request_error(
     error: BaseException,
     retryable: bool,
 ) -> None:
-    """根据重试决策，按不同严重级别记录日志。"""
+    """根据重试决策记录日志；已知配置错误附带安全的配置原因。"""
     error_type = type(error).__name__
+    if isinstance(error, LLMConfigurationError):
+        details = next(
+            (arg for arg in error.args if isinstance(arg, str)), error_type,
+        )
+        logger.error(
+            f"LLM 请求配置错误：model={model_identifier}, "
+            f"request={request_name or '__default__'}, "
+            f"error_type={error_type}, reason={details}",
+            exc_info=False,
+        )
+        return
     if retryable:
         logger.warning(
             f"LLM 请求暂时失败：model={model_identifier}, "

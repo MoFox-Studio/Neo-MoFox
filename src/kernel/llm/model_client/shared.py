@@ -218,8 +218,9 @@ def log_provider_request_body(
     request_name: str | None = None,
     token_counter: Any = None,
     summary_only: bool = False,
+    request_only: bool = False,
 ) -> None:
-    """把 provider 请求快照转发到统一观测链路，显式区分安全摘要。"""
+    """把 provider 请求快照转发到统一观测链路，区分请求和结果观测权。"""
     capture_provider_request(
         api_name,
         params,
@@ -228,4 +229,5 @@ def log_provider_request_body(
         request_name=request_name,
         token_counter=token_counter,
         summary_only=summary_only,
+        request_only=request_only,
     )

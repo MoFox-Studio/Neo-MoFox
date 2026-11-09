@@ -199,6 +199,27 @@ class Attempt:
         """
         return self.native_result_observed
 
+    def capture_request(
+        self,
+        api_name: str,
+        params: dict[str, Any],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """保存最终 SDK 入参，由统一执行层继续归并标准化结果。
+
+        Args:
+            api_name: 实际 SDK 调用入口名称。
+            params: SDK 入参或兼容的请求摘要，不包含客户端配置对象。
+            metadata: 采集方式及请求标识等元数据。
+        """
+        self.request_captured = True
+        self._emit(
+            "start", params, api_name=api_name,
+            metadata={"capture_kind": "sdk_request", **self._metadata, **(metadata or {})},
+        )
+        self._emit("update", {"kind": self.kind})
+
     def capture_summary(
         self,
         api_name: str,
@@ -206,13 +227,10 @@ class Attempt:
         *,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """把预先筛选的安全摘要写入同一尝试，不取得原生结果观测权。"""
-        self.request_captured = True
-        self._emit(
-            "start", params, api_name=api_name,
-            metadata={**self._metadata, **(metadata or {}), "capture_kind": "summary"},
+        """兼容旧的请求摘要入口，不取得原生结果观测权。"""
+        self.capture_request(
+            api_name, params, metadata={**(metadata or {}), "capture_kind": "summary"},
         )
-        self._emit("update", {"kind": self.kind})
 
     def start(
         self,
@@ -268,9 +286,11 @@ class Attempt:
 
             for owner in (value, get(value, "response"), get(value, "message")):
                 usage = get(owner, "usage")
+                if usage is None:
+                    usage = get(owner, "usage_metadata")
                 for canonical, aliases in (
-                    ("prompt_tokens", ("prompt_tokens", "input_tokens")),
-                    ("completion_tokens", ("completion_tokens", "output_tokens")),
+                    ("prompt_tokens", ("prompt_tokens", "input_tokens", "prompt_token_count")),
+                    ("completion_tokens", ("completion_tokens", "output_tokens", "candidates_token_count")),
                 ):
                     if any(
                         isinstance(get(usage, name), (int, float)) for name in aliases

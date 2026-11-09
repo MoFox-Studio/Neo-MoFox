@@ -190,7 +190,11 @@ class ModelInfoSection(SectionBase):
             "额外参数（用于 API 调用时的额外配置）。"
             "支持三个特殊键：headers（注入 HTTP 请求头，dict[str,str]）、"
             "query（注入 URL 查询参数，dict）、body（合并到请求体字段，dict）；"
-            "其余键按原透传逻辑处理"
+            "具体支持范围取决于 client_type。原生 Gemini 生成参数必须放在 "
+            "gemini.generation_config 下，不接受顶层 tool_choice、非空 query/body；"
+            "Gemini 自动工具调用无需 tool_choice；显式策略使用 "
+            "gemini.generation_config.tool_config.function_calling_config.mode。"
+            "OpenAI 等协议的其余键按对应客户端规则透传。"
         ),
     )
     anti_truncation: bool = Field(
