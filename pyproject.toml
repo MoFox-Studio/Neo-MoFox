@@ -48,11 +48,6 @@ addopts = [
     "--cov-report=term-missing",
 ]
 
-[[tool.uv.index]]
-name = "huawei"
-url = "https://mirrors.huaweicloud.com/repository/pypi/simple/"
-default = true
-
 [tool.coverage.run]
 source = ["src"]
 
@@ -70,3 +65,8 @@ omit = [
     "config/*",
     "**/__pycache__/*",
 ]
+
+[[tool.uv.index]]
+name = "huawei"
+url = "https://repo.huaweicloud.com/repository/pypi/simple"
+default = true
