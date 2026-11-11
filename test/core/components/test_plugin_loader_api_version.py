@@ -49,8 +49,8 @@ def _patch_api_version(monkeypatch: pytest.MonkeyPatch, api_name: str, version: 
 # =============================================================================
 
 
-def test_plugin_api_versions_contains_all_22_modules() -> None:
-    """PLUGIN_API_VERSIONS 应包含全部 22 个 *_api 模块。"""
+def test_plugin_api_versions_contains_all_24_modules() -> None:
+    """PLUGIN_API_VERSIONS 应包含全部 24 个 *_api 模块。"""
     expected = {
         "action_api",
         "adapter_api",
@@ -61,6 +61,7 @@ def test_plugin_api_versions_contains_all_22_modules() -> None:
         "database_api",
         "event_api",
         "llm_api",
+        "jev_api",
         "log_api",
         "media_api",
         "message_api",
@@ -68,6 +69,7 @@ def test_plugin_api_versions_contains_all_22_modules() -> None:
         "person_api",
         "plugin_api",
         "prompt_api",
+        "request_inspector_api",
         "router_api",
         "send_api",
         "service_api",
@@ -76,7 +78,7 @@ def test_plugin_api_versions_contains_all_22_modules() -> None:
         "tool_api",
     }
     assert set(PLUGIN_API_VERSIONS) == expected
-    assert len(PLUGIN_API_VERSIONS) == 22
+    assert len(PLUGIN_API_VERSIONS) == 24
     from packaging.version import InvalidVersion, Version
 
     for name, ver in PLUGIN_API_VERSIONS.items():
@@ -187,17 +189,17 @@ def test_dict_api_version_core_too_low(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "低于" in reason
 
 
-def test_dict_api_version_core_higher_warns_but_loads(
+def test_dict_api_version_core_higher_is_compatible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """dict 形式，核心版本高于插件要求，应警告但允许加载。"""
+    """同一主版本内核心高于插件要求时正常兼容，不生成版本告警。"""
     _patch_api_version(monkeypatch, "llm_api", "1.5.0")
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(
         _manifest(api_version={"llm_api": "1.0.0"})
     )
     assert ok is True
-    assert "llm_api" in reason
+    assert reason == "兼容"
 
 
 def test_dict_api_version_unknown_key_rejected() -> None:

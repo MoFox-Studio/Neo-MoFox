@@ -72,13 +72,15 @@ class RerankRequest:
             if step.delay_seconds and step.delay_seconds > 0:
                 await asyncio.sleep(step.delay_seconds)
 
-            assert self.clients is not None
-            client = self.clients.get_rerank_client_for_model(model)
             timer = RequestTimer()
             trace = Attempt(logical, model, self.request_name, kind="rerank")
 
             try:
+                # 客户端解析也放进 try：未注册 provider 之类的配置错误必须走
+                # policy 的 failover，否则会直接中断整个重试链。
+                assert self.clients is not None
                 with timer:
+                    client = self.clients.get_rerank_client_for_model(model)
                     timeout_seconds = model.get("timeout")
                     with attempt_scope(trace):
                         create_task = client.create_rerank(

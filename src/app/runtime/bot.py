@@ -14,6 +14,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from urllib.parse import urlparse
+from weakref import WeakSet
 
 from src.core.config import CORE_VERSION
 
@@ -103,9 +104,17 @@ class Bot:
         self.manifests: dict[str, PluginManifest] = {}
         self.load_results: dict[str, bool] = {}
         self._telemetry_log_unsubscribe: Any | None = None
-        # 在初始化调用前登记，以覆盖“资源创建后初始化抛错”的情况。
+        # 在初始化调用前登记，以覆盖"资源创建后初始化抛错"的情况。
         self._owned_resources: set[str] = set()
         self._stream_loop_manager: Any | None = None
+
+        # 保留仍在清理的步骤和 owner；完成回调读取迟到异常后释放引用。
+        self._shutdown_step_tasks: set[asyncio.Task[Any]] = set()
+        self._shutdown_owner_tasks: set[asyncio.Task[Any]] = set()
+        self._shutdown_coordinator: asyncio.Task[Any] | None = None
+        # SLM 继续拥有取消权；Bot 仅保存已交接的身份，不以名字反推取消许可。
+        self._slm_owner_tasks: WeakSet[asyncio.Task[Any]] = WeakSet()
+        self._network_restore_started = False
 
         # DNS 专用线程池与原始 loop 方法（用于关闭时恢复）
         self._dns_executor: ThreadPoolExecutor | None = None
@@ -513,58 +522,39 @@ class Bot:
         self.ui.update_phase_status("云端遥测", "已初始化")
 
     async def _preflight_llm_providers(self) -> None:
-        """可选地探测模型提供商，记录连接情况；探测失败不阻止启动。"""
+        """可选地探测模型提供商，记录连接情况；探测失败不阻止启动。
+
+        由初始化阶段调用，不掌握供应商协议或资源机制的完整认证；
+        该方法是预检性质，仅报告配置覆盖的模型数量和分组。
+        """
         assert self.config is not None
         if not self.config.bot.llm_preflight_check:
             self.ui.update_phase_status("LLM 预检", "已跳过")
             return
 
         assert self.logger is not None
-
         from src.core.config import get_model_config
-        import httpx
-        import time
+        from src.core.managers.llm_runtime import preflight_llm_providers
 
-        providers = get_model_config().api_providers
-        if not providers:
+        self.ui.update_phase_status("LLM 预检", "进行中...")
+        results = await preflight_llm_providers(
+            get_model_config(),
+            timeout=float(self.config.bot.llm_preflight_timeout or 5.0),
+            trust_env=self.config.advanced.trust_env,
+        )
+        if not results:
             self.logger.warning("LLM 预检: 未配置任何 API 提供商")
             self.ui.update_phase_status("LLM 预检", "无配置")
             return
-
-        timeout = float(self.config.bot.llm_preflight_timeout or 5.0)
-        self.ui.update_phase_status("LLM 预检", "进行中...")
-        logger = self.logger
-
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async def _check_provider(provider) -> None:
-                base_url = str(provider.base_url).rstrip("/")
-                url = f"{base_url}/models"
-                headers: dict[str, str] = {}
-                try:
-                    api_key = provider.get_api_key()
-                except Exception:
-                    api_key = ""
-                if api_key:
-                    headers["Authorization"] = f"Bearer {api_key}"
-
-                start = time.perf_counter()
-                try:
-                    resp = await client.get(url, headers=headers)
-                    elapsed = time.perf_counter() - start
-                    logger.info(
-                        f"LLM 预检: {provider.name} {resp.status_code} {elapsed:.2f}s ({url})"
-                    )
-                except Exception as e:
-                    elapsed = time.perf_counter() - start
-                    logger.warning(
-                        f"LLM 预检失败: {provider.name} {elapsed:.2f}s ({url}) -> {e}"
-                    )
-
-            await asyncio.gather(
-                *(_check_provider(provider) for provider in providers),
-                return_exceptions=True,
-            )
-
+        for result in results:
+            if result.status == "unverified":
+                self.logger.warning(f"LLM 预检: {result.detail}")
+            else:
+                self.logger.info(f"LLM 预检: {result.detail}")
+        self.logger.info(
+            f"LLM 预检: 有效配置覆盖 {sum(result.covered_models for result in results)} 项、"
+            f"{sum(result.groups for result in results)} 组；不验证生成能力"
+        )
         self.ui.update_phase_status("LLM 预检", "已完成")
 
     def _check_http_security(self, host: str, api_keys: list[str]) -> None:
@@ -597,7 +587,7 @@ class Bot:
 
         # 检查是否对外开放
         is_public = host == "0.0.0.0"
-        
+
         # 检查密钥是否不安全（空或包含示例密钥）
         has_insecure_keys = (
             not api_keys or any(key.lower() in INSECURE_KEYS for key in api_keys)
@@ -633,7 +623,7 @@ class Bot:
 
             # 同时在 UI 中显示警告状态
             self.ui.update_phase_status("HTTP服务器", "⚠️ 不安全配置")
-            
+
     async def _initialize_core(self) -> None:
         """在数据库就绪后准备媒体、传输和管理器，再加载插件。"""
         # 步骤 1：显式准备媒体服务，避免插件首次访问触发后台初始化。
@@ -657,12 +647,12 @@ class Bot:
         """创建消息接收器并发布共享 SinkManager，供适配器使用。"""
         from src.core.transport import MessageReceiver, SinkManager
         from src.core.transport.sink import set_sink_manager
-        
+
         self.message_receiver = MessageReceiver()
         self.sink_manager = SinkManager(self.message_receiver)
         set_sink_manager(self.sink_manager)
         self.ui.update_phase_status("消息接收器", "已初始化")
-        
+
     def _initialize_builtin_managers(self) -> None:
         """初始化核心管理器及事件订阅，必须先于插件加载。"""
         from src.core.managers import (
@@ -689,20 +679,20 @@ class Bot:
         self.mcp_manager = get_mcp_manager()
         await self.mcp_manager.initialize()
         self.ui.update_phase_status("MCP", "已初始化")
-        
+
     async def _initialize_http_server(self) -> None:
         """按配置启动 HTTP 服务，供插件加载完成时挂载路由。"""
         assert self.config is not None
         from src.core.transport.router.http_server import get_http_server
-        
+
         if self.config.http_router.enable_http_router:
             host = self.config.http_router.http_router_host
             port = self.config.http_router.http_router_port
             api_keys = self.config.http_router.api_keys
-            
+
             # 安全检查：检测对外开放且无有效密钥的情况
             self._check_http_security(host, api_keys)
-            
+
             self.http_server = get_http_server(host=host, port=port)
             await self.http_server.start()
 
@@ -887,7 +877,7 @@ class Bot:
 
         from src.core.components.types import EventType
         await self.event_bus.publish(EventType.ON_ALL_PLUGIN_LOADED, {})
-        
+
         return self.load_results
 
     async def run(self) -> None:
@@ -968,7 +958,7 @@ class Bot:
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"启动云端遥测发送循环失败: {e}")
-        
+
     async def _publish_start_event(self) -> None:
         """在服务启动完成后发布 ON_START，处理器异常记录为警告。"""
         try:
@@ -1207,6 +1197,67 @@ class Bot:
         self._stats["plugins_loaded"] = 0
         self._stats["plugins_failed"] = 0
 
+    def _shutdown_task_done(self, task: asyncio.Task[Any]) -> None:
+        """读取迟到异常并释放强引用，只记录安全错误类型。"""
+        self._shutdown_step_tasks.discard(task)
+        self._shutdown_owner_tasks.discard(task)
+        if not task.cancelled():
+            error = task.exception()
+            if error is not None and self.logger is not None:
+                self.logger.warning(f"关闭任务退出异常 ({type(error).__name__})")
+        self._reclaim_network_executors()
+
+    def _capture_stream_owners(self) -> list[asyncio.Task[Any]]:
+        """读取已持有 SLM 的既有 owner 表，在其清除退出记录前交接观察权。"""
+        manager = self._stream_loop_manager
+        owners = getattr(manager, "_stream_owners", {}) if manager is not None else {}
+        tasks = [task for task in owners if isinstance(task, asyncio.Task)]
+        self._slm_owner_tasks.update(tasks)
+        self._track_shutdown_owners(tasks)
+        return tasks
+
+    def _track_shutdown_owners(self, tasks: list[asyncio.Task[Any]]) -> None:
+        """为捕获的 owner 安装一次退出回调，超时后仍保留强引用。"""
+        for task in tasks:
+            if task not in self._shutdown_owner_tasks:
+                self._shutdown_owner_tasks.add(task)
+                if task.done():
+                    self._shutdown_task_done(task)
+                else:
+                    task.add_done_callback(self._shutdown_task_done)
+
+    async def _stop_chat_tasks(self) -> None:
+        """观察已捕获聊天任务，已退出异常也必须报告，等待取消不传给 owner。
+
+        超时由独立步骤观察者限制；聊天来源由此前唯一的停止步骤封闭。
+        """
+        current = asyncio.current_task()
+        captured = self._capture_stream_owners()
+        tasks = list(dict.fromkeys([
+            *captured,
+            *(task for task in self._shutdown_owner_tasks if task in self._slm_owner_tasks),
+            *([
+                info.task for info in self.task_manager.get_all_tasks()
+                if info.daemon and info.name is not None and info.name.startswith("chat_stream_")
+                and info.task is not None
+            ] if self.task_manager is not None else []),
+        ]))
+        tasks = [task for task in tasks if task is not current and task is not self._shutdown_coordinator]
+        self._track_shutdown_owners(tasks)
+        for task in tasks:
+            if task not in self._slm_owner_tasks and not task.done() and not task.cancelling():
+                task.cancel()
+        pending = {task for task in tasks if not task.done()}
+        if pending:
+            await asyncio.wait(pending)
+        failed = [
+            task for task in tasks
+            if task.done() and not task.cancelled() and task.exception() is not None
+        ]
+        recorded_errors = getattr(self._stream_loop_manager, "_stream_exit_errors", ())
+        if failed or recorded_errors:
+            raise BotShutdownError(f"聊天任务清理，{len(failed)} 个任务异常退出或记录到关闭失败")
+
     async def shutdown(self, timeout: float = 30.0) -> None:
         """按依赖顺序释放已取得的资源，汇总错误后再报告失败。
 
@@ -1225,16 +1276,58 @@ class Bot:
         self._shutdown_requested = True
         self._running = False
         errors: list[str] = []
+        has_pending_tasks = False  # 标记是否有未完成的活动任务
 
-        async def step(name: str, callback: Callable[[], Awaitable[Any]]) -> None:
-            """独立限制清理步骤的等待时间；失败不会跳过后续步骤。"""
+        self._shutdown_coordinator = asyncio.current_task()
+
+        async def step(name: str, callback: Callable[[], Awaitable[Any]]) -> bool:
+            """为每步独立计时，只请求取消超时步骤，不等待其无限清理。
+
+            Args:
+                name: 固定阶段名称，用于安全诊断。
+                callback: 当前阶段的异步清理入口。
+
+            Returns:
+                步骤成功为 True，失败或超时为 False；外部取消仍传播。
+            """
+            from src.kernel.concurrency import get_task_manager
+
+            async def run_step() -> Any:
+                """在受管任务内调用清理，兼容返回任意 awaitable 的入口。"""
+                return await callback()
+
+            manager = self.task_manager or get_task_manager()
+            task = manager.create_task(
+                run_step(), name=f"shutdown_step_{name}", daemon=True,
+            ).task
+            assert task is not None
+            self._shutdown_step_tasks.add(task)
+            task.add_done_callback(self._shutdown_task_done)
             try:
-                async with asyncio.timeout(timeout):
-                    await callback()
-            except Exception as exc:
-                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                done, _ = await asyncio.wait({task}, timeout=timeout)
+                if not done:
+                    errors.append(f"{name}: TimeoutError: 步骤超时 {timeout}s")
+                    return False
+                try:
+                    task.result()
+                    return True
+                except Exception as exc:
+                    errors.append(f"{name}: {type(exc).__name__}")
+                    return False
+            finally:
+                if not task.done() and not task.cancelling():
+                    task.cancel()
+
+        def dependencies_busy() -> bool:
+            """对仍运行的 owner 和清理步骤保留其依赖，不把超时当作成功。"""
+            return has_pending_tasks or any(
+                not task.done()
+                for task in self._shutdown_owner_tasks | self._shutdown_step_tasks
+            )
 
         try:
+            # 首次等待前交接已有 owner；协调者在聊天步骤前取消也不能丢掉池保护。
+            self._capture_stream_owners()
             # 步骤 1：停止主循环，记录关闭开始；遥测失败也不能阻断清理。
             if "telemetry" in self._owned_resources:
                 await step("关闭开始遥测", partial(
@@ -1244,8 +1337,20 @@ class Bot:
 
             # 步骤 2：在插件还存在时发布停止事件，停止 HTTP 入口与聊天流。
             await step("ON_STOP", self._publish_stop_event)
-            await step("HTTP", self._stop_http_server)
-            await step("聊天流", self._stop_stream_loops)
+            if not await step("HTTP", self._stop_http_server):
+                has_pending_tasks = True
+
+            # 先关闭恢复来源，再停止聊天流，避免 WatchDog 在等待期间重启任务。
+            await step("看门狗", self._stop_watchdog)
+            # 停止聊天流来源，失败时标记 pending（source.stop 可能超时）
+            stream_ok = await step("聊天流", self._stop_stream_loops)
+            if not stream_ok:
+                has_pending_tasks = True
+
+            # 步骤 2.5：等待聊天任务退出，失败时标记有 pending 以保留依赖资源。
+            chat_tasks_ok = await step("聊天任务", self._stop_chat_tasks)
+            if not chat_tasks_ok:
+                has_pending_tasks = True
 
             # 步骤 3：逐个逆序卸载插件，每个插件拥有独立的超时与错误记录。
             if self.plugin_manager is not None:
@@ -1262,13 +1367,31 @@ class Bot:
             # 步骤 5：停止外部连接、遥测发送和工作任务，避免访问已关闭的数据库。
             await step("MCP", self._stop_mcp_manager)
             await step("云端遥测", self._close_cloud_telemetry)
-            await step("看门狗", self._stop_watchdog)
-            await step("任务管理器", self._stop_task_manager)
 
-            # 步骤 6：后台工作停止后，逐个关闭业务存储。
-            await step("主数据库", self._close_database)
-            await step("向量数据库", self._close_vector_database)
-            await step("LLM统计", self._close_llm_statistics)
+            task_manager_ok = await step("任务管理器", self._stop_task_manager)
+            if not task_manager_ok:
+                has_pending_tasks = True
+
+            # 步骤 5.5：在所有 LLM 任务退出后、数据库关闭前回收模型池。
+            # 若有未确认退出的任务，保留可能被使用的模型池。
+            if not dependencies_busy():
+                await step("默认模型资源", self._close_default_model_clients)
+            else:
+                errors.append("默认模型资源: 跳过（有未确认退出的任务）")
+
+            # 步骤 6：每个存储关闭前重新检查 pending，保留尚未开始关闭的资源。
+            if not dependencies_busy():
+                await step("主数据库", self._close_database)
+            else:
+                errors.append("主数据库: 跳过（有未确认退出的任务）")
+            if not dependencies_busy():
+                await step("向量数据库", self._close_vector_database)
+            else:
+                errors.append("向量数据库: 跳过（有未确认退出的任务）")
+            if not dependencies_busy():
+                await step("LLM统计", self._close_llm_statistics)
+            else:
+                errors.append("LLM统计: 跳过（有未确认退出的任务）")
 
             # 步骤 7：遥测尚可写时记录结果，之后解绑订阅并关闭遥测存储。
             if "telemetry" in self._owned_resources:
@@ -1277,11 +1400,17 @@ class Bot:
                     event_name="shutdown_failed" if errors else "shutdown_complete",
                     summary="bot shutdown finished", detail={"errors": list(errors)},
                 ))
-            await step("遥测订阅", self._remove_telemetry_hooks)
-            await step("本地遥测", self._close_telemetry)
+
+            if not dependencies_busy():
+                await step("遥测订阅", self._remove_telemetry_hooks)
+                await step("本地遥测", self._close_telemetry)
+            else:
+                errors.append("本地遥测: 跳过（有未确认退出的任务）")
         finally:
             # 步骤 8：即使关闭任务被取消，也恢复线程池、终端和信号；各项独立兜底。
+            # 仅执行同步恢复，不重开异步操作。
             for name, cleanup in (
+                ("聊天退出身份", self._capture_stream_owners),
                 ("网络运行环境", self._restore_network_runtime),
                 ("日志系统", self._close_logger),
                 ("命令解析器", self._close_command_parser),
@@ -1290,7 +1419,7 @@ class Bot:
                 try:
                     cleanup()
                 except Exception as exc:
-                    errors.append(f"{name}: {type(exc).__name__}: {exc}")
+                    errors.append(f"{name}: {type(exc).__name__}")
             self._initialized = False
 
         if errors:
@@ -1320,8 +1449,14 @@ class Bot:
 
     async def _stop_stream_loops(self) -> None:
         """在插件和数据库释放前停止聊天流；关闭时不懒创建管理器。"""
+        # 仅停止已持有的实例，不通过 getter 懒创建
         if self._stream_loop_manager is not None:
-            await self._stream_loop_manager.stop()
+            self._capture_stream_owners()
+            try:
+                await self._stream_loop_manager.stop()
+            finally:
+                # stop 可能发现旧任务或在观察期被取消；两条路径都补交接真实身份。
+                self._capture_stream_owners()
 
     async def _stop_log_cleanup(self) -> None:
         """在调度器仍可操作时移除日志清理任务。"""
@@ -1350,27 +1485,47 @@ class Bot:
             self.watchdog.stop()
 
     async def _stop_task_manager(self) -> None:
-        """取消并等待受管理任务，包括守护任务；始终回收进程池。
+        """取消并等待 dev 既有的受管任务，但不取得共享进程池关闭权。
 
         只清理 TaskManager 持有的任务，不取消宿主事件循环中的无关任务。
         当前关闭任务可能也受管理，必须排除，避免自取消或自等待。
+        shutdown 步骤任务也受管理，但由 shutdown 方法控制，不在此取消或等待。
+        仅取消尚未 cancelling 的任务，避免二次取消。
         """
         if self.task_manager is None:
             return
+        self._capture_stream_owners()
         current = asyncio.current_task()
         pending = []
         try:
             for info in self.task_manager.get_active_tasks():
-                if info.task is not None and info.task is not current:
-                    self.task_manager.cancel_task(info.task_id)
+                if (
+                    info.task is not None and info.task is not current
+                    and info.task is not self._shutdown_coordinator
+                    and info.task not in self._shutdown_step_tasks
+                    and info.task not in self._slm_owner_tasks
+                ):
+                    # 只取消尚未取消的任务
+                    if not info.task.done() and not info.task.cancelling():
+                        self.task_manager.cancel_task(info.task_id)
                     pending.append(info.task)
+            self._track_shutdown_owners(pending)
             if pending:
                 await asyncio.wait(pending)
+            if any(not task.cancelled() and task.exception() is not None for task in pending):
+                raise BotShutdownError("受管任务异常退出，资源清理未确认")
         finally:
-            try:
-                self.task_manager.cleanup_tasks()
-            finally:
-                self.task_manager.shutdown_process_pool(wait=False)
+            # cleanup_tasks 只移除已退出记录；全局进程池没有 Bot 独占证明，留给其拥有者。
+            self.task_manager.cleanup_tasks()
+
+    async def _close_default_model_clients(self) -> None:
+        """活动 LLM 任务结束后、事件循环和线程池结束前回收内核拥有的默认资源。
+
+        此步骤在 step() 的独立 timeout 上下文中被调用。
+        """
+        from src.kernel.llm.model_client.runtime import close_default_model_clients
+
+        await close_default_model_clients()
 
     async def _close_database(self) -> None:
         """释放本 Bot 尝试初始化的主数据库，包括初始化部分失败的情况。"""
@@ -1437,13 +1592,26 @@ class Bot:
             else:
                 # 公共 setter 不接受 None；恢复未创建默认池的状态需动态赋值。
                 setattr(loop, "_default_executor", None)
+        self._network_restore_started = True
+        self._reclaim_network_executors()
+
+    def _reclaim_network_executors(self) -> None:
+        """已知 LLM owner/步骤退出后温和关闭自有池，不取消队列、不监控宿主作业。
+
+        恢复宿主引用先执行；回收只由原 loop 中既有的退出回调再次尝试。
+        未知 HTTP/持续消息入口不属于此局部保证，不能据此宣称全部工作已排空。
+        """
+        if not self._network_restore_started:
+            return
+        if any(not task.done() for task in self._shutdown_owner_tasks | self._shutdown_step_tasks):
+            return
         try:
             if self._dns_executor is not None:
-                self._dns_executor.shutdown(wait=False, cancel_futures=True)
+                self._dns_executor.shutdown(wait=False, cancel_futures=False)
                 self._dns_executor = None
         finally:
             if self._default_executor is not None:
-                self._default_executor.shutdown(wait=False, cancel_futures=True)
+                self._default_executor.shutdown(wait=False, cancel_futures=False)
                 self._default_executor = None
 
     def _close_logger(self) -> None:
@@ -1456,15 +1624,17 @@ class Bot:
 
     def _close_command_parser(self) -> None:
         """在资源释放结束后停止输入线程，让关闭期间的二次中断有效。"""
-        if self._command_parser is not None:
-            self._command_parser.close()
-            self._command_parser = None
+        parser = self._command_parser
+        self._command_parser = None
+        if parser is not None:
+            parser.close()
 
     def _restore_signal_handler(self) -> None:
         """最后恢复进程原信号处理器，即使命令解析器关闭失败也执行。"""
-        if self._signal_handler is not None:
-            self._signal_handler.restore_handlers()
-            self._signal_handler = None
+        handler = self._signal_handler
+        self._signal_handler = None
+        if handler is not None:
+            handler.restore_handlers()
 
     async def start(self) -> None:
         """完整的启动流程（初始化 + 运行 + 关闭）

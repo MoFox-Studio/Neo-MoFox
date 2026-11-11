@@ -87,6 +87,10 @@ OpenAI 兼容客户端通过 `extra_params.reasoning_history_mode` 控制是否�
 
 不配置时按 `on_tool` 处理；不需要针对它做特殊配置时，不写这个参数即可。
 
+为兼容已有配置，布尔值及 `deepseek` / `kimi` / `auto` 等旧字符串仍按原有真值语义
+决定是否回传：`False`、空字符串和 `None` 关闭，其余真值配置保留历史。
+旧配置仍仅在检测到思考模式或历史已有思考内容时回填；新增配置请优先使用上表的明确模式。
+
 ```toml
 # DeepSeek：仅在工具请求中回传思考历史（默认值，可不写）
 extra_params = {reasoning_history_mode = "on_tool"}

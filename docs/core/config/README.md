@@ -20,6 +20,7 @@
 
 - core_config.py: 核心配置模型
 - model_config.py: 模型配置定义与加载
+- jev.py: 具名领域配置到 JevClientConfig 的桥接及凭据地址绑定；保留原默认与覆盖语义，见 [运行时边界](../../llm/model_client/runtime.md)
 - mcp_config.py: MCP 相关配置
 - __init__.py: 聚合导出
 

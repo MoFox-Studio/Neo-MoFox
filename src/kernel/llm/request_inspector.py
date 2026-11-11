@@ -83,7 +83,7 @@ def _build_overview(
 ) -> list[dict[str, str]]:
     """构造顶层请求摘要。"""
     messages = _get_inspector_messages(params)
-    tools = params.get("tools", [])
+    tools = _get_inspector_tools(params)
     overview = [
         {"label": "API", "value": api_name},
         {"label": "提供商", "value": _format_scalar(metadata.get("api_provider", "-"))},
@@ -112,7 +112,12 @@ def _build_overview(
         if key in params:
             overview.append({"label": label, "value": _format_scalar(params[key])})
 
-    reserved_keys = {"messages", "tools", "model", "system"}
+    config = params.get("config")
+    if "contents" in params and isinstance(config, dict):
+        for key, value in config.items():
+            if key not in {"system_instruction", "tools"} and value is not None:
+                overview.append({"label": key, "value": _format_scalar(value)})
+    reserved_keys = {"messages", "tools", "model", "system", "contents", "config"}
     reserved_keys.update(name for name, _ in _OVERVIEW_FIELDS)
     for key in sorted(key for key in params.keys() if key not in reserved_keys):
         overview.append({"label": key, "value": _format_scalar(params[key])})
@@ -136,11 +141,27 @@ def _schema_type_text(schema: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _get_inspector_tools(params: dict[str, Any]) -> list[Any]:
+    """读取工具声明，展开 Gemini config.tools 中的原生函数分组。"""
+    if "contents" not in params:
+        tools = params.get("tools", [])
+        return tools if isinstance(tools, list) else []
+    config = params.get("config")
+    if not isinstance(config, dict) or not isinstance(config.get("tools"), list):
+        return []
+    tools: list[Any] = []
+    for group in config["tools"]:
+        declarations = group.get("function_declarations") if isinstance(group, dict) else None
+        if isinstance(declarations, list):
+            tools.extend(declarations)
+        else:
+            tools.append(group)
+    return tools
+
+
 def _build_tools_view(params: dict[str, Any]) -> list[dict[str, Any]]:
     """将 tools schema 转为更适合前端展示的结构。"""
-    tools = params.get("tools", [])
-    if not isinstance(tools, list):
-        return []
+    tools = _get_inspector_tools(params)
 
     rendered_tools: list[dict[str, Any]] = []
     for index, tool in enumerate(tools):
@@ -163,7 +184,9 @@ def _build_tools_view(params: dict[str, Any]) -> list[dict[str, Any]]:
             function_schema: dict[str, Any] = function_obj
         else:
             function_schema = tool
-        parameters_obj = function_schema.get("parameters")
+        parameters_obj = function_schema.get("parameters_json_schema")
+        if not isinstance(parameters_obj, dict):
+            parameters_obj = function_schema.get("parameters")
         if not isinstance(parameters_obj, dict):
             parameters_obj = function_schema.get("input_schema")
         parameters: dict[str, Any] = (
@@ -324,9 +347,58 @@ def _render_content_list(content: list[Any]) -> list[dict[str, Any]]:
     return blocks
 
 
+def _gemini_message(content: dict[str, Any], *, role: str | None = None) -> dict[str, Any]:
+    """从原生 Content 派生展示消息，不改写参数树中的原始 Parts。"""
+    blocks: list[Any] = []
+    parts = content.get("parts")
+    for part in parts if isinstance(parts, list) else []:
+        if not isinstance(part, dict):
+            blocks.append(part)
+            continue
+        if isinstance(part.get("text"), str):
+            blocks.append(
+                {"type": "thinking", "thinking": part["text"]}
+                if part.get("thought")
+                else {"type": "text", "text": part["text"]}
+            )
+        call = part.get("function_call")
+        if isinstance(call, dict):
+            blocks.append({
+                "type": "tool_use", "id": call.get("id"),
+                "name": call.get("name"), "input": call.get("args", {}),
+            })
+        result = part.get("function_response")
+        if isinstance(result, dict):
+            blocks.append({
+                "type": "tool_result", "tool_use_id": result.get("id"),
+                "tool_name": result.get("name"), "content": result.get("response", {}),
+            })
+        image = part.get("inline_data")
+        if isinstance(image, dict):
+            blocks.append({"type": "image", "source": {"media_type": image.get("mime_type")}})
+        if not any(part.get(key) is not None for key in (
+            "text", "function_call", "function_response", "inline_data",
+        )):
+            blocks.append(part)
+    original_role = role or content.get("role") or "user"
+    return {"role": "assistant" if original_role == "model" else original_role, "content": blocks}
+
+
 def _get_inspector_messages(params: dict[str, Any]) -> list[Any]:
-    """获取用于检视器展示的消息列表，兼容 Anthropic 的 system 字段。"""
+    """获取展示消息，兼容 Gemini Contents 与其他原生协议的系统字段。"""
     rendered_messages: list[Any] = []
+    if isinstance(params.get("contents"), list):
+        config = params.get("config")
+        instruction = config.get("system_instruction") if isinstance(config, dict) else None
+        if isinstance(instruction, dict):
+            rendered_messages.append(_gemini_message(instruction, role="system"))
+        elif isinstance(instruction, str):
+            rendered_messages.append({"role": "system", "content": instruction})
+        rendered_messages.extend(
+            _gemini_message(content) if isinstance(content, dict) else content
+            for content in params["contents"]
+        )
+        return rendered_messages
 
     system = params.get("system")
     if isinstance(system, str):
@@ -699,9 +771,7 @@ class CapturedRequest:
                 self.metadata.get("estimated_input_tokens")
             ),
             "msg_count": len(_get_inspector_messages(self.params)),
-            "tool_count": len(self.params.get("tools", []))
-            if isinstance(self.params.get("tools"), list)
-            else 0,
+            "tool_count": len(_get_inspector_tools(self.params)),
             "status": self.status,
             "logical_request_id": self.logical_request_id,
             "attempt": self.attempt,

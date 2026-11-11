@@ -12,10 +12,15 @@ model_client/
 ├── openai_client.py     # OpenAI 实现
 ├── anthropic_client.py  # Anthropic 实现
 ├── responses_client.py  # OpenAI Responses API 客户端（内置 web_search 等服务端工具）
+├── gemini_client.py     # Gemini 客户端（官方 google-genai SDK，原生 Developer API）
+├── gemini_codec.py      # Gemini 负载与结果转换（消息/工具编解码、签名状态）
+├── runtime.py           # 非生成探测与默认自有资源回收
 ├── registry.py          # 客户端注册表（ModelClientRegistry）
 ├── shared.py            # 共享工具
 └── __init__.py          # 公开 API
 ```
+
+启动预检、领域配置准备及默认资源所有权见 [运行时技术边界](./runtime.md)。Bot 不构造供应商 SDK 或管理池；外部注入客户端不由默认资源入口回收。
 
 ## StreamEvent（流事件）
 
@@ -98,6 +103,13 @@ class RerankModelClient(Protocol):
 | `OpenAIChatClient` | Chat / Embedding / Rerank | 完整实现三种协议 |
 | `AnthropicChatClient` | Chat | 支持 reasoning blocks 和扩展思考 |
 | `OpenAIResponsesClient` | Chat | Responses API，支持内置 `web_search` 等服务端工具 |
+| `GeminiChatClient` | Chat | 原生 Developer API；文本、图片输入、工具、非流/流，见 [Gemini 说明](./gemini_client.md) |
+
+### Gemini 当前状态
+
+默认 `ModelClientRegistry` 已装配 Gemini，无需手工注册；使用 `google-genai==2.33.0` 和 MoFox 自建并注入的 httpx 客户端，而非 OpenAI 兼容协议。SDK 的自动工具执行（AFC）与自动续接均关闭，消息/工具转换、签名状态及工具回合来源锁由 MoFox 管理。Vertex AI 与音视频/通用文件输入不支持；其他边界、配置和当前实现限制见 [GeminiChatClient](./gemini_client.md)。
+
+下文自定义客户端/扩展片段仅作接口示意，不能视为 Gemini 当前实现或真实可用模型清单；安全凭据与资源关闭示例见 [gemini_example.py](../../../examples/src/kernel/llm/gemini_example.py)。本文不声明真实服务已联调或全量测试通过。
 
 **返回值：**
 - `message`: 非流式时的完整响应文本；流式时为 None
@@ -204,7 +216,7 @@ message = await response
 class ModelClientRegistry:
     """provider -> client 的注册表。
     
-    当前默认提供 openai client；gemini/bedrock 后续可注册。
+    当前默认提供 openai 和 gemini client；bedrock 后续可注册。
     """
     
     openai: ChatModelClient | None = None
@@ -244,7 +256,7 @@ model_config2 = {
     "model_identifier": "gemini-pro",
     "api_key": "..."
 }
-# client2 = registry.get_client_for_model(model_config2)  # 需要先注册
+client2 = registry.get_client_for_model(model_config2)  # 默认已装配；模型 ID 仅示意
 ```
 
 ### 注册自定义客户端
@@ -348,7 +360,7 @@ A: 通过 `client_type` 字段：
 # OpenAI
 models1 = [{"client_type": "openai", "model_identifier": "gpt-4", ...}]
 
-# Gemini（需要注册）
+# Gemini（默认已装配；模型 ID 仅示意，详见 Gemini 专页）
 models2 = [{"client_type": "gemini", "model_identifier": "gemini-pro", ...}]
 ```
 

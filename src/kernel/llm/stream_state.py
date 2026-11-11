@@ -14,6 +14,7 @@ from typing import Any
 
 from .model_client import StreamEvent
 from .payload import ReasoningText, ToolCall
+from .provider_state import ProviderReplayState
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class StreamReductionResult:
     usage: dict[str, Any] | None
     stop_reason: str | None = None
     error: Exception | None = None
+    provider_state: ProviderReplayState | None = None
 
 
 class LLMStreamReducer:
@@ -38,9 +40,15 @@ class LLMStreamReducer:
         self._reasoning_acc = _ReasoningBlockAccumulator()
         self._usage: dict[str, Any] | None = None
         self._stop_reason: str | None = None
+        self._provider_state: ProviderReplayState | None = None
 
     def apply(self, event: StreamEvent) -> str | None:
         """应用一个流事件，并返回其中产生的文本增量。"""
+        if event.reset:
+            self.__init__()
+            return None
+        if event.provider_state is not None:
+            self._provider_state = event.provider_state
         text_delta = event.text_delta
         if text_delta:
             self._full_content.append(text_delta)
@@ -79,6 +87,7 @@ class LLMStreamReducer:
             usage=self._usage,
             stop_reason=self._stop_reason,
             error=error,
+            provider_state=self._provider_state,
         )
 
 
@@ -90,13 +99,19 @@ async def drain_stream(
     """使用共享 reducer 消费完整条 provider 流。"""
     reducer = LLMStreamReducer()
     stream_error: Exception | None = None
-    try:
-        async for event in stream:
-            text_delta = reducer.apply(event)
-            if text_delta and on_text_delta is not None:
-                await on_text_delta(text_delta)
-    except Exception as exc:
-        stream_error = exc
+    iterator = aiter(stream)
+    while True:
+        try:
+            event = await anext(iterator)
+        except StopAsyncIteration:
+            break
+        except Exception as exc:
+            stream_error = exc
+            break
+        text_delta = reducer.apply(event)
+        if text_delta and on_text_delta is not None:
+            # 调用方异常不属于 provider 读取，不可归并成可重试错误。
+            await on_text_delta(text_delta)
     return reducer.finalize(stream_error)
 
 

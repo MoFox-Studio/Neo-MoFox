@@ -13,14 +13,20 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
-from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, AsyncIterator, Self
+from functools import wraps
+from types import TracebackType
+from typing import (
+    TYPE_CHECKING, Any, AsyncIterator, Concatenate, ParamSpec, Self, TypeVar,
+    cast, overload,
+)
 
 from src.kernel.logger import get_logger
 
+from ._stream_close import CloseOutcome, close_outcome, closing_iterator as aclosing, select_close_error
 from .exceptions import (
     LLMAPIError,
     LLMRateLimitError,
@@ -30,9 +36,12 @@ from .exceptions import (
 from .model_client import StreamEvent
 from .payload import LLMPayload, ReasoningText, Text, ToolCall
 from .roles import ROLE
+from .provider_state import ProviderReplayState
+from .request_attempt import ManagedStream
 from .request_trace import Attempt, retry_scope
 from .stream_state import (
     LLMStreamReducer,
+    StreamReductionResult,
     drain_stream,
 )
 from .tool_call_compat import parse_tool_call_compat_response
@@ -63,6 +72,71 @@ def _is_retryable_stream_error(exc: BaseException) -> bool:
         return exc.status_code is None or exc.status_code >= 500
     return False
 
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+@overload
+def _close_managed_after(
+    method: Callable[Concatenate[LLMResponse, P], AsyncIterator[T]],
+) -> Callable[Concatenate[LLMResponse, P], AsyncIterator[T]]:
+    """保留异步生成器 method 的参数签名与产出类型。"""
+    ...
+
+
+@overload
+def _close_managed_after(
+    method: Callable[Concatenate[LLMResponse, P], Awaitable[T]],
+) -> Callable[Concatenate[LLMResponse, P], Awaitable[T]]:
+    """保留异步消费者 method 的参数签名与返回类型。"""
+    ...
+
+
+def _close_managed_after(
+    method: Callable[Concatenate[LLMResponse, P], AsyncIterator[T]]
+    | Callable[Concatenate[LLMResponse, P], Awaitable[T]],
+) -> Callable[Concatenate[LLMResponse, P], AsyncIterator[T]] | Callable[Concatenate[LLMResponse, P], Awaitable[T]]:
+    """为 method 领取单次消费权，并返回保留签名和异步形态的包装器。
+
+    领取成功的调用独占托管流关闭和半成品清理责任；重复调用在进入
+    清理区之前拒绝。被包装方法不再重复领取消费权，嵌套消费应显式委托
+    给已持权的内部实现，不能根据任务身份或 _consumed 的变化推测归属。
+    """
+    if inspect.isasyncgenfunction(method):
+        generate_method = cast("Callable[Concatenate[LLMResponse, P], AsyncGenerator[T, None]]", method)
+
+        @wraps(method)
+        async def generate(self: LLMResponse, *args: P.args, **kwargs: P.kwargs) -> AsyncIterator[T]:
+            """为 self 领取消费权，转发 args/kwargs 并在退出时清理所属流。"""
+            self._claim_consumption()
+            primary: BaseException | None = None
+            try:
+                async with aclosing(generate_method(self, *args, **kwargs)) as iterator:
+                    async for value in iterator:
+                        yield value
+            except BaseException as error:
+                primary = error
+                raise
+            finally:
+                await self._finalize_after_consumption(primary)
+        return generate
+    consume_method = cast("Callable[Concatenate[LLMResponse, P], Awaitable[T]]", method)
+
+    @wraps(method)
+    async def consume(self: LLMResponse, *args: P.args, **kwargs: P.kwargs) -> T:
+        """为 self 领取消费权，以 args/kwargs 调用方法并清理所属流。"""
+        self._claim_consumption()
+        primary: BaseException | None = None
+        try:
+            return await consume_method(self, *args, **kwargs)
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            await self._finalize_after_consumption(primary)
+    return consume
+
+
 @dataclass(slots=True)
 class LLMResponse:
     """对缓冲式 provider 结果或实时流结果的统一包装。"""
@@ -85,13 +159,13 @@ class LLMResponse:
     _stream_started_at: float | None = None
     _usage: dict[str, object] | None = None
     stop_reason: str | None = None
+    provider_state: ProviderReplayState | None = None
 
     _consumed: bool = False
     _appended_to_context: bool = False
 
     _original_payloads: list[LLMPayload] | None = None
     _inspection: Attempt | None = None
-    _closed: bool = False
 
     def __post_init__(self) -> None:
         """规范化可选状态，并继承上游的 context manager。"""
@@ -117,6 +191,8 @@ class LLMResponse:
 
     def _get_stream_retries(self) -> int:
         """从 model_set 读取流式重试次数上限，默认 2。"""
+        if isinstance(self._stream, ManagedStream):
+            return 0  # 托管迭代器独占原始策略预算。
         if self.model_set:
             return self.model_set[0].get("max_retry", 2)
         return 2
@@ -150,8 +226,11 @@ class LLMResponse:
             self.model_set,
             request_name=getattr(self._upper, "request_name", ""),
             meta_data=dict(getattr(self._upper, "meta_data", {})),
-            enable_metrics=getattr(self._upper, "enable_metrics", True),
             context_manager=self.context_manager,
+            clients=getattr(self._upper, "clients", None),
+            policy=getattr(self._upper, "policy", None),
+            enable_metrics=getattr(self._upper, "enable_metrics", True),
+            _locked_target=(self.provider_state.target if self.provider_state and self.call_list else None),
         )
         req.payloads = list(self.payloads)
         with retry_scope(self._inspection.logical if self._inspection else None):
@@ -179,148 +258,200 @@ class LLMResponse:
             for call in parsed_calls
         ]
 
-    @asynccontextmanager
-    async def _consumption_scope(self) -> AsyncIterator[None]:
-        """正常退出、回调失败或取消时关闭提供商资源。"""
-        try:
-            yield
-        except BaseException as error:
-            if self._inspection is not None:
-                self._inspection.finish(error)
-            raise
-        finally:
-            await self.aclose()
-
-    async def aclose(self) -> None:
-        """关闭响应而不读取剩余流内容，也支持尚未开始迭代的原生流。
-
-        提前停止迭代时，应在 finally 块中调用本方法。只有观测记录尚未进入
-        执行终态时，才将其标记为取消；重复关闭不会重复释放资源。
-        """
-        if self._closed:
-            return
-        self._closed = True
-        self._consumed = True
-        try:
-            close = getattr(self._stream, "aclose", None)
-            if callable(close):
-                await close()
-        finally:
-            if self._inspection is not None:
-                self._inspection.finish(cancelled=True)
-                await self._inspection.close_resource()
-
-    def __await__(self):
-        return self._collect_full_response().__await__()
-
-    async def stream_events(self) -> AsyncIterator[StreamEvent]:
-        """以严格单次消费的方式产出原始流事件，并实时更新响应状态。
-
-        流式消费期间遇到可重试错误时自动重建请求并重试。
-        """
+    def _claim_consumption(self) -> None:
+        """同步领取唯一消费权；失败者不得进入所属流的清理作用域。"""
         if self._consumed:
             raise LLMResponseConsumedError("Response has already been consumed.")
         self._consumed = True
 
-        async with self._consumption_scope():
+    def _clear_unfinished_state(self) -> None:
+        """即使关闭失败，也清除尚未完成消费或尝试的工具及来源状态。"""
+        if isinstance(self._stream, ManagedStream) and self._stream.phase != "completed" and self._stream.result_response is None:
+            self.call_list = []
+            self.provider_state = None
 
-            if self._stream is None:
-                self._maybe_apply_tool_call_compat()
-                if self.message:
-                    yield StreamEvent(text_delta=self.message)
-                return
-
-            retries = self._get_stream_retries()
-            delay = self._get_stream_retry_delay()
-
-            while True:
-                reducer = LLMStreamReducer()
-                stream_error: Exception | None = None
-                try:
-                    async for event in self._stream:
-                        reducer.apply(event)
-                        snapshot = reducer.finalize()
-                        self.message = snapshot.message or None
-                        self.reasoning_parts = snapshot.reasoning_parts or []
-                        self.reasoning_content = snapshot.reasoning_content
-                        self.call_list = snapshot.call_list
-                        yield event
-                except Exception as exc:
-                    stream_error = exc
-
-                self._apply_stream_result(reducer.finalize(stream_error))
-
-                if stream_error is None:
-                    return  # 成功
-
-                if isinstance(stream_error, asyncio.CancelledError):
-                    raise
-
-                if not _is_retryable_stream_error(stream_error) or retries <= 0:
-                    raise stream_error
-
-                retries -= 1
-                logger.warning(
-                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(stream_error).__name__}"
-                )
-                await asyncio.sleep(delay)
-                self._retry_reset()
-                new_resp = await self._retry_send()
-                self._stream = new_resp._stream
-
-    async def __aiter__(self):
-        """以严格单次消费的方式产出流式文本增量。"""
-        events = self.stream_events()
+    async def _close_owned_managed_stream(self, primary: BaseException | None = None) -> None:
+        """持权者依据实际异常清理，禁止用任务历史取消计数推测来源。"""
+        if not isinstance(self._stream, ManagedStream):
+            return
         try:
+            outcome = await self._stream._close_outcome(cancelled=isinstance(primary, asyncio.CancelledError), primary=primary)
+            selected = select_close_error(primary, outcome)
+            if selected is not None and selected is not primary:
+                raise selected
+        finally:
+            self._clear_unfinished_state()
+            if primary is not None:
+                self.call_list = []
+                self.provider_state = None
+
+
+    async def _close_legacy_response(
+        self, primary: BaseException | None, *, abandoned: bool,
+    ) -> None:
+        """清理非托管响应并报告真实终态，不覆盖调用方主异常。
+
+        Args:
+            primary: 消费或显式作用域内已经捕获的主异常。
+            abandoned: 是否由未完成消费的显式关闭入口调用。
+        """
+        selected = select_close_error(primary, await close_outcome(self._stream))
+        if self._inspection is not None:
+            try:
+                await self._inspection.close_unconsumed_resource()
+            except BaseException as error:
+                selected = select_close_error(
+                    selected, CloseOutcome(error, not isinstance(error, Exception)),
+                )
+            self._inspection.finish(
+                selected, cancelled=abandoned and selected is None,
+            )
+        if selected is not None and selected is not primary:
+            raise selected
+
+    async def _finalize_after_consumption(self, primary: BaseException | None = None) -> None:
+        """仅由持权消费者退出时调用；托管流终态仍由 ManagedStream 发布。"""
+        if isinstance(self._stream, ManagedStream):
+            await self._close_owned_managed_stream(primary)
+        elif self._inspection is not None:
+            # 仅接管带显式观测句柄的原生资源；旧注入流仍保留显式关闭契约。
+            await self._close_legacy_response(primary, abandoned=False)
+
+    async def _close_response(self, primary: BaseException | None = None) -> None:
+        """显式作用域保留体异常，同时保持旧非托管流显式关闭责任。"""
+        try:
+            if isinstance(self._stream, ManagedStream):
+                await self._close_owned_managed_stream(primary)
+            else:
+                await self._close_legacy_response(primary, abandoned=True)
+        finally:
+            self._clear_unfinished_state()
+            self._consumed = True
+
+    async def aclose(self) -> None:
+        """显式释放未消费或部分消费的响应，唯一关闭错误继续可见。"""
+        await self._close_response()
+
+    async def __aenter__(self) -> Self:
+        """进入显式资源作用域，供可能提前结束的消费者使用。"""
+        return self
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None,
+        exc: BaseException | None, tb: TracebackType | None,
+    ) -> None:
+        """退出显式资源作用域时关闭响应；exc_type、exc、tb 不改变异常传播。"""
+        await self._close_response(exc)
+
+    def __await__(self) -> Generator[Any, None, str]:
+        """通过 await 协议领取单次消费权并返回完整响应文本。"""
+        return self._collect_full_response().__await__()
+
+    @_close_managed_after
+    async def stream_events(self) -> AsyncIterator[StreamEvent]:
+        """以严格单次消费的方式产出原始流事件，并实时更新响应状态。
+
+        流式消费期间遇到可重试错误时自动重建请求并重试。
+        消费权和关闭责任由包装器持有，内部事件迭代器只接受显式委托。
+        """
+        async with aclosing(self._stream_events_owned()) as events:
+            async for event in events:
+                yield event
+
+    async def _stream_events_owned(self) -> AsyncGenerator[StreamEvent, None]:
+        """在外层已领取的消费权内产出事件，不重新领取或关闭共享流。"""
+        if self._stream is None:
+            self._maybe_apply_tool_call_compat()
+            if self.message:
+                yield StreamEvent(text_delta=self.message)
+            return
+
+        retries = self._get_stream_retries()
+        delay = self._get_stream_retry_delay()
+
+        while True:
+            reducer = LLMStreamReducer()
+            stream_error: Exception | None = None
+            try:
+                async for event in cast(AsyncIterator[StreamEvent], self._stream):
+                    reducer.apply(event)
+                    snapshot = reducer.finalize()
+                    self.message = snapshot.message or None
+                    self.reasoning_parts = snapshot.reasoning_parts or []
+                    self.reasoning_content = snapshot.reasoning_content
+                    self.call_list = snapshot.call_list
+                    yield event
+            except Exception as exc:
+                stream_error = exc
+
+            self._apply_stream_result(reducer.finalize(stream_error))
+
+            if stream_error is None:
+                return  # 成功
+
+            if isinstance(stream_error, asyncio.CancelledError):
+                raise
+
+            if (isinstance(self._stream, ManagedStream) and self._stream._retry_blocked) or not _is_retryable_stream_error(stream_error) or retries <= 0:
+                raise stream_error
+
+            retries -= 1
+            logger.warning(
+                f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(stream_error).__name__}"
+            )
+            await asyncio.sleep(delay)
+            self._retry_reset()
+            new_resp = await self._retry_send()
+            self._stream = new_resp._stream
+
+    @_close_managed_after
+    async def __aiter__(self) -> AsyncIterator[str]:
+        """产出文本增量，将已领取的消费权显式委托给共享事件实现。"""
+        async with aclosing(self._stream_events_owned()) as events:
             async for event in events:
                 if event.text_delta:
                     yield event.text_delta
-        finally:
-            await events.aclose()
 
+    @_close_managed_after
     async def _collect_full_response(self) -> str:
         """以严格单次消费的方式收集完整响应文本。
 
         流式消费期间遇到可重试错误时自动重建请求并重试。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
+        if self._stream is None:
+            self._maybe_apply_tool_call_compat()
+            self._maybe_append_response_to_context()
+            return self.message or ""
 
-        async with self._consumption_scope():
+        retries = self._get_stream_retries()
+        delay = self._get_stream_retry_delay()
 
-            if self._stream is None:
-                self._maybe_apply_tool_call_compat()
-                self._maybe_append_response_to_context()
+        while True:
+            if isinstance(self._stream, ManagedStream):
+                self._stream.buffered = True
+            result = await drain_stream(self._stream)
+            self._apply_stream_result(result)
+
+            if result.error is None:
                 return self.message or ""
 
-            retries = self._get_stream_retries()
-            delay = self._get_stream_retry_delay()
+            error = result.error
+            if isinstance(error, asyncio.CancelledError):
+                raise
 
-            while True:
-                result = await drain_stream(self._stream)
-                self._apply_stream_result(result)
+            if (isinstance(self._stream, ManagedStream) and self._stream._retry_blocked) or not _is_retryable_stream_error(error) or retries <= 0:
+                raise error
 
-                if result.error is None:
-                    return self.message or ""
+            retries -= 1
+            logger.warning(
+                f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
+            )
+            await asyncio.sleep(delay)
+            self._retry_reset()
+            new_resp = await self._retry_send()
+            self._stream = new_resp._stream
 
-                error = result.error
-                if isinstance(error, asyncio.CancelledError):
-                    raise
-
-                if not _is_retryable_stream_error(error) or retries <= 0:
-                    raise error
-
-                retries -= 1
-                logger.warning(
-                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
-                )
-                await asyncio.sleep(delay)
-                self._retry_reset()
-                new_resp = await self._retry_send()
-                self._stream = new_resp._stream
-
-    def _apply_stream_result(self, result) -> None:
+    def _apply_stream_result(self, result: StreamReductionResult) -> None:
         """把归并后的流状态应用到当前响应对象。"""
         self.message = result.message
         self.reasoning_parts = result.reasoning_parts or self.reasoning_parts
@@ -328,6 +459,12 @@ class LLMResponse:
         self.call_list = result.call_list
         self._usage = result.usage
         self.stop_reason = result.stop_reason
+        self.provider_state = result.provider_state
+        if result.error is not None:
+            if isinstance(self._stream, ManagedStream):
+                self.call_list = []  # 未完成的供应商工具调用不可交给执行方。
+                self.provider_state = None
+            return
         self._maybe_apply_tool_call_compat()
         self._maybe_append_response_to_context()
         self._maybe_record_stream_stats()
@@ -355,7 +492,7 @@ class LLMResponse:
         if not content_parts:
             return
 
-        assistant_payload = LLMPayload(ROLE.ASSISTANT, content_parts)  # type: ignore[arg-type]
+        assistant_payload = LLMPayload(ROLE.ASSISTANT, content_parts, provider_state=self.provider_state)  # type: ignore[arg-type]
         if self.context_manager is not None:
             self.payloads = self.context_manager.add_payload(
                 self.payloads, assistant_payload
@@ -392,9 +529,9 @@ class LLMResponse:
             content_parts.extend(self.call_list)
         if not content_parts:
             content_parts.append(Text(""))
-        return LLMPayload(ROLE.ASSISTANT, content_parts)  # type: ignore[arg-type]
+        return LLMPayload(ROLE.ASSISTANT, content_parts, provider_state=self.provider_state)  # type: ignore[arg-type]
 
-    def add_payload(self, payload: "LLMPayload | LLMResponse", position=None) -> Self:
+    def add_payload(self, payload: LLMPayload | LLMResponse, position: int | None = None) -> Self:
         """把 payload 或另一个 response 追加进当前响应上下文。"""
         if isinstance(payload, LLMResponse):
             payload = payload.to_payload()
@@ -410,7 +547,8 @@ class LLMResponse:
         if position is not None:
             self.payloads.insert(int(position), payload)
         else:
-            if self.payloads and self.payloads[-1].role == payload.role:
+            if (self.payloads and self.payloads[-1].role == payload.role
+                and self.payloads[-1].provider_state is None and payload.provider_state is None):
                 self.payloads[-1].content.extend(payload.content)
             else:
                 self.payloads.append(payload)
@@ -439,6 +577,10 @@ class LLMResponse:
         stream: bool = True,
     ) -> "LLMResponse":
         """把当前响应里的 payload 作为下一次请求的输入继续发送。"""
+        if (isinstance(self._stream, ManagedStream) and self._stream.finished
+                and self._stream.phase != "completed" and self._stream.result_response is None):
+            from .exceptions import LLMContextError
+            raise LLMContextError("Cannot continue an incomplete or abandoned response")
         if not self._consumed:
             await self._collect_full_response()
 
@@ -452,59 +594,60 @@ class LLMResponse:
             self.model_set,
             request_name=getattr(self._upper, "request_name", ""),
             meta_data=dict(getattr(self._upper, "meta_data", {})),
-            enable_metrics=getattr(self._upper, "enable_metrics", True),
             context_manager=self.context_manager,
+            clients=getattr(self._upper, "clients", None),
+            policy=getattr(self._upper, "policy", None),
+            enable_metrics=getattr(self._upper, "enable_metrics", True),
+            _locked_target=(self.provider_state.target if self.provider_state and self.call_list else None),
         )
         req.payloads = list(self.payloads)
         return await req.send(auto_append_response=auto_append_response, stream=stream)
 
+    @_close_managed_after
     async def stream_with_callback(
         self, on_chunk: Callable[[str], Awaitable[None]]
     ) -> str:
         """以回调方式消费流式文本增量，返回最终完整文本。
 
+        on_chunk 接收每个文本增量，返回值为最终完整文本。
+        包装器独占消费权，并在结束、异常或取消时释放托管流。
         流式消费期间遇到可重试错误时自动重建请求并重试。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
+        if self._stream is None:
+            self._maybe_apply_tool_call_compat()
+            content = self.message or ""
+            if content:
+                await on_chunk(content)
+            self._maybe_append_response_to_context()
+            return content
 
-        async with self._consumption_scope():
+        retries = self._get_stream_retries()
+        delay = self._get_stream_retry_delay()
 
-            if self._stream is None:
-                self._maybe_apply_tool_call_compat()
-                content = self.message or ""
-                if content:
-                    await on_chunk(content)
-                self._maybe_append_response_to_context()
-                return content
+        while True:
+            result = await drain_stream(self._stream, on_text_delta=on_chunk)
+            self._apply_stream_result(result)
 
-            retries = self._get_stream_retries()
-            delay = self._get_stream_retry_delay()
+            if result.error is None:
+                return self.message or ""
 
-            while True:
-                result = await drain_stream(self._stream, on_text_delta=on_chunk)
-                self._apply_stream_result(result)
+            error = result.error
+            if isinstance(error, asyncio.CancelledError):
+                raise
 
-                if result.error is None:
-                    return self.message or ""
+            if (isinstance(self._stream, ManagedStream) and self._stream._retry_blocked) or not _is_retryable_stream_error(error) or retries <= 0:
+                raise error
 
-                error = result.error
-                if isinstance(error, asyncio.CancelledError):
-                    raise
+            retries -= 1
+            logger.warning(
+                f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
+            )
+            await asyncio.sleep(delay)
+            self._retry_reset()
+            new_resp = await self._retry_send()
+            self._stream = new_resp._stream
 
-                if not _is_retryable_stream_error(error) or retries <= 0:
-                    raise error
-
-                retries -= 1
-                logger.warning(
-                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
-                )
-                await asyncio.sleep(delay)
-                self._retry_reset()
-                new_resp = await self._retry_send()
-                self._stream = new_resp._stream
-
+    @_close_managed_after
     async def stream_events_with_callback(
         self,
         on_event: Callable[[StreamEvent], Awaitable[None]],
@@ -513,121 +656,121 @@ class LLMResponse:
 
         与 ``stream_with_callback`` 的区别是回调接收完整的 ``StreamEvent``，
         包含 ``tool_call_id`` / ``tool_name`` / ``tool_args_delta`` 等字段，
-        而不仅仅是文本增量。
+        而不仅仅是文本增量。on_event 接收事件，返回值为最终完整文本。
+        包装器独占消费权，并在结束、异常或取消时释放托管流。
 
         流式消费期间遇到可重试错误时自动重建请求并重试。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
+        if self._stream is None:
+            self._maybe_apply_tool_call_compat()
+            self._maybe_append_response_to_context()
+            return self.message or ""
 
-        async with self._consumption_scope():
+        retries = self._get_stream_retries()
+        delay = self._get_stream_retry_delay()
 
-            if self._stream is None:
-                self._maybe_apply_tool_call_compat()
-                self._maybe_append_response_to_context()
-                return self.message or ""
+        while True:
+            reducer = LLMStreamReducer()
+            stream_error: Exception | None = None
 
-            retries = self._get_stream_retries()
-            delay = self._get_stream_retry_delay()
-
+            stream = cast(AsyncIterator[StreamEvent], self._stream)
+            iterator = aiter(stream)
             while True:
-                reducer = LLMStreamReducer()
-                stream_error: Exception | None = None
-
                 try:
-                    async for event in self._stream:
-                        reducer.apply(event)
-                        await on_event(event)
+                    event = await anext(iterator)
+                except StopAsyncIteration:
+                    break
                 except Exception as exc:
                     stream_error = exc
+                    break
+                reducer.apply(event)
+                # callback 不在 provider 读取捕获区，原样交给持权清理包装器。
+                await on_event(event)
 
-                self._apply_stream_result(reducer.finalize(stream_error))
+            self._apply_stream_result(reducer.finalize(stream_error))
 
-                if stream_error is None:
-                    return self.message or ""
+            if stream_error is None:
+                return self.message or ""
 
-                error = stream_error
-                if isinstance(error, asyncio.CancelledError):
-                    raise
+            error = stream_error
+            if isinstance(error, asyncio.CancelledError):
+                raise
 
-                if not _is_retryable_stream_error(error) or retries <= 0:
-                    raise error
+            if (isinstance(self._stream, ManagedStream) and self._stream._retry_blocked) or not _is_retryable_stream_error(error) or retries <= 0:
+                raise error
 
-                retries -= 1
-                logger.warning(
-                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
-                )
-                await asyncio.sleep(delay)
-                self._retry_reset()
-                new_resp = await self._retry_send()
-                self._stream = new_resp._stream
+            retries -= 1
+            logger.warning(
+                f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(error).__name__}"
+            )
+            await asyncio.sleep(delay)
+            self._retry_reset()
+            new_resp = await self._retry_send()
+            self._stream = new_resp._stream
 
+    @_close_managed_after
     async def stream_with_buffer(self, buffer_size: int = 10) -> AsyncIterator[str]:
         """以缓冲方式产出流式文本块。
 
+        buffer_size 为触发产出的累计文本长度阈值；末尾不足阈值也会产出。
+        包装器独占消费权，显式关闭生成器会释放托管流。
         流式消费期间遇到可重试错误时自动重建请求并重试。
         """
-        if self._consumed:
-            raise LLMResponseConsumedError("Response has already been consumed.")
-        self._consumed = True
+        if self._stream is None:
+            self._maybe_apply_tool_call_compat()
+            content = self.message or ""
+            if content:
+                yield content
+            self._maybe_append_response_to_context()
+            return
 
-        async with self._consumption_scope():
+        retries = self._get_stream_retries()
+        delay = self._get_stream_retry_delay()
 
-            if self._stream is None:
-                self._maybe_apply_tool_call_compat()
-                content = self.message or ""
-                if content:
-                    yield content
-                self._maybe_append_response_to_context()
-                return
+        while True:
+            reducer = LLMStreamReducer()
+            buffer: list[str] = []
+            buffer_len = 0
+            stream_error: Exception | None = None
+            try:
+                async for event in cast(AsyncIterator[StreamEvent], self._stream):
+                    text_delta = reducer.apply(event)
+                    if not text_delta:
+                        continue
+                    buffer.append(text_delta)
+                    buffer_len += len(text_delta)
+                    if buffer_len >= buffer_size:
+                        yield "".join(buffer)
+                        buffer.clear()
+                        buffer_len = 0
+            except Exception as exc:
+                stream_error = exc
 
-            retries = self._get_stream_retries()
-            delay = self._get_stream_retry_delay()
+            if buffer:
+                yield "".join(buffer)
 
-            while True:
-                reducer = LLMStreamReducer()
-                buffer: list[str] = []
-                buffer_len = 0
-                stream_error: Exception | None = None
-                try:
-                    async for event in self._stream:
-                        text_delta = reducer.apply(event)
-                        if not text_delta:
-                            continue
-                        buffer.append(text_delta)
-                        buffer_len += len(text_delta)
-                        if buffer_len >= buffer_size:
-                            yield "".join(buffer)
-                            buffer.clear()
-                            buffer_len = 0
-                except Exception as exc:
-                    stream_error = exc
+            self._apply_stream_result(reducer.finalize(stream_error))
 
-                if buffer:
-                    yield "".join(buffer)
+            if stream_error is None:
+                return  # 成功
 
-                self._apply_stream_result(reducer.finalize(stream_error))
+            if isinstance(stream_error, asyncio.CancelledError):
+                raise
 
-                if stream_error is None:
-                    return  # 成功
+            if (isinstance(self._stream, ManagedStream) and self._stream._retry_blocked) or not _is_retryable_stream_error(stream_error) or retries <= 0:
+                raise stream_error
 
-                if isinstance(stream_error, asyncio.CancelledError):
-                    raise
-
-                if not _is_retryable_stream_error(stream_error) or retries <= 0:
-                    raise stream_error
-
-                retries -= 1
-                logger.warning(
-                    f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(stream_error).__name__}"
-                )
-                await asyncio.sleep(delay)
-                self._retry_reset()
-                new_resp = await self._retry_send()
-                self._stream = new_resp._stream
+            retries -= 1
+            logger.warning(
+                f"LLM 流式中断，正在重试（剩余 {retries} 次）: {type(stream_error).__name__}"
+            )
+            await asyncio.sleep(delay)
+            self._retry_reset()
+            new_resp = await self._retry_send()
+            self._stream = new_resp._stream
 
     def _maybe_record_stream_stats(self) -> None:
+        """在流成功归并后仅一次调用旧统计记录器。"""
         if self._stream_stats_recorder is None:
             return
 

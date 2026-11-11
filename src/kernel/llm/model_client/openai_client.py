@@ -12,19 +12,28 @@ from __future__ import annotations
 # 这样当前文件可以更聚焦在 provider 特有的 payload 映射和 SDK 行为上。
 
 import pybase64 as base64
-import inspect
 import json
 import threading
 from pathlib import Path
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 
 from src.kernel.llm.payload.tooling import LLMUsable
 from src.kernel.llm.tool_call_compat import (
     build_tool_call_compat_prompt,
     parse_tool_call_compat_response,
 )
+from src.kernel.network import build_httpx_transport
 
-from ..exceptions import LLMConfigurationError, LLMContentFilterError
+from ..exceptions import (
+    LLMAPIError,
+    LLMAuthenticationError,
+    LLMConfigurationError,
+    LLMContentFilterError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    parse_retry_after,
+)
 from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResult, Video
 from ..roles import ROLE
 from ..token_counter import count_payload_tokens
@@ -712,11 +721,9 @@ class OpenAIChatClient:
         # 统一复用共享 timeout builder，确保所有 provider 客户端应用同一套
         # httpx timeout 策略。
         timeout_config = build_httpx_timeout(timeout)
-        base_transport = (
-            httpx.AsyncHTTPTransport(local_address="0.0.0.0")
-            if force_ipv4
-            else httpx.AsyncHTTPTransport()
-        )
+        # 传 None 让 httpx 继续装载 trust_env 解析出的环境代理；只有强制 IPv4
+        # 时才显式指定 transport（显式 transport 会禁用环境代理）。
+        base_transport = build_httpx_transport(force_ipv4=force_ipv4)
         http_client_kwargs: dict[str, Any] = {
             "transport": base_transport,
             "trust_env": trust_env,
@@ -887,13 +894,12 @@ class OpenAIChatClient:
             # tool_call_compat 模式下工具通过提示词注入，对 provider 而言并没有 tools，
             # 因此不视为工具请求。
             request_has_tools = bool(openai_tools) and not tool_call_compat
-            allow_reasoning_history = (
-                reasoning_history_mode == _REASONING_HISTORY_MODE_ALL
-                or (
-                    reasoning_history_mode == _REASONING_HISTORY_MODE_ON_TOOL
-                    and request_has_tools
-                )
-            )
+            if reasoning_history_mode == _REASONING_HISTORY_MODE_ON_TOOL:
+                allow_reasoning_history = request_has_tools
+            else:
+                # all 始终回传；已有布尔值和 deepseek/kimi/auto 等字符串配置
+                # 保留原有真值语义，回填条件仍由下方的模式与历史内容判定。
+                allow_reasoning_history = bool(reasoning_history_mode)
 
             # 不回传时移除 assistant 历史中的非标准 reasoning_content 字段，
             # 避免污染请求结构或触发拒绝未知字段的兼容端点。
@@ -936,7 +942,7 @@ class OpenAIChatClient:
                 params["temperature"] = float(temperature)
 
             # 允许每模型注入额外参数（如 top_p/response_format/tool_choice 等）
-            # 注意：tool_choice 的默认策略会在 tools 分支中补齐。
+            # 未显式配置 tool_choice 时保留 SDK/provider 默认策略。
             params.update(extra_params)
             if openai_tools and not tool_call_compat:
                 params["tools"] = openai_tools
@@ -1068,7 +1074,8 @@ class OpenAIChatClient:
                         pass
             raise
 
-        trace.raw(resp)
+        if trace is not None:
+            trace.raw(resp)
         if not resp.choices:
             raise LLMContentFilterError(
                 f"模型返回空响应（可能触发了安全过滤器）。Response: {resp}",
@@ -1084,13 +1091,25 @@ class OpenAIChatClient:
                 message_content
             )
             usage = _extract_usage(resp)
-            trace.result(message=parsed_message, tool_calls=parsed_calls, reasoning_content=reasoning_content,
-                         usage=usage, stop_reason=getattr(resp.choices[0], "finish_reason", None))
+            if trace is not None:
+                trace.result(
+                    message=parsed_message,
+                    tool_calls=parsed_calls,
+                    reasoning_content=reasoning_content,
+                    usage=usage,
+                    stop_reason=getattr(resp.choices[0], "finish_reason", None),
+                )
             return parsed_message, parsed_calls, None, reasoning_content, usage
 
         usage = _extract_usage(resp)
-        trace.result(message=message_content, tool_calls=tool_calls, reasoning_content=reasoning_content,
-                     usage=usage, stop_reason=getattr(resp.choices[0], "finish_reason", None))
+        if trace is not None:
+            trace.result(
+                message=message_content,
+                tool_calls=tool_calls,
+                reasoning_content=reasoning_content,
+                usage=usage,
+                stop_reason=getattr(resp.choices[0], "finish_reason", None),
+            )
         return message_content, tool_calls, None, reasoning_content, usage
 
     async def _create_stream(
@@ -1113,7 +1132,8 @@ class OpenAIChatClient:
         stream_params.setdefault("stream_options", {"include_usage": True})
         trace = start_provider("chat.completions.create", stream_params, stream=True)
         stream_resp = await client.chat.completions.create(**stream_params)
-        trace.opened(stream_resp)
+        if trace is not None:
+            trace.opened(stream_resp)
 
         async def iter_events() -> AsyncIterator[StreamEvent]:
             """逐块迭代流式响应，产出 StreamEvent。
@@ -1121,69 +1141,87 @@ class OpenAIChatClient:
             OpenAI 标准流格式：首包携带 tool_call id，后续增量包 id 为 None，
             通过 index 归属。使用 ``index_to_id`` 维护映射关系。
             """
-            with trace.consume():
-                index_to_id: dict[int, str] = {}
+            if trace is not None:
+                with trace.consume():
+                    index_to_id: dict[int, str] = {}
 
-                try:
-                    # 内部启动占位使清理作用域先于返回生效，不读取任何 SDK 事件。
-                    yield StreamEvent()
-                    async for chunk in stream_resp:
-                        trace.raw(chunk, event=True)
-                        usage = _extract_usage_from_obj(_get_usage_field(chunk, "usage", None))
-                        if usage:
-                            yield trace.event(StreamEvent(usage=usage))
+                    try:
+                        # 内部启动占位使清理作用域先于返回生效，不读取任何 SDK 事件。
+                        yield StreamEvent()
+                        async for chunk in stream_resp:
+                            trace.raw(chunk, event=True)
+                            usage = _extract_usage_from_obj(_get_usage_field(chunk, "usage", None))
+                            if usage:
+                                yield trace.event(StreamEvent(usage=usage))
 
-                        if not chunk.choices:
-                            continue
-                        choice = chunk.choices[0]
-                        finish_reason = getattr(choice, "finish_reason", None)
-                        if isinstance(finish_reason, str) and finish_reason:
-                            yield trace.event(StreamEvent(finish_reason=finish_reason))
+                            if not chunk.choices:
+                                continue
+                            choice = chunk.choices[0]
+                            finish_reason = getattr(choice, "finish_reason", None)
+                            if isinstance(finish_reason, str) and finish_reason:
+                                yield trace.event(StreamEvent(finish_reason=finish_reason))
 
-                        delta = choice.delta
+                            delta = choice.delta
 
-                        content = getattr(delta, "content", None)
-                        if content:
-                            yield trace.event(StreamEvent(text_delta=content))
+                            content = getattr(delta, "content", None)
+                            if content:
+                                yield trace.event(StreamEvent(text_delta=content))
 
-                        reasoning_content = _extract_reasoning_content(delta)
-                        if reasoning_content:
-                            yield trace.event(StreamEvent(reasoning_delta=reasoning_content))
+                            reasoning_content = _extract_reasoning_content(delta)
+                            if reasoning_content:
+                                yield trace.event(StreamEvent(reasoning_delta=reasoning_content))
 
-                        tool_calls_delta = getattr(delta, "tool_calls", None)
-                        if tool_calls_delta:
-                            for tc in tool_calls_delta:
-                                fn = getattr(tc, "function", None)
-                                tc_id: str | None = getattr(tc, "id", None)
-                                tc_index: int | None = getattr(tc, "index", None)
+                            tool_calls_delta = getattr(delta, "tool_calls", None)
+                            if tool_calls_delta:
+                                for tc in tool_calls_delta:
+                                    fn = getattr(tc, "function", None)
+                                    tc_id: str | None = getattr(tc, "id", None)
+                                    tc_index: int | None = getattr(tc, "index", None)
 
-                                if tc_index is not None:
-                                    effective_id = index_to_id.get(tc_index)
-                                    if effective_id is None:
-                                        effective_id = tc_id or f"call_stream_{tc_index}"
-                                        index_to_id[tc_index] = effective_id
-                                else:
-                                    effective_id = tc_id or "call_stream_0"
+                                    if tc_index is not None:
+                                        effective_id = index_to_id.get(tc_index)
+                                        if effective_id is None:
+                                            effective_id = tc_id or f"call_stream_{tc_index}"
+                                            index_to_id[tc_index] = effective_id
+                                    else:
+                                        effective_id = tc_id or "call_stream_0"
 
+                                    yield trace.event(StreamEvent(
+                                        tool_call_id=effective_id,
+                                        tool_name=getattr(fn, "name", None) if fn else None,
+                                        tool_args_delta=(
+                                            getattr(fn, "arguments", None) if fn else None
+                                        ),
+                                    ))
+
+                            function_call_delta = getattr(delta, "function_call", None)
+                            if function_call_delta and not tool_calls_delta:
                                 yield trace.event(StreamEvent(
-                                    tool_call_id=effective_id,
-                                    tool_name=getattr(fn, "name", None) if fn else None,
-                                    tool_args_delta=(
-                                        getattr(fn, "arguments", None) if fn else None
+                                    tool_call_id="function_call",
+                                    tool_name=getattr(function_call_delta, "name", None),
+                                    tool_args_delta=getattr(
+                                        function_call_delta, "arguments", None
                                     ),
                                 ))
-
-                        function_call_delta = getattr(delta, "function_call", None)
-                        if function_call_delta and not tool_calls_delta:
-                            yield trace.event(StreamEvent(
-                                tool_call_id="function_call",
-                                tool_name=getattr(function_call_delta, "name", None),
-                                tool_args_delta=getattr(
-                                    function_call_delta, "arguments", None
-                                ),
-                            ))
-                finally:
-                    await trace.close_resource()
+                    finally:
+                        await trace.close_resource()
+            else:
+                # 无trace时简化路径
+                yield StreamEvent()
+                async for chunk in stream_resp:
+                    usage = _extract_usage_from_obj(_get_usage_field(chunk, "usage", None))
+                    if usage:
+                        yield StreamEvent(usage=usage)
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    if isinstance(finish_reason, str) and finish_reason:
+                        yield StreamEvent(finish_reason=finish_reason)
+                    delta = choice.delta
+                    content = getattr(delta, "content", None)
+                    if content:
+                        yield StreamEvent(text_delta=content)
 
         stream_iter = iter_events()
         await anext(stream_iter)  # 仅消费内部启动占位，不向调用方产出空事件。
@@ -1257,10 +1295,12 @@ class OpenAIChatClient:
             )
             trace = start_provider("embeddings.create", params, kind="embedding")
             resp = await client.embeddings.create(**params)
-            trace.raw(resp)
+            if trace is not None:
+                trace.raw(resp)
             data = getattr(resp, "data", None)
             if not data:
-                trace.result(embeddings=[], usage=_extract_usage(resp))
+                if trace is not None:
+                    trace.result(embeddings=[], usage=_extract_usage(resp))
                 return []
 
             out: list[list[float]] = []
@@ -1268,7 +1308,8 @@ class OpenAIChatClient:
                 vec = getattr(item, "embedding", None)
                 if isinstance(vec, list):
                     out.append([float(v) for v in vec])
-            trace.result(embeddings=out, usage=_extract_usage(resp))
+            if trace is not None:
+                trace.result(embeddings=out, usage=_extract_usage(resp))
             return out
 
     async def create_rerank(
@@ -1281,16 +1322,23 @@ class OpenAIChatClient:
         request_name: str,
         model_set: Any,
     ) -> list[dict[str, Any]]:
-        """发起 rerank 请求，返回按相关性降序排列的结果。
+        """通过兼容 rerank HTTP 契约的 endpoint 发起排序请求。
 
-        仅支持提供商 SDK 原生 ``rerank`` 接口。
-        若 SDK 不存在该接口，抛出 ``LLMConfigurationError`` 交由上级处理。
+        OpenAI SDK 并没有通用的 ``rerank`` namespace，调用 ``client.rerank.create``
+        永远走不通，因此这里直接发起异步 HTTP 请求：endpoint 依次取模型配置中的
+        ``rerank_url`` / ``rerank_endpoint``（模型级或 ``extra_params`` 级），
+        否则由 ``base_url`` 拼接 ``/rerank``。
+
+        请求体固定为 ``{model, query, documents, top_n?}``，并按 OpenAI 兼容的
+        rerank 契约解析响应（``results`` 或 ``data``，``relevance_score`` 或
+        ``score``），最终按 score 降序排序并截断到 ``top_n``。认证、限流、超时、
+        传输失败和协议错误都映射为标准 LLM 异常，便于上层 policy 决定是否 failover。
 
         Args:
             model_name: rerank 模型名称。
             query: 查询文本，不能为空。
             documents: 待排序的文档列表（str 或 dict），不能为空。
-            top_n: 返回结果数量上限，None 表示全部返回。
+            top_n: 返回结果数量上限，None 或非正数表示全部返回。
             request_name: 请求名称，用于追踪，此处不使用。
             model_set: 单个模型配置 dict。
 
@@ -1301,7 +1349,11 @@ class OpenAIChatClient:
         Raises:
             TypeError: model_set 不是 dict 时抛出。
             ValueError: query/documents 为空或 extra_params 非 dict 时抛出。
-            LLMConfigurationError: 当前 SDK 不支持原生 rerank 接口时抛出。
+            LLMAuthenticationError: API key 被 provider 拒绝（HTTP 401/403）。
+            LLMRateLimitError: provider 限流（HTTP 429）。
+            LLMTimeoutError: 请求超时。
+            ConnectionError: 网络传输层失败。
+            LLMAPIError: 其他 HTTP 错误或响应协议错误。
         """
         with provider_attempt("rerank.create", model_set, request_name, kind="rerank", stream=False):
 
@@ -1312,79 +1364,209 @@ class OpenAIChatClient:
             if not documents:
                 raise ValueError("documents 不能为空")
 
-            api_key, base_url, timeout, trust_env, force_ipv4, _extra_params, extra_headers, extra_query, explicit_body = (
+            api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = (
                 self._extract_model_params(model_set)
             )
-            client = self._get_client(
-                api_key=api_key,
-                base_url=base_url,
-                timeout=timeout,
-                trust_env=trust_env,
-                force_ipv4=force_ipv4,
-            )
+            limited_top_n = self._normalize_rerank_top_n(top_n)
 
-            # 尝试调用 SDK 原生 rerank 接口
-            rerank_api = getattr(client, "rerank", None)
-            rerank_create = (
-                getattr(rerank_api, "create", None) if rerank_api is not None else None
-            )
-            if callable(rerank_create):
-                params: dict[str, Any] = {
-                    "model": model_name,
-                    "query": query,
-                    "documents": documents,
+            params: dict[str, Any] = {
+                "model": model_name,
+                "query": query,
+                "documents": documents,
+            }
+            if limited_top_n is not None:
+                params["top_n"] = limited_top_n
+            # rerank 请求体字段集合固定：extra_params.body 只能补充额外字段，
+            # 不能覆盖 model/query/documents 这三个由调用方决定的核心字段。
+            reserved_body_fields = {"model", "query", "documents"}
+            params.update(
+                {
+                    key: value
+                    for key, value in explicit_body.items()
+                    if key not in reserved_body_fields
                 }
-                if isinstance(top_n, int) and top_n > 0:
-                    params["top_n"] = top_n
-
-                # 应用 extra_params 中的特殊键：headers/query/body
-                # rerank 接口参数集合有限，普通 extra_params 不透传，仅这三个 HTTP 层特殊键生效
-                if explicit_body:
-                    params["extra_body"] = explicit_body
-                if extra_headers:
-                    params["extra_headers"] = extra_headers
-                if extra_query:
-                    params["extra_query"] = extra_query
-
-                log_provider_request_body(
-                    "rerank.create",
-                    params,
-                    model_set=model_set, request_name=request_name,
-                    token_counter=count_payload_tokens,
-                )
-                trace = start_provider("rerank.create", params, kind="rerank")
-                maybe_resp = rerank_create(**params)
-                if inspect.isawaitable(maybe_resp):
-                    resp = await maybe_resp
-                else:
-                    resp = maybe_resp
-
-                trace.raw(resp)
-                data = (
-                    getattr(resp, "results", None)
-                    or getattr(resp, "data", None)
-                    or []
-                )
-                out: list[dict[str, Any]] = []
-                for rec in data:
-                    idx = getattr(rec, "index", None)
-                    score = getattr(rec, "relevance_score", None)
-                    if score is None:
-                        score = getattr(rec, "score", None)
-                    index = int(idx) if isinstance(idx, int) else 0
-                    out.append(
-                        {
-                            "index": index,
-                            "score": float(score) if isinstance(score, (int, float)) else 0.0,
-                            "document": documents[index] if 0 <= index < len(documents) else None,
-                        }
-                    )
-                trace.result(results=out, usage=_extract_usage(resp))
-                return out
-
-            raise LLMConfigurationError(
-                f"当前 SDK 客户端不支持原生 rerank 接口，模型：{model_name}"
             )
+            # endpoint 配置只用于路由，不应泄漏到请求体里。
+            params.pop("rerank_url", None)
+            params.pop("rerank_endpoint", None)
+
+            endpoint = self._resolve_rerank_endpoint(
+                model_set=model_set,
+                base_url=base_url,
+                extra_params=extra_params,
+            )
+
+            log_provider_request_body(
+                "rerank.create",
+                params,
+                token_counter=count_payload_tokens,
+            )
+
+            import httpx
+
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+            # extra_headers 只能补充请求头，不能覆盖认证与内容类型契约：
+            # 允许覆盖 Authorization 等于允许把 API key 发往攻击者指定的主机。
+            headers.update(
+                {
+                    key: value
+                    for key, value in extra_headers.items()
+                    if key.casefold() not in {"authorization", "content-type"}
+                }
+            )
+
+            # 统一复用共享 timeout builder，与其他 provider 客户端保持同一套超时策略。
+            timeout_config = build_httpx_timeout(timeout)
+            transport = build_httpx_transport(force_ipv4=force_ipv4)
+
+            trace = start_provider("rerank.create", params, kind="rerank")
+            try:
+                async with httpx.AsyncClient(
+                    timeout=timeout_config,
+                    trust_env=trust_env,
+                    transport=transport,
+                ) as http_client:
+                    response = await http_client.post(
+                        endpoint,
+                        params=extra_query,
+                        headers=headers,
+                        json=params,
+                    )
+            except httpx.TimeoutException as exc:
+                raise LLMTimeoutError(
+                    "Rerank API request timed out", timeout=timeout, model=model_name
+                ) from exc
+            except httpx.TransportError as exc:
+                raise ConnectionError(
+                    f"Rerank API transport failed: {type(exc).__name__}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise LLMConfigurationError(
+                    f"Rerank API request configuration failed: {type(exc).__name__}"
+                ) from exc
+
+            if trace is not None:
+                try:
+                    trace.raw(response.json())
+                except ValueError:
+                    trace.raw({"status_code": response.status_code})
+            self._raise_for_rerank_status(response, model_name=model_name)
+            ranked = self._parse_rerank_payload(response, model_name=model_name)
+            for item in ranked:
+                index = item["index"]
+                item["document"] = documents[index] if 0 <= index < len(documents) else None
+            ranked.sort(key=lambda item: item["score"], reverse=True)
+            if limited_top_n is not None:
+                ranked = ranked[:limited_top_n]
+            if trace is not None:
+                trace.result(results=ranked, usage={})
+            return ranked
+
+    @staticmethod
+    def _normalize_rerank_top_n(top_n: int | None) -> int | None:
+        """把 top_n 归一化为正整数，bool 与非正数视为"不限制"。"""
+        if isinstance(top_n, bool) or not isinstance(top_n, int) or top_n <= 0:
+            return None
+        return top_n
+
+    @staticmethod
+    def _resolve_rerank_endpoint(
+        *,
+        model_set: dict[str, Any],
+        base_url: str | None,
+        extra_params: dict[str, Any],
+    ) -> str:
+        """解析 rerank endpoint：显式 URL 优先，其次 base_url 拼接 /rerank。
+
+        显式 URL 必须是合法的 HTTP(S) 地址且不含 userinfo：
+        rerank 请求会携带 Authorization 头，允许 ``file://`` 之类的地址或
+        内嵌凭据会导致密钥被发往非预期目标。
+
+        Raises:
+            LLMConfigurationError: endpoint 格式非法时抛出。
+        """
+        configured = model_set.get("rerank_url") or model_set.get("rerank_endpoint")
+        if not configured:
+            configured = extra_params.get("rerank_url") or extra_params.get(
+                "rerank_endpoint"
+            )
+        if configured:
+            endpoint = str(configured)
+            parsed = urlsplit(endpoint)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise LLMConfigurationError(
+                    "rerank endpoint 必须是合法的 http(s) URL"
+                )
+            if parsed.username or parsed.password:
+                raise LLMConfigurationError(
+                    "rerank endpoint 不允许包含用户名或密码"
+                )
+            return endpoint
+        return f"{(base_url or 'https://api.openai.com/v1').rstrip('/')}/rerank"
+
+    @staticmethod
+    def _raise_for_rerank_status(response: Any, *, model_name: str) -> None:
+        """把 rerank HTTP 状态码映射为标准 LLM 异常。"""
+        status_code = response.status_code
+        if status_code in {401, 403}:
+            raise LLMAuthenticationError(
+                f"Rerank API authentication failed (HTTP {status_code})",
+                model=model_name,
+            )
+        if status_code == 429:
+            raise LLMRateLimitError(
+                "Rerank API rate limit exceeded",
+                retry_after=parse_retry_after(getattr(response, "headers", None)),
+                model=model_name,
+            )
+        if not response.is_success:
+            raise LLMAPIError(
+                f"Rerank API returned HTTP {status_code}",
+                status_code=status_code,
+                model=model_name,
+            )
+
+    @staticmethod
+    def _parse_rerank_payload(response: Any, *, model_name: str) -> list[dict[str, Any]]:
+        """校验并解析 rerank 响应体，返回未排序的 index/score 列表。"""
+
+        def protocol_error(message: str) -> LLMAPIError:
+            return LLMAPIError(
+                message, status_code=response.status_code, model=model_name
+            )
+
+        try:
+            payload = response.json()
+        except (ValueError, TypeError) as exc:
+            raise protocol_error("Rerank API response must be valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise protocol_error("Rerank API response must be a JSON object")
+        if "results" not in payload and "data" not in payload:
+            raise protocol_error("Rerank API response lacks results/data")
+
+        data = payload.get("results", payload.get("data"))
+        if data is None:
+            data = []
+        if not isinstance(data, list):
+            raise protocol_error("Rerank API response results must be a list")
+
+        ranked: list[dict[str, Any]] = []
+        for record in data:
+            if not isinstance(record, dict):
+                raise protocol_error("Rerank API result item must be an object")
+            index = record.get("index")
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise protocol_error("Rerank API result index must be an integer")
+            score = record.get("relevance_score")
+            if score is None:
+                score = record.get("score")
+            if isinstance(score, bool) or not isinstance(score, (int, float)):
+                raise protocol_error("Rerank API result score must be numeric")
+            ranked.append({"index": index, "score": float(score), "document": None})
+        return ranked
 
     async def create_transcription(
         self,

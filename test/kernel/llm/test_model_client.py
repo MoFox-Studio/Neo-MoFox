@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 from src.kernel.llm.model_client.base import ChatModelClient, StreamEvent
+from src.kernel.llm.model_client.gemini_client import GeminiChatClient
 from src.kernel.llm.model_client.openai_client import OpenAIChatClient, _image_to_data_url, _is_data_url, _payloads_to_openai_messages
 from src.kernel.llm.model_client.registry import ModelClientRegistry
 from src.kernel.llm.payload import Image, LLMPayload, Text, ToolResult
@@ -510,7 +511,7 @@ class TestModelClientRegistry:
         """Test creating ModelClientRegistry."""
         registry = ModelClientRegistry()
         assert registry.openai is not None
-        assert registry.gemini is None
+        assert isinstance(registry.gemini, GeminiChatClient)
         assert registry.bedrock is None
 
     def test_get_client_for_openai_model(self) -> None:
