@@ -158,6 +158,126 @@ class TestReasoningHistoryCompatibility:
             assert "reasoning_content" not in assistant_msg
 
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        (
+            "reasoning_mode", "has_tools", "tool_call_compat", "has_reasoning",
+            "thinking", "expect_reasoning", "expect_backfill",
+        ),
+        [
+            ("all", False, False, True, False, True, True),
+            ("all", False, False, False, False, True, True),
+            ("all", True, True, False, False, True, True),
+            ("on_tool", True, False, True, False, True, True),
+            ("on_tool", True, False, False, True, True, True),
+            ("on_tool", True, False, False, False, False, False),
+            ("on_tool", False, False, True, True, False, False),
+            ("on_tool", True, True, True, True, False, False),
+            (True, False, False, True, False, True, True),
+            (True, False, False, False, False, False, False),
+            (True, False, False, False, True, True, True),
+            ("deepseek", False, False, True, False, True, True),
+            ("kimi", False, False, True, False, True, True),
+            ("auto", True, True, True, False, True, True),
+            (False, True, False, True, True, False, False),
+            ("", True, False, True, True, False, False),
+            (None, True, False, True, True, False, False),
+        ],
+    )
+    async def test_upstream_modes_preserve_legacy_backfill(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        reasoning_mode: Any,
+        has_tools: bool,
+        tool_call_compat: bool,
+        has_reasoning: bool,
+        thinking: bool,
+        expect_reasoning: bool,
+        expect_backfill: bool,
+    ) -> None:
+        """新模式遵循实际 tools，旧配置保留真值与有条件回填语义。"""
+        class HistoryTool:
+            """提供原生工具声明，不执行任何业务操作。"""
+
+            @classmethod
+            def to_schema(cls) -> dict[str, Any]:
+                """返回离线测试工具的 JSON Schema。"""
+                return {
+                    "name": "history_tool",
+                    "description": "History mode test",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+
+        captured_params: dict[str, Any] = {}
+        response = MagicMock()
+        response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content=json.dumps({"message": "OK", "tool_calls": []}),
+                    tool_calls=None,
+                    reasoning_content=None,
+                ),
+                finish_reason="stop",
+            )
+        ]
+        response.usage = None
+
+        async def mock_create(**kwargs: Any) -> Any:
+            """只替换 SDK 边界，捕获真实适配器最终发送的参数。"""
+            captured_params.update(kwargs)
+            return response
+
+        sdk = MagicMock()
+        sdk.chat.completions.create = mock_create
+        client = OpenAIChatClient()
+
+        def mock_get_client(**kwargs: Any) -> Any:
+            """返回内存 SDK，禁止真实连接。"""
+            return sdk
+
+        monkeypatch.setattr(client, "_get_client", mock_get_client)
+        first_parts: list[Any] = [Text("first answer")]
+        if has_reasoning:
+            first_parts.insert(0, ReasoningText("internal reasoning"))
+        payloads = [
+            LLMPayload(ROLE.USER, Text("question")),
+            LLMPayload(ROLE.ASSISTANT, first_parts),
+            LLMPayload(ROLE.ASSISTANT, Text("plain answer")),
+        ]
+        if has_tools:
+            payloads.insert(0, LLMPayload(ROLE.TOOL, HistoryTool))
+        await client.create(
+            model_name="test-model",
+            payloads=payloads,
+            tools=[],
+            request_name="reasoning-mode-merge",
+            model_set={
+                "api_key": "test-key",
+                "base_url": "https://test.example.invalid",
+                "tool_call_compat": tool_call_compat,
+                "extra_params": {
+                    "reasoning_history_mode": reasoning_mode,
+                    "enable_thinking": thinking,
+                },
+            },
+            stream=False,
+        )
+
+        messages = captured_params["messages"]
+        assistants = [message for message in messages if message["role"] == "assistant"]
+        assert len(assistants) == 2
+        assert ("tools" in captured_params) is (has_tools and not tool_call_compat)
+        assert ("reasoning_content" in assistants[0]) is expect_reasoning
+        assert ("reasoning_content" in assistants[1]) is expect_backfill
+        if expect_reasoning:
+            expected = "internal reasoning" if has_reasoning else "first answer"
+            assert assistants[0]["reasoning_content"] == expected
+        if expect_backfill:
+            assert assistants[1]["reasoning_content"] == "plain answer"
+        assert "reasoning_history_mode" not in captured_params
+        assert "reasoning_history_mode" not in captured_params.get("extra_body", {})
+
+
 class TestRerankHTTPWithObservation:
     """测试 HTTP rerank 保留核心实现并加入观测（O2）。
 

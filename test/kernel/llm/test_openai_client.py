@@ -874,7 +874,7 @@ class TestOpenAIChatClient:
             "temperature": None,
             "extra_params": {
                 "enable_thinking": True,
-                "reasoning_history_mode": "deepseek",
+                "reasoning_history_mode": "all",
             },
         }
 
@@ -897,7 +897,7 @@ class TestOpenAIChatClient:
 
     @pytest.mark.asyncio
     async def test_create_backfills_reasoning_content_when_history_already_contains_it(self):
-        """测试当上下文中已有 reasoning_content 并开启 auto 模式时，会为其他 assistant 历史回填。"""
+        """测试当上下文中已有 reasoning_content 并开启 all 模式时，会为其他 assistant 历史回填。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
 
         mock_completion = MagicMock()
@@ -933,7 +933,7 @@ class TestOpenAIChatClient:
             "timeout": None,
             "max_tokens": None,
             "temperature": None,
-            "extra_params": {"reasoning_history_mode": "auto"},
+            "extra_params": {"reasoning_history_mode": "all"},
         }
 
         await client.create(
@@ -1050,8 +1050,8 @@ class TestOpenAIChatClient:
         assert result[3] == "中间思考"
 
     @pytest.mark.asyncio
-    async def test_default_tool_choice_is_auto_for_deepseek(self):
-        """测试 DeepSeek 场景下默认 tool_choice 为 auto（避免 required 触发 grammar 编译失败）。"""
+    async def test_deepseek_tools_do_not_inject_tool_choice(self) -> None:
+        """DeepSeek 请求保留工具声明，不额外注入 tool_choice 默认值。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
 
         class MockTool:
@@ -1105,11 +1105,12 @@ class TestOpenAIChatClient:
         )
 
         call_kwargs = mock_chat.completions.create.call_args.kwargs
-        assert call_kwargs["tool_choice"] == "auto"
+        assert "tool_choice" not in call_kwargs
+        assert call_kwargs["tools"][0]["function"]["name"] == "test_tool"
 
     @pytest.mark.asyncio
-    async def test_default_tool_choice_is_required_for_non_deepseek(self):
-        """测试非 DeepSeek 提供商默认 tool_choice 也为 auto。"""
+    async def test_other_tools_do_not_inject_tool_choice(self) -> None:
+        """其他提供商也保留 SDK/provider 的默认工具选择策略。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
 
         class MockTool:
@@ -1159,7 +1160,8 @@ class TestOpenAIChatClient:
         )
 
         call_kwargs = mock_chat.completions.create.call_args.kwargs
-        assert call_kwargs["tool_choice"] == "auto"
+        assert "tool_choice" not in call_kwargs
+        assert call_kwargs["tools"][0]["function"]["name"] == "test_tool"
 
     @pytest.mark.asyncio
     async def test_create_with_tool_call_compat_prompt_and_parsing(self):
@@ -1396,8 +1398,8 @@ class TestReasoningHistoryMode:
         assert "reasoning_content" not in messages[1]
 
     @pytest.mark.asyncio
-    async def test_deepseek_mode_keeps_and_backfills_reasoning_content(self):
-        """deepseek 模式下应保留并回填 assistant 历史的 reasoning_content。"""
+    async def test_all_mode_keeps_and_backfills_reasoning_content(self):
+        """all 模式下应保留并回填 assistant 历史的 reasoning_content。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
 
         mock_completion = MagicMock()
@@ -1426,11 +1428,11 @@ class TestReasoningHistoryMode:
             "base_url": None,
             "max_tokens": None,
             "temperature": None,
-            "extra_params": {"reasoning_history_mode": "deepseek"},
+            "extra_params": {"reasoning_history_mode": "all"},
         }
 
         await client.create(
-            model_name="deepseek-chat",
+            model_name="kimi-k2",
             payloads=payloads,
             tools=[],
             request_name="test",
@@ -1446,8 +1448,68 @@ class TestReasoningHistoryMode:
         assert messages[2]["reasoning_content"] == "plain"
 
     @pytest.mark.asyncio
-    async def test_kimi_mode_backfills_reasoning_content(self):
-        """kimi 模式下同样会回填 assistant 历史的 reasoning_content。"""
+    async def test_default_mode_sends_reasoning_when_tools_present(self):
+        """未配置时默认 on_tool，在请求携带 tools 时保留并回填 reasoning_content。"""
+        from src.kernel.llm.model_client.openai_client import OpenAIChatClient
+
+        class MockTool:
+            @classmethod
+            def to_schema(cls):
+                return {
+                    "name": "test_tool",
+                    "description": "A test tool",
+                    "parameters": {"type": "object"},
+                }
+
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock()]
+        mock_completion.choices[0].message.content = "OK"
+        mock_completion.choices[0].message.tool_calls = None
+        mock_completion.usage = None
+
+        mock_chat = AsyncMock()
+        mock_chat.completions.create = AsyncMock(return_value=mock_completion)
+
+        mock_openai_client = MagicMock()
+        mock_openai_client.chat.completions.create = mock_chat.completions.create
+
+        client = OpenAIChatClient()
+        client._clients = {}
+        client._get_client = MagicMock(return_value=mock_openai_client)
+
+        payloads = [
+            LLMPayload(ROLE.USER, Text("Hi")),
+            LLMPayload(ROLE.TOOL, MockTool),
+            LLMPayload(ROLE.ASSISTANT, [ReasoningText("think"), Text("answer")]),
+            LLMPayload(ROLE.ASSISTANT, [Text("plain")]),
+        ]
+        model_set = {
+            "api_key": "test-key",
+            "base_url": None,
+            "max_tokens": None,
+            "temperature": None,
+            "extra_params": {},
+        }
+
+        await client.create(
+            model_name="deepseek-chat",
+            payloads=payloads,
+            tools=[],
+            request_name="test",
+            model_set=model_set,
+            stream=False,
+        )
+
+        call_kwargs = mock_chat.completions.create.call_args.kwargs
+        assert "tools" in call_kwargs
+        messages = call_kwargs["messages"]
+        assert messages[1]["reasoning_content"] == "think"
+        # 缺失字段的 assistant 历史在带 tools 时统一回填
+        assert messages[2]["reasoning_content"] == "plain"
+
+    @pytest.mark.asyncio
+    async def test_on_tool_mode_strips_reasoning_without_tools(self):
+        """on_tool 模式在请求不带 tools 时移除 reasoning_content。"""
         from src.kernel.llm.model_client.openai_client import OpenAIChatClient
 
         mock_completion = MagicMock()
@@ -1468,18 +1530,18 @@ class TestReasoningHistoryMode:
 
         payloads = [
             LLMPayload(ROLE.USER, Text("Hi")),
-            LLMPayload(ROLE.ASSISTANT, [Text("plain")]),
+            LLMPayload(ROLE.ASSISTANT, [ReasoningText("think"), Text("answer")]),
         ]
         model_set = {
             "api_key": "test-key",
             "base_url": None,
             "max_tokens": None,
             "temperature": None,
-            "extra_params": {"reasoning_history_mode": "kimi"},
+            "extra_params": {"reasoning_history_mode": "on_tool"},
         }
 
         await client.create(
-            model_name="moonshotai/kimi-k2.5",
+            model_name="deepseek-chat",
             payloads=payloads,
             tools=[],
             request_name="test",
@@ -1488,9 +1550,8 @@ class TestReasoningHistoryMode:
         )
 
         call_kwargs = mock_chat.completions.create.call_args.kwargs
-        messages = call_kwargs["messages"]
-        assert messages[1]["role"] == "assistant"
-        assert messages[1]["reasoning_content"] == "plain"
+        assert "tools" not in call_kwargs
+        assert "reasoning_content" not in call_kwargs["messages"][1]
 
 
 @pytest.mark.asyncio

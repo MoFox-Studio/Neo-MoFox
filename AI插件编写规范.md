@@ -49,6 +49,8 @@ default_chatter:chatter:default_chatter
   插件类若再显式声明 `plugin_version` / `plugin_description` / `plugin_author`，
   会被视为历史遗留冗余并触发 `DeprecationWarning`（不影响加载运行）。
 - 如果插件有配置类，必须在 `configs: list[type]` 中声明。
+- 插件级组件依赖在类属性 `dependencies: list[str]` 中声明（完整组件签名）。
+  注意：历史属性 `dependent_components` 已从 `BasePlugin` 移除，新代码一律使用 `dependencies`。
 - `get_components()` 必须返回组件类列表，返回值是 `list[type]`，不是实例列表。
 
 最小形式：
@@ -62,7 +64,7 @@ class MyPlugin(BasePlugin):
     plugin_name = "my_plugin"
 
     configs: list[type] = []
-    dependent_components: list[str] = []
+    dependencies: list[str] = []
 
     def get_components(self) -> list[type]:
         return []
@@ -144,10 +146,10 @@ from plugins.my_plugin.config import MyPluginConfig
 | Tool | `BaseTool` | `name` | 给 LLM 查询信息或计算 | `__init__(plugin)` | `execute()` | `(bool, str | dict)` | 偏信息获取，不做明显副作用 |
 | Action | `BaseAction` | `name` | 给 LLM 执行动作 | `__init__(chat_stream, plugin)` | `execute()` | `(bool, str)` | 偏副作用；会注入 `ChatStream` |
 | Agent | `BaseAgent` | `name` | 需要私有 usables 的复杂任务代理 | `__init__(stream_id, plugin)` | `execute()` | `(bool, str | dict)` | `usables` 是私有组件集，不进全局注册表 |
-| Chatter | `BaseChatter` | `name` | 作为对话主控制器 | `__init__(stream_id, plugin)` | `execute()` | `AsyncGenerator[Wait | Success | Failure | Stop, None]` | 是对话流程核心，不等于普通 Tool |
-| Command | `BaseCommand` | `name` | 处理命令式输入 | `__init__(plugin, stream_id)` | 路由方法而非通常重写 `execute()` | `(bool, str)` | 使用 `@cmd_route` 构建 Trie 路由 |
+| Chatter | `BaseChatter` | `name` | 作为对话主控制器 | `__init__(stream_id, plugin)` | `execute()` | `AsyncGenerator[Wait | Success | Failure | Stop, WaitResumeEvent | None]` | 是对话流程核心，不等于普通 Tool |
+| Command | `BaseCommand` | `name` | 处理命令式输入 | `__init__(plugin, stream_id, message_id="", message=None)` | 路由方法而非通常重写 `execute()` | `(bool, str)` | 使用 `@cmd_route` 构建 Trie 路由；`message_id` / `message` 可选注入 |
 | Service | `BaseService` | `name` | 给其他插件/组件直接调用能力 | `__init__(plugin)` | 自定义公开方法 | 自定 | 适合暴露稳定能力接口 |
-| EventHandler | `BaseEventHandler` | `name` | 响应系统事件 | `__init__(plugin)` | `execute(event_name, params)` | `(EventDecision, dict[str, Any])` | 可订阅、拦截、调整事件参数 |
+| EventHandler | `BaseEventHandler` | `name` | 响应系统事件 | `__init__(plugin)` | `execute(event_name, params)` | `(EventDecision, dict[str, Any])` | 可订阅、拦截、调整事件参数；支持 `weight` / `intercept_message` / `timeout` |
 | Router | `BaseRouter` | `name` | 暴露 HTTP API | `__init__(plugin)` | `register_endpoints()` | 无 | 基于 FastAPI，不要用于聊天逻辑 |
 | Adapter | `BaseAdapter` | `name` | 平台协议桥接 | `__init__(core_sink, plugin=None, **kwargs)` | `from_platform_message()`、`get_bot_info()` | `MessageEnvelope` / `dict` | 负责平台消息与统一消息模型转换 |
 
@@ -193,6 +195,7 @@ class DemoConfig(BaseConfig):
 - 必须实现 `async def execute(...) -> tuple[bool, str | dict]`。
 - 参数必须有类型注解和含义清晰的文档字符串，管理器会据此生成 schema。
 - Tool 用于查询和返回信息，不适合承担明确的外部副作用。
+- Tool 没有 `chat_stream` 注入，但管理器（tool_manager + `tool_api`）会在调用时为实例绑定运行时上下文：可读取 `self.stream_id`（已绑定流的 ID，或经 `trigger_message` 兜底）与 `self.trigger_message`（触发本次调用的原始 `Message`，可为 `None`）。
 
 ### 4.3 Action
 
@@ -215,17 +218,19 @@ class DemoConfig(BaseConfig):
 
 - 继承 `BaseChatter`。
 - 必须定义统一属性 `name` 和 `description`（旧属性 `chatter_name` / `chatter_description` 已弃用但仍可用）。
-- 必须实现 `async def execute(self) -> AsyncGenerator[ChatterResult, None]`。
-- `ChatterResult` 由 `Wait`、`Success`、`Failure`、`Stop` 组成。
+- 必须实现 `async def execute(self) -> AsyncGenerator[ChatterResult, WaitResumeEvent | None]`。
+- `ChatterResult` 由 `Wait`、`Success`、`Failure`、`Stop` 组成；生成器还可收到 `WaitResumeEvent`（`source` 内置于 `"message"` / `"timer"` / `"sub_agent"` / `"internal_context"`，插件可通过额外 source 唤醒）。
+- 可选类属性 `stream_tick_interval` / `allow_message_buffer` 用于覆盖当前聊天流的运行时默认行为（`None` 表示跟随框架默认）。
 - Chatter 是对话主流程控制器，会组合 Tool、Action、Agent，而不是替代它们。
 
 ### 4.6 Command
 
 - 继承 `BaseCommand`。
-- 必须定义统一属性 `name`（旧属性 `command_name` 已弃用但仍可用），可定义 `command_prefix`、`permission_level`。
+- 必须定义统一属性 `name`（旧属性 `command_name` 已弃用但仍可用），可定义 `command_prefix`、`permission_level`、`associated_platforms`、`chat_type`。
 - 通常不要重写 `execute()`；正确做法是写若干个被 `@cmd_route(...)` 装饰的方法。
-- 路由方法返回值约定为 `(bool, str)`。
+- 路由方法返回值约定为 `(bool, str)`，参数按类型注解自动转换（支持 `int` / `float` / `bool` / `list[T]` 等）。
 - `BaseCommand.execute()` 接收的是已经去掉前缀和 `name` 的子路由文本，不要按完整原始命令文本编写逻辑。
+- 构造函数为 `__init__(plugin, stream_id, message_id="", message=None)`：`message_id` / `message` 可选注入，用于在回复中定位触发命令的原始消息（含图片等媒体内容）。
 
 ### 4.7 Service
 
@@ -243,6 +248,10 @@ class DemoConfig(BaseConfig):
   - `EventDecision.SUCCESS, params`
   - `EventDecision.STOP, params`
   - `EventDecision.PASS, params`
+- 可选类属性：
+  - `weight: int = 0`：处理器权重，数值越大越先执行。
+  - `intercept_message: bool = False`：为 True 时消息不再传递给后续处理器。
+  - `timeout: float | None = None`：订阅者级超时秒数。`None` 沿用 EventBus 全局默认（30s）；`<= 0` 禁用超时保护（长耗时处理器如 agent 工具调用应设为 `0`）。
 - 需要改变事件传播行为时用 EventHandler，不要把这类逻辑塞进 Chatter 或 Adapter。
 
 ### 4.9 Router
@@ -259,11 +268,12 @@ class DemoConfig(BaseConfig):
 - 必须实现：
   - `async def from_platform_message(self, raw: Any) -> MessageEnvelope`
   - `async def get_bot_info(self) -> dict[str, Any]`
+- 出站发送：若未配置自动传输，必须重写 `async def _send_platform_message(self, envelope) -> PlatformSendResult`；返回值 `PlatformSendResult` 携带 `success` / `message_id` / `error`，用于精确区分「成功且带 ID / 成功但无 ID / 失败」三类结果。
 - 可选实现：
   - `on_adapter_loaded()`
   - `on_adapter_unloaded()`
-  - `health_check()`
-  - `reconnect()`
+  - `health_check()`（默认基于连接状态）
+  - `reconnect()`（默认 stop → sleep → start）
 - Adapter 只负责平台协议桥接和消息模型转换，不负责业务决策。
 
 ## 5. manifest 与加载规则
@@ -332,7 +342,7 @@ class DemoConfig(BaseConfig):
 - `include` 字段必须手工维护。系统不会自动扫描你的组件文件。
 - `component_type` 必须与真实组件类型匹配。
 - `component_name` 必须与组件类上的统一名称属性 `name` 匹配（旧属性如 `tool_name` / `action_name` 已弃用但仍可桥接到 `name`）。
-- `dependencies` 内的每一项都必须是完整组件签名。
+- `dependencies.plugins` 写插件名（可带 `name>=x.y.z` 版本约束，见 5.1.4）；`dependencies.components` 与 `include[].dependencies` 内的每一项都必须是完整组件签名。
 - `entry_point` 默认语义是插件根目录下的 `plugin.py`。
 - 如果声明了 `python_dependencies`，要确保运行环境可安装这些依赖。
 - `api_version` 声明插件用到的插件 API 模块版本，支持字符串（等价于对全部 24 个 `*_api` 模块应用同一要求）与 `dict[str, str]`（仅校验声明模块，key 必须是合法 API 模块名）两种形式。插件 `import` 了任何 `*_api` 模块就应声明此项，优先用 dict 形式精确声明。与 `min_core_version` 同等判断（声明即校验，都声明则都须满足）。
@@ -381,9 +391,8 @@ class DemoConfig(BaseConfig):
 兼容性检查规则（每个声明模块）：
 
 - 主版本号不一致 → **拒绝加载**（存在破坏性变更）
-- 核心 API 的次版本号低于插件要求 → **拒绝加载**（核心过旧）
-- 核心 API 的次版本号与小版本号均不低于插件要求 → **允许加载**（兼容或仅有可向下兼容的差异）
-- 核心 API 的次版本号高于插件要求 → **允许加载，但警告**（可能存在非兼容变更）
+- 核心版本低于插件要求（核心次版本号更低，或次版本号相同但小版本号更低）→ **拒绝加载**（核心过旧）
+- 其余情况（核心不低于插件要求，含核心版本高于插件要求的场景）→ **允许加载**（兼容或仅有可向下兼容的差异）
 
 dict 形式示例：
 
@@ -395,7 +404,7 @@ dict 形式示例：
 }
 ```
 
-合法 API 模块名（24 个，与 `src/app/plugin_system/api/` 一一对应）：`action_api`、`adapter_api`、`agent_api`、`chat_api`、`command_api`、`config_api`、`database_api`、`event_api`、`jev_api`、`llm_api`、`log_api`、`media_api`、`message_api`、`permission_api`、`person_api`、`plugin_api`、`prompt_api`、`request_inspector_api`、`router_api`、`send_api`、`service_api`、`storage_api`、`stream_api`、`tool_api`。任何不在此清单中的 key 都会被拒绝加载（防止拼写错误被静默接受）。
+合法 API 模块名（24 个，与 `src/app/plugin_system/api/` 一一对应）：`action_api`、`adapter_api`、`agent_api`、`chat_api`、`command_api`、`config_api`、`database_api`、`event_api`、`jev_api`、`llm_api`、`log_api`、`media_api`、`message_api`、`permission_api`、`person_api`、`plugin_api`、`prompt_api`、`request_inspector_api`、`router_api`、`send_api`、`service_api`、`storage_api`、`stream_api`、`tool_api`。任何不在此清单中的 key 都会被拒绝加载（防止拼写错误被静默接受）。模块清单的权威事实源是 `src/app/plugin_system/api/__init__.py` 的 `PLUGIN_API_VERSIONS`，新增模块后请以该字典为准。
 
 ##### `min_core_version`（声明核心能力版本）
 
@@ -414,26 +423,34 @@ dict 形式示例：
 
 两个字段是「或」关系，**按需填写**：插件 `import` 了任何 `*_api` 模块就写 `api_version`；插件用到「必须更高版本核心才支持」的能力（新事件、新内核接口、新组件机制）就写 `min_core_version`；两者都不需要也可都不写（仅警告但加载）。一旦声明，即按 AND 同等判断：声明了哪一项就校验哪一项，只要任一项声明且不满足即拒绝注册。
 
-#### 5.1.4 `dependencies.plugins` 目前只用于插件级加载顺序
+#### 5.1.4 `dependencies.plugins` 参与加载顺序并校验版本约束
 
-源码当前会基于 `manifest.dependencies.plugins`：
+源码当前基于 `manifest.dependencies.plugins` 做三件事：
 
-- 计算插件加载顺序
+- 计算插件加载顺序（`PluginDependencyResolver` 拓扑排序）
 - 剔除缺失依赖插件
 - 检查循环依赖
 
-但这里有两个实际限制：
+版本约束的处理（以当前 loader 为准）：**支持约束语法且会真正校验**。每条引用解析出「插件名 + 可选版本约束」，缺失的依赖、版本不满足的依赖都会被剔除（并把原因记入 `_failed_plugins`），依赖因此缺失的插件也会被递归剔除。
 
-- 解析时当前只取 `:` 前面的插件名，**不会真正执行版本约束判断**。
-- `dependencies.components` 和 `include[].dependencies` 不参与插件级拓扑排序，它们主要是组件注册元数据。
+两种写法等价：
 
-所以如果你写：
+```json
+"plugins": ["other_plugin>=1.2.0"]
+```
+
+或兼容旧式写法：
 
 ```json
 "plugins": ["other_plugin:>=1.2.0"]
 ```
 
-当前真实生效的仍然主要是 `other_plugin` 这个名字本身。
+版本约束按 `packaging.specifiers.SpecifierSet` 语义与依赖插件的 `manifest.version` 比对；约束格式非法时按「无法满足」处理。
+
+实际限制仍然存在：
+
+- `dependencies.components` 和 `include[].dependencies` **不参与**插件级拓扑排序，它们主要是组件注册元数据。
+- 插件级依赖只认插件名，组件级依赖必须用完整组件签名并写在组件类的 `dependencies` / `include[].dependencies` 中。
 
 #### 5.1.5 `include` 目前更接近声明清单，不是唯一注册来源
 
@@ -454,6 +471,16 @@ dict 形式示例：
 - 把 `manifest.include` 当成必须维护的声明文档；
 - 同时确保 `get_components()` 与 `configs` 的真实返回与之保持一致；
 - 如果想禁用组件，不要只改 `manifest.include[].enabled`，还要在插件代码里控制 `get_components()` 的返回。
+
+#### 5.1.6 新增 API 模块速览
+
+相对早期版本，`src/app/plugin_system/api/` 新增了以下模块（均为对应 manager 的薄封装，`API_VERSION` 在各自模块顶部声明）：
+
+- `tool_api`：`ToolManager` 的封装，提供 Tool 组件查询与筛选（如 `filter_tools`），与 `action_api` / `agent_api` 对称。
+- `person_api`：用户身份与服务能力——身份标识生成、用户记录管理、昵称/群名片变更历史、用户关联查询与印象/态度维护。涉及数据库读写的函数为异步（需 `await`），身份标识生成函数为同步。
+- `request_inspector_api`：请求体监视器统一入口，提供当前进程请求快照（`get_request_inspector_snapshot`）、摘要与详情查询、缓冲清理与统计（供 WebUI / 调试插件使用），数据来自 `src.kernel.llm.request_inspector`。
+
+以上模块同样纳入 `PLUGIN_API_VERSIONS` 校验；插件用到哪个就把它声明进 `api_version` 的 dict。
 
 ## 6. 目录与导入约定
 
@@ -658,15 +685,19 @@ dependencies = ["other_plugin:service:storage"]
 - 新增 `src/` 代码时需要配套测试；新增插件代码也应补对应测试。
 - 不要依赖含糊 fallback 掩盖真实错误，优先修根因。
 
-### 8.8 `dependent_components` 当前不是核心加载真源
+### 8.8 插件级依赖写在 `dependencies`，加载真源是 manifest
 
-`BasePlugin` 上有 `dependent_components` 类属性，但从当前主加载流程看，插件加载顺序与可加载性判断主要来自 `manifest.dependencies.plugins`，组件注册来自 `get_components()` 与 `configs`。
+`BasePlugin` 上的组件依赖类属性现在叫 `dependencies`（历史属性 `dependent_components` 已移除）。从当前主加载流程看：
+
+- 插件加载顺序与可加载性判断主要来自 `manifest.dependencies.plugins`（含版本约束校验，见 5.1.4）。
+- 组件注册来自 `get_components()` 与 `configs`；组件级依赖取自组件类的 `dependencies` 属性。
+- `BasePlugin.dependencies` / `dependent_components` 这类类属性只承担声明/文档作用。
 
 因此：
 
-- `dependent_components` 可以保留为插件内部声明；
-- 但不要只写这里而不写 manifest；
-- 当前真正影响插件级加载计划的仍然是 `manifest.json`。
+- 不要把依赖只写在插件类属性里，真正决定加载计划的是 `manifest.json`；
+- 插件间依赖用 `manifest.dependencies.plugins`（插件名或 `name>=x.y.z`）；
+- 组件级依赖用组件类上 `dependencies`（完整组件签名）。
 
 ### 8.9 system reminder 默认只存储，不会自动全局注入
 
@@ -679,6 +710,15 @@ dependencies = ["other_plugin:service:storage"]
 - `BaseAgent.create_llm_request(..., with_reminder="sub_actor")`
 
 所以如果一个插件的设计目标是“通过 reminder 影响模型行为”，除了写 reminder 之外，还必须确认目标调用链真的会注入对应 bucket。
+
+新版本还提供**流私有 reminder** API（写入 `stream:{stream_id}:{bucket}` 私有 bucket，仅对指定聊天流可见）：
+
+- `prompt_api.add_stream_reminder(stream_id, bucket, name, content, ...)`
+- `prompt_api.get_stream_reminder(stream_id, bucket, names=None)`
+- `prompt_api.delete_stream_reminder(stream_id, bucket, name)`
+- `prompt_api.clear_stream_reminders(stream_id)`
+
+chatter 通过 `create_request(with_reminder=...)` 调用时会**自动同时拾取**全局 bucket 与当前流私有 bucket，插件无需关心底层 bucket 命名。
 
 ### 8.10 PromptTemplate 在构建前会触发 `on_prompt_build`
 
@@ -697,6 +737,19 @@ dependencies = ["other_plugin:service:storage"]
 - 如果你要做 prompt 注入、notice 注入、上下文增强，优先考虑订阅 `on_prompt_build`；
 - 如果你只改了 system reminder，但目标 prompt 根本不用对应 bucket，那效果不会自动出现；
 - `PromptTemplate.build()` 对事件异常会静默降级，不会因为某个注入器出错就阻断整个 prompt 构建。
+
+### 8.11 供插件订阅的生命周期事件一览
+
+除 `BEFORE_MESSAGE_RECEIVED`（7.1）与 `ON_PROMPT_BUILD`（8.10）外，新版本还提供了以下可订阅事件（全部位于 `src.core.components.types.EventType`）：
+
+- 消息与通知：`ON_MESSAGE_RECEIVED`、`ON_MESSAGE_SENT` / `AFTER_MESSAGE_SENT`、`ON_NOTICE_RECEIVED`、`ON_RECEIVED_OTHER_MESSAGE`、`ON_INTERNAL_CONTEXT_REQUESTED`。
+- LLM 请求生命周期：`BEFORE_LLM_REQUEST`（可在请求发出前改写 `payloads` / `stream` / `tools`，修改会回写本次请求）、`AFTER_LLM_REQUEST`、`ON_LLM_REQUEST_FAILED`。
+- 组件筛选：`BEFORE_ACTION_FILTER` / `BEFORE_AGENT_FILTER` / `BEFORE_TOOL_FILTER`（在各管理器执行筛选前发布，处理器可修改 `component_classes` 控制最终组件类型）。
+- 调用生命周期：`BEFORE_TOOL_CALL` / `AFTER_TOOL_CALL` / `ON_TOOL_CALL_FAILED`、`BEFORE_ACTION_CALL` / `AFTER_ACTION_CALL` / `ON_ACTION_CALL_FAILED`、`BEFORE_COMMAND_EXECUTE` / `AFTER_COMMAND_EXECUTE` / `ON_COMMAND_EXECUTE_FAILED`。
+- 媒体识别：`ON_MEDIA_RECOGNIZE`（媒体落盘入库后触发，参数含 `media_hash` / `media_type` / `engine` / `base64_data` / `stream_id` / `description`，处理器可回写 `description` 或设置 `skip_engine` / `engine_processed`；`engine` 取值见 `MediaEngine`：`vlm` / `asr` / `video`）。
+- 生命周期：`ON_COMPONENT_LOADED` / `ON_COMPONENT_UNLOADED`、`ON_PLUGIN_UNLOADED`、`ON_ALL_PLUGIN_LOADED`。
+
+EventHandler 处理这些事件时同样遵循 `SUCCESS` / `STOP` / `PASS` 语义与异常转 `PASS` 的兜底；`EventType` 枚举可直接订阅，也可用 `EventType.X.value` 字符串订阅。
 
 ## 9. 最小完整插件模板
 
@@ -822,7 +875,7 @@ class DemoPlugin(BasePlugin):
     plugin_name = "demo_plugin"
 
     configs: list[type] = [DemoConfig]
-    dependent_components: list[str] = []
+    dependencies: list[str] = []
 
     def get_components(self) -> list[type]:
         """返回插件组件类。"""
@@ -856,13 +909,15 @@ AI 在生成插件前，先做下面的判定。
 6. Tool、Action、Agent、Chatter 的方法签名和返回值是否匹配基类要求。
 7. `dependencies` 是否写成完整组件签名。
 8. 是否误把副作用组件写成 Tool，或误把查询组件写成 Action。
-9. 是否错误假设 Tool/Service 拥有 `chat_stream`。
+9. 是否错误假设 Tool/Service 拥有 `chat_stream`（Tool 只能读运行时绑定的 `stream_id` / `trigger_message`）。
 10. 若有后台任务，是否使用了 `task_manager`。
 11. 是否补了文档字符串、类型注解，以及后续应补的测试。
 12. `manifest.name` 是否与插件类 `plugin_name` 一致。
 13. 是否误以为 `manifest.include[].enabled` 会自动禁用组件。
 14. 如果使用 Service，是否避免依赖单例实例语义。
-15. 如果依赖 system reminder，是否确认目标请求链实际传入了 `with_reminder`。
+15. 如果依赖 system reminder，是否确认目标请求链实际传入了 `with_reminder`，且明确使用的是全局还是流私有 bucket。
+16. 插件级依赖是否写到了 `manifest.dependencies.plugins`（而不是只依赖类属性 `dependencies`），组件级依赖是否写成完整组件签名。
+17. 若 `import` 了 `*_api` 模块，`manifest.api_version` 是否用 dict 形式精确声明（模块名以 `PLUGIN_API_VERSIONS` 为准）；EventHandler 是否考虑了 `weight` / `intercept_message` / `timeout`。
 
 如果以上任一项不满足，不应认为插件代码已经符合 Neo-MoFox 规范。
 
@@ -871,7 +926,7 @@ AI 在生成插件前，先做下面的判定。
 如果 AI 要生成的插件碰到下面这些场景，建议在动手前先读对应源码，而不要只依赖本文。
 
 - `src/core/components/loader.py`
-  需要确认 manifest 真实字段要求、插件级依赖裁剪、压缩包支持和默认值行为时看这里。
+  需要确认 manifest 真实字段要求、插件级依赖裁剪（含版本约束）、压缩包支持和默认值行为时看这里。
 - `src/core/managers/plugin_manager.py`
   需要确认组件真实注册来源、`configs` 注入行为、入口点导入方式时看这里。
 - `src/core/managers/config_manager.py`
@@ -881,8 +936,16 @@ AI 在生成插件前，先做下面的判定。
 - `src/core/prompt/template.py`
   需要做 prompt 注入、动态模板增强、事件型 prompt 修改时看这里。
 - `src/app/plugin_system/api/llm_api.py` 与 `src/core/components/base/chatter.py`
-  需要确认 system reminder 怎样进入 LLM 上下文时看这里。
+  需要确认 system reminder 怎样进入 LLM 上下文（含流私有 reminder）时看这里。
 - `src/core/managers/event_manager.py`
-  需要确认 EventHandler 的订阅、包装、异常传播、优先级行为时看这里。
+  需要确认 EventHandler 的订阅、包装、异常传播、优先级与时序行为时看这里。
+- `src/core/transport/message_receive/receiver.py`
+  需要确认入站信封的接收、转换与 `BEFORE_MESSAGE_RECEIVED` 拦截时机时看这里。
+- `src/kernel/llm/request_execution.py` 与 `src/core/managers/tool_manager/tool_use.py`
+  需要做 LLM 请求生命周期 / 工具调用生命周期的拦截、统计或改写时看这里。
+- `src/core/managers/media_manager/recognition.py` 与 `src/app/plugin_system/api/request_inspector_api.py`
+  需要做媒体识别事件（`ON_MEDIA_RECOGNIZE`）或请求体监视时看这里。
+- `src/app/plugin_system/api/__init__.py`
+  任何需要确认最新 `*_api` 模块清单与各自版本的场景，以这里的 `PLUGIN_API_VERSIONS` 为准。
 
 如果生成逻辑依赖这些细节，而本文又没有明确写出，请以源码为准，并把“源码事实”优先纳入设计，而不是按一般插件框架经验脑补。

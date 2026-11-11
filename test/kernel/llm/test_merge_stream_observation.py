@@ -51,7 +51,7 @@ async def test_managed_native_events_are_recorded_once(
 async def test_gemini_standard_events_observed_without_replay_state(
     inspector: RequestInspector,
 ) -> None:
-    """未接原生 trace 的 Gemini 只补标准结果，不把签名回放状态送入观测。"""
+    """Gemini 记录原生事件并归并标准结果，不把内部回放状态送入观测。"""
     wire = _Wire()
     client = _adapter([wire])
     request = LLMRequest(
@@ -68,7 +68,12 @@ async def test_gemini_standard_events_observed_without_replay_state(
         assert record is not None and record["status"] == "succeeded"
         assert record["response"]["message"] == "012"
         assert "provider_state" not in record["response"]
-        assert record["capture_info"]["raw_unavailable"] is True
+        assert record["capture_info"]["raw_unavailable"] is False
+        assert len(record["raw_events"]) == 3
+        assert [
+            event["candidates"][0]["content"]["parts"][0]["text"]
+            for event in record["raw_events"]
+        ] == ["0", "1", "2"]
         assert len(inspector.snapshot()["records"]) == 1
         assert wire.closed == 1
     finally:

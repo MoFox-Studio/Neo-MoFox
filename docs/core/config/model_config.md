@@ -74,6 +74,35 @@ extra_params = {headers = {"X-API-Version" = "2024-06"}, query = {version = "202
 > 若需多行书写，请使用子表语法 `[models.extra_params.headers]` 等仅对 `[[models]]`
 > 数组最后一项生效，或改用单行写法。详见 [LLM Types 文档](../../../docs/llm/types.md)。
 
+### 思考历史回传：reasoning_history_mode
+
+OpenAI 兼容客户端通过 `extra_params.reasoning_history_mode` 控制是否把
+`reasoning_content` 作为历史字段回传给 provider。该参数与模型名称无关，
+按供应商的真实要求显式选择即可：
+
+| 值 | 行为 | 适用场景 |
+|---|---|---|
+| `on_tool`（默认） | 仅当本次请求携带 `tools` 时回传；不带工具时移除该字段 | DeepSeek 思考模式：携带 `tools` 时历史轮次必须完整回传，否则 400 |
+| `all` | 无论是否携带 `tools` 都回传 | Kimi K2/K3 等强制保留历史思考的模型 |
+
+不配置时按 `on_tool` 处理；不需要针对它做特殊配置时，不写这个参数即可。
+
+为兼容已有配置，布尔值及 `deepseek` / `kimi` / `auto` 等旧字符串仍按原有真值语义
+决定是否回传：`False`、空字符串和 `None` 关闭，其余真值配置保留历史。
+旧配置仍仅在检测到思考模式或历史已有思考内容时回填；新增配置请优先使用上表的明确模式。
+
+```toml
+# DeepSeek：仅在工具请求中回传思考历史（默认值，可不写）
+extra_params = {reasoning_history_mode = "on_tool"}
+
+# Kimi 强制保留思考：所有请求都回传
+extra_params = {reasoning_history_mode = "all"}
+```
+
+> 回传时，缺失 `reasoning_content` 的 assistant 历史会用其 `content` 兜底回填；
+> `all` 模式无条件回填，`on_tool` 模式仅在检测到思考模式或历史中已有思考内容时回填，
+> 避免向普通模型注入该字段。
+
 ## 全局实例管理
 
 - _global_model_config: ModelConfig | None
