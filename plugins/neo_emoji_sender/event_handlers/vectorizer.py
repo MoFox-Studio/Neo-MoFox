@@ -1,0 +1,114 @@
+"""neo_emoji_sender 事件处理器：向量化与检索。
+
+必须完整捕获异常并以 ``ok=False`` 回传，不能把异常抛给 EventBus；
+EventBus 会把处理器异常转成 PASS，导致参数变更丢失。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from src.app.plugin_system.base import BaseEventHandler
+from src.kernel.event import EventDecision
+from src.kernel.logger import get_logger
+
+from ..manager.events import (
+    EVENT_DELETED,
+    EVENT_REGISTERED,
+    EVENT_SEARCH,
+    EVENT_UPDATED,
+)
+
+logger = get_logger("neo_emoji_sender.vectorizer")
+
+
+class EmojiVectorizer(BaseEventHandler):
+    """订阅表情包领域事件，维护向量索引并响应检索。"""
+
+    name = "emoji_vectorizer"
+    description = "订阅表情包注册 / 更新 / 删除 / 检索事件"
+    weight = 100
+    timeout = 0
+    init_subscribe = [EVENT_REGISTERED, EVENT_UPDATED, EVENT_DELETED, EVENT_SEARCH]
+
+    async def execute(
+        self, event_name: str, params: dict[str, Any]
+    ) -> tuple[EventDecision, dict[str, Any]]:
+        """处理事件。"""
+        try:
+            runtime = getattr(self.plugin, "runtime", None)
+            if runtime is None:
+                raise RuntimeError("runtime 未初始化")
+
+            if event_name in (EVENT_REGISTERED, EVENT_UPDATED):
+                await self._handle_upsert(runtime, params)
+            elif event_name == EVENT_DELETED:
+                await self._handle_delete(runtime, params)
+            elif event_name == EVENT_SEARCH:
+                await self._handle_search(runtime, params)
+        except Exception as e:
+            logger.warning(f"向量化处理器失败 {event_name}: {e}")
+            params["ok"] = False
+            params["error"] = str(e)
+        return EventDecision.SUCCESS, params
+
+    @staticmethod
+    async def _handle_upsert(runtime: Any, params: dict[str, Any]) -> None:
+        """注册 / 更新：重建该表情包的全部向量。"""
+        emoji_id = str(params.get("emoji_id") or "").strip()
+        description = str(params.get("description") or "").strip()
+        tags = [str(tag).strip() for tag in (params.get("tags") or []) if str(tag).strip()]
+        revision = str(params.get("revision") or "").strip()
+        updated_at = float(params.get("updated_at") or 0.0)
+        if not emoji_id or not description or not tags:
+            params["ok"] = False
+            params["error"] = "事件参数不完整"
+            return
+        async with runtime.index_lock(emoji_id):
+            ok = await runtime.vector.upsert(
+                emoji_id=emoji_id,
+                description=description,
+                tags=tags,
+                revision=revision,
+                updated_at=updated_at,
+            )
+        params["ok"] = ok
+        if not ok:
+            params["error"] = "向量写入失败"
+
+    @staticmethod
+    async def _handle_delete(runtime: Any, params: dict[str, Any]) -> None:
+        """删除：清理该表情包的全部向量。"""
+        emoji_id = str(params.get("emoji_id") or "").strip()
+        if not emoji_id:
+            params["ok"] = False
+            params["error"] = "emoji_id 为空"
+            return
+        async with runtime.index_lock(emoji_id):
+            ok = await runtime.vector.delete(emoji_id)
+        params["ok"] = ok
+        if not ok:
+            params["error"] = "向量删除失败或无法确认"
+
+    @staticmethod
+    async def _handle_search(runtime: Any, params: dict[str, Any]) -> None:
+        """检索：回填 results。"""
+        query = str(params.get("query") or "").strip()
+        tags = [str(tag).strip() for tag in (params.get("tags") or []) if str(tag).strip()]
+        limit = int(params.get("limit") or 8)
+        exclude = {str(item) for item in (params.get("exclude_ids") or [])}
+        hits = await runtime.vector.search(
+            query=query,
+            tags=tags or None,
+            limit=limit,
+            exclude_ids=exclude,
+        )
+        params["results"] = [
+            {"emoji_id": hit.emoji_id, "tag": hit.tag, "distance": hit.distance}
+            for hit in hits
+        ]
+        params["ok"] = True
+        params["error"] = ""
+
+
+__all__ = ["EmojiVectorizer"]
