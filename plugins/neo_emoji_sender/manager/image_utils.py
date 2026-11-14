@@ -5,17 +5,25 @@ from __future__ import annotations
 import base64
 import io
 import json
-from typing import Any
+from typing import TypedDict, cast
+
+from PIL import Image as PILImage
 
 from src.core.config import get_core_config
 from src.kernel.logger import get_logger
 
 logger = get_logger("neo_emoji_sender.image")
 
-try:
-    from PIL import Image as PILImage
-except ImportError:  # pragma: no cover - 运行环境缺 Pillow 时给出明确错误
-    PILImage = None
+
+class JsonObject(TypedDict, total=False):
+    """VLM 输出对应的 JSON 对象。
+
+    仅声明本插件实际读取的字段；其余字段保持不参与类型检查。
+    """
+
+    keep: bool
+    description: str
+    emotion_tags: list[str]
 
 
 def base64_encode(data: bytes) -> str:
@@ -49,11 +57,8 @@ def compress_image_for_vlm(
         (用于 VLM 的字节, MIME, 是否为 GIF 拼图)。
 
     Raises:
-        RuntimeError: Pillow 未安装或图片无法处理时抛出。
+        RuntimeError: 图片无法处理时抛出。
     """
-    if PILImage is None:
-        raise RuntimeError("PIL 未安装。请运行: uv add pillow")
-
     max_bytes = int(max_size_mb * 1024 * 1024)
 
     if mime == "image/gif":
@@ -67,7 +72,7 @@ def compress_image_for_vlm(
                 step = total_frames / max_frames
                 indices = [int(index * step) for index in range(max_frames)]
 
-            frames: list[Any] = []
+            frames: list[PILImage.Image] = []
             for index in indices:
                 try:
                     image.seek(index)
@@ -165,7 +170,7 @@ def build_persona_prompt() -> str:
     return "\n".join(item for item in parts if item)
 
 
-def extract_json_object(text: str) -> dict[str, Any] | None:
+def extract_json_object(text: str) -> JsonObject | None:
     """从模型输出中提取 JSON object。
 
     Args:
@@ -184,10 +189,11 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
         value = json.loads(text[start : end + 1])
     except Exception:
         return None
-    return value if isinstance(value, dict) else None
+    return cast(JsonObject, value) if isinstance(value, dict) else None
 
 
 __all__ = [
+    "JsonObject",
     "base64_encode",
     "compress_image_for_vlm",
     "build_persona_prompt",
