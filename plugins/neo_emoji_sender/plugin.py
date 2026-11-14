@@ -157,6 +157,8 @@ class NeoEmojiSenderPlugin(BasePlugin):
         sync_actor_reminder(self)
         self._apply_custom_instructions()
 
+        # scheduler 在加载阶段尚未 start，create_schedule 不会因 _stopping 抛错，
+        # 因此可以直接 await 注册，不需要轮询等待就绪
         self.runtime.reconciler = EmojiReconciler(self.runtime)
         self.runtime.sources = self._build_sources()
         await self._register_schedules()

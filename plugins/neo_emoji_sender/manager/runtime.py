@@ -26,6 +26,11 @@ class EmojiRuntime:
     """插件级共享运行时。"""
 
     def __init__(self, plugin: BasePlugin) -> None:
+        """装配仓储、文件存储与向量索引。
+
+        Args:
+            plugin: 所属插件实例，用于读取配置。
+        """
         self.plugin = plugin
         cfg = self.config
         data_dir = Path(cfg.storage.data_dir)
@@ -38,8 +43,11 @@ class EmojiRuntime:
             meta_path=str(data_dir / "index_meta.json"),
         )
         self.usage_history: dict[str, deque[str]] = {}
+        # 全局写锁：注册 / 更新 / 删除互斥，避免并发写入时 DB 与文件状态错位
         self.mutation_lock = asyncio.Lock()
+        # 正在落盘的文件路径，对账器据此跳过，避免误删写了一半的文件
         self.pending_paths: set[str] = set()
+        # 按 emoji_id 细分的索引锁：同一表情包的向量重建串行，不同表情包可并行
         self.index_locks: dict[str, asyncio.Lock] = {}
         self.sources: list[EmojiSource] = []
         self.schedule_ids: list[str] = []
@@ -47,7 +55,14 @@ class EmojiRuntime:
 
     @property
     def config(self) -> "NeoEmojiSenderConfig":
-        """获取插件配置。"""
+        """获取插件配置。
+
+        Returns:
+            强类型化的插件配置对象。
+
+        Raises:
+            RuntimeError: 插件配置未加载或类型不符时抛出。
+        """
         from ..config import NeoEmojiSenderConfig
 
         cfg = self.plugin.config
@@ -84,7 +99,16 @@ class EmojiRuntime:
         await self.repo.close()
 
     def index_lock(self, emoji_id: str) -> asyncio.Lock:
-        """获取某个表情包的索引锁。"""
+        """获取某个表情包的索引锁。
+
+        锁按需创建并常驻，保证同一表情包的向量重建始终串行。
+
+        Args:
+            emoji_id: 表情包完整 ID。
+
+        Returns:
+            该表情包对应的锁对象。
+        """
         lock = self.index_locks.get(emoji_id)
         if lock is None:
             lock = asyncio.Lock()
@@ -96,12 +120,24 @@ class EmojiRuntime:
     # ------------------------------------------------------------------
 
     def recently_used(self, stream_id: str) -> set[str]:
-        """获取指定聊天流最近已发送的表情包。"""
+        """获取指定聊天流最近已发送的表情包。
+
+        Args:
+            stream_id: 聊天流 ID。
+
+        Returns:
+            最近发送过的表情包 ID 集合；无历史时为空集合。
+        """
         history = self.usage_history.get(stream_id)
         return set(history) if history else set()
 
     def record_usage(self, stream_id: str, emoji_id: str) -> None:
-        """记录一次发送。"""
+        """记录一次发送，供去重使用。
+
+        Args:
+            stream_id: 聊天流 ID。
+            emoji_id: 表情包完整 ID。
+        """
         if not stream_id or not emoji_id:
             return
         cfg = self.config

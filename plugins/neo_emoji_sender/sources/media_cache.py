@@ -34,6 +34,11 @@ class MediaCacheSource(EmojiSource):
 
     @property
     def _source_config(self) -> NeoEmojiSenderConfig.SourcesSection.MediaSection:
+        """获取主库媒体来源的配置节。
+
+        Returns:
+            主库媒体来源配置。
+        """
         return self.config.sources.media
 
     async def collect_candidates(self, *, limit: int) -> list[EmojiCandidate]:

@@ -48,7 +48,16 @@ class EmojiSource(ABC):
 
     @property
     def runtime(self) -> EmojiRuntime:
-        """获取插件运行时。"""
+        """获取插件运行时。
+
+        来源不持有运行时引用，统一从插件实例取，避免插件重载后拿到旧对象。
+
+        Returns:
+            当前插件运行时。
+
+        Raises:
+            RuntimeError: 运行时尚未初始化时抛出。
+        """
         plugin = cast("NeoEmojiSenderPlugin", self.plugin)
         if plugin.runtime is None:
             raise RuntimeError("neo_emoji_sender runtime 未初始化")
@@ -56,22 +65,41 @@ class EmojiSource(ABC):
 
     @property
     def config(self) -> NeoEmojiSenderConfig:
-        """获取插件配置。"""
+        """获取插件配置。
+
+        Returns:
+            强类型化的插件配置对象。
+        """
         return self.runtime.config
 
     @property
     def interval_seconds(self) -> int:
-        """扫描间隔（秒）。"""
+        """获取扫描间隔。
+
+        Returns:
+            扫描间隔秒数，最小 5 秒以免过于频繁地触发扫描。
+        """
         return max(5, int(self._source_config.interval_seconds))
 
     @property
     def batch_size(self) -> int:
-        """每轮最多入库数量。"""
+        """获取每轮最多入库数量。
+
+        Returns:
+            每轮入库上限，最小 1。
+        """
         return max(1, int(self._source_config.batch_size))
 
     @property
     def _source_config(self) -> SectionBase:
-        """子类返回自己的配置节。"""
+        """返回本来源对应的配置节，由子类实现。
+
+        Returns:
+            该来源的配置节。
+
+        Raises:
+            NotImplementedError: 子类未实现时抛出。
+        """
         raise NotImplementedError
 
     # ------------------------------------------------------------------
@@ -130,6 +158,8 @@ class EmojiSource(ABC):
             logger.info(f"表情包数量已达上限 {max_memes}，跳过入库")
             return
 
+        # 索取的候选数大于实际入库数：候选中会有重复、已入库或 VLM 拒收的，
+        # 多取一些才能保证一轮下来尽量凑满 batch_size
         scan_limit = max(self.batch_size, int(self.config.sources.scan_batch_size))
         candidates = await self.collect_candidates(limit=scan_limit)
         handled = 0
@@ -145,6 +175,8 @@ class EmojiSource(ABC):
             try:
                 await self.after_register(candidate, record)
             except Exception as e:
+                # 后处理（如移动源文件）失败不应让已注册的记录作废，
+                # 只记警告，下一轮扫描会按哈希认出它已存在而跳过
                 logger.warning(f"来源 {self.source_kind} 后处理失败: {e}")
 
     async def _already_known(self, candidate: EmojiCandidate) -> bool:
@@ -181,6 +213,7 @@ class EmojiSource(ABC):
         data = await self.load(candidate)
         if not data:
             return None
+        # 以内容哈希而非来源标识判重：同一张图可能来自不同路径 / 不同缓存记录
         content_hash = sha256_bytes(data)
 
         runtime = self.runtime
@@ -190,6 +223,7 @@ class EmojiSource(ABC):
             self._ignored_refs.add(candidate.source_ref)
             return None
 
+        # 压缩是纯 CPU 操作，放线程池避免阻塞事件循环（大图或长 GIF 尤其明显）
         try:
             vlm_bytes, vlm_mime, is_collage = await asyncio.to_thread(
                 compress_image_for_vlm, data, candidate.mime
@@ -206,6 +240,8 @@ class EmojiSource(ABC):
         )
         if labeled is None:
             return None
+        # VLM 判为不收的表情包写入抑制表：否则每轮扫描都会把同一张图
+        # 重新送去标注，白白消耗 VLM 调用
         if labeled.get("keep") is False:
             await runtime.repo.add_suppression(
                 content_hash,

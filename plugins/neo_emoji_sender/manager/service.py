@@ -124,7 +124,14 @@ class EmojiService(BaseService):
         return runtime
 
     def _cfg(self) -> NeoEmojiSenderConfig:
-        """获取插件配置。"""
+        """获取强类型化的插件配置。
+
+        Returns:
+            插件配置对象。
+
+        Raises:
+            RuntimeError: 配置未加载或类型不符时抛出。
+        """
         cfg = self.plugin.config
         if not isinstance(cfg, NeoEmojiSenderConfig):
             raise RuntimeError("neo_emoji_sender plugin config 未正确加载")
@@ -195,6 +202,8 @@ class EmojiService(BaseService):
             if existing is not None:
                 return existing
 
+            # 登记待写路径：对账器会跳过 pending 中的文件，避免把正在写入的
+            # 文件当成"无 DB 记录的孤儿文件"删掉
             rel_path = runtime.store.rel_path_for(emoji_id, suffix)
             runtime.pending_paths.add(rel_path)
             try:
@@ -217,6 +226,7 @@ class EmojiService(BaseService):
                 if not inserted:
                     return await runtime.repo.get(emoji_id)
             except Exception:
+                # DB 写入失败时回滚已落盘的文件，避免留下永远对不上账的孤儿
                 runtime.pending_paths.discard(runtime.store.rel_path_for(emoji_id, suffix))
                 try:
                     await runtime.store.delete(runtime.store.rel_path_for(emoji_id, suffix))
@@ -224,6 +234,7 @@ class EmojiService(BaseService):
                     pass
                 raise
 
+        # 默认: event_handlers/vectorizer.py::_handle_upsert
         await self._publish_registered(record, is_update=False)
         logger.info(f"注册表情包: {record.emoji_id[:8]}... tags={list(record.tags)}")
         return record
@@ -296,6 +307,8 @@ class EmojiService(BaseService):
                 return record
 
             revision = compute_revision(new_desc, new_tags)
+            # revision 是 (描述, 标签集合) 的内容指纹；没变就没有重建向量的必要，
+            # 直接返回也避免对账器把这批向量判成"过期"
             if revision == record.revision:
                 return record
 
@@ -313,6 +326,7 @@ class EmojiService(BaseService):
             if updated is None:
                 return None
 
+        # 默认: event_handlers/vectorizer.py::_handle_upsert
         await self._publish_registered(updated, is_update=True)
         return updated
 
@@ -336,6 +350,8 @@ class EmojiService(BaseService):
         async with runtime.mutation_lock:
             record = await runtime.repo.get(normalized)
             rel_paths = [record.rel_path] if record else await runtime.store.find_by_hash(normalized)
+            # 先写抑制再删记录：来源扫描以内容哈希判重，若顺序反过来，下一轮
+            # 扫描会立刻把刚删掉的表情包重新注册进来
             await runtime.repo.add_suppression(
                 normalized,
                 reason=reason,
@@ -346,6 +362,7 @@ class EmojiService(BaseService):
 
         vector_deleted = False
         try:
+            # 默认: event_handlers/vectorizer.py::_handle_delete
             vector_deleted, error = await EmojiPublisher.deleted(emoji_id=normalized)
             if error:
                 logger.warning(f"向量清理未完成: {normalized[:8]}... {error}")
@@ -391,6 +408,7 @@ class EmojiService(BaseService):
         clean_tags = self.normalize_tags(tags)
         exclude = [str(item) for item in (exclude_ids or []) if item]
         try:
+            # 默认: event_handlers/vectorizer.py::_handle_search
             results: list[SearchResultItem] = await EmojiPublisher.search(
                 query=text,
                 tags=clean_tags,
@@ -401,6 +419,8 @@ class EmojiService(BaseService):
             logger.warning(f"发布检索事件失败: {e}")
             return []
 
+        # 向量库只存 emoji_id / tag / 距离，路径与描述始终回 SQLite 与文件系统取，
+        # 因此这里必须逐条回表：DB 记录已被删、或文件已丢失的命中项直接跳过
         hits: list[EmojiHit] = []
         for item in results:
             emoji_id = str(item.get("emoji_id") or "").strip()
@@ -449,6 +469,7 @@ class EmojiService(BaseService):
         exclude = sorted(self.runtime.recently_used(stream_id)) if cfg.dedup.enabled and stream_id else []
 
         hits = await self.search(query, tags=tags, limit=top_n, exclude_ids=exclude)
+        # 历史去重把候选全过滤光时回退到全量：宁可重复发一张，也好过无表情可发
         if not hits and exclude:
             hits = await self.search(query, tags=tags, limit=top_n)
         if not hits:
@@ -459,6 +480,8 @@ class EmojiService(BaseService):
         if under_threshold:
             best = self._select_candidate(under_threshold)
         elif tags:
+            # 指定了情感标签却全部超出距离阈值时放宽阈值：标签是硬性条件，
+            # 距离只是相关性，用户明确要"生气的表情"就不该因为不够像而返回空
             best = self._select_candidate(hits)
             fallback_used = True
         else:
@@ -712,8 +735,11 @@ class EmojiService(BaseService):
             return None
         ordered = sorted(candidates, key=lambda item: item.distance)
         temperature = max(0.0, float(self._cfg().vector.temperature))
+        # temperature <= 0 退化为确定性选取最相似项，便于调试与复现
         if temperature <= 0.0 or len(ordered) == 1:
             return ordered[0]
+        # 以最近项为基准做相对化：距离差除以温度后取指数，越近权重越大。
+        # 减 base 是为了数值稳定，避免大距离时 exp 下溢成全 0
         base = ordered[0].distance
         weights = [math.exp(-max(0.0, item.distance - base) / temperature) for item in ordered]
         if not any(weight > 0.0 for weight in weights):
@@ -734,6 +760,7 @@ class EmojiService(BaseService):
 
         from src.core.utils.base64_helper import base64_encode_bytes
 
+        # 编码大图时是纯 CPU 操作，放进线程池避免阻塞事件循环
         return await asyncio.to_thread(base64_encode_bytes, payload)
 
 

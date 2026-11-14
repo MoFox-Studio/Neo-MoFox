@@ -43,7 +43,18 @@ class EmojiVectorizer(BaseEventHandler):
     async def execute(
         self, event_name: str, params: RegisteredPayload | DeletedPayload | SearchPayload
     ) -> tuple[EventDecision, RegisteredPayload | DeletedPayload | SearchPayload]:
-        """处理事件。"""
+        """处理表情包事件并维护向量索引。
+
+        按事件名分派到重建 / 删除 / 检索三个处理器，所有失败都回填到
+        ``params["ok"]`` 与 ``params["error"]`` 而不是抛出。
+
+        Args:
+            event_name: 事件名，取值见 :class:`EmojiEvent`。
+            params: 事件参数。
+
+        Returns:
+            (事件决策, 回填后的参数)。
+        """
         try:
             runtime = getattr(self.plugin, "runtime", None)
             if runtime is None:
@@ -56,6 +67,8 @@ class EmojiVectorizer(BaseEventHandler):
             elif event_name == EmojiEvent.SEARCH:
                 await self._handle_search(runtime, cast(SearchPayload, params))
         except Exception as e:
+            # 必须自己吞掉异常并回填 ok=False：EventBus 会把处理器抛出的异常
+            # 转成 PASS，导致本次对 params 的修改整体丢弃，调用方读不到失败原因
             logger.warning(f"向量化处理器失败 {event_name}: {e}")
             params["ok"] = False
             params["error"] = str(e)
@@ -63,7 +76,12 @@ class EmojiVectorizer(BaseEventHandler):
 
     @staticmethod
     async def _handle_upsert(runtime: EmojiRuntime, params: RegisteredPayload) -> None:
-        """注册 / 更新：重建该表情包的全部向量。"""
+        """注册 / 更新：重建该表情包的全部向量。
+
+        Args:
+            runtime: 插件运行时。
+            params: 含 emoji_id / description / tags / revision 的参数。
+        """
         emoji_id = str(params.get("emoji_id") or "").strip()
         description = str(params.get("description") or "").strip()
         tags = [str(tag).strip() for tag in (params.get("tags") or []) if str(tag).strip()]
@@ -73,6 +91,8 @@ class EmojiVectorizer(BaseEventHandler):
             params["ok"] = False
             params["error"] = "事件参数不完整"
             return
+        # 按 emoji_id 加锁：同一表情包的注册与对账重建可能并发，串行化避免
+        # "先删后加"写成一半时被另一方插进来
         async with runtime.index_lock(emoji_id):
             ok = await runtime.vector.upsert(
                 emoji_id=emoji_id,
@@ -87,7 +107,12 @@ class EmojiVectorizer(BaseEventHandler):
 
     @staticmethod
     async def _handle_delete(runtime: EmojiRuntime, params: DeletedPayload) -> None:
-        """删除：清理该表情包的全部向量。"""
+        """删除：清理该表情包的全部向量。
+
+        Args:
+            runtime: 插件运行时。
+            params: 含 emoji_id 的参数。
+        """
         emoji_id = str(params.get("emoji_id") or "").strip()
         if not emoji_id:
             params["ok"] = False
@@ -101,7 +126,12 @@ class EmojiVectorizer(BaseEventHandler):
 
     @staticmethod
     async def _handle_search(runtime: EmojiRuntime, params: SearchPayload) -> None:
-        """检索：回填 results。"""
+        """检索：按描述与标签检索并把命中写回 ``params["results"]``。
+
+        Args:
+            runtime: 插件运行时。
+            params: 含 query / tags / limit / exclude_ids 的参数。
+        """
         query = str(params.get("query") or "").strip()
         tags = [str(tag).strip() for tag in (params.get("tags") or []) if str(tag).strip()]
         limit = int(params.get("limit") or 8)
@@ -112,6 +142,7 @@ class EmojiVectorizer(BaseEventHandler):
             limit=limit,
             exclude_ids=exclude,
         )
+        # results 的 key 集合必须与 search_payload 预填时一致，这里整体赋值即可
         params["results"] = [
             SearchResultItem(emoji_id=hit.emoji_id, tag=hit.tag, distance=hit.distance)
             for hit in hits

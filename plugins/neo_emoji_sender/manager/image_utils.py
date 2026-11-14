@@ -66,6 +66,8 @@ def compress_image_for_vlm(
             image = PILImage.open(io.BytesIO(image_bytes))
             total_frames = int(getattr(image, "n_frames", 1))
             max_frames = 6
+            # 帧数不多就全取；帧多时均匀采样，覆盖首尾而不只取开头几帧，
+            # 避免 VLM 只看开头就判断整张动图的内容
             if total_frames <= max_frames:
                 indices = list(range(total_frames))
             else:
