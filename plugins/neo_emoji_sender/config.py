@@ -82,6 +82,24 @@ class NeoEmojiSenderConfig(BaseConfig):
             description="孤儿文件清理宽限期（秒），避免与正在进行的注册竞争",
         )
 
+    @config_section("migration")
+    class MigrationSection(SectionBase):
+        """旧 emoji_sender 数据迁移配置。"""
+
+        enabled: bool = Field(
+            default=True,
+            description="是否在插件加载时自动接管旧 emoji_sender 数据",
+        )
+        legacy_root: str = Field(
+            default="data/emoji_sender",
+            description="旧插件数据根目录（读取其下的 memes/）",
+        )
+        legacy_vector_db: str = Field(
+            default="data/emoji_sender/vector_db",
+            description="旧插件向量库路径",
+        )
+        legacy_collection: str = Field(default="emoji_sender", description="旧插件向量集合名")
+
     @config_section("picker")
     class PickerSection(SectionBase):
         """两段式挑选模式相关配置。"""
@@ -143,6 +161,7 @@ class NeoEmojiSenderConfig(BaseConfig):
     storage: StorageSection = Field(default_factory=StorageSection)
     vector: VectorSection = Field(default_factory=VectorSection)
     reconcile: ReconcileSection = Field(default_factory=ReconcileSection)
+    migration: MigrationSection = Field(default_factory=MigrationSection)
     picker: PickerSection = Field(default_factory=PickerSection)
     dedup: DedupSection = Field(default_factory=DedupSection)
     sources: SourcesSection = Field(default_factory=SourcesSection)

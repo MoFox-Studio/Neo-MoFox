@@ -7,9 +7,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-from pathlib import Path
 from typing import TypedDict, cast
 
 from src.app.plugin_system.api.llm_api import (
@@ -19,6 +16,7 @@ from src.app.plugin_system.api.llm_api import (
 from src.kernel.logger import get_logger
 from src.kernel.vector_db import VectorDBBase, get_vector_db_service
 
+from .state import IndexMeta, StateStore
 from .types import VectorHit
 
 logger = get_logger("neo_emoji_sender.vector")
@@ -37,20 +35,13 @@ class EmojiVectorMetadata(TypedDict):
     updated_at: float
 
 
-class IndexMeta(TypedDict):
-    """``index_meta.json`` 中记录的 embedding 配置指纹。"""
-
-    embedding_model: str
-    collection: str
-
-
 class EmojiVectorIndex:
     """Chroma 向量索引封装。"""
 
-    def __init__(self, *, db_path: str, collection_name: str, meta_path: str) -> None:
+    def __init__(self, *, db_path: str, collection_name: str, state: StateStore) -> None:
         self._db_path = db_path
         self.collection = collection_name
-        self._meta_path = Path(meta_path)
+        self._state = state
 
     def _vdb(self) -> VectorDBBase:
         """获取本插件使用的向量数据库服务。
@@ -332,12 +323,12 @@ class EmojiVectorIndex:
 
     async def _ensure_index_meta(self) -> None:
         """校验 embedding 模型指纹；不一致时清空集合并重建。"""
-        current = await asyncio.to_thread(self._read_meta)
+        current = await self._state.get_index_meta()
         expected = self._current_meta()
         # 首次运行只需落盘指纹；此后模型一换就必须整体重建——
         # 不同 embedding 模型的向量不可比，混在一个集合里检索结果会失真
         if current is None:
-            await asyncio.to_thread(self._write_meta, expected)
+            await self._state.set_index_meta(expected)
             return
         if current.get("embedding_model") == expected.get("embedding_model"):
             return
@@ -350,7 +341,7 @@ class EmojiVectorIndex:
         vdb = self._vdb()
         await vdb.delete_collection(self.collection)
         await vdb.get_or_create_collection(self.collection)
-        await asyncio.to_thread(self._write_meta, expected)
+        await self._state.set_index_meta(expected)
 
     def _current_meta(self) -> IndexMeta:
         """读取当前 embedding 配置指纹。
@@ -369,31 +360,6 @@ class EmojiVectorIndex:
             pass
         return IndexMeta(embedding_model=model_name, collection=self.collection)
 
-    def _read_meta(self) -> IndexMeta | None:
-        """读取已落盘的索引元信息。
-
-        Returns:
-            解析成功时返回元信息；文件不存在或内容损坏时返回 None。
-        """
-        if not self._meta_path.exists():
-            return None
-        try:
-            data = json.loads(self._meta_path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-        return cast(IndexMeta, data) if isinstance(data, dict) else None
-
-    def _write_meta(self, data: IndexMeta) -> None:
-        """写入索引元信息。
-
-        Args:
-            data: 待落盘的元信息。
-        """
-        self._meta_path.parent.mkdir(parents=True, exist_ok=True)
-        self._meta_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
 
 
-__all__ = ["EmojiVectorIndex", "EmojiVectorMetadata", "IndexMeta"]
+__all__ = ["EmojiVectorIndex", "EmojiVectorMetadata"]

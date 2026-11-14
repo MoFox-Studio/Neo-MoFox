@@ -154,6 +154,9 @@ class NeoEmojiSenderPlugin(BasePlugin):
 
         self.runtime = EmojiRuntime(self)
         await self.runtime.initialize()
+        # 迁移必须在注册本插件调度之前：判断依据是旧任务是否还在调度器里，
+        # 而注册本插件任务不影响该判断，但尽早迁移可让首批扫描看到完整数据
+        await self.runtime.migrate_legacy_if_needed()
         sync_actor_reminder(self)
         self._apply_custom_instructions()
 

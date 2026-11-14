@@ -136,7 +136,10 @@ plugins/neo_emoji_sender/
 │   ├── __init__.py
 │   └── search_emoji.py     # picker 检索工具
 └── migrations/
-    └── migrate_emoji_sender.py
+    └── __init__.py
+
+scripts/
+└── migrate_neo_emoji_sender.py   # CLI 外壳，复用 manager/legacy_migration.py
 ```
 
 ### 4.3 数据目录
@@ -147,7 +150,7 @@ data/neo_emoji_sender/
 ├── emoji.db        # SQLite：records / tags / suppressions
 ├── vector/         # Chroma 持久化目录
 ├── tmp/            # 原子写入临时文件
-└── index_meta.json # embedding 模型与维度指纹
+└── state.json      # embedding 指纹与迁移标记
 ```
 
 ---
@@ -841,17 +844,26 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
 | 删除 DB 成功、向量删除失败 | 孤儿向量 | 对账步骤 4；检索回表跳过 |
 | 删除 DB 成功、文件删除失败 | 孤儿文件 | 对账步骤 2 |
 | 进程在注册中途崩溃 | 文件或 DB 单边存在 | 对账双向清理 |
-| embedding 模型维度变化 | 旧向量全部不可用 | 校验 `index_meta.json` 后全量重建 |
+| embedding 模型维度变化 | 旧向量全部不可用 | 校验 `state.json` 后全量重建 |
 
-### 11.4 index_meta.json
+### 11.4 state.json
 
 ```json
 {
-  "embedding_model": "…",
-  "dimension": 1024,
-  "collection": "neo_emoji_sender"
+  "index": {
+    "embedding_model": "…",
+    "collection": "neo_emoji_sender"
+  },
+  "migration": {
+    "marker": "legacy_emoji_sender_v1",
+    "migrated": 200,
+    "skipped": 0,
+    "finished_at": 1730000000.0
+  }
 }
 ```
+
+顶层按用途分组，各写入方只替换自己那一组，互不覆盖。业务数据不放这里。
 
 启动时与当前 embedding 配置比对；不一致则删除 collection 并全量重建。这是唯一需要全量重建的场景。
 
@@ -881,7 +893,7 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
    - 建目录
    - 初始化 SQLite
    - 初始化 Chroma
-   - 校验 index_meta
+   - 校验 state.json
 2. 同步 actor reminder
 3. 追加自定义场景说明到组件描述
 4. 构造启用的 EmojiSource 与 Reconciler
@@ -957,16 +969,26 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
 - 旧插件与新插件不能同时启用（Action 同名）
 - 迁移完成前旧数据只读
 
-### 14.2 脚本
+### 14.2 触发条件
 
-`plugins/neo_emoji_sender/migrations/migrate_emoji_sender.py`：
+迁移实现在 `plugins/neo_emoji_sender/manager/legacy_migration.py`，插件加载时自动调用，
+同时满足以下两条才执行：
+
+1. 调度器中不存在旧插件任务 `emoji_sender_ingest_once` / `emoji_sender_ingest_recurring`
+2. `state.json` 中没有迁移标记
+
+旧任务仍在时只记日志跳过、不写标记，待旧插件停用后的下次加载重试。
+
+### 14.3 脚本
+
+`scripts/migrate_neo_emoji_sender.py` 只是套在上述实现上的命令行外壳：
 
 ```text
 1. 读取旧 Chroma collection（emoji_sender）全量 metadata
 2. 按 meme_id 分组，得到 description、tags、created_at、source_cache_path
 3. 校验 data/emoji_sender/memes/<meme_id>.<ext> 的 sha256 与文件名一致
 4. 复制文件到 data/neo_emoji_sender/memes/
-5. 写入 emoji_records + emoji_tags
+5. 写入 emoji_records + emoji_tags，并写入迁移标记
 6. 向量二选一：
    a. 搬运旧 embedding（ID 仍为 {id}:{tag}，补 revision metadata）
    b. 不搬向量，迁移后由对账全量重建
@@ -980,7 +1002,7 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
 - 单条失败不中断整体，最后汇总失败列表
 - 迁移完成后把旧插件 `config/plugins/emoji_sender/config.toml` 的 `plugin.enabled` 置 `false`
 
-### 14.3 旧数据现状参考
+### 14.4 旧数据现状参考
 
 - `data/emoji_sender/memes/`：约 200 个文件
 - 旧向量库：约 444 条记录（每表情多 tag）

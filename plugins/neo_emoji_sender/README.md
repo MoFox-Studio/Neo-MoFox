@@ -37,7 +37,7 @@ data/neo_emoji_sender/
 ├── vector/          # Chroma
 ├── tmp/             # 原子写入
 ├── manual_memes/    # 手动目录来源默认扫描位置
-└── index_meta.json  # embedding 模型指纹
+└── state.json       # embedding 指纹与迁移标记
 ```
 
 ## 组件
@@ -70,20 +70,30 @@ data/neo_emoji_sender/
 
 ## 迁移
 
-```bash
-# 预览
-python -m plugins.neo_emoji_sender.migrations.migrate_emoji_sender --dry-run
+插件加载时会自动接管旧 `emoji_sender` 数据，前提是旧插件的定时任务
+（`emoji_sender_ingest_once` / `emoji_sender_ingest_recurring`）不在调度器中，
+即旧插件已停用或未加载。迁移成功后在自有库写入标记，之后不再重复扫描旧库。
 
-# 正式迁移（向量交由启动后的对账补齐）
-python -m plugins.neo_emoji_sender.migrations.migrate_emoji_sender
-
-# 迁移后立即重建向量（需要可用的 embedding 任务模型）
-python -m plugins.neo_emoji_sender.migrations.migrate_emoji_sender --vector
-```
-
-迁移只读取旧数据，不修改旧目录；脚本可重复执行，已存在的记录会被跳过。迁移完成后在旧插件配置中禁用：
+因此正常流程只需把旧插件关掉：
 
 ```toml
 [plugin]
 enabled = false
 ```
+
+需要手工排查或强制重建时，使用脚本（与插件内部迁移共用同一份实现）：
+
+```bash
+# 预览
+python scripts/migrate_neo_emoji_sender.py --dry-run
+
+# 正式迁移（向量交由启动后的对账补齐）
+python scripts/migrate_neo_emoji_sender.py
+
+# 迁移后立即重建向量（需要可用的 embedding 任务模型）
+python scripts/migrate_neo_emoji_sender.py --vector
+```
+
+迁移只读取旧数据，不修改旧目录；脚本可重复执行，已存在的记录会被跳过。
+相关路径可在 `[migration]` 配置节中调整（`legacy_root` / `legacy_vector_db` /
+`legacy_collection` / `enabled`）。

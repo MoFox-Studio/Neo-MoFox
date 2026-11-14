@@ -47,12 +47,14 @@ class EmojiRepository:
         Args:
             db_path: 插件自有 SQLite 文件路径。
         """
-        self._db = PluginDatabase(db_path, [EmojiRecordModel, EmojiTagModel, EmojiSuppressionModel])
+        self._db = PluginDatabase(
+            db_path,
+            [EmojiRecordModel, EmojiTagModel, EmojiSuppressionModel],
+        )
 
     async def initialize(self) -> None:
         """建表。"""
         await self._db.initialize()
-
     async def close(self) -> None:
         """关闭数据库连接。"""
         await self._db.close()

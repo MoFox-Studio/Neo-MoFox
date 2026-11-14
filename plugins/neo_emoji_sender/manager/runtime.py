@@ -6,13 +6,19 @@ Service 不是单例，所有跨实例共享状态都放在这里。
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.kernel.logger import get_logger
+
 from .repository import EmojiRepository
+from .state import StateStore
 from .store import EmojiStore
 from .vector_index import EmojiVectorIndex
+
+logger = get_logger("neo_emoji_sender.runtime")
 
 if TYPE_CHECKING:
     from src.app.plugin_system.base import BasePlugin
@@ -37,10 +43,12 @@ class EmojiRuntime:
         self.data_dir = data_dir
         self.repo = EmojiRepository(str(data_dir / "emoji.db"))
         self.store = EmojiStore(data_dir)
+        # 插件处理状态（embedding 指纹、迁移标记）统一放在 state.json
+        self.state = StateStore(data_dir / "state.json")
         self.vector = EmojiVectorIndex(
             db_path=str(data_dir / "vector"),
             collection_name=str(cfg.vector.collection_name),
-            meta_path=str(data_dir / "index_meta.json"),
+            state=self.state,
         )
         self.usage_history: dict[str, deque[str]] = {}
         # 全局写锁：注册 / 更新 / 删除互斥，避免并发写入时 DB 与文件状态错位
@@ -75,6 +83,60 @@ class EmojiRuntime:
         await self.store.initialize()
         await self.repo.initialize()
         await self.vector.initialize()
+
+    async def migrate_legacy_if_needed(self) -> None:
+        """在满足条件时把旧 emoji_sender 数据并入本插件。
+
+        两个条件缺一不可：
+
+        - 旧插件的定时任务已不在调度器中（说明它已停用或从未加载）
+        - 本库尚未写过迁移标记
+
+        旧任务仍在时跳过而不写标记，下次加载（旧插件停用后）会重新尝试。
+        """
+        from .legacy_migration import (
+            MIGRATION_MARKER,
+            LegacyPaths,
+            legacy_schedule_active,
+            migrate,
+        )
+
+        cfg = self.config
+        if not cfg.migration.enabled:
+            return
+        if await self.state.get_migration() is not None:
+            return
+        if legacy_schedule_active():
+            # 旧插件仍在运行并持续写入旧库，此时迁移只能拿到不一致的快照
+            logger.info("检测到 emoji_sender 定时任务仍在注册，跳过数据迁移")
+            return
+
+        paths = LegacyPaths(
+            root=Path(cfg.migration.legacy_root),
+            vector_db=str(cfg.migration.legacy_vector_db),
+            collection=str(cfg.migration.legacy_collection),
+        )
+        if not paths.root.exists() and not Path(paths.vector_db).exists():
+            # 没有旧数据可迁，写标记避免每次加载都做无谓探测
+            await self.state.set_migration(
+                {"marker": MIGRATION_MARKER, "migrated": 0, "skipped": 0}
+            )
+            return
+
+        result = await migrate(
+            paths=paths,
+            target_root=self.data_dir,
+            repo=self.repo,
+            store=self.store,
+        )
+        await self.state.set_migration(
+            {
+                "marker": MIGRATION_MARKER,
+                "migrated": result.migrated,
+                "skipped": result.skipped,
+                "finished_at": time.time(),
+            }
+        )
 
     async def close(self) -> None:
         """释放资源：移除调度任务并关闭数据库。
