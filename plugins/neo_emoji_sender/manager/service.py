@@ -11,22 +11,11 @@ import time
 from pathlib import Path
 from typing import TypedDict
 
-from src.app.plugin_system.api.event_api import publish_event
 from src.app.plugin_system.api.send_api import send_emoji
 from src.app.plugin_system.base import BaseService
 from src.kernel.logger import get_logger
 
-from .events import (
-    EVENT_DELETED,
-    EVENT_REGISTERED,
-    EVENT_SEARCH,
-    EVENT_UPDATED,
-    SearchResultItem,
-    as_event_params,
-    deleted_payload,
-    registered_payload,
-    search_payload,
-)
+from .events import EmojiPublisher, SearchResultItem
 from .store import guess_mime, normalize_suffix, sha256_bytes
 from .types import DeleteResult, EmojiHit, EmojiRecord
 from ..config import NeoEmojiSenderConfig
@@ -235,7 +224,7 @@ class EmojiService(BaseService):
                     pass
                 raise
 
-        await self._publish_registered(record, EVENT_REGISTERED)
+        await self._publish_registered(record, is_update=False)
         logger.info(f"注册表情包: {record.emoji_id[:8]}... tags={list(record.tags)}")
         return record
 
@@ -324,7 +313,7 @@ class EmojiService(BaseService):
             if updated is None:
                 return None
 
-        await self._publish_registered(updated, EVENT_UPDATED)
+        await self._publish_registered(updated, is_update=True)
         return updated
 
     async def delete(self, emoji_id: str, *, reason: str = "user_deleted") -> DeleteResult:
@@ -357,10 +346,9 @@ class EmojiService(BaseService):
 
         vector_deleted = False
         try:
-            result = await publish_event(
-                EVENT_DELETED, as_event_params(deleted_payload(emoji_id=normalized))
-            )
-            vector_deleted = bool(result.get("params", {}).get("ok"))
+            vector_deleted, error = await EmojiPublisher.deleted(emoji_id=normalized)
+            if error:
+                logger.warning(f"向量清理未完成: {normalized[:8]}... {error}")
         except Exception as e:
             logger.warning(f"发布删除事件失败: {e}")
 
@@ -402,25 +390,18 @@ class EmojiService(BaseService):
             return []
         clean_tags = self.normalize_tags(tags)
         exclude = [str(item) for item in (exclude_ids or []) if item]
-        payload = search_payload(
-            query=text,
-            tags=clean_tags,
-            limit=max(1, int(limit)),
-            exclude_ids=exclude,
-        )
         try:
-            result = await publish_event(EVENT_SEARCH, as_event_params(payload))
+            results: list[SearchResultItem] = await EmojiPublisher.search(
+                query=text,
+                tags=clean_tags,
+                limit=max(1, int(limit)),
+                exclude_ids=exclude,
+            )
         except Exception as e:
             logger.warning(f"发布检索事件失败: {e}")
             return []
 
-        params = result.get("params") or {}
-        if not params.get("ok"):
-            logger.debug(f"向量检索未成功: {params.get('error', '')}")
-            return []
-
         hits: list[EmojiHit] = []
-        results: list[SearchResultItem] = [dict(item) for item in (params.get("results") or [])]
         for item in results:
             emoji_id = str(item.get("emoji_id") or "").strip()
             if not emoji_id or emoji_id in exclude:
@@ -694,34 +675,29 @@ class EmojiService(BaseService):
         )
         return ok
 
-    async def _publish_registered(self, record: EmojiRecord, event_name: str) -> None:
+    async def _publish_registered(self, record: EmojiRecord, is_update: bool) -> None:
         """发布注册 / 更新事件。
 
         Args:
             record: 已写入的记录。
-            event_name: 事件名。
+            is_update: True 发布更新事件，False 发布注册事件。
         """
+        publish = EmojiPublisher.updated if is_update else EmojiPublisher.registered
         try:
-            result = await publish_event(
-                event_name,
-                as_event_params(
-                    registered_payload(
-                        emoji_id=record.emoji_id,
-                        description=record.description,
-                        tags=list(record.tags),
-                        revision=record.revision,
-                        source_kind=record.source_kind,
-                        updated_at=record.updated_at,
-                    )
-                ),
+            ok, error = await publish(
+                emoji_id=record.emoji_id,
+                description=record.description,
+                tags=list(record.tags),
+                revision=record.revision,
+                source_kind=record.source_kind,
+                updated_at=record.updated_at,
             )
-            if not result.get("params", {}).get("ok"):
+            if not ok:
                 logger.warning(
-                    f"向量索引未完成，等待对账: {record.emoji_id[:8]}... "
-                    f"{result.get('params', {}).get('error', '')}"
+                    f"向量索引未完成，等待对账: {record.emoji_id[:8]}... {error}"
                 )
         except Exception as e:
-            logger.warning(f"发布 {event_name} 失败: {e}")
+            logger.warning(f"发布向量事件失败 {record.emoji_id[:8]}...: {e}")
 
     def _select_candidate(self, candidates: list[EmojiHit]) -> EmojiHit | None:
         """按距离与温度采样选择候选。

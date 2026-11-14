@@ -13,11 +13,8 @@ from src.kernel.event import EventDecision
 from src.kernel.logger import get_logger
 
 from ..manager.events import (
-    EVENT_DELETED,
-    EVENT_REGISTERED,
-    EVENT_SEARCH,
-    EVENT_UPDATED,
     DeletedPayload,
+    EmojiEvent,
     RegisteredPayload,
     SearchPayload,
     SearchResultItem,
@@ -36,7 +33,12 @@ class EmojiVectorizer(BaseEventHandler):
     description = "订阅表情包注册 / 更新 / 删除 / 检索事件"
     weight = 100
     timeout = 0
-    init_subscribe = [EVENT_REGISTERED, EVENT_UPDATED, EVENT_DELETED, EVENT_SEARCH]
+    init_subscribe = [
+        EmojiEvent.REGISTERED,
+        EmojiEvent.UPDATED,
+        EmojiEvent.DELETED,
+        EmojiEvent.SEARCH,
+    ]
 
     async def execute(
         self, event_name: str, params: RegisteredPayload | DeletedPayload | SearchPayload
@@ -47,11 +49,11 @@ class EmojiVectorizer(BaseEventHandler):
             if runtime is None:
                 raise RuntimeError("runtime 未初始化")
 
-            if event_name in (EVENT_REGISTERED, EVENT_UPDATED):
+            if event_name in (EmojiEvent.REGISTERED, EmojiEvent.UPDATED):
                 await self._handle_upsert(runtime, cast(RegisteredPayload, params))
-            elif event_name == EVENT_DELETED:
+            elif event_name == EmojiEvent.DELETED:
                 await self._handle_delete(runtime, cast(DeletedPayload, params))
-            elif event_name == EVENT_SEARCH:
+            elif event_name == EmojiEvent.SEARCH:
                 await self._handle_search(runtime, cast(SearchPayload, params))
         except Exception as e:
             logger.warning(f"向量化处理器失败 {event_name}: {e}")

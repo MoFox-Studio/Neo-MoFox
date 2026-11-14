@@ -118,14 +118,10 @@ class EmojiReconciler:
 
     async def _publish_delete(self, emoji_id: str) -> None:
         """发布删除事件，清理可能残留的向量。"""
-        from src.app.plugin_system.api.event_api import publish_event
-
-        from .events import EVENT_DELETED, as_event_params, deleted_payload
+        from .events import EmojiPublisher
 
         try:
-            await publish_event(
-                EVENT_DELETED, as_event_params(deleted_payload(emoji_id=emoji_id))
-            )
+            await EmojiPublisher.deleted(emoji_id=emoji_id)
         except Exception as e:
             logger.debug(f"对账发布删除事件失败: {e}")
 
