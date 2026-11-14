@@ -28,7 +28,7 @@ import asyncio
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TypedDict, cast
 
 # 允许脚本以文件方式直接执行
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -51,6 +51,16 @@ from plugins.neo_emoji_sender.manager.types import EmojiRecord  # noqa: E402
 logger = get_logger("neo_emoji_sender.migrate")
 
 SOURCE_KIND = "legacy_emoji_sender"
+
+
+class LegacyMetadata(TypedDict, total=False):
+    """旧向量集合中单条 metadata。"""
+
+    meme_id: str
+    tag: str
+    description: str
+    source_cache_path: str
+    created_at: float
 
 
 @dataclass
@@ -142,7 +152,7 @@ async def _read_legacy_entries(
         ids: list[str] = list(data.get("ids") or [])
         if not ids:
             break
-        metadatas: list[dict[str, Any]] = list(data.get("metadatas") or [])
+        metadatas = cast(list[LegacyMetadata], data.get("metadatas") or [])
         for index, record_id in enumerate(ids):
             meta = metadatas[index] if index < len(metadatas) else {}
             meme_id = str(meta.get("meme_id") or "").strip()

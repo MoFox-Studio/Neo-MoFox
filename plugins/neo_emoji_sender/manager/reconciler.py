@@ -7,12 +7,15 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 
-from .events import deleted_payload
 from .types import EmojiRecord
+from .vector_index import EmojiVectorMetadata
+
+if TYPE_CHECKING:
+    from .runtime import EmojiRuntime
 
 logger = get_logger("neo_emoji_sender.reconcile")
 
@@ -20,7 +23,7 @@ logger = get_logger("neo_emoji_sender.reconcile")
 class EmojiReconciler:
     """三方对账器。"""
 
-    def __init__(self, runtime: Any) -> None:
+    def __init__(self, runtime: EmojiRuntime) -> None:
         self.runtime = runtime
 
     async def run_once(self) -> None:
@@ -101,7 +104,7 @@ class EmojiReconciler:
         )
 
     @staticmethod
-    async def _vector_ok(record: EmojiRecord, vectors: list[dict[str, Any]]) -> bool:
+    async def _vector_ok(record: EmojiRecord, vectors: list[EmojiVectorMetadata]) -> bool:
         """判断某个表情包的向量是否完整且是最新 revision。"""
         if not vectors:
             return False
@@ -117,10 +120,12 @@ class EmojiReconciler:
         """发布删除事件，清理可能残留的向量。"""
         from src.app.plugin_system.api.event_api import publish_event
 
-        from .events import EVENT_DELETED
+        from .events import EVENT_DELETED, as_event_params, deleted_payload
 
         try:
-            await publish_event(EVENT_DELETED, deleted_payload(emoji_id=emoji_id))
+            await publish_event(
+                EVENT_DELETED, as_event_params(deleted_payload(emoji_id=emoji_id))
+            )
         except Exception as e:
             logger.debug(f"对账发布删除事件失败: {e}")
 

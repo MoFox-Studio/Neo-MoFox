@@ -885,18 +885,19 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
 2. 同步 actor reminder
 3. 追加自定义场景说明到组件描述
 4. 构造启用的 EmojiSource 与 Reconciler
-5. 启动后台任务，等待 scheduler 就绪后再注册来源与对账 schedule
-   - 原因：ON_ALL_PLUGIN_LOADED 之后事件订阅才绑定，首轮入库必须延后
+5. 直接注册来源与对账 schedule（`await source.start()`）
+   - `create_schedule` 只在 scheduler 停止时才抛错，加载阶段可直接调用，
+     无需轮询等待
+   - 首轮入库用 `delay_seconds: 0` 的一次性任务延后到事件订阅绑定之后
+   - 所有 schedule ID 统一登记到 `runtime.schedule_ids`
 ```
 
 `on_plugin_unloaded`：
 
 ```text
-1. 取消后台注册任务
-2. 移除来源与对账 schedule
-3. 停止来源
-4. 关闭 SQLite / Chroma
-5. 清理 actor reminder
+1. 按 runtime.schedule_ids 移除全部 schedule（唯一撤销路径）
+2. 关闭 SQLite / Chroma
+3. 清理 actor reminder
 ```
 
 ### 12.3 使用历史去重

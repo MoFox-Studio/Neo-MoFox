@@ -5,13 +5,18 @@ from __future__ import annotations
 import asyncio
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
 
 from ..manager.store import ALLOWED_SUFFIXES, guess_mime
 from ..manager.types import EmojiCandidate, EmojiRecord
 from .base import EmojiSource
+
+if TYPE_CHECKING:
+    from src.app.plugin_system.base import BasePlugin
+
+    from ..config import NeoEmojiSenderConfig
 
 logger = get_logger("neo_emoji_sender.source.manual")
 
@@ -21,12 +26,12 @@ class ManualDirectorySource(EmojiSource):
 
     source_kind = "manual_dir"
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: BasePlugin) -> None:
         super().__init__(plugin)
         self._cursor = 0
 
     @property
-    def _source_config(self) -> Any:
+    def _source_config(self) -> NeoEmojiSenderConfig.SourcesSection.ManualSection:
         return self.config.sources.manual
 
     @property

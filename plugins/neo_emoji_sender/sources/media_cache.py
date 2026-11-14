@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 from src.app.plugin_system.api.database_api import query
 from src.core.models.sql_alchemy import Images
@@ -14,6 +14,11 @@ from ..manager.store import guess_mime
 from ..manager.types import EmojiCandidate
 from .base import EmojiSource
 
+if TYPE_CHECKING:
+    from src.app.plugin_system.base import BasePlugin
+
+    from ..config import NeoEmojiSenderConfig
+
 logger = get_logger("neo_emoji_sender.source.media")
 
 
@@ -22,13 +27,13 @@ class MediaCacheSource(EmojiSource):
 
     source_kind = "media_cache"
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: BasePlugin) -> None:
         super().__init__(plugin)
         self._cursor_id = 0
         self.vlm_enabled = bool(self.config.sources.media.vlm_enabled)
 
     @property
-    def _source_config(self) -> Any:
+    def _source_config(self) -> NeoEmojiSenderConfig.SourcesSection.MediaSection:
         return self.config.sources.media
 
     async def collect_candidates(self, *, limit: int) -> list[EmojiCandidate]:
@@ -40,7 +45,14 @@ class MediaCacheSource(EmojiSource):
         Returns:
             候选列表。
         """
-        rows = await query(Images).filter(type="emoji", id__gt=self._cursor_id).order_by("id").limit(max(1, limit)).all()
+        builder = (
+            query(Images)
+            .filter(type="emoji", id__gt=self._cursor_id)
+            .order_by("id")
+            .limit(max(1, limit))
+        )
+        # ``all()`` 的返回类型是 ``list[T] | list[dict]``，这里显式收窄为模型实例。
+        rows = cast(list[Images], await builder.all())
         candidates: list[EmojiCandidate] = []
         for row in rows:
             self._cursor_id = int(row.id)

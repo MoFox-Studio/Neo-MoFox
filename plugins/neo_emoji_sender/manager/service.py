@@ -9,7 +9,7 @@ import math
 import random
 import time
 from pathlib import Path
-from typing import Any
+from typing import TypedDict
 
 from src.app.plugin_system.api.event_api import publish_event
 from src.app.plugin_system.api.send_api import send_emoji
@@ -21,6 +21,8 @@ from .events import (
     EVENT_REGISTERED,
     EVENT_SEARCH,
     EVENT_UPDATED,
+    SearchResultItem,
+    as_event_params,
     deleted_payload,
     registered_payload,
     search_payload,
@@ -54,6 +56,37 @@ EMOTION_TAG_PRESET: tuple[str, ...] = (
 
 _FULL_ID_LENGTH = 64
 _HEX_CHARS = frozenset("0123456789abcdef")
+
+
+class BestEmojiResult(TypedDict):
+    """``search_best`` / ``send_by_id`` 返回的最佳表情包详情。"""
+
+    emoji_id: str
+    meme_id: str
+    tag: str
+    path: str
+    description: str
+    distance: float
+    fallback_used: bool
+
+
+class EmojiCandidateItem(TypedDict):
+    """``search_candidates`` 返回的单个候选。"""
+
+    emoji_id: str
+    meme_id: str
+    short_id: str
+    tag: str
+    description: str
+    distance: float
+
+
+class CandidatePage(TypedDict):
+    """``search_candidates`` 返回的分页结果。"""
+
+    candidates: list[EmojiCandidateItem]
+    page: int
+    total: int
 
 
 def is_full_emoji_id(value: str) -> bool:
@@ -324,7 +357,9 @@ class EmojiService(BaseService):
 
         vector_deleted = False
         try:
-            result = await publish_event(EVENT_DELETED, deleted_payload(emoji_id=normalized))
+            result = await publish_event(
+                EVENT_DELETED, as_event_params(deleted_payload(emoji_id=normalized))
+            )
             vector_deleted = bool(result.get("params", {}).get("ok"))
         except Exception as e:
             logger.warning(f"发布删除事件失败: {e}")
@@ -374,18 +409,19 @@ class EmojiService(BaseService):
             exclude_ids=exclude,
         )
         try:
-            result = await publish_event(EVENT_SEARCH, payload)
+            result = await publish_event(EVENT_SEARCH, as_event_params(payload))
         except Exception as e:
             logger.warning(f"发布检索事件失败: {e}")
             return []
 
-        params: dict[str, Any] = result.get("params") or {}
+        params = result.get("params") or {}
         if not params.get("ok"):
             logger.debug(f"向量检索未成功: {params.get('error', '')}")
             return []
 
         hits: list[EmojiHit] = []
-        for item in params.get("results") or []:
+        results: list[SearchResultItem] = [dict(item) for item in (params.get("results") or [])]
+        for item in results:
             emoji_id = str(item.get("emoji_id") or "").strip()
             if not emoji_id or emoji_id in exclude:
                 continue
@@ -410,7 +446,7 @@ class EmojiService(BaseService):
         description_query: str,
         emotion_tags: list[str] | None = None,
         stream_id: str = "",
-    ) -> dict[str, Any] | None:
+    ) -> BestEmojiResult | None:
         """检索并返回温度采样后的最佳表情包。
 
         Args:
@@ -449,15 +485,15 @@ class EmojiService(BaseService):
         if best is None:
             return None
 
-        return {
-            "emoji_id": best.record.emoji_id,
-            "meme_id": best.record.emoji_id,
-            "tag": best.tag,
-            "path": best.record.rel_path,
-            "description": best.record.description,
-            "distance": best.distance,
-            "fallback_used": fallback_used,
-        }
+        return BestEmojiResult(
+            emoji_id=best.record.emoji_id,
+            meme_id=best.record.emoji_id,
+            tag=best.tag,
+            path=best.record.rel_path,
+            description=best.record.description,
+            distance=best.distance,
+            fallback_used=fallback_used,
+        )
 
     async def search_candidates(
         self,
@@ -465,7 +501,7 @@ class EmojiService(BaseService):
         emotion_tags: list[str] | None = None,
         page: int = 1,
         stream_id: str = "",
-    ) -> dict[str, Any] | None:
+    ) -> CandidatePage | None:
         """检索并返回去重、历史过滤、分页后的候选列表。
 
         Args:
@@ -506,21 +542,21 @@ class EmojiService(BaseService):
         if not page_items:
             return None
 
-        return {
-            "candidates": [
-                {
-                    "emoji_id": hit.record.emoji_id,
-                    "meme_id": hit.record.emoji_id,
-                    "short_id": hit.record.emoji_id[:12],
-                    "tag": hit.tag,
-                    "description": hit.record.description,
-                    "distance": hit.distance,
-                }
+        return CandidatePage(
+            candidates=[
+                EmojiCandidateItem(
+                    emoji_id=hit.record.emoji_id,
+                    meme_id=hit.record.emoji_id,
+                    short_id=hit.record.emoji_id[:12],
+                    tag=hit.tag,
+                    description=hit.record.description,
+                    distance=hit.distance,
+                )
                 for hit in page_items
             ],
-            "page": page,
-            "total": total,
-        }
+            page=page,
+            total=total,
+        )
 
     async def send_by_id(
         self,
@@ -528,7 +564,7 @@ class EmojiService(BaseService):
         short_id: str,
         stream_id: str,
         platform: str | None,
-    ) -> tuple[bool, dict[str, Any] | None, str]:
+    ) -> tuple[bool, BestEmojiResult | None, str]:
         """按完整 ID 或前缀发送指定表情包。
 
         Args:
@@ -565,14 +601,16 @@ class EmojiService(BaseService):
             platform=platform,
             processed_plain_text=processed,
         )
-        result = {
-            "emoji_id": record.emoji_id,
-            "meme_id": record.emoji_id,
-            "tag": record.tags[0] if record.tags else "",
-            "path": record.rel_path,
-            "description": record.description,
-            "fallback_used": False,
-        }
+        result = BestEmojiResult(
+            emoji_id=record.emoji_id,
+            meme_id=record.emoji_id,
+            tag=record.tags[0] if record.tags else "",
+            path=record.rel_path,
+            description=record.description,
+            # 按 ID 指定发送，未经过向量检索，距离无实际含义。
+            distance=0.0,
+            fallback_used=False,
+        )
         if ok:
             self.runtime.record_usage(stream_id, record.emoji_id)
             return True, result, "发送成功"
@@ -585,7 +623,7 @@ class EmojiService(BaseService):
         platform: str | None,
         description_query: str,
         emotion_tags: list[str] | None = None,
-    ) -> tuple[bool, dict[str, Any] | None, str]:
+    ) -> tuple[bool, BestEmojiResult | None, str]:
         """检索并发送最佳表情包。
 
         Args:
@@ -614,9 +652,7 @@ class EmojiService(BaseService):
             logger.warning(f"读取表情包失败 {record.rel_path}: {e}")
             return False, result, "表情包文件已被删除"
 
-        from src.core.utils.base64_helper import base64_encode_bytes
-
-        image_base64 = await base64_encode_bytes(payload)
+        image_base64 = await self._encode(payload)
         desc = str(result.get("description") or "").strip()
         tag = str(result.get("tag") or "").strip()
         processed = f"[表情包:{tag}:{desc}]" if desc else f"[表情包:{tag}]"
@@ -668,13 +704,15 @@ class EmojiService(BaseService):
         try:
             result = await publish_event(
                 event_name,
-                registered_payload(
-                    emoji_id=record.emoji_id,
-                    description=record.description,
-                    tags=list(record.tags),
-                    revision=record.revision,
-                    source_kind=record.source_kind,
-                    updated_at=record.updated_at,
+                as_event_params(
+                    registered_payload(
+                        emoji_id=record.emoji_id,
+                        description=record.description,
+                        tags=list(record.tags),
+                        revision=record.revision,
+                        source_kind=record.source_kind,
+                        updated_at=record.updated_at,
+                    )
                 ),
             )
             if not result.get("params", {}).get("ok"):

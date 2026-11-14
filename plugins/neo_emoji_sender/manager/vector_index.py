@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import TypedDict, cast
 
 from src.app.plugin_system.api.llm_api import (
     create_embedding_request,
@@ -25,6 +25,23 @@ logger = get_logger("neo_emoji_sender.vector")
 
 _SCAN_PAGE_LIMIT = 512
 _MAX_SCAN_PAGES = 1000
+
+
+class EmojiVectorMetadata(TypedDict):
+    """单条向量 metadata（每个 ``(emoji_id, tag)`` 一条）。"""
+
+    emoji_id: str
+    tag: str
+    description: str
+    revision: str
+    updated_at: float
+
+
+class IndexMeta(TypedDict):
+    """``index_meta.json`` 中记录的 embedding 配置指纹。"""
+
+    embedding_model: str
+    collection: str
 
 
 class EmojiVectorIndex:
@@ -93,14 +110,14 @@ class EmojiVectorIndex:
             return False
 
         ids = [f"{emoji_id}:{tag}" for tag in clean_tags]
-        metadatas = [
-            {
-                "emoji_id": emoji_id,
-                "tag": tag,
-                "description": description,
-                "revision": revision,
-                "updated_at": float(updated_at),
-            }
+        metadatas: list[EmojiVectorMetadata] = [
+            EmojiVectorMetadata(
+                emoji_id=emoji_id,
+                tag=tag,
+                description=description,
+                revision=revision,
+                updated_at=float(updated_at),
+            )
             for tag in clean_tags
         ]
         try:
@@ -168,7 +185,7 @@ class EmojiVectorIndex:
 
         exclude = set(exclude_ids or ())
         fetch_n = min(max((limit + len(exclude)) * 3, 20), 200)
-        where: dict[str, Any] | None = {"tag": tags} if tags else None
+        where = {"tag": list(tags)} if tags else None
 
         vdb = self._vdb()
         await vdb.get_or_create_collection(self.collection)
@@ -181,7 +198,7 @@ class EmojiVectorIndex:
 
         ids_list: list[list[str]] = list(results.get("ids") or [])
         distances_list: list[list[float]] = list(results.get("distances") or [])
-        metadatas_list: list[list[dict[str, Any]]] = list(results.get("metadatas") or [])
+        metadatas_list = cast(list[list[EmojiVectorMetadata]], results.get("metadatas") or [])
         if not ids_list or not ids_list[0]:
             return []
 
@@ -206,11 +223,11 @@ class EmojiVectorIndex:
         ordered = sorted(best.values(), key=lambda item: item.distance)
         return ordered[: max(0, int(limit))]
 
-    async def scan(self) -> dict[str, list[dict[str, Any]]]:
+    async def scan(self) -> dict[str, list[EmojiVectorMetadata]]:
         """扫描全部向量 metadata，按 emoji_id 分组。"""
         vdb = self._vdb()
         await vdb.get_or_create_collection(self.collection)
-        grouped: dict[str, list[dict[str, Any]]] = {}
+        grouped: dict[str, list[EmojiVectorMetadata]] = {}
         offset = 0
         for _page in range(_MAX_SCAN_PAGES):
             data = await vdb.get(
@@ -222,7 +239,7 @@ class EmojiVectorIndex:
             ids: list[str] = list(data.get("ids") or [])
             if not ids:
                 break
-            metadatas: list[dict[str, Any]] = list(data.get("metadatas") or [])
+            metadatas = cast(list[EmojiVectorMetadata], data.get("metadatas") or [])
             for index, record_id in enumerate(ids):
                 meta = metadatas[index] if index < len(metadatas) else {}
                 emoji_id = str(meta.get("emoji_id") or "").strip()
@@ -264,7 +281,7 @@ class EmojiVectorIndex:
         await vdb.get_or_create_collection(self.collection)
         await asyncio.to_thread(self._write_meta, expected)
 
-    def _current_meta(self) -> dict[str, Any]:
+    def _current_meta(self) -> IndexMeta:
         """读取当前 embedding 配置指纹。"""
         model_name = ""
         try:
@@ -273,12 +290,9 @@ class EmojiVectorIndex:
                 model_name = str(model_set[0].get("model_identifier") or "")
         except Exception:
             pass
-        return {
-            "embedding_model": model_name,
-            "collection": self.collection,
-        }
+        return IndexMeta(embedding_model=model_name, collection=self.collection)
 
-    def _read_meta(self) -> dict[str, Any] | None:
+    def _read_meta(self) -> IndexMeta | None:
         """读取 index_meta.json。"""
         if not self._meta_path.exists():
             return None
@@ -286,9 +300,9 @@ class EmojiVectorIndex:
             data = json.loads(self._meta_path.read_text(encoding="utf-8"))
         except Exception:
             return None
-        return data if isinstance(data, dict) else None
+        return cast(IndexMeta, data) if isinstance(data, dict) else None
 
-    def _write_meta(self, data: dict[str, Any]) -> None:
+    def _write_meta(self, data: IndexMeta) -> None:
         """写入 index_meta.json。"""
         self._meta_path.parent.mkdir(parents=True, exist_ok=True)
         self._meta_path.write_text(
@@ -297,4 +311,4 @@ class EmojiVectorIndex:
         )
 
 
-__all__ = ["EmojiVectorIndex"]
+__all__ = ["EmojiVectorIndex", "EmojiVectorMetadata", "IndexMeta"]

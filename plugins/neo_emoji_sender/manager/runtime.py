@@ -5,24 +5,27 @@ Service 不是单例，所有跨实例共享状态都放在这里。
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-import asyncio
+from typing import TYPE_CHECKING
 
 from .repository import EmojiRepository
 from .store import EmojiStore
 from .vector_index import EmojiVectorIndex
 
 if TYPE_CHECKING:
+    from src.app.plugin_system.base import BasePlugin
+
     from ..config import NeoEmojiSenderConfig
+    from ..sources.base import EmojiSource
+    from .reconciler import EmojiReconciler
 
 
 class EmojiRuntime:
     """插件级共享运行时。"""
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: BasePlugin) -> None:
         self.plugin = plugin
         cfg = self.config
         data_dir = Path(cfg.storage.data_dir)
@@ -38,9 +41,9 @@ class EmojiRuntime:
         self.mutation_lock = asyncio.Lock()
         self.pending_paths: set[str] = set()
         self.index_locks: dict[str, asyncio.Lock] = {}
-        self.sources: list[Any] = []
+        self.sources: list[EmojiSource] = []
         self.schedule_ids: list[str] = []
-        self.reconciler: Any = None
+        self.reconciler: EmojiReconciler | None = None
 
     @property
     def config(self) -> "NeoEmojiSenderConfig":

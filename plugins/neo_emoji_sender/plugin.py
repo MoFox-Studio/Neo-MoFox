@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from src.app.plugin_system.base import BasePlugin, register_plugin
 from src.kernel.logger import get_logger
 
@@ -17,6 +15,7 @@ from .event_handlers.vectorizer import EmojiVectorizer
 from .manager.reconciler import EmojiReconciler
 from .manager.runtime import EmojiRuntime
 from .manager.service import EmojiService
+from .sources.base import EmojiSource
 from .sources.manual_dir import ManualDirectorySource
 from .sources.media_cache import MediaCacheSource
 from .tools.search_emoji import SearchEmojiMemesTool
@@ -52,7 +51,7 @@ _REMINDER_PICKER = (
 )
 
 
-def _get_interaction_mode(plugin: Any) -> str:
+def _get_interaction_mode(plugin: BasePlugin) -> str:
     """读取当前发送模式。
 
     Args:
@@ -71,7 +70,7 @@ def _get_interaction_mode(plugin: Any) -> str:
     return mode
 
 
-def build_actor_reminder(plugin: Any) -> str:
+def build_actor_reminder(plugin: BasePlugin) -> str:
     """构建 actor reminder。
 
     Args:
@@ -86,7 +85,7 @@ def build_actor_reminder(plugin: Any) -> str:
     return _REMINDER_PICKER if _get_interaction_mode(plugin) == MODE_PICKER else _REMINDER
 
 
-def sync_actor_reminder(plugin: Any) -> str:
+def sync_actor_reminder(plugin: BasePlugin) -> str:
     """同步 actor reminder。
 
     Args:
@@ -171,14 +170,14 @@ class NeoEmojiSenderPlugin(BasePlugin):
             self.runtime = None
         get_system_reminder_store().delete(_TARGET_REMINDER_BUCKET, _TARGET_REMINDER_NAME)
 
-    def _build_sources(self) -> list[Any]:
+    def _build_sources(self) -> list[EmojiSource]:
         """按配置构造来源。
 
         Returns:
             启用的来源实例列表。
         """
         config = self.config
-        sources: list[Any] = []
+        sources: list[EmojiSource] = []
         if not isinstance(config, NeoEmojiSenderConfig):
             return sources
         if config.sources.manual.enabled:

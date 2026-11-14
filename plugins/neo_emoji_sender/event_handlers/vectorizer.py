@@ -6,7 +6,7 @@ EventBus 会把处理器异常转成 PASS，导致参数变更丢失。
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 from src.app.plugin_system.base import BaseEventHandler
 from src.kernel.event import EventDecision
@@ -17,7 +17,14 @@ from ..manager.events import (
     EVENT_REGISTERED,
     EVENT_SEARCH,
     EVENT_UPDATED,
+    DeletedPayload,
+    RegisteredPayload,
+    SearchPayload,
+    SearchResultItem,
 )
+
+if TYPE_CHECKING:
+    from ..manager.runtime import EmojiRuntime
 
 logger = get_logger("neo_emoji_sender.vectorizer")
 
@@ -32,8 +39,8 @@ class EmojiVectorizer(BaseEventHandler):
     init_subscribe = [EVENT_REGISTERED, EVENT_UPDATED, EVENT_DELETED, EVENT_SEARCH]
 
     async def execute(
-        self, event_name: str, params: dict[str, Any]
-    ) -> tuple[EventDecision, dict[str, Any]]:
+        self, event_name: str, params: RegisteredPayload | DeletedPayload | SearchPayload
+    ) -> tuple[EventDecision, RegisteredPayload | DeletedPayload | SearchPayload]:
         """处理事件。"""
         try:
             runtime = getattr(self.plugin, "runtime", None)
@@ -41,11 +48,11 @@ class EmojiVectorizer(BaseEventHandler):
                 raise RuntimeError("runtime 未初始化")
 
             if event_name in (EVENT_REGISTERED, EVENT_UPDATED):
-                await self._handle_upsert(runtime, params)
+                await self._handle_upsert(runtime, cast(RegisteredPayload, params))
             elif event_name == EVENT_DELETED:
-                await self._handle_delete(runtime, params)
+                await self._handle_delete(runtime, cast(DeletedPayload, params))
             elif event_name == EVENT_SEARCH:
-                await self._handle_search(runtime, params)
+                await self._handle_search(runtime, cast(SearchPayload, params))
         except Exception as e:
             logger.warning(f"向量化处理器失败 {event_name}: {e}")
             params["ok"] = False
@@ -53,7 +60,7 @@ class EmojiVectorizer(BaseEventHandler):
         return EventDecision.SUCCESS, params
 
     @staticmethod
-    async def _handle_upsert(runtime: Any, params: dict[str, Any]) -> None:
+    async def _handle_upsert(runtime: EmojiRuntime, params: RegisteredPayload) -> None:
         """注册 / 更新：重建该表情包的全部向量。"""
         emoji_id = str(params.get("emoji_id") or "").strip()
         description = str(params.get("description") or "").strip()
@@ -77,7 +84,7 @@ class EmojiVectorizer(BaseEventHandler):
             params["error"] = "向量写入失败"
 
     @staticmethod
-    async def _handle_delete(runtime: Any, params: dict[str, Any]) -> None:
+    async def _handle_delete(runtime: EmojiRuntime, params: DeletedPayload) -> None:
         """删除：清理该表情包的全部向量。"""
         emoji_id = str(params.get("emoji_id") or "").strip()
         if not emoji_id:
@@ -91,7 +98,7 @@ class EmojiVectorizer(BaseEventHandler):
             params["error"] = "向量删除失败或无法确认"
 
     @staticmethod
-    async def _handle_search(runtime: Any, params: dict[str, Any]) -> None:
+    async def _handle_search(runtime: EmojiRuntime, params: SearchPayload) -> None:
         """检索：回填 results。"""
         query = str(params.get("query") or "").strip()
         tags = [str(tag).strip() for tag in (params.get("tags") or []) if str(tag).strip()]
@@ -104,7 +111,7 @@ class EmojiVectorizer(BaseEventHandler):
             exclude_ids=exclude,
         )
         params["results"] = [
-            {"emoji_id": hit.emoji_id, "tag": hit.tag, "distance": hit.distance}
+            SearchResultItem(emoji_id=hit.emoji_id, tag=hit.tag, distance=hit.distance)
             for hit in hits
         ]
         params["ok"] = True

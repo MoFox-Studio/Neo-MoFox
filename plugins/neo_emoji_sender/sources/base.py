@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, cast
+from typing import TYPE_CHECKING, cast
 
 from src.app.plugin_system.api.llm_api import create_llm_request, get_model_set_by_task
 from src.app.plugin_system.api.service_api import get_service
 from src.kernel.logger import get_logger
 
 from ..manager.image_utils import (
+    JsonObject,
     base64_encode,
     build_persona_prompt,
     compress_image_for_vlm,
@@ -23,6 +24,13 @@ from ..manager.image_utils import (
 from ..manager.service import EMOTION_TAG_PRESET, EmojiService
 from ..manager.store import sha256_bytes
 from ..manager.types import EmojiCandidate, EmojiRecord
+
+if TYPE_CHECKING:
+    from src.app.plugin_system.base import BasePlugin, SectionBase
+
+    from ..config import NeoEmojiSenderConfig
+    from ..manager.runtime import EmojiRuntime
+    from ..plugin import NeoEmojiSenderPlugin
 
 logger = get_logger("neo_emoji_sender.source")
 
@@ -33,18 +41,21 @@ class EmojiSource(ABC):
     source_kind: str = ""
     vlm_enabled: bool = True
 
-    def __init__(self, plugin: Any) -> None:
+    def __init__(self, plugin: BasePlugin) -> None:
         self.plugin = plugin
         self._ignored_refs: set[str] = set()
         self.source_name = self.source_kind
 
     @property
-    def runtime(self) -> Any:
+    def runtime(self) -> EmojiRuntime:
         """获取插件运行时。"""
-        return self.plugin.runtime
+        plugin = cast("NeoEmojiSenderPlugin", self.plugin)
+        if plugin.runtime is None:
+            raise RuntimeError("neo_emoji_sender runtime 未初始化")
+        return plugin.runtime
 
     @property
-    def config(self) -> Any:
+    def config(self) -> NeoEmojiSenderConfig:
         """获取插件配置。"""
         return self.runtime.config
 
@@ -59,7 +70,7 @@ class EmojiSource(ABC):
         return max(1, int(self._source_config.batch_size))
 
     @property
-    def _source_config(self) -> Any:
+    def _source_config(self) -> SectionBase:
         """子类返回自己的配置节。"""
         raise NotImplementedError
 
@@ -235,7 +246,7 @@ class EmojiSource(ABC):
         mime: str,
         is_gif_collage: bool = False,
         hint: str = "",
-    ) -> dict[str, Any] | None:
+    ) -> JsonObject | None:
         """调用 VLM 做收藏决策与标注。
 
         Args:
@@ -327,11 +338,7 @@ class EmojiSource(ABC):
             return None
         if len(description) > 200:
             description = description[:197] + "..."
-        return {
-            "keep": keep,
-            "description": description,
-            "emotion_tags": filtered_tags,
-        }
+        return JsonObject(keep=keep, description=description, emotion_tags=filtered_tags)
 
     # ------------------------------------------------------------------
     # 子类实现
