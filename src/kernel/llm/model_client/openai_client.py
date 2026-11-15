@@ -400,6 +400,13 @@ def _should_backfill_reasoning_content(messages: list[dict[str, Any]]) -> bool:
     return False
 
 
+# reasoning_content 历史回传模式：
+# - ``on_tool``（默认）：仅当本次请求携带 tools 时回传，满足 DeepSeek 思考模式的硬性要求。
+# - ``all``：所有 assistant 历史都回传，适用于 Kimi 等强制保留思考的模型。
+_REASONING_HISTORY_MODE_ALL = "all"
+_REASONING_HISTORY_MODE_ON_TOOL = "on_tool"
+
+
 def _thinking_enabled(model_set: dict[str, Any]) -> bool:
     """判断当前模型请求是否显式开启了 thinking / reasoning 模式。"""
     extra_params = model_set.get("extra_params")
@@ -862,7 +869,9 @@ class OpenAIChatClient:
             # force_sync_http 已废弃，移除后不传给 API
             extra_params.pop("force_sync_http", None)
             # 控制是否向兼容供应商发送 reasoning_content 历史字段
-            reasoning_history_mode = extra_params.pop("reasoning_history_mode", True)
+            reasoning_history_mode = extra_params.pop(
+                "reasoning_history_mode", _REASONING_HISTORY_MODE_ON_TOOL
+            )
 
             client = self._get_client(
                 api_key=api_key,
@@ -872,16 +881,43 @@ class OpenAIChatClient:
                 force_ipv4=force_ipv4,
             )
             messages, openai_tools = _payloads_to_openai_messages(payloads)
-            # 默认不向 OpenAI-compatible provider 发送非标准 reasoning_content 历史字段，
-            # 避免污染请求结构；需要时通过 reasoning_history_mode 显式开启。
-            allow_reasoning_history = ( reasoning_history_mode == True )
 
+            tool_call_compat = bool(model_set.get("tool_call_compat", False))
+            # DeepSeek 等供应商的判定条件是“本次请求是否携带 tools 参数”：
+            # tool_call_compat 模式下工具通过提示词注入，对 provider 而言并没有 tools，
+            # 因此不视为工具请求。
+            request_has_tools = bool(openai_tools) and not tool_call_compat
+            allow_reasoning_history = (
+                reasoning_history_mode == _REASONING_HISTORY_MODE_ALL
+                or (
+                    reasoning_history_mode == _REASONING_HISTORY_MODE_ON_TOOL
+                    and request_has_tools
+                )
+            )
+
+            # 不回传时移除 assistant 历史中的非标准 reasoning_content 字段，
+            # 避免污染请求结构或触发拒绝未知字段的兼容端点。
             if not allow_reasoning_history:
                 for msg in messages:
                     if msg.get("role") == "assistant":
                         msg.pop("reasoning_content", None)
-
-            tool_call_compat = bool(model_set.get("tool_call_compat", False))
+            # 回传时，为缺失字段的 assistant 历史统一回填：
+            # DeepSeek 在携带 tools 时要求历史每一轮都带 reasoning_content，
+            # 即使该轮没有实际发起工具调用。文本消息用自身 content 兜底，
+            # 多模态/空内容消息回填空串。
+            #
+            # ``all`` 模式无条件回填；``on_tool`` 仅在检测到思考模式或历史中已有
+            # reasoning_content 时回填，避免向不带思考能力的模型注入该字段。
+            elif reasoning_history_mode == _REASONING_HISTORY_MODE_ALL or (
+                _thinking_enabled(model_set) or _should_backfill_reasoning_content(messages)
+            ):
+                for msg in messages:
+                    if (
+                        msg.get("role") == "assistant"
+                        and "reasoning_content" not in msg
+                    ):
+                        content = msg.get("content")
+                        msg["reasoning_content"] = content if isinstance(content, str) else ""
 
             if tool_call_compat and openai_tools:
                 compat_prompt = build_tool_call_compat_prompt(openai_tools)
@@ -945,20 +981,6 @@ class OpenAIChatClient:
                 params["extra_headers"] = extra_headers
             if extra_query:
                 params["extra_query"] = extra_query
-
-            # 仅在显式允许 reasoning 历史模式时，才为缺失字段的 assistant 历史回填
-            # reasoning_content；默认模式下前面已经清理过该字段。
-            if allow_reasoning_history and (
-                _thinking_enabled(model_set)
-                or _should_backfill_reasoning_content(messages)
-            ):
-                for msg in messages:
-                    if (
-                        msg.get("role") == "assistant"
-                        and "reasoning_content" not in msg
-                    ):
-                        content = msg.get("content")
-                        msg["reasoning_content"] = content if isinstance(content, str) else ""
 
             # 请求检查和 token 估算统一走共享观测 seam，这里只负责上报原始请求体。
             log_provider_request_body(
