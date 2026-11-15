@@ -108,11 +108,14 @@ class EmojiStore:
             ValueError: 路径越界或指向符号链接时抛出。
         """
         base = self.root.resolve()
-        target = (self.root / rel_path).resolve()
+        raw = self.root / rel_path
+        # 符号链接必须在 resolve() 之前判断：resolve 会展开到真实路径，
+        # 展开后的路径不再是链接，检查会永远失效
+        if raw.is_symlink():
+            raise ValueError(f"拒绝符号链接: {rel_path}")
+        target = raw.resolve()
         if target != base and base not in target.parents:
             raise ValueError(f"路径越界: {rel_path}")
-        if target.is_symlink():
-            raise ValueError(f"拒绝符号链接: {rel_path}")
         return target
 
     async def save(self, data: bytes, suffix: str) -> tuple[str, str]:

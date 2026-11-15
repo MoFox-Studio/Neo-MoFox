@@ -128,23 +128,27 @@ class EmojiRepository:
         """按完整 ID 或前缀查找记录。
 
         先按主键精确命中，未命中再退化为前缀匹配，便于模型用短 ID 指定。
+        前缀命中多条时返回 None——短 ID 的含义必须唯一，否则可能发错表情包。
 
         Args:
             prefix: 完整 ID 或前缀。
 
         Returns:
-            匹配到的记录；无匹配时返回 None。
+            唯一匹配到的记录；无匹配或前缀有歧义时返回 None。
         """
         async with self._db.session() as session:
             row = await session.get(EmojiRecordModel, prefix)
             if row is None:
-                row = (
+                matched = (
                     await session.execute(
                         select(EmojiRecordModel)
                         .where(EmojiRecordModel.emoji_id.like(f"{prefix}%"))
-                        .limit(1)
+                        .limit(2)
                     )
-                ).scalars().first()
+                ).scalars().all()
+                if len(matched) != 1:
+                    return None
+                row = matched[0]
             if row is None:
                 return None
             result = await session.execute(
@@ -305,7 +309,9 @@ class EmojiRepository:
                     updated_at=record.updated_at,
                 )
             )
-            for tag in record.tags:
+            # 标签是主键的一部分，重复值会触发唯一约束导致整条注册失败，
+            # 因此入库前去重；排序保证同一集合写入顺序稳定
+            for tag in sorted(set(record.tags)):
                 session.add(EmojiTagModel(emoji_id=record.emoji_id, tag=tag))
         return True
 
