@@ -32,7 +32,7 @@ async def test_shutdown_continues_after_failures_in_dependency_order(bot, monkey
         return AsyncMock(side_effect=run)
 
     bot._stream_loop_manager = SimpleNamespace(stop=operation("streams"))
-    bot.plugin_manager = SimpleNamespace(unload_plugin=operation("plugin"))
+    bot.plugin_manager = SimpleNamespace(unload_plugin=operation("plugin"), list_loaded_plugins=lambda: ["one"])
     bot.load_order = ["one"]
     bot.media_manager = SimpleNamespace(shutdown=operation("media", fail=True))
     bot.scheduler = SimpleNamespace(stop=operation("scheduler"))
@@ -65,7 +65,7 @@ async def test_each_plugin_timeout_does_not_skip_other_cleanup(bot):
             await asyncio.Event().wait()
         return True
 
-    bot.plugin_manager = SimpleNamespace(unload_plugin=unload)
+    bot.plugin_manager = SimpleNamespace(unload_plugin=unload, list_loaded_plugins=lambda: ["ok", "stuck"])
     bot.load_order = ["ok", "stuck"]
     bot.scheduler = SimpleNamespace(stop=AsyncMock())
     with pytest.raises(BotShutdownError, match="TimeoutError"):

@@ -91,7 +91,7 @@ class TestBaseConfig:
         path = OtherConfig.get_default_path()
         assert path == Path("config/plugins/other_plugin/other_config.toml")
 
-    @patch("src.core.components.base.config.Path.write_text")
+    @patch("src.core.components.base.config._atomic_write_text")
     @patch("src.core.components.base.config.Path.mkdir")
     def test_generate_default(self, mock_mkdir, mock_write):
         """测试生成默认配置。"""
@@ -104,7 +104,7 @@ class TestBaseConfig:
         # 检查是否写入了文件
         mock_write.assert_called_once()
 
-    @patch("src.core.components.base.config.Path.write_text")
+    @patch("src.core.components.base.config._atomic_write_text")
     @patch("src.core.components.base.config.Path.mkdir")
     def test_generate_default_custom_path(self, mock_mkdir, mock_write, temp_dir):
         """测试生成默认配置（自定义路径）。"""
@@ -116,7 +116,7 @@ class TestBaseConfig:
         args = mock_write.call_args
         assert args is not None
 
-    @patch("src.core.components.base.config.Path.write_text")
+    @patch("src.core.components.base.config._atomic_write_text")
     @patch("src.core.components.base.config.Path.mkdir")
     def test_generate_default_with_required_fields(self, mock_mkdir, mock_write):
         """测试含必填字段配置也能生成默认配置。"""
@@ -129,7 +129,7 @@ class TestBaseConfig:
 
         call_args = mock_write.call_args
         assert call_args is not None
-        toml_text = call_args.args[0]
+        toml_text = call_args.args[1]
         assert "qq_id = \"\"" in toml_text
         assert "qq_nickname = \"\"" in toml_text
 

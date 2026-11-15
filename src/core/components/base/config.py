@@ -5,13 +5,17 @@
 自动默认路径生成和默认配置文件生成。
 """
 
-from abc import ABC
 from pathlib import Path
 from typing import ClassVar, Self
 
 from src.core.components.base.component import BaseComponent
 from src.kernel.config import ConfigBase
-from src.kernel.config.core import _atomic_write_text, config_section, Field, SectionBase
+from src.kernel.config.core import (
+    Field,
+    SectionBase,
+    _atomic_write_text,
+    config_section,
+)
 
 
 class BaseConfig(BaseComponent, ConfigBase):
