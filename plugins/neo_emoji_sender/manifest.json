@@ -1,0 +1,61 @@
+{
+  "name": "neo_emoji_sender",
+  "display_name": "表情包领域服务",
+  "version": "0.1.0",
+  "description": "Neo 表情包领域服务：独立存储与数据库、可插拔来源入库、事件驱动的向量化与检索，兼容 direct / picker 两种发送模式。",
+  "author": "MoFox Team",
+  "dependencies": {
+    "plugins": [],
+    "components": []
+  },
+  "include": [
+    {
+      "component_type": "service",
+      "component_name": "emoji",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "event_handler",
+      "component_name": "emoji_vectorizer",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "tool",
+      "component_name": "search_emoji_memes",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "send_emoji_meme",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "send_emoji_meme_by_id",
+      "dependencies": [],
+      "enabled": true
+    },
+    {
+      "component_type": "action",
+      "component_name": "delete_emoji_meme_by_id",
+      "dependencies": [],
+      "enabled": true
+    }
+  ],
+  "entry_point": "plugin.py",
+  "min_core_version": "1.2.0-rc.2",
+  "api_version": {
+    "llm_api": "1.2.0",
+    "send_api": "1.1.0",
+    "service_api": "1.0.0",
+    "event_api": "1.1.0",
+    "database_api": "1.0.0",
+    "storage_api": "1.0.0"
+  },
+  "python_dependencies": ["pillow"],
+  "dependencies_required": true
+}
