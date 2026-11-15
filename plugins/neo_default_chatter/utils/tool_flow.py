@@ -3,6 +3,12 @@
 负责在主会话逻辑调用统一执行器前，先拦截 ``pass_and_wait`` 与
 ``stop_conversation`` 两个控制流动作（不写回 TOOL_RESULT，避免模型继续 follow-up），
 其余普通调用按原始顺序批量交给 ``run_tool_call``。
+
+去重规则：普通工具调用参与「本轮去重 + 跨轮去重（``seen_signatures``）」，
+防止同一轮内重复执行或跨轮重复执行同款副作用调用；而 ``pass_and_wait`` /
+``stop_conversation`` 是幂等的状态转换意图，**不参与任何去重**——只有这样才能保证
+上一轮因「普通工具 + pass」走 FOLLOW_UP 而未被兑现的等待意图，在当前回合窗口内
+被模型再次表达时仍能生效，不会因签名残留而被跳过。
 """
 
 from __future__ import annotations
@@ -97,7 +103,8 @@ async def process_tool_calls(
         stop_call_name: "结束对话"控制流调用名（含 ``action-`` 前缀）。
         default_stop_minutes: stop_conversation 未传 minutes 时的默认冷却分钟数。
         logger: 用于记录调试信息的 logger。
-        seen_signatures: 跨轮去重集合；为 None 时只做本轮去重。
+        seen_signatures: 跨轮去重集合；为 None 时只做本轮去重。控制流调用
+            （pass/stop）不参与去重，也不登记进该集合。
 
     Returns:
         ToolCallOutcome: 本轮控制流与普通调用执行后的汇总结果。
@@ -141,6 +148,13 @@ async def process_tool_calls(
         # 规范化入参：非 dict 视作空 dict，方便后续按 key 取值
         args = call.args if isinstance(call.args, dict) else {}
 
+        # 控制流动作（pass_and_wait / stop_conversation）是幂等的「状态转换意图」，
+        # 一律不参与去重：无论模型重复多少次，语义都是「等待 / 结束」。
+        # 若把它们登记进跨轮集合，上一轮「普通工具 + pass」走 FOLLOW_UP 时 pass
+        # 意图被丢弃、签名却已入账，下一轮模型重复 pass 会命中去重被跳过，
+        # 导致 should_wait 永远为 False 的无限空转（见 session.py 4.5 分支说明）。
+        is_control_flow_call = call.name in (pass_call_name, stop_call_name)
+
         # 本轮内去重（快路径，不发布事件）：去重时忽略 reason 字段，
         # 相同动作不同理由仍视为同一调用
         dedupe_args = (
@@ -153,8 +167,12 @@ async def process_tool_calls(
         is_local_duplicate = dedupe_key in seen
 
         # 跨轮去重（发布 :dedupe_tool_call 事件，默认 handler 检查/登记
-        # seen_signatures；seen_signatures 为 None 时只做本轮去重）
-        if not is_local_duplicate and seen_signatures is not None:
+        # seen_signatures；seen_signatures 为 None 时只做本轮去重；控制流调用不参与）
+        if (
+            not is_local_duplicate
+            and not is_control_flow_call
+            and seen_signatures is not None
+        ):
             # 默认: defaults/dedupe_tool_call.py
             is_cross_duplicate = await NdfcPublisher.dedupe_tool_call(
                 stream_id=stream_id,
@@ -188,8 +206,10 @@ async def process_tool_calls(
             )
             continue
 
-        # 登记到本轮去重集合（跨轮集合 seen_signatures 已由默认 handler 登记）
-        seen.add(dedupe_key)
+        # 登记到本轮去重集合（跨轮集合 seen_signatures 已由默认 handler 登记；
+        # 控制流调用不登记——重复 pass/stop 一律照常执行，以最后一次为准）
+        if not is_control_flow_call:
+            seen.add(dedupe_key)
 
         # ----- 控制流分支 1：pass_and_wait（等待新消息）-----
         if call.name == pass_call_name:

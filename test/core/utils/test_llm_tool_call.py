@@ -8,10 +8,10 @@ import pytest
 
 from src.core.components.base.tool import BaseTool
 from src.core.models.message import Message
-from src.core.utils.llm_tool_call import (
+from src.kernel.llm.usable_execution import (
     create_llm_usable_execution,
     run_llm_usable_executions,
-    run_tool_call,
+    execute_tool_calls,
 )
 from src.kernel.llm import LLMUsableExecution, ToolCall, ToolRegistry
 
@@ -93,7 +93,7 @@ async def test_ready_execution_waits_for_all_previous_executions_done() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_tool_call_runs_concurrently_and_appends_in_call_order() -> None:
+async def test_execute_tool_calls_runs_concurrently_and_appends_in_call_order() -> None:
     events: list[str] = []
 
     class SlowTool(BaseTool):
@@ -120,7 +120,7 @@ async def test_run_tool_call_runs_concurrently_and_appends_in_call_order() -> No
     registry.register(FastTool)
     response = _FakeResponse()
 
-    result = await run_tool_call(
+    result = await execute_tool_calls(
         calls=[
             ToolCall(id="1", name="tool-slow", args={}),
             ToolCall(id="2", name="tool-fast", args={}),

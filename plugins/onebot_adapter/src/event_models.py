@@ -1,6 +1,28 @@
 from enum import Enum
 
 
+class EventKind(str, Enum):
+    """适配器通用处理器使用的 OneBot 顶层事件种类。"""
+
+    MESSAGE = "message"
+    NOTICE = "notice"
+    META_EVENT = "meta_event"
+    REQUEST = "request"
+    UNKNOWN = "unknown"
+
+
+# 兼容旧代码中的枚举名称。
+OneBotEventKind = EventKind
+
+
+class RequestEventKind(str, Enum):
+    """适配器转换的 OneBot request 子种类。"""
+
+    FRIEND_ADD = "friend_add"
+    GROUP_ADD = "group_add"
+    GROUP_INVITE = "group_invite"
+
+
 class MetaEventType:
     lifecycle = "lifecycle"  # 生命周期
 

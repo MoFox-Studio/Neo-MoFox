@@ -115,7 +115,8 @@ await scheduler.create_schedule(
 
 注意：
 
-- 未 `start()` 时会抛 `RuntimeError`
+- 首次 `start()` 前允许注册，回调等待调度器启动后执行；延迟从注册时间计算
+- 关闭期间及停止后注册会抛 `RuntimeError`；再次 `start()` 后可以注册新任务
 - 同名活跃任务默认会抛 `ValueError`
 - `force_overwrite=True` 会移除同名活跃任务后重建
 

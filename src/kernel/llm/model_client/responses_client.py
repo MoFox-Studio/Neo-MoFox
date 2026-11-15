@@ -38,6 +38,7 @@ from ..roles import ROLE
 from ..token_counter import count_payload_tokens
 from ..tool_call_compat import build_tool_call_compat_prompt
 from .base import StreamEvent
+from ..request_trace import provider_attempt, start_provider
 from .openai_client import (
     OpenAIChatClient,
     _extract_usage_from_obj,
@@ -549,131 +550,132 @@ class OpenAIResponsesClient(OpenAIChatClient):
             LLMConfigurationError: 请求缺少 input 且缺少 instructions 时抛出。
             LLMContentFilterError: 模型返回空 output 时抛出。
         """
-        del tools
+        with provider_attempt("responses.create", model_set, request_name, kind="chat", stream=stream):
+            del tools
 
-        if not isinstance(model_set, dict):
-            raise TypeError("OpenAIResponsesClient 期望 model_set 为单个模型配置 dict")
+            if not isinstance(model_set, dict):
+                raise TypeError("OpenAIResponsesClient 期望 model_set 为单个模型配置 dict")
 
-        (
-            api_key,
-            base_url,
-            timeout,
-            trust_env,
-            force_ipv4,
-            extra_params,
-            extra_headers,
-            extra_query,
-            explicit_body,
-        ) = self._extract_model_params(model_set)
+            (
+                api_key,
+                base_url,
+                timeout,
+                trust_env,
+                force_ipv4,
+                extra_params,
+                extra_headers,
+                extra_query,
+                explicit_body,
+            ) = self._extract_model_params(model_set)
 
-        client = self._get_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            trust_env=trust_env,
-            force_ipv4=force_ipv4,
-        )
-
-        items, function_tools = _payloads_to_response_input(payloads)
-        custom_tools = _extract_custom_tools(explicit_body)
-
-        # 兼容 Chat Completions 配置：extra_params.tools 也可声明额外工具
-        extra_tools = extra_params.pop("tools", None)
-        if isinstance(extra_tools, list):
-            custom_tools = [*custom_tools, *extra_tools]
-
-        merged_tools = _merge_tools(function_tools, custom_tools)
-
-        # tool_call_compat：把函数工具以提示词形式追加到 input 末尾
-        tool_call_compat = bool(model_set.get("tool_call_compat", False))
-        if tool_call_compat and merged_tools:
-            compat_prompt = build_tool_call_compat_prompt(merged_tools)
-            items.append(
-                {"type": "message", "role": "user", "content": compat_prompt}
+            client = self._get_client(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                trust_env=trust_env,
+                force_ipv4=force_ipv4,
             )
 
-        params: dict[str, Any] = {
-            "model": model_name,
-        }
-        if items:
-            params["input"] = items
+            items, function_tools = _payloads_to_response_input(payloads)
+            custom_tools = _extract_custom_tools(explicit_body)
 
-        max_output_tokens = model_set.get("max_tokens")
-        if isinstance(max_output_tokens, int):
-            params["max_output_tokens"] = max_output_tokens
-        temperature = model_set.get("temperature")
-        if isinstance(temperature, (int, float)):
-            params["temperature"] = float(temperature)
-        if merged_tools:
-            params["tools"] = merged_tools
+            # 兼容 Chat Completions 配置：extra_params.tools 也可声明额外工具
+            extra_tools = extra_params.pop("tools", None)
+            if isinstance(extra_tools, list):
+                custom_tools = [*custom_tools, *extra_tools]
 
-        # 标准 Responses 参数直接透传，非标准参数并入 extra_body
-        standard_extra: dict[str, Any] = {}
-        non_standard_body: dict[str, Any] = {}
-        for key, value in extra_params.items():
-            if key in _RESPONSES_STANDARD_PARAMS:
-                standard_extra[key] = value
-            else:
-                non_standard_body[key] = value
-        params.update(standard_extra)
+            merged_tools = _merge_tools(function_tools, custom_tools)
 
-        # 自定义请求体优先级最高：body 覆盖 extra_params 中的同名标准参数
-        body_overrides: dict[str, Any] = {}
-        if isinstance(explicit_body, Mapping):
-            for key, value in explicit_body.items():
-                if key == "tools":
-                    continue  # 已在合并分支处理
-                body_overrides[key] = value
-        params.update(body_overrides)
+            # tool_call_compat：把函数工具以提示词形式追加到 input 末尾
+            tool_call_compat = bool(model_set.get("tool_call_compat", False))
+            if tool_call_compat and merged_tools:
+                compat_prompt = build_tool_call_compat_prompt(merged_tools)
+                items.append(
+                    {"type": "message", "role": "user", "content": compat_prompt}
+                )
 
-        # 非标准参数与 body 中无法落到 params 的字段统一进入 extra_body
-        merged_body = dict(non_standard_body)
-        for key in list(body_overrides.keys()):
-            if key not in _RESPONSES_STANDARD_PARAMS:
-                merged_body[key] = body_overrides[key]
+            params: dict[str, Any] = {
+                "model": model_name,
+            }
+            if items:
+                params["input"] = items
 
-        if merged_body:
-            params["extra_body"] = merged_body
+            max_output_tokens = model_set.get("max_tokens")
+            if isinstance(max_output_tokens, int):
+                params["max_output_tokens"] = max_output_tokens
+            temperature = model_set.get("temperature")
+            if isinstance(temperature, (int, float)):
+                params["temperature"] = float(temperature)
+            if merged_tools:
+                params["tools"] = merged_tools
 
-        if extra_headers:
-            params["extra_headers"] = extra_headers
-        if extra_query:
-            params["extra_query"] = extra_query
+            # 标准 Responses 参数直接透传，非标准参数并入 extra_body
+            standard_extra: dict[str, Any] = {}
+            non_standard_body: dict[str, Any] = {}
+            for key, value in extra_params.items():
+                if key in _RESPONSES_STANDARD_PARAMS:
+                    standard_extra[key] = value
+                else:
+                    non_standard_body[key] = value
+            params.update(standard_extra)
 
-        # 至少需要 input 或 instructions 之一
-        extra_body = params.get("extra_body")
-        has_input = bool(params.get("input")) or bool(
-            isinstance(extra_body, dict) and extra_body.get("input")
-        )
-        has_instructions = bool(params.get("instructions")) or bool(
-            isinstance(extra_body, dict) and extra_body.get("instructions")
-        )
-        if not has_input and not has_instructions:
-            raise LLMConfigurationError(
-                "Responses API 请求必须提供 input 或 instructions（当前两者均为空）"
+            # 自定义请求体优先级最高：body 覆盖 extra_params 中的同名标准参数
+            body_overrides: dict[str, Any] = {}
+            if isinstance(explicit_body, Mapping):
+                for key, value in explicit_body.items():
+                    if key == "tools":
+                        continue  # 已在合并分支处理
+                    body_overrides[key] = value
+            params.update(body_overrides)
+
+            # 非标准参数与 body 中无法落到 params 的字段统一进入 extra_body
+            merged_body = dict(non_standard_body)
+            for key in list(body_overrides.keys()):
+                if key not in _RESPONSES_STANDARD_PARAMS:
+                    merged_body[key] = body_overrides[key]
+
+            if merged_body:
+                params["extra_body"] = merged_body
+
+            if extra_headers:
+                params["extra_headers"] = extra_headers
+            if extra_query:
+                params["extra_query"] = extra_query
+
+            # 至少需要 input 或 instructions 之一
+            extra_body = params.get("extra_body")
+            has_input = bool(params.get("input")) or bool(
+                isinstance(extra_body, dict) and extra_body.get("input")
+            )
+            has_instructions = bool(params.get("instructions")) or bool(
+                isinstance(extra_body, dict) and extra_body.get("instructions")
+            )
+            if not has_input and not has_instructions:
+                raise LLMConfigurationError(
+                    "Responses API 请求必须提供 input 或 instructions（当前两者均为空）"
+                )
+
+            log_provider_request_body(
+                "responses.create",
+                params,
+                model_set=model_set,
+                payloads=payloads,
+                request_name=request_name,
+                token_counter=count_payload_tokens,
             )
 
-        log_provider_request_body(
-            "responses.create",
-            params,
-            model_set=model_set,
-            payloads=payloads,
-            request_name=request_name,
-            token_counter=count_payload_tokens,
-        )
-
-        if stream:
-            return await self._create_responses_stream(client=client, params=params)
-        return await self._create_responses_non_stream(
-            client=client,
-            params=params,
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            trust_env=trust_env,
-            force_ipv4=force_ipv4,
-            model_name=model_name,
-        )
+            if stream:
+                return await self._create_responses_stream(client=client, params=params)
+            return await self._create_responses_non_stream(
+                client=client,
+                params=params,
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                trust_env=trust_env,
+                force_ipv4=force_ipv4,
+                model_name=model_name,
+            )
 
     async def _create_responses_non_stream(
         self,
@@ -707,6 +709,7 @@ class OpenAIResponsesClient(OpenAIChatClient):
         Raises:
             LLMContentFilterError: 模型返回空 output 时抛出。
         """
+        trace = start_provider("responses.create", params)
         try:
             resp = await client.responses.create(**params)
         except Exception as e:
@@ -730,6 +733,7 @@ class OpenAIResponsesClient(OpenAIChatClient):
                         pass
             raise
 
+        trace.raw(resp)
         output = _get_attr(resp, "output", [])
         if isinstance(output, dict):
             output = output.get("data", [])
@@ -742,6 +746,8 @@ class OpenAIResponsesClient(OpenAIChatClient):
 
         message, tool_calls, reasoning_content = _extract_response_output(resp)
         usage = _extract_responses_usage(resp)
+        trace.result(message=message, tool_calls=tool_calls, reasoning_content=reasoning_content,
+                     usage=usage, stop_reason=_get_attr(resp, "status"))
         return message, tool_calls, None, reasoning_content, usage
 
     async def _create_responses_stream(
@@ -761,7 +767,9 @@ class OpenAIResponsesClient(OpenAIChatClient):
         """
         stream_params = dict(params)
         stream_params["stream"] = True
+        trace = start_provider("responses.create", stream_params, stream=True)
         stream_resp = await client.responses.create(**stream_params)
+        trace.opened(stream_resp)
 
         async def iter_events() -> AsyncIterator[StreamEvent]:
             """逐事件迭代流式响应，产出 StreamEvent。
@@ -769,88 +777,84 @@ class OpenAIResponsesClient(OpenAIChatClient):
             DeepSeek Responses 流以 ``response.completed`` / ``response.incomplete``
             / ``response.failed`` 作结，没有 ``data: [DONE]``。
             """
-            function_call_meta: dict[str, tuple[str | None, str | None]] = {}
+            with trace.consume():
+                function_call_meta: dict[str, tuple[str | None, str | None]] = {}
 
-            try:
-                async for event in stream_resp:
-                    event_type = _get_attr(event, "type")
+                try:
+                    # 内部启动占位使清理作用域先于返回生效，不读取任何 SDK 事件。
+                    yield StreamEvent()
+                    async for event in stream_resp:
+                        trace.raw(event, event=True)
+                        event_type = _get_attr(event, "type")
 
-                    if event_type in ("response.completed", "response.incomplete"):
-                        resp_body = _get_attr(event, "response")
-                        usage = _extract_responses_usage(resp_body)
-                        if usage:
-                            yield StreamEvent(usage=usage)
-                        yield StreamEvent(
-                            stop_reason=str(_get_attr(resp_body, "status") or event_type)
-                        )
-                        continue
+                        if event_type in ("response.completed", "response.incomplete"):
+                            resp_body = _get_attr(event, "response")
+                            usage = _extract_responses_usage(resp_body)
+                            if usage:
+                                yield trace.event(StreamEvent(usage=usage))
+                            yield trace.event(StreamEvent(
+                                stop_reason=str(_get_attr(resp_body, "status") or event_type)
+                            ))
+                            continue
 
-                    if event_type == "response.failed":
-                        resp_body = _get_attr(event, "response")
-                        usage = _extract_responses_usage(resp_body)
-                        if usage:
-                            yield StreamEvent(usage=usage)
-                        error = _get_attr(resp_body, "error", {}) or {}
-                        message = _get_attr(error, "message", "Responses 流式响应失败")
-                        raise RuntimeError(str(message))
+                        if event_type == "response.failed":
+                            resp_body = _get_attr(event, "response")
+                            usage = _extract_responses_usage(resp_body)
+                            if usage:
+                                yield trace.event(StreamEvent(usage=usage))
+                            error = _get_attr(resp_body, "error", {}) or {}
+                            message = _get_attr(error, "message", "Responses 流式响应失败")
+                            raise RuntimeError(str(message))
 
-                    if event_type == "response.error":
-                        raise RuntimeError(
-                            str(_get_attr(event, "message", "Responses 流式响应错误"))
-                        )
-
-                    if event_type == "response.output_item.added":
-                        item = _get_attr(event, "item")
-                        if _get_attr(item, "type") == "function_call":
-                            call_id = _get_attr(item, "call_id")
-                            name = _get_attr(item, "name")
-                            item_id = _get_attr(item, "id")
-                            if item_id:
-                                function_call_meta[item_id] = (call_id, name)
-                            yield StreamEvent(
-                                tool_call_id=call_id or item_id,
-                                tool_name=name,
+                        if event_type == "response.error":
+                            raise RuntimeError(
+                                str(_get_attr(event, "message", "Responses 流式响应错误"))
                             )
-                        continue
 
-                    if event_type == "response.function_call_arguments.delta":
-                        item_id = _get_attr(event, "item_id")
-                        call_id, name = function_call_meta.get(item_id, (item_id, None))
-                        yield StreamEvent(
-                            tool_call_id=call_id,
-                            tool_name=name,
-                            tool_args_delta=str(_get_attr(event, "delta", "")),
-                        )
-                        continue
+                        if event_type == "response.output_item.added":
+                            item = _get_attr(event, "item")
+                            if _get_attr(item, "type") == "function_call":
+                                call_id = _get_attr(item, "call_id")
+                                name = _get_attr(item, "name")
+                                item_id = _get_attr(item, "id")
+                                if item_id:
+                                    function_call_meta[item_id] = (call_id, name)
+                                yield trace.event(StreamEvent(
+                                    tool_call_id=call_id or item_id,
+                                    tool_name=name,
+                                ))
+                            continue
 
-                    if event_type == "response.reasoning_text.delta":
-                        delta = _get_attr(event, "delta", "")
-                        if delta:
-                            yield StreamEvent(reasoning_delta=str(delta))
-                        continue
+                        if event_type == "response.function_call_arguments.delta":
+                            item_id = _get_attr(event, "item_id")
+                            call_id, name = function_call_meta.get(item_id, (item_id, None))
+                            yield trace.event(StreamEvent(
+                                tool_call_id=call_id,
+                                tool_name=name,
+                                tool_args_delta=str(_get_attr(event, "delta", "")),
+                            ))
+                            continue
 
-                    if event_type == "response.output_text.delta":
-                        delta = _get_attr(event, "delta", "")
-                        if delta:
-                            yield StreamEvent(text_delta=str(delta))
-                        continue
+                        if event_type == "response.reasoning_text.delta":
+                            delta = _get_attr(event, "delta", "")
+                            if delta:
+                                yield trace.event(StreamEvent(reasoning_delta=str(delta)))
+                            continue
 
-                    # 其余事件（web_search_call / file_search_call 等服务端执行
-                    # 工具的状态更新）不产出 StreamEvent，静默跳过。
-            finally:
-                close = getattr(stream_resp, "aclose", None)
-                if callable(close):
-                    result = close()
-                    if inspect.isawaitable(result):
-                        await result
+                        if event_type == "response.output_text.delta":
+                            delta = _get_attr(event, "delta", "")
+                            if delta:
+                                yield trace.event(StreamEvent(text_delta=str(delta)))
+                            continue
 
-                close_sync = getattr(stream_resp, "close", None)
-                if callable(close_sync):
-                    result = close_sync()
-                    if inspect.isawaitable(result):
-                        await result
+                        # 其余事件（web_search_call / file_search_call 等服务端执行
+                        # 工具的状态更新）不产出 StreamEvent，静默跳过。
+                finally:
+                    await trace.close_resource()
 
-        return None, None, iter_events(), None, None
+        stream_iter = iter_events()
+        await anext(stream_iter)  # 仅消费内部启动占位，不向调用方产出空事件。
+        return None, None, stream_iter, None, None
 
 
 __all__ = [

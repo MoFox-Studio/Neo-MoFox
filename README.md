@@ -73,8 +73,8 @@ Neo-MoFox 是一个全新重构的 AI 聊天机器人框架，它的目标不仅
 
 获取最新资源、探索高阶用法或结识同频开发者，请加入我们的社区：
 
-- 📚 **官方文档**：[https://docs.mofox-sama.com/](https://docs.mofox-sama.com/)
-- 🐧 **用户QQ群**：169850076
+- 📚 **官方文档**：[https://docs.mofox.chat/](https://docs.mofox.chat/)
+- 🐧 **用户QQ群**：[1130433589](https://qm.qq.com/q/LOxRpyzMoa)
 - 🎧 **KOOK 频道**：[https://kook.vip/NmrFgn](https://kook.vip/NmrFgn)
 
 ---

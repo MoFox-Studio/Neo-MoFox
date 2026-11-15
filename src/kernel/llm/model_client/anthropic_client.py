@@ -23,6 +23,7 @@ from ..payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResu
 from ..roles import ROLE
 from ..token_counter import count_payload_tokens
 from .base import StreamEvent
+from ..request_trace import provider_attempt, start_provider
 from .shared import (
     build_httpx_timeout,
     extract_model_transport_params,
@@ -501,74 +502,75 @@ class AnthropicChatClient:
         dict[str, Any] | None,
     ]:
         """发起一次 Anthropic 消息请求。"""
-        del tools
+        with provider_attempt("messages.create", model_set, request_name, kind="chat", stream=stream):
+            del tools
 
-        if not isinstance(model_set, dict):
-            raise TypeError("AnthropicChatClient 期望 model_set 为单个模型配置 dict")
+            if not isinstance(model_set, dict):
+                raise TypeError("AnthropicChatClient 期望 model_set 为单个模型配置 dict")
 
-        api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = self._extract_model_params(model_set)
-        tool_format = str(extra_params.pop("tool_format", "anthropic"))
-        # 提取 Anthropic 原生 thinking 参数，由 SDK 负责校验和序列化
-        thinking = extra_params.pop("thinking", None)
-        client = self._get_client(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout,
-            trust_env=trust_env,
-            force_ipv4=force_ipv4,
-        )
+            api_key, base_url, timeout, trust_env, force_ipv4, extra_params, extra_headers, extra_query, explicit_body = self._extract_model_params(model_set)
+            tool_format = str(extra_params.pop("tool_format", "anthropic"))
+            # 提取 Anthropic 原生 thinking 参数，由 SDK 负责校验和序列化
+            thinking = extra_params.pop("thinking", None)
+            client = self._get_client(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=timeout,
+                trust_env=trust_env,
+                force_ipv4=force_ipv4,
+            )
 
-        messages, anthropic_tools, system_blocks = _payloads_to_anthropic_messages(
-            payloads,
-            tool_format=tool_format,
-        )
-        params: dict[str, object] = {
-            "model": model_name,
-            "messages": messages,
-            "max_tokens": int(model_set.get("max_tokens") or 1024),
-        }
-        if system_blocks:
-            params["system"] = system_blocks
-        if anthropic_tools:
-            params["tools"] = anthropic_tools
-            params.setdefault("tool_choice", {"type": "auto"})
+            messages, anthropic_tools, system_blocks = _payloads_to_anthropic_messages(
+                payloads,
+                tool_format=tool_format,
+            )
+            params: dict[str, object] = {
+                "model": model_name,
+                "messages": messages,
+                "max_tokens": int(model_set.get("max_tokens") or 1024),
+            }
+            if system_blocks:
+                params["system"] = system_blocks
+            if anthropic_tools:
+                params["tools"] = anthropic_tools
+                params.setdefault("tool_choice", {"type": "auto"})
 
-        temperature = model_set.get("temperature")
-        if isinstance(temperature, (int, float)) and thinking is None:
-            params["temperature"] = float(temperature)
+            temperature = model_set.get("temperature")
+            if isinstance(temperature, (int, float)) and thinking is None:
+                params["temperature"] = float(temperature)
 
-        if thinking is not None:
-            params["thinking"] = thinking
+            if thinking is not None:
+                params["thinking"] = thinking
 
-        params.update(extra_params)
+            params.update(extra_params)
 
-        # 应用 extra_params 中的 HTTP 层特殊键：headers/query/body
-        # Anthropic SDK 原生支持 extra_headers/extra_query/extra_body，
-        # 这些参数直接注入到实际 HTTP 请求中，与普通请求体字段区分开。
-        if explicit_body:
-            existing = params.get("extra_body")
-            if isinstance(existing, dict):
-                params["extra_body"] = {**explicit_body, **existing}
-            else:
-                params["extra_body"] = explicit_body
-        if extra_headers:
-            params["extra_headers"] = extra_headers
-        if extra_query:
-            params["extra_query"] = extra_query
+            # 应用 extra_params 中的 HTTP 层特殊键：headers/query/body
+            # Anthropic SDK 原生支持 extra_headers/extra_query/extra_body，
+            # 这些参数直接注入到实际 HTTP 请求中，与普通请求体字段区分开。
+            if explicit_body:
+                existing = params.get("extra_body")
+                if isinstance(existing, dict):
+                    params["extra_body"] = {**explicit_body, **existing}
+                else:
+                    params["extra_body"] = explicit_body
+            if extra_headers:
+                params["extra_headers"] = extra_headers
+            if extra_query:
+                params["extra_query"] = extra_query
 
-        # 请求检查和 token 估算统一走共享观测 seam，这里只负责上报原始请求体。
-        log_provider_request_body(
-            "messages.create",
-            params,
-            model_set=model_set,
-            payloads=payloads,
-            request_name=request_name,
-            token_counter=count_payload_tokens,
-        )
+            # 请求检查和 token 估算统一走共享观测 seam，这里只负责上报原始请求体。
+            log_provider_request_body(
+                "messages.create",
+                params,
+                model_set=model_set,
+                payloads=payloads,
+                request_name=request_name,
+                token_counter=count_payload_tokens,
+            )
 
-        if stream:
-            return await self._create_stream(client=client, params=params)
-        return await self._create_non_stream(client=client, params=params)
+            if stream:
+                return await self._create_stream(client=client, params=params)
+            return await self._create_non_stream(client=client, params=params)
 
     async def _create_non_stream(
         self,
@@ -577,12 +579,17 @@ class AnthropicChatClient:
         params: dict[str, object],
     ) -> tuple[str | None, list[dict[str, Any]] | None, None, list[ReasoningText] | None, dict[str, Any] | None]:
         """执行非流式 Anthropic 请求。"""
+        trace = start_provider("messages.create", params)
         response = await client.messages.create(**params)
+        trace.raw(response)
         message_text, tool_calls, reasoning_content = _parse_anthropic_message(response)
         reasoning_parts = _extract_anthropic_reasoning_parts(response)
         if not reasoning_parts and reasoning_content:
             reasoning_parts = [ReasoningText(reasoning_content)]
         usage = _extract_anthropic_usage(getattr(response, "usage", None))
+        trace.result(message=message_text, tool_calls=tool_calls, reasoning_content=reasoning_content,
+                     reasoning_parts=reasoning_parts, usage=usage,
+                     stop_reason=_get_attr(response, "stop_reason"))
         return message_text, tool_calls, None, reasoning_parts or None, usage
 
     async def _create_stream(
@@ -599,101 +606,110 @@ class AnthropicChatClient:
 
         两者合并后通过 StreamEvent(usage=...) 产出。
         """
-        stream_manager = client.messages.stream(**params)
+        trace = start_provider("messages.stream", {**params, "stream": True}, stream=True)
+        trace.opened()
 
         async def iter_events() -> AsyncIterator[StreamEvent]:
-            tool_block_meta: dict[int, tuple[str | None, str | None]] = {}
-            # Anthropic 流式 usage 分两处：message_start 给 input，message_delta 给 output
-            input_usage: dict[str, Any] = {}
+            """逐事件解析原生流，内部启动占位仅用于激活关闭逻辑。"""
+            with trace.consume():
+                # 返回前激活终态处理，尚未消费就关闭时也能记录取消。
+                yield StreamEvent()
+                tool_block_meta: dict[int, tuple[str | None, str | None]] = {}
+                # Anthropic 流式 usage 分两处：message_start 给 input，message_delta 给 output
+                input_usage: dict[str, Any] = {}
 
-            async with stream_manager as stream:
-                async for event in stream:
-                    event_type = _get_attr(event, "type")
+                # 真正消费时才创建管理器，避免遗留未等待的 SDK 请求协程。
+                async with client.messages.stream(**params) as stream:
+                    async for event in stream:
+                        trace.raw(event, event=True)
+                        event_type = _get_attr(event, "type")
 
-                    # ── message_start：提取 input 侧 usage ──
-                    if event_type == "message_start":
-                        msg_obj = _get_attr(event, "message")
-                        if msg_obj is not None:
-                            msg_usage = _get_attr(msg_obj, "usage")
-                            if msg_usage is not None:
-                                input_usage = _extract_anthropic_usage(msg_usage)
-                        continue
-
-                    # ── message_delta：合并 output 侧 usage 并产出 StreamEvent ──
-                    if event_type == "message_delta":
-                        delta = _get_attr(event, "delta")
-                        stop_reason = _get_attr(delta, "stop_reason")
-
-                        delta_usage = _get_attr(event, "usage")
-                        if delta_usage is not None:
-                            output_tokens = _get_attr(delta_usage, "output_tokens", 0) or 0
-                            input_usage["completion_tokens"] = output_tokens
-                            # Anthropic output_tokens 已包含 reasoning tokens
-                            input_usage["completion_includes_reasoning"] = True
-                            input_usage["total_tokens"] = input_usage.get("prompt_tokens", 0) + output_tokens
-                        yield StreamEvent(
-                            usage=dict(input_usage) if input_usage else None,
-                            stop_reason=str(stop_reason) if stop_reason else None,
-                        )
-                        continue
-
-                    if event_type in {"message_stop", "ping", "content_block_stop"}:
-                        continue
-
-                    if event_type == "error":
-                        error = _get_attr(event, "error", {})
-                        message = _get_attr(error, "message", "Anthropic stream error")
-                        raise RuntimeError(str(message))
-
-                    if event_type == "content_block_start":
-                        index = _get_attr(event, "index", -1)
-                        content_block = _get_attr(event, "content_block")
-                        block_type = _get_attr(content_block, "type")
-                        if block_type in {"thinking", "redacted_thinking"}:
-                            if block_type == "redacted_thinking":
-                                redacted_data = _get_attr(content_block, "data")
-                                yield StreamEvent(
-                                    reasoning_block_type=str(block_type),
-                                    reasoning_redacted_data=str(redacted_data) if redacted_data else None,
-                                )
-                            else:
-                                yield StreamEvent(reasoning_block_type=str(block_type))
+                        # ── message_start：提取 input 侧 usage ──
+                        if event_type == "message_start":
+                            msg_obj = _get_attr(event, "message")
+                            if msg_obj is not None:
+                                msg_usage = _get_attr(msg_obj, "usage")
+                                if msg_usage is not None:
+                                    input_usage = _extract_anthropic_usage(msg_usage)
                             continue
-                        if block_type in {"tool_use", "server_tool_use"}:
-                            tool_call_id = _get_attr(content_block, "id")
-                            tool_name = _get_attr(content_block, "name")
-                            tool_block_meta[int(index)] = (tool_call_id, tool_name)
-                            yield StreamEvent(tool_call_id=tool_call_id, tool_name=tool_name)
-                        continue
 
-                    if event_type != "content_block_delta":
-                        continue
+                        # ── message_delta：合并 output 侧 usage 并产出 StreamEvent ──
+                        if event_type == "message_delta":
+                            delta = _get_attr(event, "delta")
+                            stop_reason = _get_attr(delta, "stop_reason")
 
-                    index = int(_get_attr(event, "index", -1))
-                    delta = _get_attr(event, "delta")
-                    delta_type = _get_attr(delta, "type")
+                            delta_usage = _get_attr(event, "usage")
+                            if delta_usage is not None:
+                                output_tokens = _get_attr(delta_usage, "output_tokens", 0) or 0
+                                input_usage["completion_tokens"] = output_tokens
+                                # Anthropic output_tokens 已包含 reasoning tokens
+                                input_usage["completion_includes_reasoning"] = True
+                                input_usage["total_tokens"] = input_usage.get("prompt_tokens", 0) + output_tokens
+                            yield trace.event(StreamEvent(
+                                usage=dict(input_usage) if input_usage else None,
+                                stop_reason=str(stop_reason) if stop_reason else None,
+                            ))
+                            continue
 
-                    if delta_type == "text_delta":
-                        yield StreamEvent(text_delta=str(_get_attr(delta, "text", "")))
-                        continue
+                        if event_type in {"message_stop", "ping", "content_block_stop"}:
+                            continue
 
-                    if delta_type == "thinking_delta":
-                        yield StreamEvent(reasoning_delta=str(_get_attr(delta, "thinking", "")))
-                        continue
+                        if event_type == "error":
+                            error = _get_attr(event, "error", {})
+                            message = _get_attr(error, "message", "Anthropic stream error")
+                            raise RuntimeError(str(message))
 
-                    if delta_type == "signature_delta":
-                        yield StreamEvent(reasoning_signature_delta=str(_get_attr(delta, "signature", "")))
-                        continue
+                        if event_type == "content_block_start":
+                            index = _get_attr(event, "index", -1)
+                            content_block = _get_attr(event, "content_block")
+                            block_type = _get_attr(content_block, "type")
+                            if block_type in {"thinking", "redacted_thinking"}:
+                                if block_type == "redacted_thinking":
+                                    redacted_data = _get_attr(content_block, "data")
+                                    yield trace.event(StreamEvent(
+                                        reasoning_block_type=str(block_type),
+                                        reasoning_redacted_data=str(redacted_data) if redacted_data else None,
+                                    ))
+                                else:
+                                    yield trace.event(StreamEvent(reasoning_block_type=str(block_type)))
+                                continue
+                            if block_type in {"tool_use", "server_tool_use"}:
+                                tool_call_id = _get_attr(content_block, "id")
+                                tool_name = _get_attr(content_block, "name")
+                                tool_block_meta[int(index)] = (tool_call_id, tool_name)
+                                yield trace.event(StreamEvent(tool_call_id=tool_call_id, tool_name=tool_name))
+                            continue
 
-                    if delta_type == "input_json_delta":
-                        tool_call_id, tool_name = tool_block_meta.get(index, (None, None))
-                        yield StreamEvent(
-                            tool_call_id=tool_call_id,
-                            tool_name=tool_name,
-                            tool_args_delta=str(_get_attr(delta, "partial_json", "")),
-                        )
+                        if event_type != "content_block_delta":
+                            continue
 
-        return None, None, iter_events(), None, None
+                        index = int(_get_attr(event, "index", -1))
+                        delta = _get_attr(event, "delta")
+                        delta_type = _get_attr(delta, "type")
+
+                        if delta_type == "text_delta":
+                            yield trace.event(StreamEvent(text_delta=str(_get_attr(delta, "text", ""))))
+                            continue
+
+                        if delta_type == "thinking_delta":
+                            yield trace.event(StreamEvent(reasoning_delta=str(_get_attr(delta, "thinking", ""))))
+                            continue
+
+                        if delta_type == "signature_delta":
+                            yield trace.event(StreamEvent(reasoning_signature_delta=str(_get_attr(delta, "signature", ""))))
+                            continue
+
+                        if delta_type == "input_json_delta":
+                            tool_call_id, tool_name = tool_block_meta.get(index, (None, None))
+                            yield trace.event(StreamEvent(
+                                tool_call_id=tool_call_id,
+                                tool_name=tool_name,
+                                tool_args_delta=str(_get_attr(delta, "partial_json", "")),
+                            ))
+
+        stream_iter = iter_events()
+        await anext(stream_iter)  # 仅消费内部启动占位，不进入 SDK 流上下文。
+        return None, None, stream_iter, None, None
 
 
 __all__ = [

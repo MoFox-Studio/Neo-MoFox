@@ -450,9 +450,9 @@ class BaseChatter(BaseComponent):
     ) -> list[tuple[bool, bool]]:
         """执行一次响应中的普通 tool calls 并写回 TOOL_RESULT。
 
-        此方法面向一批 call，实际执行会委托统一调度器：可并发的 coroutine
-        会并发运行，顺序敏感的异步生成器会在 ``"_READY"`` 阶段按原始顺序门控。
-        控制流工具（pass_and_wait / stop_conversation 等）仍应由调用方先行处理。
+        此方法面向一批 call，实际执行会委托 ``llm_api``，再由对应的
+        Tool/Action/Agent Manager 负责组件级执行。控制流工具
+        （pass_and_wait / stop_conversation 等）仍应由调用方先行处理。
 
         Args:
             calls: LLM 返回的一批工具调用对象，按模型输出顺序排列。
@@ -466,7 +466,7 @@ class BaseChatter(BaseComponent):
         """
         from src.app.plugin_system.api import llm_api
 
-        return await llm_api.run_tool_call(
+        return await llm_api.dispatch_llm_tool_calls(
             calls=calls,
             response=response,
             usable_map=usable_map,
@@ -474,8 +474,6 @@ class BaseChatter(BaseComponent):
             plugin=self.plugin,
             stream_id=self.stream_id,
             resolve_component_plugin=self._resolve_component_plugin,
-            display_name=self.name,
-            task_observer=task_observer,
         )
 
     @staticmethod

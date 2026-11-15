@@ -1,8 +1,9 @@
-"""emoji_sender Action：发送表情包。
+"""emoji_sender Action：发送与删除表情包。
 
-提供两个 Action：
+提供三个 Action：
 - SendEmojiMemeAction（direct 模式）：输入目标描述 + 情感 tag，一步完成检索与发送
 - SendEmojiMemeByIdAction（picker 模式）：按 search_emoji_memes 返回的 id 精确发送指定表情包
+- DeleteEmojiMemeByIdAction（picker 模式）：按完整 meme_id 彻底删除表情包
 """
 
 from __future__ import annotations
@@ -115,6 +116,54 @@ class SendEmojiMemeByIdAction(BaseAction):
             tag = str(result.get("tag") or "").strip()
             desc = str(result.get("description") or "").strip()
             detail = f"已发送表情包\n- 标签: {tag}\n- 描述: {desc}" if desc else f"已发送表情包\n- 标签: {tag}"
+            yield True, detail
+            return
+
+        yield False, reason
+        return
+
+
+class DeleteEmojiMemeByIdAction(BaseAction):
+    """按完整 meme_id 删除表情包动作。"""
+
+    name: str = "delete_emoji_meme_by_id"
+    description: str = (
+        "从表情包库中彻底删除一张表情包，同时移除磁盘文件与向量库记录，删除后不可恢复。"
+        "meme_id 必须是 search_emoji_memes 返回的完整 meme_id"
+        "（64 位十六进制，仅限 0-9a-f），不接受前缀。"
+        "仅在你明确不想再使用这张表情包时调用，例如候选列表里的表情明显不合适、"
+        "或用户要求清理某张表情包。"
+    )
+    primary_action: bool = False
+    associated_types = ["emoji"]
+
+    async def execute(
+        self,
+        meme_id: Annotated[str, "要删除的表情包完整 id（来自 search_emoji_memes 返回的完整 meme_id）"],
+    ) -> AsyncGenerator[tuple[bool, str] | None, None]:
+        """执行按完整 id 删除表情包动作。"""
+        service = get_service("emoji_sender:service:emoji_sender")
+        if service is None:
+            yield False, "emoji_sender service 未加载"
+            return
+
+        service = cast(EmojiSenderService, service)
+
+        yield None
+        ok, result, reason = await service.delete_by_meme_id(meme_id=meme_id)
+
+        if ok:
+            # 成功但没有详情时也要给出成功文案，不能把成功当成失败
+            if not result:
+                yield True, "已删除表情包"
+                return
+            tags = result.get("tags") or []
+            tag_text = "、".join(str(tag) for tag in tags) if tags else "无"
+            desc = str(result.get("description") or "").strip()
+            detail = (
+                f"已删除表情包\n- ID: {result.get('meme_id', '')}\n"
+                f"- 标签: {tag_text}\n- 描述: {desc or '无'}"
+            )
             yield True, detail
             return
 

@@ -12,6 +12,7 @@ from .exceptions import LLMAPIError, LLMConfigurationError, LLMRateLimitError, L
 from .model_client import ModelClientRegistry
 from .monitor import RequestMetrics, RequestTimer, get_global_collector
 from .policy import create_default_policy
+from .request_trace import Attempt, attempt_scope, new_logical_request
 from .policy.base import Policy
 from .request import _validate_model_entry, _validate_model_set
 from .types import ModelSet, RequestType
@@ -54,6 +55,7 @@ class EmbeddingRequest:
 
         last_error: BaseException | None = None
         retry_count = 0
+        logical = new_logical_request()
         step = session.first()
 
         while step.model is not None:
@@ -68,23 +70,25 @@ class EmbeddingRequest:
             assert self.clients is not None
             client = self.clients.get_embedding_client_for_model(model)
             timer = RequestTimer()
+            trace = Attempt(logical, model, self.request_name, kind="embedding")
 
             try:
                 with timer:
                     timeout_seconds = model.get("timeout")
-                    create_task = client.create_embedding(
-                        model_name=model_identifier,
-                        inputs=list(self.inputs),
-                        request_name=self.request_name,
-                        model_set=model,
-                    )
-                    if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0:
-                        embeddings = await asyncio.wait_for(
-                            create_task,
-                            timeout=float(timeout_seconds),
+                    with attempt_scope(trace):
+                        create_task = client.create_embedding(
+                            model_name=model_identifier,
+                            inputs=list(self.inputs),
+                            request_name=self.request_name,
+                            model_set=model,
                         )
-                    else:
-                        embeddings = await create_task
+                        if isinstance(timeout_seconds, (int, float)) and timeout_seconds > 0:
+                            embeddings = await asyncio.wait_for(
+                                create_task,
+                                timeout=float(timeout_seconds),
+                            )
+                        else:
+                            embeddings = await create_task
 
                 if self.enable_metrics:
                     metrics = RequestMetrics(
@@ -98,6 +102,9 @@ class EmbeddingRequest:
                     )
                     get_global_collector().record_request(metrics)
 
+                if not trace.bound:
+                    trace.result(embeddings=embeddings)
+                trace.finish()
                 session.record_success(latency=timer.elapsed)
                 return EmbeddingResponse(
                     embeddings=embeddings,
@@ -105,10 +112,10 @@ class EmbeddingRequest:
                     request_name=self.request_name,
                 )
             except BaseException as e:
+                trace.finish(e)
                 if isinstance(e, asyncio.CancelledError):
                     logger.debug(
                         f"Embedding 请求被取消: model={model_identifier}, request={self.request_name or '__default__'}",
-                        exc_info=True,
                     )
                     raise
 
@@ -126,14 +133,12 @@ class EmbeddingRequest:
                     )
                     logger.debug(
                         f"Embedding 请求暂时失败（详情）: model={model_identifier}, "
-                        f"request={self.request_name or '__default__'}, reason={classified_error}",
-                        exc_info=True,
+                        f"request={self.request_name or '__default__'}, error_type={_err_type}",
                     )
                 else:
                     logger.error(
                         f"Embedding 请求失败: model={model_identifier}, request={self.request_name or '__default__'}, "
-                        f"error_type={_err_type}, reason={classified_error}",
-                        exc_info=True,
+                        f"error_type={_err_type}",
                     )
 
                 if self.enable_metrics:

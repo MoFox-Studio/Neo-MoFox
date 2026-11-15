@@ -24,13 +24,13 @@ src/app/plugin_system/base/__init__.py 暴露核心基类：
 
 ## API 层能力分类
 
-src/app/plugin_system/api/__init__.py 聚合 20 个 API 子模块：
+src/app/plugin_system/api/__init__.py 聚合各插件 API 子模块：
 
 - 交互与消息：message_api、send_api、stream_api、chat_api。
-- 插件与配置：plugin_api、config_api、permission_api。
-- 组件能力：action_api、agent_api、adapter_api、command_api。
+- 插件与配置：plugin_api、config_api、permission_api、person_api。
+- 组件能力：action_api、agent_api、adapter_api、command_api、tool_api。
 - 业务支撑：service_api、router_api、event_api。
-- 基础设施：database_api、storage_api、llm_api、log_api、media_api、prompt_api。
+- 基础设施：database_api、storage_api、llm_api、log_api、media_api、prompt_api、request_inspector_api。
 
 建议优先从聚合入口导入，减少插件与底层模块的耦合深度。
 
@@ -50,11 +50,26 @@ src/app/plugin_system/types.py 提供：
 - 实际执行逻辑位于 core/components、core/managers 和 kernel 子模块。
 - 新增 API 时应优先包装并稳定导出，而不是直接暴露底层内部实现细节。
 
+请求体监视插件 API 位于 `request_inspector_api`，可获取摘要快照、查询单条详情、
+清空当前缓冲、读取相关统计，并生成详情页使用的结构化视图。WebUI 后端通过该 API
+访问核心监视器，不直接读取其内部记录。
+
+```python
+from src.app.plugin_system.api import request_inspector_api
+
+snapshot = request_inspector_api.get_request_inspector_snapshot()
+records = request_inspector_api.list_request_inspector_requests()
+detail = request_inspector_api.get_request_inspector_request(records[-1]["id"]) if records else None
+```
+
+可运行 [request_inspector_api 示例](../../examples/src/app/plugin_system/api/request_inspector_api_example.py)
+查看当前监视快照和最新请求详情。
+
 ## 示例与验证
 
 示例目录位于 examples/src/app/plugin_system/api，当前覆盖：
 
 - action、adapter、agent、chat、command、config。
-- media、permission、plugin、prompt、router、service、stream。
+- media、permission、plugin、prompt、request inspector、router、service、stream。
 
 新增 API 后，建议同步补充对应 example，保证插件作者可以快速验证调用路径。

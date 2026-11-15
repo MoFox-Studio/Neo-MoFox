@@ -19,7 +19,6 @@ from typing import Any
 from src.core.managers.media_manager.cache import MediaCache
 from src.core.managers.media_manager.cleanup import (
     MediaCleanup,
-    start_cleanup_scheduler_async,
 )
 from src.core.managers.media_manager.config import MediaConfig
 from src.core.managers.media_manager.engines import ASREngine, VLMEngine
@@ -84,7 +83,30 @@ class MediaManager:
 
         # 清理调度
         self._cleanup = MediaCleanup(self._config)
-        start_cleanup_scheduler_async(self._cleanup)
+        self._initialized = False
+        self._running = False
+
+    async def initialize(self) -> None:
+        """初始化媒体管理器，但不启动其后台服务。"""
+        if self._initialized:
+            return
+        self._initialized = True
+
+    async def start(self) -> None:
+        """启动媒体管理器的周期清理任务。"""
+        if self._running:
+            return
+        if not self._initialized:
+            await self.initialize()
+        await self._cleanup.start_scheduler()
+        self._running = True
+
+    async def shutdown(self) -> None:
+        """停止媒体管理器注册的周期清理任务。"""
+        if not self._running:
+            return
+        await self._cleanup.stop_scheduler()
+        self._running = False
 
     # ──────────────────────────────────────────
     # 公共 API：媒体识别控制

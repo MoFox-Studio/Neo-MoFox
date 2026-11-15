@@ -172,7 +172,7 @@ class SkillGetScriptTool(BaseTool):
         # 1) trigger_message 本身为 None —— BaseTool.trigger_message 默认 None
         #    （src/core/components/base/tool.py:76）。Agent usable 路径经
         #    create_llm_usable_execution 会调 _bind_runtime_context
-        #    （src/core/utils/llm_tool_call.py:146），但传入的 message 允许为 None
+        #    （src/kernel/llm/usable_execution.py），但传入的 message 允许为 None
         #    （execute_local_usable 的 message 默认 None，agent_api.execute_agent_usable
         #    根本没有 message 参数）；ToolUse.execute_tool 则压根不绑定运行时上下文。
         # 2) 消息存在但字段为空 —— Message 无字段校验，platform/sender_id 默认空串；

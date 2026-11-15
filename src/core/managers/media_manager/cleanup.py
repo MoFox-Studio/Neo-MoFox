@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 
@@ -89,6 +88,17 @@ class MediaCleanup:
             f"(缓存清理每 {self._config.media_cache_cleanup_interval_hours}h，"
             f"文件清理每 {self._config.media_file_cleanup_interval_hours}h)"
         )
+
+    async def stop_scheduler(self) -> None:
+        """移除媒体缓存清理和媒体文件清理任务。"""
+        scheduler = get_unified_scheduler()
+        task_ids = (self.cache_cleanup_task_id, self.file_cleanup_task_id)
+        self.cache_cleanup_task_id = None
+        self.file_cleanup_task_id = None
+
+        for task_id in task_ids:
+            if task_id:
+                await scheduler.remove_schedule(task_id)
 
     async def cleanup_pending_folder(self) -> None:
         """清理待识别文件夹中的陈旧文件。
@@ -209,19 +219,3 @@ class MediaCleanup:
         except Exception as e:
             logger.warning(f"删除媒体文件失败 {file_path.name}: {e}")
             return 0
-
-
-def start_cleanup_scheduler_async(cleanup: MediaCleanup) -> None:
-    """在事件循环中异步启动清理调度器。
-
-    包装 :meth:`MediaCleanup.start_scheduler` 为 asyncio task，
-    供 :class:`~src.core.managers.media_manager.manager.MediaManager` 在
-    构造时非阻塞启动使用。
-
-    Args:
-        cleanup: 清理组件实例
-    """
-    try:
-        asyncio.create_task(cleanup.start_scheduler())
-    except Exception as e:
-        logger.error(f"启动清理调度器失败: {e}")

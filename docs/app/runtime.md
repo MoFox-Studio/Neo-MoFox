@@ -18,7 +18,7 @@
 
 ## 启动路径
 
-1. main.py 从 config/core.toml 读取 ui_level。
+1. main.py 确认启动协议与遥测选择。
 2. main.py 创建 Bot 并调用 Bot.start()。
 3. Bot.start() 顺序执行 initialize()、run()，最后进入 shutdown()。
 
@@ -34,42 +34,76 @@ Bot.initialize() 采用单条进度链路，按阶段推进。
 - 事件总线、任务管理器、调度器、WatchDog。
 - 数据库与 schema 对齐。
 - 向量数据库、JSON 存储初始化。
+- 本地遥测、LLM 统计及云端遥测运行时准备。
+
+`_initialize_kernel()` 只编排各资源的初始化方法。同步构造使用普通函数，
+数据库连接等异步操作使用异步函数；每个方法说明其依赖和副作用。
+调度器此时只用于注册任务，看门狗按配置启动以监控后续初始化。
 
 ### 阶段 2：Core 组件初始化
 
-- 初始化 MessageReceiver 与 SinkManager。
+- `_initialize_media_manager()`：数据库就绪后显式准备媒体管理器。
+- `_initialize_transport()`：初始化 MessageReceiver 与 SinkManager。
 - 初始化 adapter/router/event/distribution 管理器。
-- 在配置启用时启动 HTTPServer，并尝试挂载 LLM Request Inspector。
+- `_initialize_mcp_manager()`：准备 MCP 工具连接。
+- `_initialize_http_server()`：在配置启用时启动 HTTPServer，供插件挂载路由。
 
 ### 阶段 3：插件发现与加载
 
+- `_initialize_plugins()` 编排市场同步、发现、依赖安装和加载。
 - 通过 PluginLoader.plan_plugins() 生成 load_order 与 manifests。
 - 可选安装插件 Python 依赖（受 plugin_deps 配置控制）。
 - 逐个插件加载，失败插件按容错策略继续后续加载。
 - 全部加载后发布 ON_ALL_PLUGIN_LOADED 事件。
+- `_validate_startup_contract()` 检查必需资源，记录已注册的定时任务。
+
+重复调用已成功完成的 `initialize()` 会直接返回；关闭后的 Bot 不可复用。
+此阶段仍可能建立外部连接或由插件事件启动适配器，不能视为完全无后台活动。
 
 ## 运行阶段
 
 Bot.run() 的核心行为：
 
-1. 启动调度器并发布 ON_START 事件。
-2. 按 UILevel 决定是否启动实时仪表盘。
-3. 注册信号处理器。
-4. 启动 CommandParser，循环执行用户命令。
-5. 循环期间维护统计并更新 UI（Verbose 模式）。
+1. 检查初始化、运行和关闭状态，并验证必需资源。
+2. `_start_runtime_services()` 依次启动调度器、媒体清理、日志清理、云端遥测发送循环。
+3. `_publish_start_event()` 发布 ON_START。
+4. `_install_signal_handler()` 注册信号处理器，`_create_command_parser()` 创建命令解析器。
+5. `_run_command_loop()` 处理用户命令，遇到退出命令、关闭信号或取消时结束。
+
+媒体启动方法要求调度器已运行。服务启动向外抛出异常时不发布 ON_START，
+完整入口 `start()` 的 finally 执行关闭。日志清理和云端遥测启动失败沿用警告后继续的策略。
+`run()` 退出时复位运行标记；信号处理器和命令解析器保留到 `shutdown()` 末尾，
+保证关闭期间第二次 Ctrl+C 仍可强制退出。
 
 ## 关闭阶段
 
 Bot.shutdown() 默认流程如下：
 
-1. 设置停止标记，拒绝新工作。
-2. 发布 ON_STOP 事件。
-3. 按逆序卸载插件。
-4. 停止调度器与 HTTP 服务器。
-5. 停止 WatchDog。
-6. 取消并回收任务管理器任务。
-7. 关闭数据库与向量数据库。
-8. 关闭日志系统。
+1. 设置停止标记，记录关闭开始遥测。
+2. 发布 ON_STOP，停止 HTTP 入口与聊天流。
+3. 按逆序逐个卸载插件，每个插件独立处理超时及异常。
+4. 移除日志、媒体清理任务，再停止调度器。
+5. 关闭 MCP、云端遥测发送循环和看门狗，取消并等待任务管理器持有的任务。
+6. 关闭主数据库、向量库和 LLM 统计存储。
+7. 记录关闭结果，解除遥测订阅，关闭本地遥测存储。
+8. 在 finally 中恢复 DNS 和默认线程池，关闭日志、命令解析器，最后恢复信号处理器。
+
+`initialize()`、内核/Core/插件编排、`run()`、运行服务启动、`shutdown()` 和
+`start()` 均有编号步骤注释；各资源函数的文档字符串说明依赖和释放职责。
+
+`shutdown(timeout=30.0)` 的 timeout 表示**每个异步清理步骤**的等待上限，
+包括每个插件，不代表整个关闭流程的总时限。超时依赖协程配合取消，无法抢占
+同步阻塞代码或吞掉取消的协程。一个步骤失败或超时后仍尝试后续步骤，最后
+汇总为 `BotShutdownError`；出错时不会输出“关闭完成”。
+
+全局资源在初始化调用前登记，以便释放初始化中途失败产生的资源；未尝试初始化的
+数据库不会被关闭，关闭时不通过懒加载 getter 新建聊天流管理器。任务清理仅针对
+TaskManager 持有的任务（排除当前关闭任务），不会遍历并取消宿主事件循环的所有任务。
+线程池也只释放 Bot 创建的实例，并恢复先前的默认线程池。
+
+外部取消关闭协程时仍会执行 finally 中的同步恢复，但尚未执行的异步清理步骤
+不会继续。关闭请求具有幂等保护，重复调用直接返回，不表示重新尝试失败步骤。
+`start()` 在已有启动异常时把关闭错误作为异常附注保留，避免覆盖最初的故障原因。
 
 SignalHandler 策略：
 
