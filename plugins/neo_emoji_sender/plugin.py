@@ -121,7 +121,6 @@ class NeoEmojiSenderPlugin(BasePlugin):
             config: 插件配置。
         """
         super().__init__(config)
-        self.runtime: EmojiRuntime | None = None
 
     def get_components(self) -> list[type]:
         """返回插件组件类。
@@ -152,27 +151,32 @@ class NeoEmojiSenderPlugin(BasePlugin):
         if isinstance(config, NeoEmojiSenderConfig) and not config.plugin.enabled:
             return
 
-        self.runtime = EmojiRuntime(self)
-        await self.runtime.initialize()
+        config = self.config
+        if not isinstance(config, NeoEmojiSenderConfig):
+            logger.warning("neo_emoji_sender 配置未加载，跳过运行时初始化")
+            return
+
+        runtime = EmojiRuntime.create(config)
+        await runtime.initialize()
         # 迁移必须在注册本插件调度之前：判断依据是旧任务是否还在调度器里，
         # 而注册本插件任务不影响该判断，但尽早迁移可让首批扫描看到完整数据
-        await self.runtime.migrate_legacy_if_needed()
+        await runtime.migrate_legacy_if_needed()
         sync_actor_reminder(self)
         self._apply_custom_instructions()
 
         # scheduler 在加载阶段尚未 start，create_schedule 不会因 _stopping 抛错，
         # 因此可以直接 await 注册，不需要轮询等待就绪
-        self.runtime.reconciler = EmojiReconciler(self.runtime)
-        self.runtime.sources = self._build_sources()
+        runtime.reconciler = EmojiReconciler(runtime)
+        runtime.sources = self._build_sources()
         await self._register_schedules()
 
     async def on_plugin_unloaded(self) -> None:
         """插件卸载前清理调度与资源。"""
         from src.core.prompt import get_system_reminder_store
 
-        if self.runtime is not None:
-            await self.runtime.close()
-            self.runtime = None
+        runtime = EmojiRuntime.peek()
+        if runtime is not None:
+            await runtime.close()
         get_system_reminder_store().delete(_TARGET_REMINDER_BUCKET, _TARGET_REMINDER_NAME)
 
     def _build_sources(self) -> list[EmojiSource]:
@@ -215,7 +219,7 @@ class NeoEmojiSenderPlugin(BasePlugin):
         """注册来源与对账调度任务。"""
         from src.kernel.scheduler import TriggerType, get_unified_scheduler
 
-        runtime = self.runtime
+        runtime = EmojiRuntime.peek()
         if runtime is None:
             return
         scheduler = get_unified_scheduler()

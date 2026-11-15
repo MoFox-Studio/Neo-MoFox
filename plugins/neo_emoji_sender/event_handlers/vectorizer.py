@@ -6,7 +6,7 @@ EventBus 会把处理器异常转成 PASS，导致参数变更丢失。
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 from src.app.plugin_system.base import BaseEventHandler
 from src.kernel.event import EventDecision
@@ -19,9 +19,7 @@ from ..manager.events import (
     SearchPayload,
     SearchResultItem,
 )
-
-if TYPE_CHECKING:
-    from ..manager.runtime import EmojiRuntime
+from ..manager.runtime import EmojiRuntime
 
 logger = get_logger("neo_emoji_sender.vectorizer")
 
@@ -56,10 +54,7 @@ class EmojiVectorizer(BaseEventHandler):
             (事件决策, 回填后的参数)。
         """
         try:
-            runtime = getattr(self.plugin, "runtime", None)
-            if runtime is None:
-                raise RuntimeError("runtime 未初始化")
-
+            runtime = EmojiRuntime.get()
             if event_name in (EmojiEvent.REGISTERED, EmojiEvent.UPDATED):
                 await self._handle_upsert(runtime, cast(RegisteredPayload, params))
             elif event_name == EmojiEvent.DELETED:

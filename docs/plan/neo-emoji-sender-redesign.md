@@ -113,7 +113,7 @@ plugins/neo_emoji_sender/
 ├── __init__.py
 ├── manager/
 │   ├── __init__.py
-│   ├── runtime.py          # EmojiRuntime：跨 Service 实例共享的运行时
+│   ├── runtime.py          # EmojiRuntime：模块级单例运行时
 │   ├── service.py          # EmojiService（BaseService）
 │   ├── models.py           # SQLAlchemy 模型
 │   ├── repository.py       # SQLite 仓储
@@ -244,8 +244,12 @@ def compute_revision(description: str, tags: list[str]) -> str:
 框架的 `service_api.get_service()` 每次都会创建新的 Service 实例。因此：
 
 - `EmojiService` 必须是无状态门面
-- 所有共享状态放在 `plugin.runtime`（`EmojiRuntime`）
+- 所有共享状态放在模块级单例 `EmojiRuntime`
 - 不能把锁、缓存、DB 连接挂在 Service 实例字段上
+
+组件由框架实例化，构造时只能拿到 `BasePlugin`，看不到插件子类上的字段。
+因此运行时不挂在插件实例上，而是以模块单例暴露，组件侧直接拿具体类型，
+无需 `getattr` 或类型断言：
 
 ```python
 class EmojiService(BaseService):
@@ -254,7 +258,7 @@ class EmojiService(BaseService):
 
     @property
     def runtime(self) -> EmojiRuntime:
-        return self.plugin.runtime
+        return EmojiRuntime.get()
 ```
 
 服务签名为 `neo_emoji_sender:service:emoji`。
@@ -873,7 +877,7 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
 
 ### 12.1 锁
 
-所有共享状态放在 `EmojiRuntime`：
+所有共享状态放在模块级单例 `EmojiRuntime`：
 
 | 名称 | 作用 |
 |---|---|
@@ -889,7 +893,7 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
 `on_plugin_loaded`：
 
 ```text
-1. 初始化 EmojiRuntime
+1. `EmojiRuntime.create(config)` 建立单例并初始化
    - 建目录
    - 初始化 SQLite
    - 初始化 Chroma
@@ -909,6 +913,7 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
 ```text
 1. 按 runtime.schedule_ids 移除全部 schedule（唯一撤销路径）
 2. 关闭 SQLite / Chroma
+3. 注销模块单例，避免插件重载后拿到指向已关闭数据库的旧实例
 3. 清理 actor reminder
 ```
 

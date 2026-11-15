@@ -1,6 +1,16 @@
-"""neo_emoji_sender 运行时。
+"""neo_emoji_sender 运行时（插件级模块单例）。
 
-Service 不是单例，所有跨实例共享状态都放在这里。
+Service、来源、事件处理器都是框架按需实例化的组件，构造时只能拿到
+``BasePlugin``，看不到插件子类上的字段。若让它们反过来 ``getattr`` 插件实例，
+既拿不到类型信息，也把依赖方向扭反了。
+
+因此跨组件共享状态集中在这里，并以模块级单例暴露：
+
+- 组件侧一律 ``EmojiRuntime.get()``，拿到的是具体类型
+- 插件 ``on_plugin_loaded`` 负责 ``create``，``on_plugin_unloaded`` 负责 ``close``
+
+单例的生命周期必须跟着插件走：``close()`` 会把内部引用置空，避免插件重载后
+拿到指向已关闭数据库的旧对象。
 """
 
 from __future__ import annotations
@@ -21,25 +31,27 @@ from .vector_index import EmojiVectorIndex
 logger = get_logger("neo_emoji_sender.runtime")
 
 if TYPE_CHECKING:
-    from src.app.plugin_system.base import BasePlugin
-
     from ..config import NeoEmojiSenderConfig
     from ..sources.base import EmojiSource
     from .reconciler import EmojiReconciler
 
 
 class EmojiRuntime:
-    """插件级共享运行时。"""
+    """插件级共享运行时。
 
-    def __init__(self, plugin: BasePlugin) -> None:
+    不直接实例化，统一走 :meth:`create` 与 :meth:`get`。
+    """
+
+    _instance: EmojiRuntime | None = None
+
+    def __init__(self, config: NeoEmojiSenderConfig) -> None:
         """装配仓储、文件存储与向量索引。
 
         Args:
-            plugin: 所属插件实例，用于读取配置。
+            config: 已加载的插件配置。
         """
-        self.plugin = plugin
-        cfg = self.config
-        data_dir = Path(cfg.storage.data_dir)
+        self.config = config
+        data_dir = Path(config.storage.data_dir)
         self.data_dir = data_dir
         self.repo = EmojiRepository(str(data_dir / "emoji.db"))
         self.store = EmojiStore(data_dir)
@@ -47,7 +59,7 @@ class EmojiRuntime:
         self.state = StateStore(data_dir / "state.json")
         self.vector = EmojiVectorIndex(
             db_path=str(data_dir / "vector"),
-            collection_name=str(cfg.vector.collection_name),
+            collection_name=str(config.vector.collection_name),
             state=self.state,
         )
         self.usage_history: dict[str, deque[str]] = {}
@@ -61,22 +73,43 @@ class EmojiRuntime:
         self.schedule_ids: list[str] = []
         self.reconciler: EmojiReconciler | None = None
 
-    @property
-    def config(self) -> "NeoEmojiSenderConfig":
-        """获取插件配置。
+    @classmethod
+    def create(cls, config: NeoEmojiSenderConfig) -> EmojiRuntime:
+        """创建并登记模块单例，覆盖可能残留的旧实例。
+
+        Args:
+            config: 已加载的插件配置。
 
         Returns:
-            强类型化的插件配置对象。
+            新建的运行时实例。
+        """
+        cls._instance = cls(config)
+        return cls._instance
+
+    @classmethod
+    def get(cls) -> EmojiRuntime:
+        """获取当前运行时。
+
+        Returns:
+            已登记的运行时实例。
 
         Raises:
-            RuntimeError: 插件配置未加载或类型不符时抛出。
+            RuntimeError: 插件未启用或运行时尚未创建时抛出。
         """
-        from ..config import NeoEmojiSenderConfig
+        if cls._instance is None:
+            raise RuntimeError("neo_emoji_sender 运行时未初始化，请确认插件已启用并加载成功")
+        return cls._instance
 
-        cfg = self.plugin.config
-        if not isinstance(cfg, NeoEmojiSenderConfig):
-            raise RuntimeError("neo_emoji_sender plugin config 未正确加载")
-        return cfg
+    @classmethod
+    def peek(cls) -> EmojiRuntime | None:
+        """获取当前运行时但不抛异常。
+
+        供加载 / 卸载流程在自身可能重复调用时做判断。
+
+        Returns:
+            已登记的运行时实例；未创建时返回 None。
+        """
+        return cls._instance
 
     async def initialize(self) -> None:
         """初始化存储与向量索引。"""
@@ -139,7 +172,7 @@ class EmojiRuntime:
         )
 
     async def close(self) -> None:
-        """释放资源：移除调度任务并关闭数据库。
+        """释放资源：移除调度任务、关闭数据库并注销单例。
 
         调度任务统一登记在 ``schedule_ids`` 中，按 ID 移除即可，
         各来源不再自行维护撤销逻辑。
@@ -159,6 +192,9 @@ class EmojiRuntime:
             self.schedule_ids.clear()
         self.sources.clear()
         await self.repo.close()
+        # 必须注销，否则插件重载后 get() 会拿到指向已关闭数据库的旧对象
+        if EmojiRuntime._instance is self:
+            EmojiRuntime._instance = None
 
     def index_lock(self, emoji_id: str) -> asyncio.Lock:
         """获取某个表情包的索引锁。
@@ -211,3 +247,6 @@ class EmojiRuntime:
             history = deque(maxlen=window)
             self.usage_history[stream_id] = history
         history.append(emoji_id)
+
+
+__all__ = ["EmojiRuntime"]

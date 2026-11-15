@@ -16,10 +16,10 @@ from src.app.plugin_system.base import BaseService
 from src.kernel.logger import get_logger
 
 from .events import EmojiPublisher, SearchResultItem
+from .runtime import EmojiRuntime
 from .store import guess_mime, normalize_suffix, sha256_bytes
 from .types import DeleteResult, EmojiHit, EmojiRecord
 from ..config import NeoEmojiSenderConfig
-
 logger = get_logger("neo_emoji_sender.service")
 
 EMOTION_TAG_PRESET: tuple[str, ...] = (
@@ -112,16 +112,16 @@ class EmojiService(BaseService):
     description = "表情包注册、检索、更新与删除服务"
 
     @property
-    def runtime(self):
+    def runtime(self) -> EmojiRuntime:
         """获取插件级运行时。
+
+        Returns:
+            模块级单例运行时。
 
         Raises:
             RuntimeError: 插件运行时尚未初始化（未启用或加载失败）。
         """
-        runtime = getattr(self.plugin, "runtime", None)
-        if runtime is None:
-            raise RuntimeError("neo_emoji_sender 运行时未初始化，请确认插件已启用并加载成功")
-        return runtime
+        return EmojiRuntime.get()
 
     def _cfg(self) -> NeoEmojiSenderConfig:
         """获取强类型化的插件配置。

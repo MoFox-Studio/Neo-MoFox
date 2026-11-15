@@ -21,6 +21,7 @@ from ..manager.image_utils import (
     compress_image_for_vlm,
     extract_json_object,
 )
+from ..manager.runtime import EmojiRuntime
 from ..manager.service import EMOTION_TAG_PRESET, EmojiService
 from ..manager.store import sha256_bytes
 from ..manager.types import EmojiCandidate, EmojiRecord
@@ -29,8 +30,6 @@ if TYPE_CHECKING:
     from src.app.plugin_system.base import BasePlugin, SectionBase
 
     from ..config import NeoEmojiSenderConfig
-    from ..manager.runtime import EmojiRuntime
-    from ..plugin import NeoEmojiSenderPlugin
 
 logger = get_logger("neo_emoji_sender.source")
 
@@ -50,7 +49,7 @@ class EmojiSource(ABC):
     def runtime(self) -> EmojiRuntime:
         """获取插件运行时。
 
-        来源不持有运行时引用，统一从插件实例取，避免插件重载后拿到旧对象。
+        来源不持有运行时引用，统一从模块单例取，插件重载后自然拿到新对象。
 
         Returns:
             当前插件运行时。
@@ -58,10 +57,7 @@ class EmojiSource(ABC):
         Raises:
             RuntimeError: 运行时尚未初始化时抛出。
         """
-        plugin = cast("NeoEmojiSenderPlugin", self.plugin)
-        if plugin.runtime is None:
-            raise RuntimeError("neo_emoji_sender runtime 未初始化")
-        return plugin.runtime
+        return EmojiRuntime.get()
 
     @property
     def config(self) -> NeoEmojiSenderConfig:
