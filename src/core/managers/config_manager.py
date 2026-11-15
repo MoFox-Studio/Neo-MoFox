@@ -8,10 +8,8 @@ from __future__ import annotations
 
 from typing import Type
 
-
-from src.kernel.logger import get_logger
 from src.core.components.base.config import BaseConfig
-
+from src.kernel.logger import get_logger
 
 logger = get_logger("config_manager")
 
@@ -145,6 +143,10 @@ class ConfigManager:
             logger.debug(f"从缓存获取插件 '{plugin_name}' 配置")
 
         return config
+
+    def restore_config(self, plugin_name: str, config: BaseConfig) -> None:
+        """恢复已验证的配置实例，用于插件替换失败后的回滚。"""
+        self._configs[plugin_name] = config
 
     def remove_config(self, plugin_name: str) -> bool:
         """移除指定插件的配置缓存。

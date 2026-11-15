@@ -12,19 +12,70 @@
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Any, Callable, Literal, TypeVar, Self, get_args, get_origin
-
+import os
+import stat
+import tempfile
+import threading
 import tomllib
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal, Self, TypeVar, get_args, get_origin
+
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 from pydantic import Field as PydanticField
 from pydantic_core import PydanticUndefined
 
 from .types import ConfigData, TOMLData
 
-
 SectionT = TypeVar("SectionT", bound="SectionBase")
+
+_CONFIG_WRITE_LOCK = threading.RLock()
+
+
+def _atomic_write_text(
+    path: str | Path, text: str, *, expected_text: str | None = None,
+) -> None:
+    """在同一目录内原子替换配置文件，避免监听期间读到半个文件。"""
+    destination = Path(path)
+
+    with _CONFIG_WRITE_LOCK:
+        temporary_name: str | None = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                dir=destination.parent,
+                text=True,
+            )
+            with os.fdopen(
+                descriptor,
+                "w",
+                encoding="utf-8",
+                newline="",
+            ) as temporary_file:
+                temporary_file.write(text)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            if destination.exists():
+                original_stat = destination.stat()
+                os.chmod(temporary_name, stat.S_IMODE(original_stat.st_mode))
+                if os.name == "posix":
+                    temporary_stat = os.stat(temporary_name)
+                    if (temporary_stat.st_uid, temporary_stat.st_gid) != (
+                        original_stat.st_uid, original_stat.st_gid,
+                    ):
+                        os.chown(temporary_name, original_stat.st_uid, original_stat.st_gid)
+            if expected_text is not None and destination.read_text(encoding="utf-8") != expected_text:
+                raise RuntimeError("配置文件在加载期间发生变化，请重试")
+            os.replace(temporary_name, destination)
+            temporary_name = None
+        finally:
+            if temporary_name is not None:
+                try:
+                    os.unlink(temporary_name)
+                except FileNotFoundError:
+                    pass
 
 
 # ==================== Field：增强的配置字段定义 ====================
@@ -402,8 +453,7 @@ class ConfigBase(BaseModel):
         original_text = path.read_text(
             encoding="utf-8"
         )  # 保存原始文本，用于后续变更检测
-        with path.open("rb") as f:
-            raw = tomllib.load(f)
+        raw = tomllib.loads(original_text)
 
         if not auto_update:
             # 不需要签名同步，直接解析原始数据
@@ -417,7 +467,7 @@ class ConfigBase(BaseModel):
 
         # 仅当文本内容（规范化换行后）发生变化时才写回文件，避免不必要的磁盘操作和时间戳更新
         if _normalize_newlines(original_text) != _normalize_newlines(new_text):
-            path.write_text(new_text, encoding="utf-8")
+            _atomic_write_text(path, new_text, expected_text=original_text)
 
         return cls.from_dict(merged)
 

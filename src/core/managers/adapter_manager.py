@@ -8,18 +8,20 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from src.kernel.concurrency import get_task_manager
-from src.kernel.event import get_event_bus, EventDecision
-from src.kernel.logger import get_logger
 from src.core.components.registry import get_global_registry
 from src.core.components.state_manager import get_global_state_manager
 from src.core.components.types import (
     ComponentState,
-    EventType,
     ComponentType,
+    EventType,
 )
+from src.kernel.concurrency import get_task_manager
+from src.kernel.event import EventDecision, get_event_bus
+from src.kernel.logger import get_logger
 
 if TYPE_CHECKING:
     from src.core.components.base.adapter import BaseAdapter
@@ -62,6 +64,23 @@ class AdapterManager:
     def __init__(self) -> None:
         """初始化适配器管理器。"""
         self._active_adapters: dict[str, BaseAdapter] = {}
+        self._plugin_locks: dict[str, asyncio.Lock] = {}
+        self._lock_owners: dict[str, asyncio.Task[Any] | None] = {}
+
+    @asynccontextmanager
+    async def plugin_lifecycle(self, plugin_name: str) -> AsyncIterator[None]:
+        """串行化同一插件的适配器启停，允许当前清理任务再次进入。"""
+        task = asyncio.current_task()
+        if plugin_name in self._lock_owners and self._lock_owners[plugin_name] is task:
+            yield
+            return
+        lock = self._plugin_locks.setdefault(plugin_name, asyncio.Lock())
+        async with lock:
+            self._lock_owners[plugin_name] = task
+            try:
+                yield
+            finally:
+                del self._lock_owners[plugin_name]
 
     async def start_adapter(self, signature: str) -> bool:
         """启动适配器。
@@ -78,6 +97,11 @@ class AdapterManager:
             >>> success = await manager.start_adapter("my_plugin:adapter:qq")
             >>> True
         """
+        async with self.plugin_lifecycle(signature.split(":")[0]):
+            return await self._start_adapter(signature)
+
+    async def _start_adapter(self, signature: str) -> bool:
+        """持有插件锁时创建适配器，防止重复启动覆盖活跃实例。"""
         # 检查是否已经启动
         if signature in self._active_adapters:
             logger.warning(f"适配器 '{signature}' 已经启动")
@@ -157,8 +181,18 @@ class AdapterManager:
             logger.info(f"适配器启动成功: {signature}")
             return True
 
-        except Exception as e:
-            logger.error(f"启动适配器 '{signature}' 失败: {e}")
+        except (Exception, asyncio.CancelledError) as error:
+            # 启动可能已创建后台任务或连接，失败后仍需执行停止钩子。
+            try:
+                await adapter_instance.stop()
+            except Exception as cleanup_error:
+                self._active_adapters[signature] = adapter_instance
+                logger.error(f"适配器启动回滚失败: {signature}", exc_info=cleanup_error)
+            else:
+                self._active_adapters.pop(signature, None)
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            logger.error(f"启动适配器 '{signature}' 失败", exc_info=error)
             return False
 
     async def stop_adapter(self, signature: str) -> bool:
@@ -176,6 +210,11 @@ class AdapterManager:
             >>> success = await manager.stop_adapter("my_plugin:adapter:qq")
             >>> True
         """
+        async with self.plugin_lifecycle(signature.split(":")[0]):
+            return await self._stop_adapter(signature)
+
+    async def _stop_adapter(self, signature: str) -> bool:
+        """持有插件锁时停止实例，失败时保留实例供清理重试。"""
         # 检查是否已启动
         if signature not in self._active_adapters:
             logger.warning(f"适配器 '{signature}' 未启动")
@@ -187,12 +226,12 @@ class AdapterManager:
             # 停止适配器
             await adapter_instance.stop()
 
-            # 从活跃列表中移除
-            del self._active_adapters[signature]
-
             # 更新组件状态
             state_manager = get_global_state_manager()
             await state_manager.set_state_async(signature, ComponentState.INACTIVE)
+
+            # 状态同步完成后才删除引用，失败时保留实例供重试。
+            del self._active_adapters[signature]
 
             logger.info(f"适配器停止成功: {signature}")
             return True

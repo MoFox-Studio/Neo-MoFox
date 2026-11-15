@@ -5,13 +5,17 @@
 自动默认路径生成和默认配置文件生成。
 """
 
-from abc import ABC
 from pathlib import Path
 from typing import ClassVar, Self
 
 from src.core.components.base.component import BaseComponent
 from src.kernel.config import ConfigBase
-from src.kernel.config.core import config_section, Field, SectionBase
+from src.kernel.config.core import (
+    Field,
+    SectionBase,
+    _atomic_write_text,
+    config_section,
+)
 
 
 class BaseConfig(BaseComponent, ConfigBase):
@@ -114,7 +118,7 @@ class BaseConfig(BaseComponent, ConfigBase):
             toml_content = _render_toml_with_signature(cls, default_data)
 
             # 写入文件
-            path.write_text(toml_content, encoding="utf-8")
+            _atomic_write_text(path, toml_content)
 
     @classmethod
     def load_for_plugin(

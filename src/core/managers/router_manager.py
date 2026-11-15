@@ -12,16 +12,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from src.kernel.event import EventDecision
 
-from src.kernel.logger import get_logger
-
 from src.core.components.registry import get_global_registry
 from src.core.components.types import ComponentType
-
 from src.core.transport.router import get_http_server
+from src.kernel.logger import get_logger
 
 if TYPE_CHECKING:
-    from src.core.components.base.router import BaseRouter
     from src.core.components.base.plugin import BasePlugin
+    from src.core.components.base.router import BaseRouter
 
 
 logger = get_logger("router_manager")
@@ -165,11 +163,13 @@ class RouterManager:
             name=router_instance.name,
         )
 
-        # 调用启动钩子
-        await router_instance.startup()
-
-        # 保存实例
+        # 先追踪实例，使启动钩子失败时也能卸载已挂载的路由。
         self._mounted_routers[signature] = router_instance
+        try:
+            await router_instance.startup()
+        except BaseException:
+            await self.unmount_router(signature)
+            raise
 
         logger.info(f"Router 已挂载: {signature} -> {route_path}")
         return router_instance
@@ -195,6 +195,7 @@ class RouterManager:
             await router_instance.shutdown()
         except Exception as e:
             logger.error(f"Router 关闭钩子执行失败 ({signature}): {e}")
+            raise
 
         # 从 HTTP 服务器卸载路由
         # 注意：通过直接修改 app.routes 列表卸载 Mount 路由是可行的，
@@ -215,6 +216,7 @@ class RouterManager:
                 for route in http_server.app.routes
                 if isinstance(route, Mount)
                 and route.path.rstrip("/") == normalized_path
+                and route.app is router_instance.get_app()
             ]
 
             if not routes_to_remove:
@@ -229,6 +231,7 @@ class RouterManager:
 
         except Exception as e:
             logger.error(f"从HTTP服务器卸载路由失败 ({signature}): {e}")
+            raise
 
         # 移除实例
         self._mounted_routers.pop(signature, None)
@@ -259,7 +262,9 @@ class RouterManager:
                 plugin_name, ComponentType.ROUTER, component_name
             )
             try:
-                router = await self.mount_router(signature, plugin)
+                router = self.get_mounted_router(signature)
+                if router is None:
+                    router = await self.mount_router(signature, plugin)
                 mounted_routers.append(router)
             except Exception as e:
                 logger.error(f"挂载 Router 失败 ({signature}): {e}")
@@ -278,19 +283,20 @@ class RouterManager:
         Examples:
             >>> await manager.unmount_plugin_routers("my_plugin")
         """
-        from src.core.components.types import build_signature
-
-        routers = self.get_routers_for_plugin(plugin_name)
-
-        for component_name in routers.keys():
-            # 构建完整签名
-            signature = build_signature(
-                plugin_name, ComponentType.ROUTER, component_name
-            )
+        signatures = [
+            signature for signature in self._mounted_routers
+            if signature.startswith(f"{plugin_name}:")
+        ]
+        failures: list[str] = []
+        for signature in signatures:
             try:
                 await self.unmount_router(signature)
             except Exception as e:
                 logger.error(f"卸载 Router 失败 ({signature}): {e}")
+                failures.append(signature)
+
+        if failures:
+            raise RuntimeError(f"插件路由卸载失败: {', '.join(failures)}")
 
         logger.info(f"插件 {plugin_name} 的 Router 卸载完成")
 
@@ -446,8 +452,8 @@ def initialize_router_manager() -> None:
     主要用于在应用启动时进行必要的初始化操作。
     订阅插件加载完成事件，在所有插件加载完成后自动挂载所有 Router。
     """
-    from src.kernel.event import get_event_bus
     from src.core.components.types import EventType
+    from src.kernel.event import get_event_bus
 
     get_event_bus().subscribe(EventType.ON_ALL_PLUGIN_LOADED, on_all_plugins_loaded)
 
