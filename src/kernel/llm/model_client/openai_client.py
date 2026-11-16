@@ -1462,7 +1462,7 @@ class OpenAIChatClient:
             if limited_top_n is not None:
                 ranked = ranked[:limited_top_n]
             if trace is not None:
-                trace.result(results=ranked, usage={})
+                trace.result(results=ranked, usage=_extract_usage(response.json()))
             return ranked
 
     @staticmethod
