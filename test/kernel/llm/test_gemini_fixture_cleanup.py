@@ -27,7 +27,7 @@ from src.kernel.llm.model_client.gemini_client import (
     _response_owner,
 )
 from test.kernel.llm import test_gemini_coverage_edges as edges
-from test.kernel.llm import test_pr181_gemini_continuations as continuations
+from test.kernel.llm import test_gemini_continuations as continuations
 from test.kernel.llm.test_gemini_client import model
 
 
@@ -579,8 +579,8 @@ from typing import Any
 
 import pytest
 
-from test.kernel.llm import test_pr181_gemini_continuations as target
-from test.kernel.llm.test_pr181_gemini_continuations import offline
+from test.kernel.llm import test_gemini_continuations as target
+from test.kernel.llm.test_gemini_continuations import offline
 
 BODY, CANCEL_LEASES = __BODY__, __CANCEL_LEASES__
 CLIENTS, STREAMS, LOOPS, CANCEL_ERRORS, PATCHES = [], [], [], [], []

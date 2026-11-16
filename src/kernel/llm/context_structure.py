@@ -58,8 +58,10 @@ def validate_payload_sequence(
             if idx == 0:
                 err("对话不能以 assistant 开始")
             prev_role = convo[idx - 1].role
-            if prev_role not in {ROLE.USER, ROLE.TOOL_RESULT}:
-                err("assistant 前必须是 user 或 tool_result")
+            # 供应商回放状态要求保留相邻 assistant 的边界，普通续轮无需插入 user。
+            # 前序工具调用只有在下方配对检查全部通过后，才会推进到这里。
+            if prev_role not in {ROLE.USER, ROLE.TOOL_RESULT, ROLE.ASSISTANT}:
+                err("assistant 前必须是 user、tool_result 或已完成的 assistant")
 
             tool_calls = [part for part in payload.content if isinstance(part, ToolCall)]
             if not tool_calls:

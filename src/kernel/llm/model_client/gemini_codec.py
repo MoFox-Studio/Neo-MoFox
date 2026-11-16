@@ -541,6 +541,9 @@ def decode_response(
     standard.extend(
         ToolCall(id=c["id"], name=c["name"], args=c["args"]) for c in tool_calls
     )
+    if not standard:
+        # 与公开响应 to_payload() 的空占位一致；仅签名的原生 Part 仍原样保存。
+        standard.append(Text(""))
     replay = ProviderReplayState(
         provider="gemini",
         target=target,
