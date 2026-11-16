@@ -199,6 +199,7 @@ async def execute_request(
             logical, model, request.request_name,
             stream=actual_stream, metadata=request.meta_data,
         )
+        resp: LLMResponse | None = None
 
         try:
             with timer:
@@ -451,6 +452,9 @@ async def execute_request(
 
             return resp
         except BaseException as exc:
+            # 返回前仍由执行方持有响应，AFTER 事件取消也必须交接真实关闭。
+            if resp is not None:
+                await resp._close_response(exc)
             trace.finish(exc)
             await trace.close_resource()
             if isinstance(exc, asyncio.CancelledError):

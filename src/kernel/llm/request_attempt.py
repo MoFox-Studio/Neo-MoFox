@@ -168,6 +168,10 @@ class ManagedStream:
                 if self._source_result is None:
                     result = await close_outcome(self.source)
                     self._source_result = CloseOutcome(result.error)
+                    if isinstance(result.error, Exception):
+                        # 主取消可能被驱动器消费；实际源关闭失败须独立且仅记录一次。
+                        logger.warning("LLM stream cleanup failed: stage=source_close; error_type="
+                                       + type(result.error).__name__)
                     return result
                 return self._source_result
         except BaseException as error:

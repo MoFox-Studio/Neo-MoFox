@@ -8,8 +8,8 @@ import pytest
 
 
 PROBE_FILES = (
-    ("test/kernel/llm/test_pr181_handoff_fixture_cleanup.py", 2),
-    ("test/core/transport/test_pr181_diagnostic_fixture_cleanup.py", 2),
+    ("test/kernel/llm/test_handoff_fixture_cleanup.py", 2),
+    ("test/core/transport/test_diagnostic_fixture_cleanup.py", 2),
     ("test/kernel/llm/test_pr181_gemini_fixture_cleanup.py", 2),
 )
 PROBE_NAMES = {"PROBE", "_PROBE", "_OFFLINE_PYTEST_CONFTEST", "_OFFLINE_PYTEST_CASE"}

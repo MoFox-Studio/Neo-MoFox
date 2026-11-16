@@ -27,9 +27,9 @@ from src.kernel.concurrency import TaskInfo
 from src.kernel.llm import LLMPayload, LLMRequest, ROLE, Text
 from src.kernel.llm.model_client.registry import ModelClientRegistry
 from src.kernel.llm.policy.round_robin import RoundRobinPolicy
-from test.kernel.llm import test_pr181_response_handoff as target
+from test.kernel.llm import test_response_handoff as target
 from test.kernel.llm.test_gemini_client import model
-from test.kernel.llm.test_pr181_response_handoff import handoff_case, closing_case
+from test.kernel.llm.test_response_handoff import handoff_case, closing_case
 
 SCENARIO = __SCENARIO__
 STATE = Path(__STATE__)

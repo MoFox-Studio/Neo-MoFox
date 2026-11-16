@@ -319,6 +319,8 @@ class LLMResponse:
 
     async def _close_response(self, primary: BaseException | None = None) -> None:
         """显式作用域保留体异常，同时保持旧非托管流显式关闭责任。"""
+        # 关闭流程在首次 await 前取得消费权，避免新消费者读到空结果。
+        self._consumed = True
         try:
             if isinstance(self._stream, ManagedStream):
                 await self._close_owned_managed_stream(primary)
@@ -326,7 +328,6 @@ class LLMResponse:
                 await self._close_legacy_response(primary, abandoned=True)
         finally:
             self._clear_unfinished_state()
-            self._consumed = True
 
     async def aclose(self) -> None:
         """显式释放未消费或部分消费的响应，唯一关闭错误继续可见。"""

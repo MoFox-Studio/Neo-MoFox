@@ -27,7 +27,7 @@ from src.core.transport.distribution import loop, stream_loop_manager
 from src.kernel import concurrency
 from src.kernel.llm import request_attempt
 from src.kernel.logger import logger as logger_module
-from test.core.transport import test_pr181_cancel_cleanup_diagnostic as target
+from test.core.transport import test_cancel_cleanup_diagnostic as target
 
 pytest_plugins = [target.__name__]
 SCENARIO = __SCENARIO__
@@ -252,7 +252,7 @@ def test_diagnostic_fixture_cleanup(tmp_path: Path, scenario: str) -> None:
     probe = tmp_path / "test_probe.py"
     probe.write_text(
         '"""重用原诊断用例的真实 driver 与参数化入口。"""\n'
-        "from test.core.transport.test_pr181_cancel_cleanup_diagnostic import "
+        "from test.core.transport.test_cancel_cleanup_diagnostic import "
         "test_cancel_cleanup_diagnostic_survives_real_driver as test_subject\n",
         encoding="utf-8",
     )
