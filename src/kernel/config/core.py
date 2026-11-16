@@ -403,19 +403,22 @@ class ConfigBase(BaseModel):
         """
 
         path = Path(path)
-        # 确保文件存在，若父目录不存在则递归创建
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch()
-        original_text = path.read_text(
-            encoding="utf-8"
-        )  # 保存原始文本，用于后续变更检测
-        with path.open("rb") as f:
-            raw = tomllib.load(f)
+        if path.exists():
+            # 保存原始文本，用于后续变更检测。
+            original_text = path.read_text(encoding="utf-8")
+            with path.open("rb") as f:
+                raw = tomllib.load(f)
+        else:
+            original_text = ""
+            raw = {}
 
         if not auto_update:
-            # 不需要签名同步，直接解析原始数据
-            return cls.from_dict(raw)
+            # 不需要签名同步，直接解析原始数据；校验通过后才创建缺失文件。
+            config = cls.from_dict(raw)
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            return config
 
         # 合并用户值与模型默认值
         merged = _merge_with_model_defaults(cls, raw)
@@ -423,11 +426,15 @@ class ConfigBase(BaseModel):
             cls, merged
         )  # 按最新模型签名重新渲染 TOML 文本
 
-        # 仅当文本内容（规范化换行后）发生变化时才写回文件，避免不必要的磁盘操作和时间戳更新
-        if _normalize_newlines(original_text) != _normalize_newlines(new_text):
+        # 完整模型校验必须先于写回；渲染已保留用户原值，不写回运行时归一化结果。
+        config = cls.from_dict(merged)
+
+        # 仅当文件缺失或文本内容变化时才写回，避免不必要的磁盘操作和时间戳更新。
+        if not path.exists() or _normalize_newlines(original_text) != _normalize_newlines(new_text):
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(new_text, encoding="utf-8")
 
-        return cls.from_dict(merged)
+        return config
 
     @classmethod
     def default(cls) -> ConfigData:
@@ -542,31 +549,12 @@ def _eval_default_factory(factory: Any) -> Any:
         return factory({})  # 部分旧形态的 factory 需要一个空字典作为 validated_data
 
 
-class _InvalidEnumValueError(ValueError):
-    """枚举字段取值非法。
-
-    仅用于配置加载阶段：用户填了非法枚举值时立即失败，而不是静默回退到
-    默认值导致请求被发往错误的 provider。
-    """
-
-
 def _is_strict_choices_field(field: Any) -> bool:
     """判断字段是否声明了 ``strict_choices=True``。"""
     extra = getattr(field, "json_schema_extra", None)
     if not isinstance(extra, dict):
         return False
     return bool(extra.get("strict_choices"))
-
-
-def _allowed_literal_values(annotation: Any) -> list[str]:
-    """提取 Literal 注解的合法取值，用于报错提示。"""
-    values: list[str] = []
-    for arg in get_args(annotation):
-        if isinstance(arg, str):
-            values.append(arg)
-        elif isinstance(arg, (int, float, bool)):
-            values.append(str(arg))
-    return values
 
 
 def _iter_sections(config_model: type[ConfigBase]) -> list[_SectionInfo]:
@@ -685,7 +673,8 @@ def _merge_section_fields(
 
     对每个字段：
     - 若字段为嵌套 ``SectionBase``（单个或列表），递归合并。
-    - 若 ``raw_section`` 中存在该字段且能通过类型校验，则保留用户值。
+    - 严格枚举字段保留原值，交由完整模型校验，不因裸类型校验失败回退。
+    - 若 ``raw_section`` 中存在其它字段且能通过类型校验，则保留用户值。
     - 否则使用字段的 ``default`` / ``default_factory``，最后回退到类型占位值。
 
     默认返回严格按模型字段顺序组装的字典，不含模型未定义的键。
@@ -759,20 +748,15 @@ def _merge_section_fields(
 
         if key in raw_section:
             candidate = raw_section[key]
+            if _is_strict_choices_field(field):
+                # 裸 TypeAdapter 不执行模型 validator；保留原值，由 load 在写回前校验。
+                section_out[key] = candidate
+                continue
             try:
                 # 用 TypeAdapter 做严格类型校验，校验通过则直接使用用户值
                 section_out[key] = TypeAdapter(annotation).validate_python(candidate)
                 continue
             except Exception:
-                # 严格枚举字段：非法取值必须报错，不能静默回退默认值。
-                # 典型场景是 client_type 写错时被改成 openai，请求会被发到
-                # 完全错误的 provider 上，且没有任何报错线索。
-                if _is_strict_choices_field(field):
-                    raise _InvalidEnumValueError(
-                        f"配置节 {section_model.__name__} 的字段 {key!r} "
-                        f"取值非法：{candidate!r}；"
-                        f"合法取值为 {_allowed_literal_values(annotation)}"
-                    ) from None
                 pass  # 校验失败：用户值类型不符，回落到下方的默认值/占位值逻辑
 
         if default_value is not None:
