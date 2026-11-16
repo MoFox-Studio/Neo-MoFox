@@ -11,7 +11,6 @@ PROBE_FILES = (
     ("test/kernel/llm/test_pr181_handoff_fixture_cleanup.py", 2),
     ("test/core/transport/test_pr181_diagnostic_fixture_cleanup.py", 2),
     ("test/kernel/llm/test_pr181_gemini_fixture_cleanup.py", 2),
-    ("test/kernel/jev/test_pr181_event_fixture_cleanup.py", 1),
 )
 PROBE_NAMES = {"PROBE", "_PROBE", "_OFFLINE_PYTEST_CONFTEST", "_OFFLINE_PYTEST_CASE"}
 
@@ -68,7 +67,7 @@ def _contract_gaps(source: str, label: str) -> list[str]:
 def test_generated_pytest_modules_follow_project_conventions(
     relative_path: str, expected_sources: int,
 ) -> None:
-    """覆盖全部七份生成源码，防止提取器漏掉模块而产生空集合假绿。"""
+    """覆盖全部六份生成源码，防止提取器漏掉模块而产生空集合假绿。"""
     root = Path(__file__).resolve().parents[1]
     sources = _generated_sources(root / relative_path)
     assert len(sources) == expected_sources, (relative_path, sources)

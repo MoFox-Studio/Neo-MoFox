@@ -49,8 +49,8 @@ def _patch_api_version(monkeypatch: pytest.MonkeyPatch, api_name: str, version: 
 # =============================================================================
 
 
-def test_plugin_api_versions_contains_all_24_modules() -> None:
-    """PLUGIN_API_VERSIONS 应包含全部 24 个 *_api 模块。"""
+def test_plugin_api_versions_contains_all_23_modules() -> None:
+    """PLUGIN_API_VERSIONS 应包含移除 Jev 后全部 23 个 *_api 模块。"""
     expected = {
         "action_api",
         "adapter_api",
@@ -61,7 +61,6 @@ def test_plugin_api_versions_contains_all_24_modules() -> None:
         "database_api",
         "event_api",
         "llm_api",
-        "jev_api",
         "log_api",
         "media_api",
         "message_api",
@@ -78,7 +77,7 @@ def test_plugin_api_versions_contains_all_24_modules() -> None:
         "tool_api",
     }
     assert set(PLUGIN_API_VERSIONS) == expected
-    assert len(PLUGIN_API_VERSIONS) == 24
+    assert len(PLUGIN_API_VERSIONS) == 23
     from packaging.version import InvalidVersion, Version
 
     for name, ver in PLUGIN_API_VERSIONS.items():
@@ -202,24 +201,26 @@ def test_dict_api_version_core_higher_is_compatible(
     assert reason == "兼容"
 
 
-def test_dict_api_version_unknown_key_rejected() -> None:
-    """dict 形式，未知 API key 应被拒绝。"""
+@pytest.mark.parametrize("api_name", ["foo_api", "jev_api"])
+def test_dict_api_version_unknown_key_rejected(api_name: str) -> None:
+    """dict 形式，未知或已移除的 API key 应被拒绝。"""
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(
-        _manifest(api_version={"foo_api": "1.0.0"})
+        _manifest(api_version={api_name: "1.0.0"})
     )
     assert ok is False
-    assert "foo_api" in reason
+    assert api_name in reason
 
 
-def test_dict_api_version_mixed_known_and_unknown_rejected() -> None:
-    """dict 形式，混合已知与未知 key，应因未知 key 被拒绝。"""
+@pytest.mark.parametrize("api_name", ["bar_api", "jev_api"])
+def test_dict_api_version_mixed_known_and_unknown_rejected(api_name: str) -> None:
+    """dict 形式混合已知与未知或已移除 key，仍应因无效 key 被拒绝。"""
     loader = PluginLoader()
     ok, reason = loader._check_version_compatibility(
-        _manifest(api_version={"llm_api": "1.0.0", "bar_api": "1.0.0"})
+        _manifest(api_version={"llm_api": "1.0.0", api_name: "1.0.0"})
     )
     assert ok is False
-    assert "bar_api" in reason
+    assert api_name in reason
 
 
 def test_empty_string_api_version_skips_api_check() -> None:

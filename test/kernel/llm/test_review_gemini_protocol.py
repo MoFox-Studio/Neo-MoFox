@@ -278,8 +278,16 @@ async def test_locked_target_rejects_changes_before_http(
         await client.aclose()
 
 
-@pytest.mark.parametrize("client_type", ["vertex-ai", " Vertex_AI ", "jev", "typesafe-ai"])
-def test_registry_keeps_vertex_and_jev_outside_gemini(client_type: str) -> None:
-    """默认注册表仍拒绝 Vertex 与 Jev，不把独立认证或协议发给 Gemini。"""
+@pytest.mark.parametrize("client_type", ["vertex-ai", " Vertex_AI "])
+def test_registry_keeps_vertex_outside_gemini(client_type: str) -> None:
+    """默认注册表仍拒绝 Vertex，不把独立认证发给 Gemini。"""
     with pytest.raises(LLMProviderUnavailableError):
         ModelClientRegistry().get_client_for_model(_model(client_type))
+
+
+@pytest.mark.parametrize("client_type", ["jev", "typesafe-ai"])
+def test_registry_rejects_removed_provider_types(client_type: str) -> None:
+    """已移除类型明确报错，不再引导调用已删除 API 或回退到 Gemini。"""
+    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as error:
+        ModelClientRegistry().get_client_for_model(_model(client_type))
+    assert "jev_api" not in str(error.value)

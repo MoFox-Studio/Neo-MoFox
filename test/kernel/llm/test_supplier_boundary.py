@@ -52,36 +52,30 @@ async def test_runtime_contract_and_owned_close(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(FrozenInstanceError):
         result.detail = "更改"  # type: ignore[misc]
     assert runtime.get_provider_probe(" AIOHTTP-GEMINI ").requires_model_entries
-    assert not runtime.get_provider_probe("typesafe-ai").requires_model_entries
-    assert (await runtime.get_provider_probe("typesafe-ai").check([], 1))[0].status == "unsupported"
-    assert runtime.get_provider_probe("gemini").requires_provider_entry
-    assert runtime.get_provider_probe("openai").requires_provider_entry
-    assert not runtime.get_provider_probe("typesafe-ai").requires_provider_entry
+    assert not runtime.get_provider_probe("openai").requires_model_entries
     assert runtime.get_provider_probe("openai").allows_anonymous_probe
     assert not runtime.get_provider_probe("gemini").allows_anonymous_probe
-    assert not runtime.get_provider_probe("typesafe-ai").allows_anonymous_probe
 
 
-@pytest.mark.asyncio
-async def test_unsupported_probe_never_reads_key_or_creates_http(monkeypatch: pytest.MonkeyPatch) -> None:
-    """独立协议跳过不依赖 provider 条目，也不轮询 key 或构造 HTTP 客户端。"""
+@pytest.mark.parametrize("client_type", [
+    "jev", "type-safe", "typesafe", "jev-api", "jev-client", "typesafe-ai", "typesafe-system-one",
+    " JEV ", " TYPE_SAFE ", " TYPESAFE ", " JEV_API ", " JEV_CLIENT ",
+    " TYPESAFE_AI ", " TYPESAFE_SYSTEM_ONE ",
+])
+def test_removed_provider_probe_rejected_before_http(
+    monkeypatch: pytest.MonkeyPatch, client_type: str,
+) -> None:
+    """已移除类型在选择探测器时拒绝，不构造 HTTP 客户端或返回跳过结果。"""
     from src.kernel.llm.model_client import runtime
-
-    class ForbiddenEntry(dict[str, Any]):
-        """任何字段访问都失败，防止隐式读取凭据。"""
-        def get(self, key: str, default: Any = None) -> Any:
-            """拒绝读取任何配置字段。"""
-            raise AssertionError("unsupported probe must not read entries")
 
     def forbidden_client(**kwargs: Any) -> httpx.AsyncClient:
         """拒绝创建网络客户端。"""
-        raise AssertionError("unsupported probe must not create HTTP clients")
+        raise AssertionError("已移除类型不得创建 HTTP 客户端")
 
     monkeypatch.setattr(runtime.httpx, "AsyncClient", forbidden_client)
-    probe = runtime.get_provider_probe(" TYPESAFE-AI ")
-    assert not probe.requires_model_entries and not probe.requires_provider_entry
-    assert (await probe.check([], 1, provider_only=True))[0].status == "unsupported"
-    assert (await probe.check([ForbiddenEntry()], 1))[0].status == "unsupported"
+    with pytest.raises(exceptions.LLMProviderUnavailableError, match="已从核心移除") as error:
+        runtime.get_provider_probe(client_type)
+    assert "jev_api" not in str(error.value)
 
 
 @pytest.mark.asyncio

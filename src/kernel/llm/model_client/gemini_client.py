@@ -708,7 +708,6 @@ class GeminiProviderProbe:
     """用独占临时资源执行官方 models.list，不借用或访问生成共享池。"""
 
     requires_model_entries = True
-    requires_provider_entry = True
     allows_anonymous_probe = False
 
     async def _check_group(

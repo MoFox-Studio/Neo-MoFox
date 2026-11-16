@@ -21,8 +21,6 @@ LLM_TEST_FILES = (
     "test_managed_stream_edges.py",
 )
 OWNED_TESTS = tuple("test/kernel/llm/" + name for name in LLM_TEST_FILES) + (
-    "test/kernel/jev/test_client_fallbacks_and_api.py",
-    "test/kernel/jev/test_client_response_and_retry.py",
     "test/kernel/llm/test_review_response_ownership.py",
     "test/kernel/llm/test_review_gemini_resources.py",
     "test/kernel/llm/test_review_gemini_protocol.py",

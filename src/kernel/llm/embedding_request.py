@@ -72,7 +72,7 @@ class EmbeddingRequest:
             trace = Attempt(logical, model, self.request_name, kind="embedding")
 
             try:
-                # 客户端解析也放进 try：未注册 provider、Jev provider 误入这类
+                # 客户端解析也放进 try：未注册 provider 或不支持请求类型这类
                 # 配置错误必须走 policy 的 failover，否则会直接中断整个重试链。
                 with timer:
                     client = self.clients.get_embedding_client_for_model(model)

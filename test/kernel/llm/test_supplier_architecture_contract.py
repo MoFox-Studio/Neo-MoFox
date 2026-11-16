@@ -13,11 +13,10 @@ from src.kernel.llm.model_client.registry import ModelClientRegistry
 
 ROOT = Path(__file__).resolve().parents[3]
 NEW_MODULES = (
-    "src/core/config/jev.py", "src/core/managers/llm_runtime.py",
+    "src/core/managers/llm_runtime.py",
     "src/kernel/llm/model_client/runtime.py", "src/kernel/llm/model_client/probe_contract.py",
-    "test/core/config/test_jev_bridge.py", "test/core/managers/test_llm_runtime.py",
-    "test/app/test_bot_supplier_boundary.py", "test/app/plugin_system/api/test_jev_boundary.py",
-    "test/kernel/jev/test_transport_ownership.py", "test/kernel/llm/test_supplier_boundary.py",
+    "test/core/managers/test_llm_runtime.py",
+    "test/app/test_bot_supplier_boundary.py", "test/kernel/llm/test_supplier_boundary.py",
     "test/kernel/llm/test_supplier_probe_resources.py", "test/kernel/llm/test_supplier_architecture_contract.py",
     "examples/src/core/llm_runtime_example.py",
 )

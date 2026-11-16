@@ -57,10 +57,10 @@ def test_registry_custom_openai_client():
 
 
 @pytest.mark.parametrize("client_type", ["jev", "typesafe", "type-safe"])
-def test_registry_rejects_jev_as_chat_provider(client_type: str) -> None:
-    """Jev 必须走 typed-evaluation API，不能伪装成聊天 provider。"""
+def test_registry_rejects_removed_provider(client_type: str) -> None:
+    """已移除类型必须明确报错，不能回退到现有聊天客户端。"""
     registry = ModelClientRegistry()
-    with pytest.raises(LLMConfigurationError, match="独立 typed-evaluation"):
+    with pytest.raises(LLMConfigurationError, match="已从核心移除"):
         registry.get_client_for_model(_model_entry(client_type=client_type))
 
 

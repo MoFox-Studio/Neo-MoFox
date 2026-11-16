@@ -37,8 +37,6 @@ async def preflight_provider(
     results: list[ProviderProbeResult] = []
     try:
         probe = get_provider_probe(provider.client_type)
-        if not probe.requires_model_entries and not probe.requires_provider_entry:
-            return await probe.check([], timeout, provider_only=True)
         entries: list[dict[str, Any]] = []
         selected: list[ModelInfoSection | dict[str, Any]] = []
         if probe.requires_model_entries:

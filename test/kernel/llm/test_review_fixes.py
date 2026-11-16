@@ -2,31 +2,23 @@
 
 覆盖本次审查确认并修复的问题：
 
-1. provider 不可用（未注册 / JEv 误入）必须能走 policy failover，
+1. provider 不可用（未注册 / 已移除类型）必须能走 policy failover，
    而不是直接中断整条重试链。
-2. JEv 的 base_url 与运维方 API key 绑定，不允许被调用方覆盖，
-   否则等同于把 Bearer 凭据发往攻击者主机。
-3. ``client_type`` 的别名集合在配置层、registry、插件 API 三处保持一致，
-   JEv 类拼写错误不得静默回退到 OpenAI。
-4. 非法 ``client_type`` 不得被配置加载器静默改写成默认值。
-5. Rerank 的 endpoint 必须是合法 http(s) URL，且 ``extra_headers``
+2. 已移除的 ``client_type`` 及其别名必须明确拒绝，不得静默回退到 OpenAI。
+3. 非法 ``client_type`` 不得被配置加载器静默改写成默认值。
+4. Rerank 的 endpoint 必须是合法 http(s) URL，且 ``extra_headers``
    不能覆盖 ``Authorization``。
-6. Rerank 429 必须携带服务端给出的 ``Retry-After``。
-7. JEv 上游返回的 error 字符串属于不可信输入，回显到异常消息前需要清洗。
+5. Rerank 429 必须携带服务端给出的 ``Retry-After``。
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
 import pytest
 
-from src.kernel.jev.client import (
-    MAX_UPSTREAM_ERROR_LENGTH,
-    JevClient,
-    JevClientConfig,
-)
 from src.kernel.llm import (
     LLMConfigurationError,
     LLMProviderUnavailableError,
@@ -94,89 +86,47 @@ def test_plain_configuration_error_stays_non_retryable() -> None:
     assert decision.reason == "configuration_error"
 
 
-def test_jev_client_type_in_llm_registry_is_retryable() -> None:
-    """JEv 误入传统 registry 时也走 failover，不会硬失败整链。"""
+def test_removed_client_type_in_llm_registry_is_retryable() -> None:
+    """已移除类型的不可用错误仍允许 failover，不会硬失败整链。"""
     registry = ModelClientRegistry()
 
-    with pytest.raises(LLMProviderUnavailableError, match="jev_api"):
+    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as error:
         registry.get_client_for_model(_model_entry(client_type="jev"))
 
-    assert decide_retry(LLMProviderUnavailableError("boom")).retryable is True
+    assert "jev_api" not in str(error.value)
+    assert decide_retry(error.value).retryable is True
 
 
 # ---------------------------------------------------------------------------
-# 2. JEv base_url 覆盖 -> 凭据外泄
-# ---------------------------------------------------------------------------
-
-
-def test_jev_api_rejects_base_url_override(monkeypatch) -> None:
-    """复用 Core provider 配置时不允许改写 base_url。"""
-    from src.app.plugin_system.api import jev_api
-
-    provider = cast(Any, type("P", (), {})())
-    provider.get_api_key = lambda: "provider-key"
-    provider.base_url = "https://jev.example"
-    provider.client_type = "jev"
-    provider.timeout = 7
-    provider.max_retry = 2
-    provider.retry_interval = 3
-
-    model = cast(Any, type("M", (), {})())
-    model.api_provider = "typesafe"
-    model.model_identifier = "jev-1.13.0"
-    model.extra_params = {}
-
-    config = cast(Any, type("C", (), {})())
-    config.get_provider = lambda name: provider
-    config.get_model = lambda name: model
-    monkeypatch.setattr("src.core.config.get_model_config", lambda: config)
-
-    with pytest.raises(ValueError, match="base_url"):
-        jev_api.create_jev_client(
-            configured_model_name="jev-prod",
-            base_url="https://attacker.example",
-        )
-
-
-def test_jev_client_config_rejects_non_https_base_url() -> None:
-    """Jev 只允许 HTTPS，避免明文传输密钥。"""
-    with pytest.raises(Exception, match="HTTPS"):
-        JevClientConfig(api_key="k", base_url="http://jev.example")
-
-
-def test_jev_client_config_rejects_userinfo_in_base_url() -> None:
-    """base_url 不允许内嵌用户名密码。"""
-    with pytest.raises(Exception, match="用户名或密码"):
-        JevClientConfig(api_key="k", base_url="https://user:pw@jev.example")
-
-
-# ---------------------------------------------------------------------------
-# 3. client_type 别名集合一致性
+# 2. 已移除 client_type 的别名拒绝
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "client_type",
-    ["jev", "typesafe", "type_safe", "JEV", "TypeSafe", "type-safe"],
+    ["jev", "typesafe", "type_safe", " JEV ", " TypeSafe ", "type-safe"],
 )
-def test_jev_alias_variants_all_rejected_in_llm_registry(client_type: str) -> None:
-    """JEv 的所有别名写法在传统 registry 中都必须被明确拒绝。"""
+def test_removed_alias_variants_all_rejected_in_llm_registry(client_type: str) -> None:
+    """已移除类型的别名必须明确拒绝，不再指向已删除的插件 API。"""
     registry = ModelClientRegistry()
 
-    with pytest.raises(LLMProviderUnavailableError, match="jev_api"):
+    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as error:
         registry.get_client_for_model(_model_entry(client_type=client_type))
+    assert "jev_api" not in str(error.value)
 
 
 @pytest.mark.parametrize(
     "client_type",
-    ["jev_api", "jev_client", "typesafe_ai", "typesafe_system_one"],
+    ["jev-api", "jev-client", "typesafe-ai", "typesafe-system-one",
+     " JEV_API ", " JEV_CLIENT ", " TYPESAFE_AI ", " TYPESAFE_SYSTEM_ONE "],
 )
-def test_jev_typo_variants_do_not_fall_back_to_openai(client_type: str) -> None:
-    """JEv 类拼写错误不得静默回退到 OpenAI（否则请求会发到错误 provider）。"""
+def test_removed_alias_variants_do_not_fall_back_to_openai(client_type: str) -> None:
+    """已移除类型的连字符、大小写及下划线变体不得静默回退到 OpenAI。"""
     registry = ModelClientRegistry()
 
-    with pytest.raises(LLMProviderUnavailableError, match="jev_api"):
+    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as error:
         registry.get_client_for_model(_model_entry(client_type=client_type))
+    assert "jev_api" not in str(error.value)
 
 
 def test_unknown_client_type_still_falls_back_to_openai() -> None:
@@ -188,33 +138,25 @@ def test_unknown_client_type_still_falls_back_to_openai() -> None:
     assert client is registry.openai
 
 
-def test_jev_client_types_constant_is_shared() -> None:
-    """配置层 / registry / 插件 API 共用同一份 JEv 别名定义。"""
-    from src.kernel.jev import JEV_CLIENT_TYPES
-    from src.kernel.llm.model_client import registry as registry_module
-
-    assert registry_module._JEV_CLIENT_TYPES == JEV_CLIENT_TYPES
-    assert JEV_CLIENT_TYPES == {"jev", "typesafe", "type_safe"}
-
-
-def test_model_config_accepts_all_jev_aliases() -> None:
-    """配置层的 client_type 允许 JEv 的全部别名。"""
+@pytest.mark.parametrize("client_type", ["jev", "typesafe", "type_safe"])
+def test_model_config_rejects_removed_aliases(client_type: str) -> None:
+    """配置层拒绝曾经允许的已移除类型，不能生成可用 provider。"""
     from src.core.config.model_config import APIProviderSection
 
-    for alias in ("jev", "typesafe", "type_safe"):
-        provider = APIProviderSection(name="p", client_type=alias)
-        assert provider.client_type == alias
+    with pytest.raises(ValueError, match="client_type"):
+        APIProviderSection(name="p", client_type=client_type)
 
 
 # ---------------------------------------------------------------------------
-# 4. 非法 client_type 不得被配置加载器静默改写
+# 3. 非法 client_type 不得被配置加载器静默改写
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("client_type", ["gemimni", "jev", "typesafe", "type_safe"])
 def test_invalid_client_type_in_config_raises_instead_of_silently_defaulting(
-    tmp_path,
+    tmp_path: Path, client_type: str,
 ) -> None:
-    """写错的 client_type 必须报错，而不是被静默改成 openai。"""
+    """写错或已移除的 client_type 必须报错，而不是被静默改成 openai。"""
     from src.core.config.model_config import ModelConfig
 
     toml_path = tmp_path / "models.toml"
@@ -225,7 +167,7 @@ def test_invalid_client_type_in_config_raises_instead_of_silently_defaulting(
                 'name = "broken"',
                 'base_url = "https://example.com/v1"',
                 'api_key = "sk-test"',
-                'client_type = "gemimni"',
+                f'client_type = "{client_type}"',
                 "",
                 "[[models]]",
                 'model_identifier = "m1"',
@@ -241,8 +183,8 @@ def test_invalid_client_type_in_config_raises_instead_of_silently_defaulting(
         ModelConfig.load(str(toml_path))
 
 
-def test_valid_client_type_in_config_is_preserved(tmp_path) -> None:
-    """合法取值照常保留。"""
+def test_valid_client_type_in_config_is_preserved(tmp_path: Path) -> None:
+    """合法 Gemini 取值照常保留。"""
     from src.core.config.model_config import ModelConfig
 
     toml_path = tmp_path / "models.toml"
@@ -253,7 +195,7 @@ def test_valid_client_type_in_config_is_preserved(tmp_path) -> None:
                 'name = "ok"',
                 'base_url = "https://example.com/v1"',
                 'api_key = "sk-test"',
-                'client_type = "typesafe"',
+                'client_type = "gemini"',
                 "",
                 "[[models]]",
                 'model_identifier = "m1"',
@@ -267,11 +209,11 @@ def test_valid_client_type_in_config_is_preserved(tmp_path) -> None:
 
     config = ModelConfig.load(str(toml_path))
 
-    assert config.api_providers[0].client_type == "typesafe"
+    assert config.api_providers[0].client_type == "gemini"
 
 
 # ---------------------------------------------------------------------------
-# 5. Rerank endpoint 与 Authorization
+# 4. Rerank endpoint 与 Authorization
 # ---------------------------------------------------------------------------
 
 
@@ -368,7 +310,7 @@ async def test_rerank_extra_headers_cannot_override_authorization(monkeypatch) -
 
 
 # ---------------------------------------------------------------------------
-# 6. Rerank 429 Retry-After
+# 5. Rerank 429 Retry-After
 # ---------------------------------------------------------------------------
 
 
@@ -405,37 +347,3 @@ def test_rerank_rate_limit_without_retry_after_is_none() -> None:
         client._raise_for_rerank_status(response, model_name="m")
 
     assert excinfo.value.retry_after is None
-
-
-# ---------------------------------------------------------------------------
-# 7. JEv 上游 error 清洗
-# ---------------------------------------------------------------------------
-
-
-def test_jev_upstream_error_is_truncated_and_sanitized() -> None:
-    """上游 error 是不可信输入：超长内容与控制字符不得原样进入异常消息。"""
-    long_detail = "x" * (MAX_UPSTREAM_ERROR_LENGTH + 500)
-    response = httpx.Response(
-        400,
-        json={"error": long_detail},
-        request=httpx.Request("POST", "https://api.typesafe.ai/v1/systemone"),
-    )
-
-    error = JevClient._status_error(response)
-
-    assert len(str(error)) < len(long_detail)
-    assert MAX_UPSTREAM_ERROR_LENGTH <= len(str(error)) < len(long_detail) + 200
-
-
-def test_jev_upstream_error_control_characters_are_removed() -> None:
-    """控制字符不得进入异常消息（会污染日志与失败事件）。"""
-    response = httpx.Response(
-        400,
-        json={"error": "bad\x00request\x07"},
-        request=httpx.Request("POST", "https://api.typesafe.ai/v1/systemone"),
-    )
-
-    error = JevClient._status_error(response)
-
-    assert "\x00" not in str(error)
-    assert "\x07" not in str(error)

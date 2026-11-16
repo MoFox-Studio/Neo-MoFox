@@ -7,28 +7,13 @@ import httpx
 
 from . import gemini_client
 from .probe_contract import ProviderProbe, ProviderProbeResult
-from .registry import is_gemini_client_type, is_jev_client_type
-
-
-class _UnsupportedProbe:
-    """独立评估协议没有聊天模型枚举端点，不发网络请求。"""
-
-    requires_model_entries = False
-    requires_provider_entry = False
-    allows_anonymous_probe = False
-
-    async def check(
-        self, entries: list[dict[str, Any]], timeout: float, *, provider_only: bool = False,
-    ) -> list[ProviderProbeResult]:
-        """返回固定不支持信息，不读取条目中的凭据。"""
-        return [ProviderProbeResult("unsupported", "跳过独立评估协议：无 /models 路由")]
+from .registry import is_gemini_client_type, reject_removed_client_type
 
 
 class _LegacyModelsProbe:
     """保留既有 Bearer /models GET 行为，不宣称支持生成或增加 SDK。"""
 
     requires_model_entries = False
-    requires_provider_entry = True
     allows_anonymous_probe = True
 
     async def check(
@@ -55,11 +40,20 @@ class _LegacyModelsProbe:
 
 
 def get_provider_probe(client_type: object) -> ProviderProbe:
-    """复用注册表归一规则选择技术探测能力，上层无需识别供应商品牌。"""
+    """按客户端类型选择探测能力，已移除类型在创建传输前明确报错。
+
+    Args:
+        client_type: 原始客户端类型，沿用注册表的别名归一规则。
+
+    Returns:
+        Gemini 原生探测或既有 /models 探测，不创建网络资源。
+
+    Raises:
+        LLMProviderUnavailableError: 客户端类型已从核心移除。
+    """
+    reject_removed_client_type(client_type)
     if is_gemini_client_type(client_type):
         return gemini_client.GeminiProviderProbe()
-    if is_jev_client_type(client_type):
-        return _UnsupportedProbe()
     return _LegacyModelsProbe()
 
 

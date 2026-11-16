@@ -14,7 +14,6 @@ from src.app.plugin_system.api import config_api
 from src.app.plugin_system.api import database_api
 from src.app.plugin_system.api import event_api
 from src.app.plugin_system.api import llm_api
-from src.app.plugin_system.api import jev_api
 from src.app.plugin_system.api import log_api
 from src.app.plugin_system.api import media_api
 from src.app.plugin_system.api import message_api
@@ -47,7 +46,6 @@ PLUGIN_API_VERSIONS: dict[str, str] = {
     "database_api": database_api.API_VERSION,
     "event_api": event_api.API_VERSION,
     "llm_api": llm_api.API_VERSION,
-    "jev_api": jev_api.API_VERSION,
     "log_api": log_api.API_VERSION,
     "media_api": media_api.API_VERSION,
     "message_api": message_api.API_VERSION,
@@ -74,7 +72,6 @@ __all__ = [
     "database_api",
     "event_api",
     "llm_api",
-    "jev_api",
     "log_api",
     "media_api",
     "message_api",

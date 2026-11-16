@@ -13,7 +13,6 @@ from .openai_client import OpenAIChatClient
 from .responses_client import OpenAIResponsesClient
 from .gemini_client import get_default_gemini_client
 from ..types import ModelEntry
-from src.kernel.jev import JEV_CLIENT_TYPES
 
 # Developer API 与尚未实现的 Vertex/Bedrock 分别显式分发，禁止协议误回退。
 _GEMINI_CLIENT_TYPES = frozenset(
@@ -22,15 +21,12 @@ _GEMINI_CLIENT_TYPES = frozenset(
 _BEDROCK_CLIENT_TYPES = frozenset(
     {"bedrock", "amazon_bedrock", "bedrock_converse"}
 )
-_JEV_CLIENT_TYPES = JEV_CLIENT_TYPES
-
-# JEv 相关别名的「宽松匹配」集合：这些名字都是 JEv 的常见拼写变体。
-# 与 :data:`_JEV_CLIENT_TYPES` 的区别在于，宽松集合里还包含可能由拼写错误
-# 产生的近似名（例如 ``jev_api`` / ``typesafe-ai``），命中后会给出明确的
-# 提示，而不是静默回退到 OpenAI 把请求发到错误的 provider。
-_JEV_LOOSE_CLIENT_TYPES = frozenset(
+# 已移除类型只保留拒绝名单，防止旧配置落入其他协议的兼容回退。
+_REMOVED_CLIENT_TYPES = frozenset(
     {
-        *_JEV_CLIENT_TYPES,
+        "jev",
+        "typesafe",
+        "type_safe",
         "jev_api",
         "jev_client",
         "typesafe_ai",
@@ -46,16 +42,26 @@ def _normalize_client_type(client_type: Any) -> str | None:
     return client_type.strip().casefold().replace("-", "_")
 
 
-def is_jev_client_type(client_type: object) -> bool:
-    """按注册表归一规则识别独立评估协议及需拒绝聊天回退的近似别名。"""
-    return _normalize_client_type(client_type) in _JEV_LOOSE_CLIENT_TYPES
+def reject_removed_client_type(client_type: object) -> None:
+    """拒绝已移除的客户端类型，防止生成与预检误用其他协议。
+
+    Args:
+        client_type: 未经配置层处理的客户端类型，沿用注册表归一规则。
+
+    Raises:
+        LLMProviderUnavailableError: 旧类型已移除，不能回退到其他客户端。
+    """
+    if _normalize_client_type(client_type) in _REMOVED_CLIENT_TYPES:
+        raise LLMProviderUnavailableError(
+            "该客户端类型已从核心移除，不能回退到其他客户端"
+        )
 
 
 def is_gemini_client_type(client_type: Any) -> bool:
     """判断原始 client_type 是否为 Gemini Developer API 别名。
 
     参数接受未经配置层处理的值；复用注册表的小写、空白及连字符归一化规则，
-    非字符串、Vertex 与 Jev 均返回 False。注册分发和签名来源锁共用此入口，
+    非字符串与其他协议均返回 False。注册分发和签名来源锁共用此入口，
     调用方无需维护另一套别名集合；此判断不验证模型的具体签名来源。
     """
     return _normalize_client_type(client_type) in _GEMINI_CLIENT_TYPES
@@ -86,7 +92,7 @@ class ModelClientRegistry:
             self.responses = OpenAIResponsesClient()
 
     def matches_replay_target(self, model: ModelEntry, target: tuple[str, str, str]) -> bool:
-        """检查签名续轮来源，别名共用技术匹配器且不放宽 Jev/Vertex 隔离。
+        """检查签名续轮来源，别名共用技术匹配器且不放宽协议隔离。
 
         Args:
             model: 本次候选模型技术配置，不修改调用方条目。
@@ -114,11 +120,12 @@ class ModelClientRegistry:
 
         Raises:
             LLMProviderUnavailableError: Vertex 需要独立认证/路由适配器，Bedrock
-                尚未装配，或命中独立 Jev 协议（应通过 jev_api 使用）；这些类型
-                不会回退到 OpenAI 或 Gemini。
+                尚未装配，或客户端类型已从核心移除；这些类型不会回退到
+                OpenAI 或 Gemini。
             LLMConfigurationError: 需要使用的默认 OpenAI 客户端未配置。
         """
 
+        reject_removed_client_type(model.get("client_type"))
         normalized_type = _normalize_client_type(model.get("client_type"))
         if normalized_type == "vertex_ai":
             raise LLMProviderUnavailableError("Vertex AI requires a separate authentication/route adapter")
@@ -129,13 +136,6 @@ class ModelClientRegistry:
                 return self.anthropic
             if normalized_type in {"openai_response", "responses", "openai.responses"} and self.responses is not None:
                 return self.responses
-            if normalized_type in _JEV_LOOSE_CLIENT_TYPES:
-                raise LLMProviderUnavailableError(
-                    "Jev 是独立 typed-evaluation provider，请通过 src.app.plugin_system.api.jev_api 调用，"
-                    "不能作为传统 LLM ChatModelClient 使用"
-                    f"（api_provider={model.get('api_provider')!r}, "
-                    f"model_identifier={model.get('model_identifier')!r}）"
-                )
             if is_gemini_client_type(model.get("client_type")):
                 if self.gemini is None:
                     raise LLMProviderUnavailableError(

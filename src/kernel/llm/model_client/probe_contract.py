@@ -25,7 +25,6 @@ class ProviderProbe(Protocol):
     """只接收合并后的技术条目，通过显式能力声明输入需求。"""
 
     requires_model_entries: bool
-    requires_provider_entry: bool
     allows_anonymous_probe: bool
 
     async def check(
@@ -40,6 +39,5 @@ class ProviderProbe(Protocol):
 
         Returns:
             仅含安全状态、诊断和计数的结果；返回前等待自有临时资源关闭。
-            不支持探测的实现不访问条目，也不创建网络资源。
         """
         ...
