@@ -288,6 +288,6 @@ def test_registry_keeps_vertex_outside_gemini(client_type: str) -> None:
 @pytest.mark.parametrize("client_type", ["jev", "typesafe-ai"])
 def test_registry_rejects_removed_provider_types(client_type: str) -> None:
     """已移除类型明确报错，不再引导调用已删除 API 或回退到 Gemini。"""
-    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as error:
+    with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type") as error:
         ModelClientRegistry().get_client_for_model(_model(client_type))
     assert "jev_api" not in str(error.value)

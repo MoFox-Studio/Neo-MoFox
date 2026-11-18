@@ -129,21 +129,23 @@ async def test_domain_cancellation_is_not_a_failed_probe(
         await llm_runtime.preflight_llm_providers(config, timeout=2, trust_env=False)
 
 
-@pytest.mark.parametrize("client_type", ["jev", "type_safe", " TYPESAFE_SYSTEM_ONE "])
-async def test_removed_probe_never_rotates_provider_key(
-    monkeypatch: pytest.MonkeyPatch, client_type: str,
+@pytest.mark.parametrize("client_type", [
+    "jev", "type_safe", " TYPESAFE_SYSTEM_ONE ", "gemni", "unknown_provider", " ", 123, None,
+])
+async def test_invalid_probe_never_rotates_provider_key(
+    monkeypatch: pytest.MonkeyPatch, client_type: object,
 ) -> None:
-    """历史内存配置中的已移除类型预检失败，不读取或轮询凭据、不联网。"""
+    """内存中的无效类型预检失败，不读取或轮询凭据、不联网。"""
     import httpx
     from unittest.mock import MagicMock
     from src.core.managers.llm_runtime import preflight_llm_providers
 
-    provider = APIProviderSection(name="removed", api_key=["offline-first", "offline-second"],
+    provider = APIProviderSection(name="invalid", api_key=["offline-first", "offline-second"],
                                   client_type="openai")
-    # 绕过新配置校验，模拟进程中遗留的已移除类型配置。
+    # 绕过配置校验，直接检查运行时探测边界。
     object.__setattr__(provider, "client_type", client_type)
     config = ModelConfig(api_providers=[provider])
-    factory = MagicMock(side_effect=AssertionError("已移除类型不得创建客户端"))
+    factory = MagicMock(side_effect=AssertionError("无效类型不得创建客户端"))
     monkeypatch.setattr(httpx, "AsyncClient", factory)
     result = await preflight_llm_providers(config, timeout=2, trust_env=False)
     assert result[0].status == "unverified"

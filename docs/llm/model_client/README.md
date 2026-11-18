@@ -236,7 +236,7 @@ def get_client_for_model(self, model: dict[str, Any]) -> ChatModelClient:
     """
 ```
 
-根据模型配置的 `client_type` 返回相应的客户端。
+根据模型配置的 `client_type` 返回相应的客户端。未知或无效的类型会直接报错；已识别的客户端未装配时也不会回退到其他协议。启动预检使用同一套类型与别名，详见[启动探测与默认资源边界](./runtime.md)。
 
 **使用示例：**
 ```python

@@ -12,7 +12,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from src.core.config.model_config import APIProviderSection, ModelConfig  # noqa: E402
 from src.core.managers.llm_runtime import preflight_llm_providers  # noqa: E402
-from src.kernel.llm.model_client.runtime import ProviderProbeResult, close_default_model_clients  # noqa: E402
+from src.kernel.llm import LLMProviderUnavailableError  # noqa: E402
+from src.kernel.llm.model_client.runtime import (  # noqa: E402
+    ProviderProbeResult,
+    close_default_model_clients,
+    get_provider_probe,
+)
 
 
 class OfflineProbe:
@@ -42,6 +47,11 @@ async def main() -> None:
         results = await preflight_llm_providers(config, timeout=1, trust_env=False)
     for result in results:
         print(result.status, result.detail)
+    # 未知类型在选择探测器时即被拒绝，不会访问供应商。
+    try:
+        get_provider_probe("unknown_provider")
+    except LLMProviderUnavailableError as error:
+        print(error)
     # 此入口不创建默认实例，也不会回收外部注入客户端；本例没有活动默认资源。
     await close_default_model_clients()
 

@@ -7,7 +7,7 @@ import httpx
 
 from . import gemini_client
 from .probe_contract import ProviderProbe, ProviderProbeResult
-from .registry import is_gemini_client_type, reject_removed_client_type
+from .registry import resolve_client_type
 
 
 class _LegacyModelsProbe:
@@ -40,19 +40,18 @@ class _LegacyModelsProbe:
 
 
 def get_provider_probe(client_type: object) -> ProviderProbe:
-    """按客户端类型选择探测能力，已移除类型在创建传输前明确报错。
+    """按已识别的客户端类型选择探测能力。
 
     Args:
-        client_type: 原始客户端类型，沿用注册表的别名归一规则。
+        client_type: 原始类型值，与请求分发使用同一套类型和别名。
 
     Returns:
         Gemini 原生探测或既有 /models 探测，不创建网络资源。
 
     Raises:
-        LLMProviderUnavailableError: 客户端类型已从核心移除。
+        LLMProviderUnavailableError: 类型无效或不受支持，不能选择探测器。
     """
-    reject_removed_client_type(client_type)
-    if is_gemini_client_type(client_type):
+    if resolve_client_type(client_type) == "gemini":
         return gemini_client.GeminiProviderProbe()
     return _LegacyModelsProbe()
 

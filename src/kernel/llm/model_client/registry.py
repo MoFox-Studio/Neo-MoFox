@@ -4,67 +4,63 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from ..exceptions import LLMConfigurationError, LLMProviderUnavailableError
-from .base import ASRModelClient, ChatModelClient, EmbeddingModelClient, RerankModelClient
+from ..types import ModelEntry
 from .anthropic_client import AnthropicChatClient
+from .base import ASRModelClient, ChatModelClient, EmbeddingModelClient, RerankModelClient
+from .gemini_client import get_default_gemini_client
 from .openai_client import OpenAIChatClient
 from .responses_client import OpenAIResponsesClient
-from .gemini_client import get_default_gemini_client
-from ..types import ModelEntry
 
-# Developer API 与尚未实现的 Vertex/Bedrock 分别显式分发，禁止协议误回退。
-_GEMINI_CLIENT_TYPES = frozenset(
-    {"gemini", "aiohttp_gemini", "gemini_v2", "google"}
-)
-_BEDROCK_CLIENT_TYPES = frozenset(
-    {"bedrock", "amazon_bedrock", "bedrock_converse"}
-)
-# 已移除类型只保留拒绝名单，防止旧配置落入其他协议的兼容回退。
-_REMOVED_CLIENT_TYPES = frozenset(
-    {
-        "jev",
-        "typesafe",
-        "type_safe",
-        "jev_api",
-        "jev_client",
-        "typesafe_ai",
-        "typesafe_system_one",
-    }
-)
+# 只识别已声明的类型；每个别名映射到对应的注册表字段。
+_CLIENT_TYPES = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "openai_response": "responses",
+    "responses": "responses",
+    "openai.responses": "responses",
+    "gemini": "gemini",
+    "aiohttp_gemini": "gemini",
+    "gemini_v2": "gemini",
+    "google": "gemini",
+    "bedrock": "bedrock",
+    "amazon_bedrock": "bedrock",
+    "bedrock_converse": "bedrock",
+}
 
 
-def _normalize_client_type(client_type: Any) -> str | None:
-    """把 client_type 归一化为小写下划线形式，非字符串返回 None。"""
+def _normalize_client_type(client_type: object) -> str:
+    """把类型归一化为小写下划线形式，非字符串视同空值。"""
     if not isinstance(client_type, str):
-        return None
+        return ""
     return client_type.strip().casefold().replace("-", "_")
 
 
-def reject_removed_client_type(client_type: object) -> None:
-    """拒绝已移除的客户端类型，防止生成与预检误用其他协议。
+def resolve_client_type(client_type: object) -> str:
+    """把已识别的客户端类型解析为请求分发与预检共用的类型名。
 
     Args:
-        client_type: 未经配置层处理的客户端类型，沿用注册表归一规则。
+        client_type: 原始类型值，可以来自未经配置层校验的技术条目。
+
+    Returns:
+        注册表中对应的客户端字段名。
 
     Raises:
-        LLMProviderUnavailableError: 旧类型已移除，不能回退到其他客户端。
+        LLMProviderUnavailableError: 类型未知、无效，或是尚不支持的 Vertex AI。
     """
-    if _normalize_client_type(client_type) in _REMOVED_CLIENT_TYPES:
-        raise LLMProviderUnavailableError(
-            "该客户端类型已从核心移除，不能回退到其他客户端"
-        )
+    normalized_type = _normalize_client_type(client_type)
+    if normalized_type == "vertex_ai":
+        raise LLMProviderUnavailableError("Vertex AI requires a separate authentication/route adapter")
+    resolved_type = _CLIENT_TYPES.get(normalized_type)
+    if resolved_type is None:
+        raise LLMProviderUnavailableError("不支持的 client_type")
+    return resolved_type
 
 
-def is_gemini_client_type(client_type: Any) -> bool:
-    """判断原始 client_type 是否为 Gemini Developer API 别名。
-
-    参数接受未经配置层处理的值；复用注册表的小写、空白及连字符归一化规则，
-    非字符串与其他协议均返回 False。注册分发和签名来源锁共用此入口，
-    调用方无需维护另一套别名集合；此判断不验证模型的具体签名来源。
-    """
-    return _normalize_client_type(client_type) in _GEMINI_CLIENT_TYPES
+def is_gemini_client_type(client_type: object) -> bool:
+    """判断原始类型是否为 Gemini Developer API，不验证具体签名来源。"""
+    return _CLIENT_TYPES.get(_normalize_client_type(client_type)) == "gemini"
 
 
 @dataclass(slots=True)
@@ -115,49 +111,19 @@ class ModelClientRegistry:
                 连字符后分发，不修改调用方的配置。
 
         Returns:
-            对应的聊天客户端。默认已装配 Gemini Developer API；真正未知的
-            client_type 仍兼容回退到 OpenAI。
+            类型对应的聊天客户端，不回退到其他协议。
 
         Raises:
-            LLMProviderUnavailableError: Vertex 需要独立认证/路由适配器，Bedrock
-                尚未装配，或客户端类型已从核心移除；这些类型不会回退到
-                OpenAI 或 Gemini。
-            LLMConfigurationError: 需要使用的默认 OpenAI 客户端未配置。
+            LLMProviderUnavailableError: 类型无效、不受支持或对应客户端未注册。
+            LLMConfigurationError: 显式选择的 OpenAI 客户端未配置。
         """
-
-        reject_removed_client_type(model.get("client_type"))
-        normalized_type = _normalize_client_type(model.get("client_type"))
-        if normalized_type == "vertex_ai":
-            raise LLMProviderUnavailableError("Vertex AI requires a separate authentication/route adapter")
-        if normalized_type:
-            if normalized_type == "openai" and self.openai is not None:
-                return self.openai
-            if normalized_type == "anthropic" and self.anthropic is not None:
-                return self.anthropic
-            if normalized_type in {"openai_response", "responses", "openai.responses"} and self.responses is not None:
-                return self.responses
-            if is_gemini_client_type(model.get("client_type")):
-                if self.gemini is None:
-                    raise LLMProviderUnavailableError(
-                        f"Gemini client 未注册（client_type={normalized_type}），"
-                        "不能将 Gemini 请求回退到 OpenAI"
-                        f"（api_provider={model.get('api_provider')!r}, "
-                        f"model_identifier={model.get('model_identifier')!r}）"
-                    )
-                return self.gemini
-            if normalized_type in _BEDROCK_CLIENT_TYPES:
-                if self.bedrock is None:
-                    raise LLMProviderUnavailableError(
-                        f"Bedrock client 未注册（client_type={normalized_type}），"
-                        "不能将 Bedrock 请求回退到 OpenAI"
-                        f"（api_provider={model.get('api_provider')!r}, "
-                        f"model_identifier={model.get('model_identifier')!r}）"
-                    )
-                return self.bedrock
-
-        if self.openai is None:
+        client_type = resolve_client_type(model.get("client_type"))
+        client: ChatModelClient | None = getattr(self, client_type)
+        if client is not None:
+            return client
+        if client_type == "openai":
             raise LLMConfigurationError("OpenAI client 未配置")
-        return self.openai
+        raise LLMProviderUnavailableError(f"{client_type.capitalize()} client 未注册")
 
     def get_embedding_client_for_model(self, model: ModelEntry) -> EmbeddingModelClient:
         """根据单个模型配置获取 embedding client。"""

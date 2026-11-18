@@ -89,7 +89,7 @@ def test_removed_provider_never_resolves_to_another_client(
         "asr": registry.get_asr_client_for_model,
     }[kind]
     model = cast(ModelEntry, {"client_type": client_type})
-    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as caught:
+    with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type") as caught:
         resolve(model)
     assert "jev_api" not in str(caught.value)
 
@@ -97,7 +97,7 @@ def test_removed_provider_never_resolves_to_another_client(
 @pytest.mark.parametrize("client_type", REMOVED_CLIENT_TYPES)
 def test_removed_probe_lookup_fails_before_transport(client_type: str) -> None:
     """预检选择阶段拒绝旧类型，不返回占位探针或借用其他协议发送请求。"""
-    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除"):
+    with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type"):
         get_provider_probe(client_type)
 
 

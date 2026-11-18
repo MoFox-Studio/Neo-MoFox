@@ -73,9 +73,27 @@ def test_removed_provider_probe_rejected_before_http(
         raise AssertionError("已移除类型不得创建 HTTP 客户端")
 
     monkeypatch.setattr(runtime.httpx, "AsyncClient", forbidden_client)
-    with pytest.raises(exceptions.LLMProviderUnavailableError, match="已从核心移除") as error:
+    with pytest.raises(exceptions.LLMProviderUnavailableError, match="不支持的 client_type") as error:
         runtime.get_provider_probe(client_type)
     assert "jev_api" not in str(error.value)
+
+
+@pytest.mark.parametrize("client_type", ["unknown_provider", "gemni", "", "  ", 123, None])
+def test_probe_rejects_invalid_client_type(client_type: object) -> None:
+    """无效类型不得取得通用探测器，错误不回显原始类型值。"""
+    from src.kernel.llm.model_client.runtime import get_provider_probe
+
+    with pytest.raises(exceptions.LLMProviderUnavailableError, match="不支持的 client_type") as error:
+        get_provider_probe(client_type)
+    assert str(error.value) == "不支持的 client_type"
+
+
+def test_probe_rejects_vertex_before_choosing_transport() -> None:
+    """Vertex AI 仍需独立认证，不能取得通用或 Gemini 探测器。"""
+    from src.kernel.llm.model_client.runtime import get_provider_probe
+
+    with pytest.raises(exceptions.LLMProviderUnavailableError, match="Vertex AI"):
+        get_provider_probe(" Vertex-AI ")
 
 
 @pytest.mark.asyncio

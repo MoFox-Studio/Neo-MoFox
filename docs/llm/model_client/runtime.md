@@ -21,9 +21,9 @@ Gemini 关闭仍为当前循环 idle-only。活动请求必须先完成响应关
 
 调用方显式创建的 Gemini client 应在原循环关闭；借用 transport 由调用方最终关闭。
 
-## 配置拒绝与兼容
+## 客户端类型校验
 
-Jev 已从核心移除，不再提供独立客户端、配置桥接或插件 `jev_api`。`APIProviderSection.client_type` 不再接受 `jev/typesafe/type_safe`。注册表和 `get_provider_probe()` 对 `jev`、`type-safe`、`typesafe`、`jev-api`、`jev-client`、`typesafe-ai`、`typesafe-system-one` 及大小写、首尾空格、下划线变体直接抛出 `LLMProviderUnavailableError`，说明“已从核心移除”，不返回 unsupported 探测器、不轮询密钥或发出网络请求。Gemini 和其他 legacy provider 的探测、未知 legacy 类型的原兼容行为保持不变。
+请求分发和 `get_provider_probe()` 共用受支持的类型与别名映射。未知、空白、缺失或非字符串的 `client_type` 统一抛出 `LLMProviderUnavailableError`；不回退到 OpenAI 或通用 `/models` 探测。启动预检将该提供商标记为未验证，不读取或轮询其密钥，也不发出网络请求。已支持的类型和别名仍使用原有探测能力，Vertex AI 仍不受支持。请求策略若显式配置了其他候选模型，仍可按原策略尝试下一候选；这与换用其他协议发送同一个模型条目的请求不同。
 
 工具续轮的来源目标匹配由注册表技术入口负责，通用执行器不导入 Gemini codec。目标仍精确绑定 `api_provider + 规范化端点/版本 + model_identifier`，不放宽签名来源锁。SDK 异常的安全日志标记由错误归一化层产生，执行器不猜第三方包名。
 

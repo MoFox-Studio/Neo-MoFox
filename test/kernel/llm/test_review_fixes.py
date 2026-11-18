@@ -90,7 +90,7 @@ def test_removed_client_type_in_llm_registry_is_retryable() -> None:
     """已移除类型的不可用错误仍允许 failover，不会硬失败整链。"""
     registry = ModelClientRegistry()
 
-    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as error:
+    with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type") as error:
         registry.get_client_for_model(_model_entry(client_type="jev"))
 
     assert "jev_api" not in str(error.value)
@@ -110,7 +110,7 @@ def test_removed_alias_variants_all_rejected_in_llm_registry(client_type: str) -
     """已移除类型的别名必须明确拒绝，不再指向已删除的插件 API。"""
     registry = ModelClientRegistry()
 
-    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as error:
+    with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type") as error:
         registry.get_client_for_model(_model_entry(client_type=client_type))
     assert "jev_api" not in str(error.value)
 
@@ -124,18 +124,19 @@ def test_removed_alias_variants_do_not_fall_back_to_openai(client_type: str) -> 
     """已移除类型的连字符、大小写及下划线变体不得静默回退到 OpenAI。"""
     registry = ModelClientRegistry()
 
-    with pytest.raises(LLMProviderUnavailableError, match="已从核心移除") as error:
+    with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type") as error:
         registry.get_client_for_model(_model_entry(client_type=client_type))
     assert "jev_api" not in str(error.value)
 
 
-def test_unknown_client_type_still_falls_back_to_openai() -> None:
-    """真正未知的 client_type 保持历史回退行为，避免无意扩大破坏性变更。"""
+def test_unknown_client_type_has_same_policy_as_removed_type() -> None:
+    """未识别的类型是提供商不可用，仍允许策略层显式尝试其他模型。"""
     registry = ModelClientRegistry()
 
-    client = registry.get_client_for_model(_model_entry(client_type="unknown_provider"))
+    with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type") as error:
+        registry.get_client_for_model(_model_entry(client_type="unknown_provider"))
 
-    assert client is registry.openai
+    assert decide_retry(error.value).reason == "provider_unavailable"
 
 
 @pytest.mark.parametrize("client_type", ["jev", "typesafe", "type_safe"])
