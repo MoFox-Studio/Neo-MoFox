@@ -1,8 +1,7 @@
-"""PR181 进程池代际隔离与共享回收预算的受控回归。"""
+"""进程池显式重配、代际隔离与共享回收预算的受控回归。"""
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from contextvars import Context
 from typing import Any
 from unittest.mock import Mock
@@ -70,37 +69,27 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     return value
 
 
-@pytest.mark.parametrize("scope", ["unscoped", "borrowed", "owned"])
-def test_getter_explicit_configuration_respects_active_ownership(clock: Clock, scope: str) -> None:
-    """无作用域可显式重配；活跃作用域只保护借用池，不限制自有池。"""
-    manager = None if scope == "owned" else concurrency.get_task_manager(process_workers=2)
-    context = nullcontext() if scope == "unscoped" else concurrency.process_pool_lifespan()
-    with context:
-        if manager is None:
-            manager = concurrency.get_task_manager(process_workers=2)
-        original = manager._process_pool
-        assert concurrency.get_task_manager() is manager
-        assert manager._process_pool is original
-        original.shutdown.assert_not_called()
+@pytest.mark.parametrize("new_context", [False, True])
+def test_getter_explicit_configuration_is_not_restricted_by_context(
+    clock: Clock, new_context: bool,
+) -> None:
+    """无参 getter 不重配，显式配置在当前或新上下文均直接生效。"""
+    manager = concurrency.get_task_manager(process_workers=2)
+    original = manager._process_pool
+    assert concurrency.get_task_manager() is manager
+    assert manager._process_pool is original
+    original.shutdown.assert_not_called()
 
-        assert concurrency.get_task_manager(process_workers=7) is manager
-        current = manager._process_pool
-        if scope == "borrowed":
-            assert current is original
-            assert manager._process_workers == 2
-            original.shutdown.assert_not_called()
-        else:
-            assert current is not original
-            assert manager._process_workers == 7
-            original.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-        current.shutdown.assert_not_called()
-
-    if scope == "owned":
-        assert manager._process_pool is None
-        current.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+    if new_context:
+        configured = Context().run(concurrency.get_task_manager, process_workers=7)
     else:
-        assert manager._process_pool is current
-        current.shutdown.assert_not_called()
+        configured = concurrency.get_task_manager(process_workers=7)
+    assert configured is manager
+    current = manager._process_pool
+    assert current is not original
+    assert manager._process_workers == 7
+    original.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+    current.shutdown.assert_not_called()
 
 
 @pytest.mark.parametrize("count", [1, 4, 32])
@@ -122,7 +111,8 @@ def test_shutdown_does_not_clear_a_replacement_pool(clock: Clock) -> None:
     replacement = Mock(_processes={}, _executor_manager_thread=None)
 
     def replace(**kwargs: Any) -> None:
-        """模拟旧代关闭时新代已接管管理器。"""
+        """模拟旧代已摘除后，新代在关闭过程中接管管理器。"""
+        assert manager._process_pool is None
         manager._process_pool = replacement
 
     old.shutdown.side_effect = replace
@@ -131,53 +121,62 @@ def test_shutdown_does_not_clear_a_replacement_pool(clock: Clock) -> None:
     replacement.shutdown.assert_not_called()
 
 
-def test_stale_owner_cannot_close_replacement_generation(clock: Clock) -> None:
-    """关闭凭据必须校验具体 executor 实例，而非仅管理器。"""
+def test_expected_pool_cannot_close_replacement_generation(clock: Clock) -> None:
+    """旧代快照只能关闭对应 executor，不能误关新代。"""
     manager = concurrency.TaskManager()
     old = manager._process_pool
     replacement = Mock(_processes={}, _executor_manager_thread=None)
     manager._process_pool = replacement
     manager.shutdown_process_pool(wait=False, expected_pool=old)
     assert manager._process_pool is replacement
+    old.shutdown.assert_not_called()
     replacement.shutdown.assert_not_called()
 
 
-def test_lifespan_skips_pool_created_by_another_context(clock: Clock) -> None:
-    """原 owner 退出不得回收其它上下文新建的池。"""
-    with concurrency.process_pool_lifespan():
-        manager = concurrency.get_task_manager()
-        old = manager._process_pool
-        Context().run(manager.configure_process_pool, 7)
-        replacement = manager._process_pool
-        assert replacement is not old
-    assert manager._process_pool is replacement
+def test_same_configuration_keeps_existing_pool(clock: Clock) -> None:
+    """显式提交相同配置不创建新代，也不触发无谓回收。"""
+    manager = concurrency.get_task_manager(process_workers=2)
+    pool = manager._process_pool
+    assert concurrency.get_task_manager(process_workers=2) is manager
+    assert manager._process_pool is pool
+    pool.shutdown.assert_not_called()
+
+
+def test_explicit_reconfiguration_reclaims_each_generation(clock: Clock) -> None:
+    """显式重配先回收旧代，最后的关闭只处理当前代。"""
+    manager = concurrency.TaskManager()
+    old = manager._process_pool
+    manager.configure_process_pool(7)
+    current = manager._process_pool
+    assert current is not old
+    assert manager._process_workers == 7
     old.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
-    replacement.shutdown.assert_not_called()
+    current.shutdown.assert_not_called()
 
-
-def test_owned_reconfiguration_registers_the_new_generation(clock: Clock) -> None:
-    """自己配置替换的每一代都在各自生命周期结束时回收。"""
-    with concurrency.process_pool_lifespan():
-        manager = concurrency.get_task_manager()
-        old = manager._process_pool
-        manager.configure_process_pool(7)
-        current = manager._process_pool
+    manager.shutdown_process_pool(wait=False)
     assert manager._process_pool is None
     old.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
     current.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
 
 
-def test_all_owned_managers_share_the_same_exit_budget(clock: Clock) -> None:
-    """多个管理器也不能分别获得完整等待预算。"""
+def test_multiple_managers_share_an_explicit_deadline(clock: Clock) -> None:
+    """调用方传入同一截止时间时，多个管理器不能分别重置预算。"""
+    managers: list[concurrency.TaskManager] = []
     workers: list[Worker] = []
-    with concurrency.process_pool_lifespan(timeout=0.4):
-        for index in range(5):
-            manager = concurrency.TaskManager()
-            worker = Worker(clock, [], str(index))
-            workers.append(worker)
-            manager._process_pool._processes = {index: worker}
+    for index in range(5):
+        manager = concurrency.TaskManager()
+        worker = Worker(clock, [], str(index))
+        managers.append(manager)
+        workers.append(worker)
+        manager._process_pool._processes = {index: worker}
+
+    deadline = clock() + 0.4
+    for manager in managers:
+        manager.shutdown_process_pool(wait=False, timeout=10, deadline=deadline)
     assert clock.now <= 0.4 + 1e-9
+    assert clock.now == pytest.approx(0.4)
     assert all(worker.killed for worker in workers)
+    assert all(manager._process_pool is None for manager in managers)
 
 
 def test_executor_manager_thread_uses_remaining_budget(clock: Clock) -> None:
@@ -226,25 +225,22 @@ def test_shutdown_overhead_consumes_the_shared_budget(clock: Clock) -> None:
     assert worker.killed
 
 
-def test_replacing_global_manager_does_not_transfer_ownership(clock: Clock) -> None:
-    """所有者保存创建凭据，退出不通过 getter 误关新的全局实例。"""
-    with concurrency.process_pool_lifespan():
-        original = concurrency.get_task_manager()
-        pool = original._process_pool
+def test_closing_original_manager_does_not_close_replacement_singleton(clock: Clock) -> None:
+    """实例关闭只处理自身的池，不通过 getter 误关新的全局实例。"""
+    original = concurrency.get_task_manager()
+    pool = original._process_pool
+    concurrency._task_manager = None
+    replacement = concurrency.get_task_manager()
 
-        def replace() -> concurrency.TaskManager:
-            """模拟独立宿主上下文替换全局管理器。"""
-            concurrency._task_manager = None
-            return concurrency.get_task_manager()
-
-        host = Context().run(replace)
-    assert concurrency._task_manager is host
-    host._process_pool.shutdown.assert_not_called()
+    original.shutdown_process_pool(wait=False)
+    assert original._process_pool is None
+    assert concurrency._task_manager is replacement
+    replacement._process_pool.shutdown.assert_not_called()
     pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
 
 
 def test_explicit_graceful_shutdown_still_waits(clock: Clock) -> None:
-    """保留宿主显式请求的 wait=True 行为。"""
+    """保留调用方显式请求的 wait=True 行为。"""
     manager = concurrency.TaskManager()
     pool = manager._process_pool
     worker = Worker(clock, [], "one")
@@ -255,20 +251,25 @@ def test_explicit_graceful_shutdown_still_waits(clock: Clock) -> None:
     assert not worker.killed
 
 
+def test_executor_shutdown_failure_still_reaps_workers_and_reports_error(clock: Clock) -> None:
+    """executor 关闭失败仍清理已捕获的 worker 和线程，并保留原错误对象。"""
+    manager = concurrency.TaskManager()
+    pool = manager._process_pool
+    failure = OSError("close failed")
+    workers = [Worker(clock, [], str(index)) for index in range(2)]
+    pool._processes = dict(enumerate(workers))
+    pool.shutdown.side_effect = failure
+    thread = Mock()
+    thread.is_alive.return_value = False
+    pool._executor_manager_thread = thread
 
-def test_cleanup_errors_preserve_primary_error_and_close_other_pools(clock: Clock) -> None:
-    """一个池回收失败不阻止其它池，并保留最初的取消异常。"""
-    error = RuntimeError("initialization")
-    with pytest.raises(RuntimeError) as caught:
-        with concurrency.process_pool_lifespan():
-            first = concurrency.TaskManager()
-            first._process_pool.shutdown.side_effect = OSError("close failed")
-            second = concurrency.TaskManager()
-            second_pool = second._process_pool
-            raise error
-    assert caught.value is error
-    assert "close failed" in error.__notes__[0]
-    second_pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+    with pytest.raises(ExceptionGroup, match="进程池关闭失败") as caught:
+        manager.shutdown_process_pool(wait=False)
+    assert caught.value.exceptions == (failure,)
+    assert manager._process_pool is None
+    assert all(worker.killed for worker in workers)
+    thread.join.assert_called_once_with(timeout=0)
+    assert clock.now <= 0.4 + 1e-9
 
 
 def test_lingering_manager_thread_is_reported_without_unbounded_join(clock: Clock) -> None:
@@ -302,12 +303,30 @@ def test_signal_failure_still_attempts_other_workers_and_kill(clock: Clock) -> N
     assert clock.now <= 0.4 + 1e-9
 
 
-def test_nested_owner_borrows_outer_pool(clock: Clock) -> None:
-    """内层作用域不获得外层已有池的关闭权。"""
-    with concurrency.process_pool_lifespan():
-        manager = concurrency.get_task_manager()
-        pool = manager._process_pool
-        with concurrency.process_pool_lifespan():
-            assert concurrency.get_task_manager() is manager
-        pool.shutdown.assert_not_called()
-    pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+def test_pool_shutdown_aggregates_executor_worker_and_thread_failures(clock: Clock) -> None:
+    """多处关闭失败全部保留，不能漏掉其它 worker 或跳过线程回收。"""
+    manager = concurrency.TaskManager()
+    pool = manager._process_pool
+    executor_error = OSError("executor failed")
+    signal_error = OSError("terminate denied")
+    failed = Worker(clock, [], "failed")
+    failed.terminate = Mock(side_effect=signal_error)
+    other = Worker(clock, [], "other")
+    pool._processes = {1: failed, 2: other}
+    pool.shutdown.side_effect = executor_error
+    thread = Mock()
+    thread.is_alive.return_value = True
+    pool._executor_manager_thread = thread
+
+    with pytest.raises(ExceptionGroup, match="进程池关闭失败") as caught:
+        manager.shutdown_process_pool(wait=False)
+    errors = caught.value.exceptions
+    assert len(errors) == 3
+    assert errors[0] is executor_error
+    assert isinstance(errors[1], ExceptionGroup)
+    assert errors[1].exceptions == (signal_error,)
+    assert isinstance(errors[2], TimeoutError)
+    assert failed.killed and other.killed
+    assert manager._process_pool is None
+    thread.join.assert_called_once_with(timeout=0)
+    assert clock.now <= 0.4 + 1e-9

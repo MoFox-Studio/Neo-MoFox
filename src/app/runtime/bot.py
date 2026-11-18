@@ -1277,6 +1277,7 @@ class Bot:
         self._running = False
         errors: list[str] = []
         has_pending_tasks = False  # 标记是否有未完成的活动任务
+        task_manager_started = False
 
         self._shutdown_coordinator = asyncio.current_task()
 
@@ -1317,6 +1318,12 @@ class Bot:
             finally:
                 if not task.done() and not task.cancelling():
                     task.cancel()
+
+        async def stop_task_manager() -> None:
+            """仅在关闭方法实际开始时登记，未执行的步骤仍需外层兜底。"""
+            nonlocal task_manager_started
+            task_manager_started = True
+            await self._stop_task_manager()
 
         def dependencies_busy() -> bool:
             """对仍运行的 owner 和清理步骤保留其依赖，不把超时当作成功。"""
@@ -1368,7 +1375,7 @@ class Bot:
             await step("MCP", self._stop_mcp_manager)
             await step("云端遥测", self._close_cloud_telemetry)
 
-            task_manager_ok = await step("任务管理器", self._stop_task_manager)
+            task_manager_ok = await step("任务管理器", stop_task_manager)
             if not task_manager_ok:
                 has_pending_tasks = True
 
@@ -1407,6 +1414,18 @@ class Bot:
             else:
                 errors.append("本地遥测: 跳过（有未确认退出的任务）")
         finally:
+            # 前置步骤被取消时尚未进入管理器清理，只同步回收已持有的池。
+            # 已开始的管理器步骤由自身 finally 负责，避免重复回收或追加任务取消。
+            original_error = sys.exc_info()[1]
+            if not task_manager_started and self.task_manager is not None:
+                try:
+                    self.task_manager.shutdown_process_pool(wait=False)
+                except Exception as exc:
+                    errors.append(f"进程池: {type(exc).__name__}")
+                    if original_error is not None:
+                        original_error.add_note(f"进程池清理另有异常: {type(exc).__name__}")
+                        if self.logger:
+                            self.logger.error("进程池清理失败", exc_info=exc)
             # 步骤 8：即使关闭任务被取消，也恢复线程池、终端和信号；各项独立兜底。
             # 仅执行同步恢复，不重开异步操作。
             for name, cleanup in (
@@ -1485,20 +1504,21 @@ class Bot:
             self.watchdog.stop()
 
     async def _stop_task_manager(self) -> None:
-        """取消并等待 dev 既有的受管任务，但不取得共享进程池关闭权。
+        """取消并等待受管任务，始终尝试回收本 Bot 持有的任务管理器进程池。
 
         只清理 TaskManager 持有的任务，不取消宿主事件循环中的无关任务。
         当前关闭任务可能也受管理，必须排除，避免自取消或自等待。
         shutdown 步骤任务也受管理，但由 shutdown 方法控制，不在此取消或等待。
         仅取消尚未 cancelling 的任务，避免二次取消。
         """
-        if self.task_manager is None:
+        manager = self.task_manager
+        if manager is None:
             return
-        self._capture_stream_owners()
         current = asyncio.current_task()
         pending = []
         try:
-            for info in self.task_manager.get_active_tasks():
+            self._capture_stream_owners()
+            for info in manager.get_active_tasks():
                 if (
                     info.task is not None and info.task is not current
                     and info.task is not self._shutdown_coordinator
@@ -1507,7 +1527,7 @@ class Bot:
                 ):
                     # 只取消尚未取消的任务
                     if not info.task.done() and not info.task.cancelling():
-                        self.task_manager.cancel_task(info.task_id)
+                        manager.cancel_task(info.task_id)
                     pending.append(info.task)
             self._track_shutdown_owners(pending)
             if pending:
@@ -1515,8 +1535,30 @@ class Bot:
             if any(not task.cancelled() and task.exception() is not None for task in pending):
                 raise BotShutdownError("受管任务异常退出，资源清理未确认")
         finally:
-            # cleanup_tasks 只移除已退出记录；全局进程池没有 Bot 独占证明，留给其拥有者。
-            self.task_manager.cleanup_tasks()
+            # 记录清理和池回收相互独立；取消或任务失败也不能跳过池回收。
+            primary_error = sys.exc_info()[1]
+            cleanup_errors: list[BaseException] = []
+            try:
+                manager.cleanup_tasks()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            try:
+                manager.shutdown_process_pool(wait=False)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            if cleanup_errors:
+                if primary_error is None:
+                    if len(cleanup_errors) == 1:
+                        raise cleanup_errors[0]
+                    raise BaseExceptionGroup("任务管理器清理失败", cleanup_errors)
+                for cleanup_error in cleanup_errors:
+                    primary_error.add_note(
+                        f"任务管理器清理另有异常: {type(cleanup_error).__name__}"
+                    )
+                    if self.logger:
+                        self.logger.error(
+                            "任务管理器清理失败", exc_info=cleanup_error,
+                        )
 
     async def _close_default_model_clients(self) -> None:
         """活动 LLM 任务结束后、事件循环和线程池结束前回收内核拥有的默认资源。

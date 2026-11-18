@@ -1,4 +1,4 @@
-"""PR181 独立入口进程池所有权回归，不启动真实 Bot。"""
+"""Bot 进程池回收职责与薄入口回归，不启动真实 Bot 服务。"""
 
 from __future__ import annotations
 
@@ -18,11 +18,13 @@ from ctypes import wintypes
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 
 import main as entrypoint
+from src.app.runtime.bot import Bot
 from src.kernel.concurrency import task_manager as concurrency
 
 
@@ -38,9 +40,10 @@ class FakePool:
         self.loop: asyncio.AbstractEventLoop | None = None
 
     def shutdown(self, wait: bool, *, cancel_futures: bool) -> None:
-        """记录关闭参数，并验证 runner 已关闭。"""
+        """记录关闭参数，验证 Bot 在事件循环退出前完成回收。"""
         if self.loop is not None:
-            assert self.loop.is_closed()
+            assert not self.loop.is_closed()
+            assert asyncio.get_running_loop() is self.loop
         self.shutdown_calls.append((wait, cancel_futures))
 
 
@@ -62,34 +65,37 @@ def pools(monkeypatch: pytest.MonkeyPatch) -> list[FakePool]:
 
 def install_fake_bot(
     monkeypatch: pytest.MonkeyPatch,
-    create: Callable[[], None],
+    create: Callable[[], concurrency.TaskManager],
     fail_stage: str | None = None,
 ) -> None:
-    """替换延迟导入，禁止真实 Bot、配置和供应商初始化。"""
+    """替换入口延迟导入，只保留真实 Bot 的任务管理器清理阶段。"""
     runtime = ModuleType("src.app.runtime")
     agreements = ModuleType("src.app.runtime.user_agreements")
 
     async def agree(path: str) -> bool:
-        """模拟协议阶段创建资源后失败。"""
+        """模拟协议失败或拒绝，不读取真实配置。"""
         if fail_stage == "agreement":
-            create()
             raise RuntimeError("agreement")
-        return True
+        return fail_stage != "declined"
 
-    class FakeBot:
-        """只覆盖入口生命周期的 Bot 替身。"""
+    class FakeBot(Bot):
+        """不启动任何服务，仅持有管理器并调用真实关闭方法。"""
 
         def __init__(self, **kwargs: Any) -> None:
-            """模拟构造阶段失败。"""
+            """保留关闭所需状态，并可模拟尚未取得管理器时失败。"""
             if fail_stage == "constructor":
-                create()
                 raise RuntimeError("constructor")
+            super().__init__(**kwargs)
 
         async def start(self) -> None:
-            """模拟初始化和运行阶段。"""
-            create()
-            if fail_stage == "start":
-                raise RuntimeError("start")
+            """模拟取得管理器后运行，由 Bot 自身而非入口回收。"""
+            self.task_manager = create()
+            self.task_manager._ensure_process_pool().loop = asyncio.get_running_loop()
+            try:
+                if fail_stage == "start":
+                    raise RuntimeError("start")
+            finally:
+                await self._stop_task_manager()
 
     runtime.Bot = FakeBot
     agreements.ensure_startup_agreements = agree
@@ -97,125 +103,112 @@ def install_fake_bot(
     monkeypatch.setitem(sys.modules, "src.app.runtime.user_agreements", agreements)
 
 
-@pytest.mark.parametrize("fail_stage", [None, "agreement", "constructor", "start"])
-def test_script_reclaims_created_pool_even_on_initialization_failure(
-    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool], fail_stage: str | None
-) -> None:
-    """真实脚本分支在 runner 外回收，包括初始化失败。"""
-    def create() -> None:
-        """记录创建池所在的事件循环。"""
-        manager = concurrency.get_task_manager()
-        manager._process_pool.loop = asyncio.get_running_loop()
-
-    install_fake_bot(monkeypatch, create, fail_stage)
-    if fail_stage is None:
+def invoke_main(invocation: str) -> None:
+    """分别进入真实脚本分支或直接运行异步 main。"""
+    if invocation == "script":
         runpy.run_path(str(Path(entrypoint.__file__)), run_name="__main__")
     else:
-        with pytest.raises(RuntimeError, match=fail_stage):
-            runpy.run_path(str(Path(entrypoint.__file__)), run_name="__main__")
-    assert len(pools) == 1
-    assert pools[0].shutdown_calls == [(False, True)]
-    assert concurrency._task_manager._process_pool is None
+        asyncio.run(entrypoint.main())
 
 
-@pytest.mark.parametrize("failure", [RuntimeError("startup"), asyncio.CancelledError(), KeyboardInterrupt()])
-def test_runner_reclaims_pool_without_replacing_original_failure(
-    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool], failure: BaseException
+@pytest.mark.parametrize("invocation", ["script", "async"])
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_main_lets_bot_close_its_manager(
+    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool], invocation: str, preexisting: bool,
 ) -> None:
-    """异常、取消与中断均经过 runner 外的 finally。"""
-    async def fail() -> None:
-        """创建资源后抛出受控异常。"""
-        manager = concurrency.get_task_manager()
-        manager._process_pool.loop = asyncio.get_running_loop()
-        raise failure
-
-    monkeypatch.setattr(entrypoint, "main", fail)
-    with pytest.raises(type(failure)) as caught:
-        entrypoint.run()
-    assert caught.value is failure
-    assert pools[0].shutdown_calls == [(False, True)]
-
-
-def test_empty_runner_does_not_call_getter_or_create_pool(
-    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool]
-) -> None:
-    """空运行退出不能为了清理而懒创建池。"""
-    async def empty() -> None:
-        """模拟协议拒绝或提前返回。"""
-
-    def forbidden(*args: Any, **kwargs: Any) -> None:
-        """任何 getter 调用都说明退出产生了资源。"""
-        raise AssertionError("cleanup called getter")
-
-    monkeypatch.setattr(entrypoint, "main", empty)
-    monkeypatch.setattr(concurrency, "get_task_manager", forbidden)
-    entrypoint.run()
-    assert pools == []
-    assert concurrency._task_manager is None
-
-
-def test_standalone_borrows_existing_host_pool_even_with_different_configuration(
-    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool]
-) -> None:
-    """宿主已存在的池不能被入口配置或关闭替换。"""
-    host = concurrency.get_task_manager(process_workers=2)
-    original = host._process_pool
-
-    async def borrow() -> None:
-        """模拟 Bot 初始化的配置请求。"""
-        assert concurrency.get_task_manager(process_workers=5) is host
-        assert host._ensure_process_pool() is original
-
-    monkeypatch.setattr(entrypoint, "main", borrow)
-    entrypoint.run()
-    assert host._process_pool is original
-    assert len(pools) == 1
-    assert original.shutdown_calls == []
-
-
-def test_embedded_async_main_does_not_own_created_pool(
-    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool]
-) -> None:
-    """嵌入调用 main 默认借用，由宿主负责最终回收。"""
+    """管理器无论先前已存在还是启动时创建，均由持有它的 Bot 回收。"""
+    manager = concurrency.get_task_manager(process_workers=2) if preexisting else None
     install_fake_bot(monkeypatch, concurrency.get_task_manager)
-    asyncio.run(entrypoint.main())
+    invoke_main(invocation)
+
+    assert len(pools) == 1
+    assert pools[0].shutdown_calls == [(False, True)]
+    assert pools[0].loop is not None and pools[0].loop.is_closed()
+    assert concurrency._task_manager is not None
+    assert concurrency._task_manager._process_pool is None
+    if manager is not None:
+        assert concurrency._task_manager is manager
+
+
+@pytest.mark.parametrize("fail_stage", ["agreement", "constructor", "start"])
+def test_script_failure_preserves_bot_cleanup_boundary(
+    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool], fail_stage: str,
+) -> None:
+    """取得管理器前失败不创建池；运行失败仍由 Bot 关闭并传播异常。"""
+    install_fake_bot(monkeypatch, concurrency.get_task_manager, fail_stage)
+    with pytest.raises(RuntimeError, match=fail_stage):
+        invoke_main("script")
+    if fail_stage == "start":
+        assert len(pools) == 1
+        assert pools[0].shutdown_calls == [(False, True)]
+        assert concurrency._task_manager._process_pool is None
+    else:
+        assert pools == []
+        assert concurrency._task_manager is None
+
+
+@pytest.mark.parametrize("invocation", ["script", "async"])
+def test_entrypoint_has_no_outer_pool_cleanup(
+    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool], invocation: str,
+) -> None:
+    """入口不另设资源上下文；故意禁用 Bot 回收时，假池仍保留。"""
+    stop = AsyncMock()
+    monkeypatch.setattr(Bot, "_stop_task_manager", stop)
+    install_fake_bot(monkeypatch, concurrency.get_task_manager)
+    invoke_main(invocation)
+
+    stop.assert_awaited_once()
     assert len(pools) == 1
     assert pools[0].shutdown_calls == []
     assert concurrency._task_manager._process_pool is pools[0]
 
 
-def test_repeated_runner_owns_only_each_new_generation(
-    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool]
+def test_declined_agreement_does_not_call_getter_or_create_pool(
+    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool],
 ) -> None:
-    """重复运行复用管理器，但每轮只回收自己创建的池。"""
-    async def use_pool() -> None:
-        """模拟已关闭管理器再次使用进程池。"""
-        manager = concurrency.get_task_manager()
-        manager._ensure_process_pool().loop = asyncio.get_running_loop()
+    """协议拒绝后的薄入口不会为清理而懒创建管理器。"""
+    def forbidden() -> concurrency.TaskManager:
+        """任何 getter 调用都说明提前返回产生了资源。"""
+        raise AssertionError("cleanup called getter")
 
-    monkeypatch.setattr(entrypoint, "main", use_pool)
-    entrypoint.run()
+    monkeypatch.setattr(concurrency, "get_task_manager", forbidden)
+    install_fake_bot(monkeypatch, forbidden, "declined")
+    invoke_main("script")
+    assert pools == []
+    assert concurrency._task_manager is None
+
+
+def test_repeated_main_calls_let_bot_reclaim_each_generation(
+    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool],
+) -> None:
+    """每轮 Bot 可以复用管理器，并回收本轮实际使用的池。"""
+    install_fake_bot(monkeypatch, concurrency.get_task_manager)
+    invoke_main("script")
     manager = concurrency._task_manager
-    entrypoint.run()
+    invoke_main("script")
     assert concurrency._task_manager is manager
+    assert manager._process_pool is None
     assert len(pools) == 2
     assert all(pool.shutdown_calls == [(False, True)] for pool in pools)
 
 
-
-def test_embedded_main_preserves_explicit_reconfiguration_contract(
-    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool]
+@pytest.mark.parametrize("invocation", ["script", "async"])
+def test_main_allows_bot_explicit_reconfiguration_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch, pools: list[FakePool], invocation: str,
 ) -> None:
-    """无独立作用域时保留显式重配契约，但 main 不负责最终回收。"""
-    host = concurrency.get_task_manager(process_workers=2)
-    original = host._process_pool
+    """入口不拒绝 Bot 的显式配置；旧代与当前代均在职责边界内回收。"""
+    manager = concurrency.get_task_manager(process_workers=2)
+    original = manager._process_pool
     install_fake_bot(monkeypatch, lambda: concurrency.get_task_manager(process_workers=8))
-    asyncio.run(entrypoint.main())
+    invoke_main(invocation)
     assert len(pools) == 2
-    assert host._process_pool is pools[1]
+    assert concurrency._task_manager is manager
+    assert manager._process_pool is None
+    assert manager._process_workers == 8
     assert pools[1].max_workers == 8
     assert original.shutdown_calls == [(False, True)]
-    assert pools[1].shutdown_calls == []
+    assert pools[1].shutdown_calls == [(False, True)]
+
 
 class _JobLimits(ctypes.Structure):
     """Windows JOBOBJECT_BASIC_LIMIT_INFORMATION 的原生布局。"""
@@ -341,37 +334,55 @@ def _write_probe_pid(path: Path) -> None:
 
 
 def _blocking_worker(marker: str) -> None:
-    """由 spawn 启动，证明作业开始后无限运行，等待所有者回收。"""
+    """由 spawn 启动，证明作业开始后无限运行，等待 Bot 回收。"""
     _write_probe_pid(Path(marker))
     while True:
         time.sleep(1)
 
 
 async def _probe_main(directory: Path, mode: str) -> None:
-    """作业已开始后才取消/超时，不读取配置或创建真实 Bot。"""
+    """作业开始后才取消或超时，仅调用 Bot 的管理器清理，不启动服务。"""
     manager = concurrency.get_task_manager(process_workers=1)
-    marker = directory / "worker.pid"
-    task = manager.create_task(manager.to_process(_blocking_worker, str(marker), timeout=None)).task
-    assert task is not None
-    deadline = time.monotonic() + 10
-    while not marker.exists():
-        if task.done():
-            await task
-        if time.monotonic() >= deadline:
-            raise TimeoutError("worker did not start")
-        await asyncio.sleep(0.01)
-    worker_pid = int(marker.read_text(encoding="utf-8"))
-    worker = next(process for process in manager._process_pool._processes.values() if process.pid == worker_pid)
-    assert worker.is_alive()
-    if mode == "timeout":
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(task, timeout=0.01)
-    else:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    assert worker.is_alive(), "cancellation alone must not be mistaken for worker exit"
-    print(json.dumps({"event": "cancelled_running_worker", "worker_pid": worker_pid}), flush=True)
+    bot = Bot()
+    bot.task_manager = manager
+    primary_error: BaseException | None = None
+    try:
+        marker = directory / "worker.pid"
+        task = manager.create_task(manager.to_process(_blocking_worker, str(marker), timeout=None)).task
+        assert task is not None
+        deadline = time.monotonic() + 10
+        while not marker.exists():
+            if task.done():
+                await task
+            if time.monotonic() >= deadline:
+                raise TimeoutError("worker did not start")
+            await asyncio.sleep(0.01)
+        worker_pid = int(marker.read_text(encoding="utf-8"))
+        worker = next(process for process in manager._process_pool._processes.values() if process.pid == worker_pid)
+        assert worker.is_alive()
+        if mode == "timeout":
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(task, timeout=0.01)
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert worker.is_alive(), "cancellation alone must not be mistaken for worker exit"
+        print(json.dumps({"event": "cancelled_running_worker", "worker_pid": worker_pid}), flush=True)
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        # legacy 是故意不关闭池的负向探针，不代表任何历史版本的实现。
+        if mode != "legacy":
+            try:
+                await bot._stop_task_manager()
+                assert manager._process_pool is None
+                print(json.dumps({"event": "bot_pool_closed"}), flush=True)
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    raise
+                primary_error.add_note("Bot 探针清理失败: " + "".join(traceback.format_exception(cleanup_error)))
 
 
 def _probe_entry(directory: Path, mode: str) -> None:
@@ -380,26 +391,19 @@ def _probe_entry(directory: Path, mode: str) -> None:
     if sys.stdin.readline().strip() != "go":
         return
     multiprocessing.set_start_method("spawn", force=True)
-
-    async def probe() -> None:
-        """提供给真实入口 runner 的无外部依赖协程。"""
-        await _probe_main(directory, mode)
-
-    entrypoint.main = probe
-    if mode == "legacy":
-        # 对照旧入口：协程结束，但解释器仍等待已运行的 worker。
-        asyncio.run(probe())
-    else:
-        entrypoint.run()
+    asyncio.run(_probe_main(directory, mode))
     print(json.dumps({"event": "runner_returned"}), flush=True)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="真实无限 worker 必须由 Windows Job Object 隔离")
 @pytest.mark.parametrize("mode", ["cancel", "timeout", "legacy"])
 def test_real_spawn_worker_exit_and_process_tree_cleanup(mode: str) -> None:
-    """验证真实退出，同时用旧入口对照证明超时保护确实清掉全部子孙。"""
+    """验证 Bot 关闭后的真实退出，并用不关闭池的负向探针证明 Job 隔离回收。"""
     root = Path(__file__).resolve().parents[3]
-    directory = root / "reports" / "pr181-test-cleanup" / "process" / f"probe-{mode}-{uuid4().hex}"
+    directory = (
+        root / "reports" / "bot-pool-responsibility-20261117-1914" / "probes"
+        / f"probe-{mode}-{uuid4().hex}"
+    )
     directory.mkdir(parents=True)
     job = _WindowsJob()
     child: subprocess.Popen[str] | None = None

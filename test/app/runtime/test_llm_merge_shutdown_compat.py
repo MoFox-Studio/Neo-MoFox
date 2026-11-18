@@ -1,4 +1,4 @@
-"""LLM 合并收口的共享池归属、退出观察和分发登记回归。"""
+"""LLM 合并收口的 Bot 关闭职责、退出观察和分发登记回归。"""
 from __future__ import annotations
 
 import asyncio
@@ -73,8 +73,8 @@ async def bot(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Bot]:
         Mock(name="controlled_process_pool_factory", return_value=pool),
     )
     manager = TaskManager()
-    # 只观察调用，绝不执行共享池的强制关闭实现。
-    monkeypatch.setattr(manager, "shutdown_process_pool", Mock(name="shared_pool_shutdown"))
+    # 池工厂不分配 OS 资源，调用观察仍执行真实 TaskManager 关闭流程。
+    monkeypatch.setattr(manager, "shutdown_process_pool", Mock(wraps=manager.shutdown_process_pool))
     monkeypatch.setattr("src.kernel.concurrency.get_task_manager", lambda: manager)
     monkeypatch.setattr("src.kernel.concurrency.task_manager.get_task_manager", lambda: manager)
     owned_tasks: list[asyncio.Task[Any]] = []
@@ -181,8 +181,10 @@ def stream_source(
     return source
 
 
-async def test_managed_tasks_stop_without_shared_process_pool_shutdown(bot: Bot) -> None:
-    """保留 dev 的守护/普通受管任务清理，但不关闭共享进程池或无关任务。"""
+async def test_managed_tasks_stop_and_bot_closes_process_pool(bot: Bot) -> None:
+    """Bot 回收持有的进程池，受管任务取消仍不触及事件循环的无关任务。"""
+    assert bot.task_manager is not None
+    pool = bot.task_manager._process_pool
     entered = [asyncio.Event(), asyncio.Event()]
 
     async def worker(ready: asyncio.Event) -> None:
@@ -202,8 +204,9 @@ async def test_managed_tasks_stop_without_shared_process_pool_shutdown(bot: Bot)
         assert all(task.cancelled() and task.cancelling() == 1 for task in managed)
         assert not unrelated.done()
         assert bot.task_manager is not None
-        bot.task_manager.shutdown_process_pool.assert_not_called()
-        bot.task_manager._process_pool.shutdown.assert_not_called()
+        bot.task_manager.shutdown_process_pool.assert_called_once_with(wait=False)
+        pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+        assert bot.task_manager._process_pool is None
     finally:
         unrelated.cancel()
         for task in managed:

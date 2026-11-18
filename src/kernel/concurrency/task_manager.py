@@ -8,11 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
-from contextlib import contextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass, field
 from multiprocessing.process import BaseProcess
 from functools import partial
 from threading import Lock
@@ -29,56 +26,6 @@ if TYPE_CHECKING:
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-
-@dataclass
-class _ProcessPoolOwner:
-    """记录当前独立运行实际创建的池及其代际。"""
-
-    pools: dict[TaskManager, ProcessPoolExecutor] = field(default_factory=dict)
-    active: bool = True
-
-
-_process_pool_owner: ContextVar[_ProcessPoolOwner | None] = ContextVar(
-    "process_pool_owner", default=None
-)
-
-
-@contextmanager
-def process_pool_lifespan(timeout: float = 1.0) -> Iterator[None]:
-    """在 runner 外回收本作用域新建的池，不接管此前存在的宿主池。
-
-    Args:
-        timeout: 所有池、worker 和管理线程共享的回收等待预算（秒）。
-            不限制 runner 本身，也不承诺整个解释器的硬退出时限。
-    """
-    owner = _ProcessPoolOwner()
-    token = _process_pool_owner.set(owner)
-    primary_error: BaseException | None = None
-    try:
-        yield
-    except BaseException as exc:
-        primary_error = exc
-        raise
-    finally:
-        owner.active = False
-        _process_pool_owner.reset(token)
-        deadline = monotonic() + max(0.0, timeout)
-        errors: list[Exception] = []
-        for manager, pool in owner.pools.items():
-            try:
-                manager.shutdown_process_pool(
-                    wait=False,
-                    expected_pool=pool,
-                    deadline=deadline,
-                )
-            except Exception as exc:
-                errors.append(exc)
-        owner.pools.clear()
-        if errors:
-            if primary_error is None:
-                raise ExceptionGroup("进程池回收失败", errors)
-            primary_error.add_note(f"进程池回收失败: {errors!r}")
 
 
 class TaskManager:
@@ -119,15 +66,6 @@ class TaskManager:
             pool = self._process_pool
             if process_workers == self._process_workers and pool is not None:
                 return
-            owner = _process_pool_owner.get()
-            if (
-                pool is not None
-                and owner is not None
-                and owner.active
-                and owner.pools.get(self) is not pool
-            ):
-                # 独立入口只能配置自己的池，借用时保留宿主配置。
-                return
             self._process_workers = process_workers
 
         if pool is not None:
@@ -135,13 +73,10 @@ class TaskManager:
         self._ensure_process_pool()
 
     def _ensure_process_pool(self) -> ProcessPoolExecutor:
-        """确保进程池存在，并仅在实际创建时登记当前所有者。"""
+        """在锁内确保进程池存在，由持有管理器的 Bot 统一回收。"""
         with self._lock:
             if self._process_pool is None:
                 self._process_pool = ProcessPoolExecutor(max_workers=self._process_workers)
-                owner = _process_pool_owner.get()
-                if owner is not None and owner.active:
-                    owner.pools[self] = self._process_pool
             return self._process_pool
 
     def set_watchdog(self, watchdog: WatchDog) -> None:
@@ -497,9 +432,9 @@ class TaskManager:
         Args:
             wait: 是否保持 executor 原有的等待任务完成语义。
             cancel_futures: 是否取消尚未开始的作业。
-            expected_pool: 所有权凭据；不匹配当前代际时不执行回收。
+            expected_pool: 预期关闭的池实例；不匹配当前代际时不执行回收。
             timeout: wait=False 时 worker 与管理线程共享的等待秒数。
-            deadline: 外层所有者传入的共同绝对截止时间，优先于 timeout。
+            deadline: 调用方传入的共同绝对截止时间，优先于 timeout。
         """
         if deadline is None:
             deadline = monotonic() + max(0.0, timeout)
@@ -611,7 +546,6 @@ def get_task_manager(process_workers: int | None = None) -> TaskManager:
 
     Args:
         process_workers: 可选进程池大小；首次创建时使用，已存在时显式重配。
-            仅在活跃独立作用域借用宿主池时保留宿主配置。
 
     Returns:
         TaskManager: 全局任务管理器单例
