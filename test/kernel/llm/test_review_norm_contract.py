@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+
+from src.kernel.llm.types import ModelEntry
 
 ROOT = Path(__file__).resolve().parents[3]
 LLM_TEST_FILES = (
@@ -104,13 +107,38 @@ def test_public_parameter_contract_is_explained(
     assert all(parameter in documentation for parameter in parameters)
 
 
-def test_result_and_registry_documentation_matches_current_contract() -> None:
-    """结构化结果和默认 Gemini 装配已进入实现，说明不能退回旧契约。"""
+def test_result_documentation_matches_current_contract() -> None:
+    """客户端和结果归一化入口均说明结构化返回值。"""
     from src.kernel.llm.model_client.base import ChatModelClient
-    from src.kernel.llm.model_client.registry import ModelClientRegistry
     from src.kernel.llm.request_execution import normalize_client_create_result
 
     assert "ModelClientResult" in (ChatModelClient.create.__doc__ or "")
     assert "ModelClientResult" in (normalize_client_create_result.__doc__ or "")
-    assert "Gemini" in (ModelClientRegistry.get_client_for_model.__doc__ or "")
-    assert "gemini/bedrock 系列别名" not in (ModelClientRegistry.get_client_for_model.__doc__ or "")
+
+
+@pytest.mark.parametrize(("client_type", "field"), [
+    ("gemini", "gemini"), ("aiohttp_gemini", "gemini"), ("gemini_v2", "gemini"),
+    ("google", "gemini"), (" AIOHTTP-Gemini ", "gemini"),
+    ("openai", "openai"), ("anthropic", "anthropic"),
+    ("openai_response", "responses"), ("responses", "responses"), ("openai.responses", "responses"),
+    ("bedrock", "bedrock"), ("amazon_bedrock", "bedrock"), ("bedrock_converse", "bedrock"),
+])
+def test_registry_routes_to_injected_client(mock_model_config: ModelEntry, client_type: str, field: str) -> None:
+    """每种类型及其别名都返回对应字段中注入的同一实例。"""
+    from src.kernel.llm.model_client.base import ChatModelClient
+    from src.kernel.llm.model_client.registry import ModelClientRegistry
+
+    client = Mock(spec=ChatModelClient)
+    registry = ModelClientRegistry(**{field: client})
+    mock_model_config["client_type"] = client_type
+    assert registry.get_client_for_model(mock_model_config) is client
+
+
+def test_registry_rejects_unknown_client_type(mock_model_config: ModelEntry) -> None:
+    """未知类型不得回退到任何已装配客户端。"""
+    from src.kernel.llm.exceptions import LLMProviderUnavailableError
+    from src.kernel.llm.model_client.registry import ModelClientRegistry
+
+    mock_model_config["client_type"] = "unknown"
+    with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type"):
+        ModelClientRegistry().get_client_for_model(mock_model_config)
