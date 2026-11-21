@@ -365,6 +365,7 @@ class LLMResponse:
             self._maybe_apply_tool_call_compat()
             if self.message:
                 yield StreamEvent(text_delta=self.message)
+            self._maybe_append_response_to_context()
             return
 
         retries = self._get_stream_retries()
@@ -486,19 +487,7 @@ class LLMResponse:
         if self._appended_to_context or not self._has_response_payload_content():
             return
 
-        content_parts: list[object] = []
-        if self.reasoning_parts:
-            content_parts.extend(self.reasoning_parts)
-        elif self.reasoning_content:
-            content_parts.append(ReasoningText(self.reasoning_content))
-        if self.message:
-            content_parts.append(Text(self.message))
-        if self.call_list:
-            content_parts.extend(self.call_list)
-        if not content_parts:
-            return
-
-        assistant_payload = LLMPayload(ROLE.ASSISTANT, content_parts, provider_state=self.provider_state)  # type: ignore[arg-type]
+        assistant_payload = self.to_payload()
         if self.context_manager is not None:
             self.payloads = self.context_manager.add_payload(
                 self.payloads, assistant_payload
@@ -512,7 +501,7 @@ class LLMResponse:
 
     def _has_response_payload_content(self) -> bool:
         """判断当前响应是否已经具备可写回 payload 的内容。"""
-        return bool(
+        return self.provider_state is not None or bool(
             self.reasoning_parts or self.reasoning_content or self.message or self.call_list
         )
 
@@ -590,7 +579,7 @@ class LLMResponse:
         if not self._consumed:
             await self._collect_full_response()
 
-        if not self._appended_to_context:
+        if not self._appended_to_context and self._has_response_payload_content():
             self.add_payload(self.to_payload())
             self._appended_to_context = True
 
