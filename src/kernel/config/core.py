@@ -468,14 +468,18 @@ def _type_repr(annotation: Any) -> str:
         return "unknown"
 
 
-def _toml_escape_string(value: str) -> str:
-    """对字符串进行 TOML 基本字符串最小转义并包裹双引号。
+_TOML_STRING_ESCAPES = str.maketrans({
+    **{chr(code): f"\\u{code:04X}" for code in (*range(0x20), 0x7F)},
+    "\b": r"\b", "\t": r"\t", "\n": r"\n", "\f": r"\f", "\r": r"\r",
+    "\\": r"\\", '"': r'\"',
+})
+# 多行字符串允许裸 LF 和单个双引号，连续三个双引号在写出时另行转义。
+_TOML_MULTILINE_ESCAPES = _TOML_STRING_ESCAPES | {ord("\n"): "\n", ord('"'): '"'}
 
-    仅转义反斜杠（``\\``）和双引号（``"``），其余字符保持原样。
-    """
-    # TOML 基本字符串，最小转义
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+
+def _toml_escape_string(value: str) -> str:
+    """转义控制字符、反斜杠与双引号，并包裹为 TOML 基本字符串。"""
+    return f'"{value.translate(_TOML_STRING_ESCAPES)}"'
 
 
 def _toml_format_key(key: str) -> str:
@@ -508,7 +512,7 @@ def _toml_format_value(value: Any) -> str:
     if isinstance(value, str):
         if "\n" in value:
             # 多行字符串使用三引号
-            escaped = value.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+            escaped = value.translate(_TOML_MULTILINE_ESCAPES).replace('"""', '\\"\\"\\"')
             return f'"""\n{escaped}"""'
         return _toml_escape_string(value)
     if isinstance(value, list):
