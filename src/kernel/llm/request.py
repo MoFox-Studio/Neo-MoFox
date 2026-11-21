@@ -18,6 +18,7 @@ from .policy.base import Policy
 from .request_execution import (
     execute_request,
 )
+from .response import LLMResponse
 from .types import ModelEntry, ModelSet, RequestType
 
 
@@ -34,6 +35,8 @@ class LLMRequest:
     context_manager: LLMContextManager | None = None
     enable_metrics: bool = True
     request_type: RequestType = RequestType.COMPLETIONS
+    _attempt_context: Any = field(default=None, repr=False)
+    _locked_target: tuple[str, str, str] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """在兼容旧构造方式的前提下补齐默认协作者。"""
@@ -50,7 +53,7 @@ class LLMRequest:
         elif not isinstance(self.meta_data, dict):
             self.meta_data = dict(self.meta_data)
 
-    def add_payload(self, payload: LLMPayload, position=None) -> Self:
+    def add_payload(self, payload: LLMPayload, position: int | None = None) -> Self:
         """按当前 context manager 规则追加或插入 payload。"""
         if self.context_manager is not None:
             self.payloads = self.context_manager.add_payload(
@@ -64,7 +67,8 @@ class LLMRequest:
             self.payloads.insert(int(position), payload)
             return self
 
-        if self.payloads and self.payloads[-1].role == payload.role:
+        if (self.payloads and self.payloads[-1].role == payload.role
+                and self.payloads[-1].provider_state is None and payload.provider_state is None):
             self.payloads[-1].content.extend(payload.content)
         else:
             self.payloads.append(payload)
@@ -75,7 +79,7 @@ class LLMRequest:
         auto_append_response: bool = True,
         *,
         stream: bool = True,
-    ):
+    ) -> LLMResponse:
         """执行请求，并返回一个 ``LLMResponse`` 包装对象。"""
         return await execute_request(
             self,

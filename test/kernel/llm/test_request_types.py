@@ -22,6 +22,7 @@ from src.kernel.llm.payload import LLMPayload, Text
 from src.kernel.llm.roles import ROLE
 from src.kernel.llm.embedding_response import EmbeddingResponse
 from src.kernel.llm.model_client import ModelClientRegistry
+from src.kernel.llm.policy.round_robin import RoundRobinPolicy
 from src.kernel.llm.rerank_response import RerankResponse
 
 
@@ -179,6 +180,43 @@ async def test_embedding_request_send(model_set: ModelSet) -> None:
     assert isinstance(response, EmbeddingResponse)
     assert response.embeddings == [[0.1, 0.2], [0.3, 0.4]]
     assert response.model_name == "test-model"
+
+
+@pytest.mark.asyncio
+async def test_rerank_unregistered_provider_fails_over_to_next_model() -> None:
+    """客户端解析失败也要走 policy，才能切到下一个模型。"""
+    gemini_entry = {
+        "api_provider": "google",
+        "base_url": "https://example.test/v1",
+        "model_identifier": "gemini-model",
+        "api_key": "test-key",
+        "client_type": "gemini",
+        "max_retry": 0,
+        "timeout": 1.0,
+        "retry_interval": 0.0,
+        "price_in": 0.0,
+        "price_out": 0.0,
+        "temperature": 0.0,
+        "max_tokens": 10,
+        "extra_params": {},
+    }
+    openai_entry = {**gemini_entry, "client_type": "openai", "model_identifier": "rerank-model"}
+    registry = ModelClientRegistry(openai=_MockMultiClient())
+    registry.gemini = None
+
+    request = RerankRequest(
+        model_set=cast(ModelSet, [gemini_entry, openai_entry]),
+        query="q",
+        documents=["doc0", "doc1"],
+        policy=RoundRobinPolicy(),
+        clients=registry,
+        enable_metrics=False,
+    )
+
+    response = await request.send()
+
+    assert response.model_name == "rerank-model"
+    assert [item.document for item in response.results] == ["doc1", "doc0"]
 
 
 @pytest.mark.asyncio

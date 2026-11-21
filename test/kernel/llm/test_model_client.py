@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from src.kernel.llm.exceptions import LLMProviderUnavailableError
 from src.kernel.llm.model_client.base import ChatModelClient, StreamEvent
+from src.kernel.llm.model_client.gemini_client import GeminiChatClient
 from src.kernel.llm.model_client.openai_client import OpenAIChatClient, _image_to_data_url, _is_data_url, _payloads_to_openai_messages
 from src.kernel.llm.model_client.registry import ModelClientRegistry
 from src.kernel.llm.payload import Image, LLMPayload, Text, ToolResult
@@ -510,7 +512,7 @@ class TestModelClientRegistry:
         """Test creating ModelClientRegistry."""
         registry = ModelClientRegistry()
         assert registry.openai is not None
-        assert registry.gemini is None
+        assert isinstance(registry.gemini, GeminiChatClient)
         assert registry.bedrock is None
 
     def test_get_client_for_openai_model(self) -> None:
@@ -535,8 +537,8 @@ class TestModelClientRegistry:
         client = registry.get_client_for_model(model)
         assert isinstance(client, OpenAIChatClient)
 
-    def test_get_client_with_unknown_type_falls_back_to_openai(self) -> None:
-        """Test that unknown client_type falls back to OpenAI."""
+    def test_get_client_with_unknown_type_fails_before_dispatch(self) -> None:
+        """注册表拒绝未知类型，不回退到默认 OpenAI 客户端。"""
         registry = ModelClientRegistry()
         model = {
             "client_type": "unknown",
@@ -554,8 +556,8 @@ class TestModelClientRegistry:
             "extra_params": {},
         }
 
-        client = registry.get_client_for_model(model)
-        assert isinstance(client, OpenAIChatClient)
+        with pytest.raises(LLMProviderUnavailableError, match="不支持的 client_type"):
+            registry.get_client_for_model(model)
 
     def test_registry_with_custom_clients(self) -> None:
         """Test registry with custom client instances."""

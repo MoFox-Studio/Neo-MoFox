@@ -125,6 +125,11 @@ async def maybe_compress_payloads(
     """当上下文逼近上限时调用可选的压缩钩子。"""
     if context_compression_handler is None or request is None:
         return payloads
+    # The current user-anchored group may contain multiple signed function steps.
+    # Compressing it would invalidate the opaque replay signatures.
+    groups = build_qa_groups(split_pinned_prefix(payloads)[1])
+    if groups and any(p.provider_state is not None and p.provider_state.call_ids for p in groups[-1]):
+        return payloads
 
     model_identifier = model.get("model_identifier")
     max_context = model.get("max_context")

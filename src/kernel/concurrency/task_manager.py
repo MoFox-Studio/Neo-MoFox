@@ -13,6 +13,7 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.process import BaseProcess
 from functools import partial
 from threading import Lock
+from time import monotonic
 from typing import TYPE_CHECKING, Any, Coroutine, ParamSpec, TypeVar
 from uuid import uuid4
 
@@ -50,9 +51,8 @@ class TaskManager:
         )
         self._watchdog: WatchDog | None = None  # WatchDog 实例，稍后注入
         self._process_workers = max(1, process_workers)
-        self._process_pool: ProcessPoolExecutor | None = ProcessPoolExecutor(
-            max_workers=self._process_workers
-        )
+        self._process_pool: ProcessPoolExecutor | None = None
+        self._ensure_process_pool()
         self._initialized = True
 
     def configure_process_pool(self, process_workers: int) -> None:
@@ -62,18 +62,22 @@ class TaskManager:
             process_workers: 进程池进程数量，最小为 1
         """
         process_workers = max(1, process_workers)
-        if process_workers == self._process_workers and self._process_pool is not None:
-            return
+        with self._lock:
+            pool = self._process_pool
+            if process_workers == self._process_workers and pool is not None:
+                return
+            self._process_workers = process_workers
 
-        self.shutdown_process_pool(wait=False, cancel_futures=True)
-        self._process_workers = process_workers
-        self._process_pool = ProcessPoolExecutor(max_workers=self._process_workers)
+        if pool is not None:
+            self.shutdown_process_pool(wait=False, expected_pool=pool)
+        self._ensure_process_pool()
 
     def _ensure_process_pool(self) -> ProcessPoolExecutor:
-        """确保进程池存在。"""
-        if self._process_pool is None:
-            self._process_pool = ProcessPoolExecutor(max_workers=self._process_workers)
-        return self._process_pool
+        """在锁内确保进程池存在，由持有管理器的 Bot 统一回收。"""
+        with self._lock:
+            if self._process_pool is None:
+                self._process_pool = ProcessPoolExecutor(max_workers=self._process_workers)
+            return self._process_pool
 
     def set_watchdog(self, watchdog: WatchDog) -> None:
         """设置 WatchDog 实例
@@ -418,37 +422,109 @@ class TaskManager:
         self,
         wait: bool = True,
         cancel_futures: bool = True,
+        *,
+        expected_pool: ProcessPoolExecutor | None = None,
+        timeout: float = 0.4,
+        deadline: float | None = None,
     ) -> None:
-        """关闭 TaskManager 持有的进程池。"""
-        if self._process_pool is None:
-            return
+        """关闭当前池；非等待模式中所有 join 共享 timeout 预算。
 
-        process_pool = self._process_pool
+        Args:
+            wait: 是否保持 executor 原有的等待任务完成语义。
+            cancel_futures: 是否取消尚未开始的作业。
+            expected_pool: 预期关闭的池实例；不匹配当前代际时不执行回收。
+            timeout: wait=False 时 worker 与管理线程共享的等待秒数。
+            deadline: 调用方传入的共同绝对截止时间，优先于 timeout。
+        """
+        if deadline is None:
+            deadline = monotonic() + max(0.0, timeout)
+        with self._lock:
+            process_pool = self._process_pool
+            if process_pool is None or (
+                expected_pool is not None and process_pool is not expected_pool
+            ):
+                return
+            # 在任何关闭动作前摘除旧代，不能在收尾时清空后来创建的新池。
+            self._process_pool = None
+
+        # shutdown 会清空 executor 的内部引用，必须先保留实际创建的资源。
         worker_processes: list[BaseProcess] = list(
-            getattr(process_pool, "_processes", {}).values()
+            (getattr(process_pool, "_processes", None) or {}).values()
         )
-        process_pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+        manager_thread = vars(process_pool).get("_executor_manager_thread")
+        errors: list[Exception] = []
+        try:
+            process_pool.shutdown(wait=wait, cancel_futures=cancel_futures)
+        except Exception as exc:
+            errors.append(exc)
 
         if not wait:
-            self._terminate_worker_processes(worker_processes)
+            try:
+                self._terminate_worker_processes(worker_processes, deadline=deadline)
+            except Exception as exc:
+                errors.append(exc)
+            if manager_thread is not None:
+                manager_thread.join(timeout=max(0.0, deadline - monotonic()))
+                if manager_thread.is_alive():
+                    errors.append(TimeoutError("进程池管理线程未在回收预算内退出"))
 
-        self._process_pool = None
+        if errors:
+            raise ExceptionGroup("进程池关闭失败", errors)
 
     def _terminate_worker_processes(
         self,
         worker_processes: list[BaseProcess],
+        *,
+        deadline: float | None = None,
     ) -> None:
-        """终止未随 shutdown 退出的进程池 worker。"""
+        """先通知所有 worker，再按共同 deadline 等待、强杀并回收。"""
+        if deadline is None:
+            deadline = monotonic() + 0.4
+        alive: list[BaseProcess] = []
+        survivors: list[BaseProcess] = []
+        errors: list[Exception] = []
         for process in worker_processes:
-            if not process.is_alive():
+            try:
+                if process.is_alive():
+                    alive.append(process)
+                    process.terminate()
+            except (ProcessLookupError, ValueError):
+                # executor 管理线程可能已回收并关闭该进程句柄。
                 continue
+            except OSError as exc:
+                errors.append(exc)
 
-            process.terminate()
-            process.join(timeout=0.2)
+        for process in alive:
+            try:
+                process.join(timeout=min(0.2, max(0.0, deadline - monotonic())))
+                if process.is_alive():
+                    survivors.append(process)
+            except (ProcessLookupError, ValueError):
+                continue
+            except OSError as exc:
+                errors.append(exc)
+                survivors.append(process)
 
-            if process.is_alive():
+        for process in survivors:
+            try:
                 process.kill()
-                process.join(timeout=0.2)
+            except (ProcessLookupError, ValueError):
+                continue
+            except OSError as exc:
+                errors.append(exc)
+
+        for process in survivors:
+            try:
+                process.join(timeout=min(0.2, max(0.0, deadline - monotonic())))
+                if process.is_alive():
+                    errors.append(TimeoutError("进程池 worker 未在回收预算内退出"))
+            except (ProcessLookupError, ValueError):
+                continue
+            except OSError as exc:
+                errors.append(exc)
+
+        if errors:
+            raise ExceptionGroup("进程池 worker 回收失败", errors)
 
     def __repr__(self) -> str:
         """任务管理器字符串表示"""
@@ -469,7 +545,7 @@ def get_task_manager(process_workers: int | None = None) -> TaskManager:
     """获取全局 TaskManager 实例
 
     Args:
-        process_workers: 可选进程池大小；首次创建时使用，已存在时会重新配置
+        process_workers: 可选进程池大小；首次创建时使用，已存在时显式重配。
 
     Returns:
         TaskManager: 全局任务管理器单例

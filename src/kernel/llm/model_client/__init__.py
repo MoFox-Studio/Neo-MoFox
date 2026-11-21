@@ -9,6 +9,7 @@ from .base import (
 from .anthropic_client import AnthropicChatClient
 from .openai_client import OpenAIChatClient
 from .responses_client import OpenAIResponsesClient
+from .gemini_client import GeminiChatClient
 from .registry import ModelClientRegistry
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
 	"AnthropicChatClient",
 	"OpenAIChatClient",
 	"OpenAIResponsesClient",
+	"GeminiChatClient",
 	"ModelClientRegistry",
 ]
