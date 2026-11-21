@@ -292,6 +292,8 @@ msg2 = await response2
 3. 自动添加到 `request.payloads`
 4. 下一次请求包含完整对话历史
 
+非流式请求的用户输入也可能由适配器参数提供（例如 Responses 的 `extra_params.input`）。如果本地历史为空或只有 `SYSTEM`、`TOOL` 声明，消费响应会正常交付正文，但不会凭空补一条用户消息，也不会写入孤立的 `ASSISTANT`。显式调用 `response.send()` 续发时仍会校验本地对话结构。
+
 ### 禁用自动追加
 
 ```python

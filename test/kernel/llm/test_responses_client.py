@@ -12,6 +12,7 @@ import pytest
 
 from src.kernel.llm.payload import Image, LLMPayload, ReasoningText, Text, ToolCall, ToolResult
 from src.kernel.llm.roles import ROLE
+from src.kernel.llm.types import ModelEntry
 
 
 class MockFunctionTool:
@@ -409,6 +410,40 @@ class TestOpenAIResponsesClient:
         assert stream_iter is None
         assert reasoning is None
         assert usage == {}
+
+    @pytest.mark.parametrize("mode", ["text", "events", "await"])
+    async def test_nonstream_external_input_without_local_turn(
+        self, mode: str, mock_model_config: ModelEntry,
+    ) -> None:
+        """SDK 使用外部输入时，各非流式消费入口交付正文，但不制造孤立的助手轮。"""
+        from types import SimpleNamespace
+
+        from src.kernel.llm import LLMContextError, LLMRequest
+        from src.kernel.llm.model_client import ModelClientRegistry
+
+        block = SimpleNamespace(type="output_text", text="answer")
+        item = SimpleNamespace(type="message", content=[block])
+        client, sdk = self._make_client(SimpleNamespace(output=[item], usage=None))
+        model = mock_model_config.copy()
+        model.update(client_type="responses", max_retry=0, base_url="https://offline.invalid/v1",
+                     extra_params={"input": "外部问题"})
+        system = LLMPayload(ROLE.SYSTEM, Text("简短作答"))
+        request = LLMRequest([model], clients=ModelClientRegistry(responses=client), enable_metrics=False)
+        request.add_payload(system)
+        response = await request.send(stream=False)
+        assert sdk.responses.create.await_args.kwargs["input"] == "外部问题"
+
+        if mode == "text":
+            assert [chunk async for chunk in response] == ["answer"]
+        elif mode == "events":
+            assert [event.text_delta async for event in response.stream_events()] == ["answer"]
+        else:
+            assert await response == "answer"
+        assert response.payloads == [system]
+        # 显式续发仍需合法的本地对话，不能绕开结构校验或再发一条 SDK 请求。
+        with pytest.raises(LLMContextError, match="对话不能以 assistant 开始"):
+            await response.send(stream=False)
+        sdk.responses.create.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_create_with_function_call_and_reasoning(self) -> None:

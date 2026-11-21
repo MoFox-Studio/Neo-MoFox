@@ -474,6 +474,11 @@ class LLMResponse:
         """按需把 assistant payload 追加回上下文。"""
         if not self._auto_append_response:
             return
+        # 用户输入可能由适配器单独提供；仅有系统提示或工具声明时，没有可接续的本地对话轮。
+        if self._stream is None and self.context_manager is not None and all(
+            payload.role in (ROLE.SYSTEM, ROLE.TOOL) for payload in self.payloads
+        ):
+            return
         self._append_current_response_payload()
 
     def _append_current_response_payload(self) -> None:
