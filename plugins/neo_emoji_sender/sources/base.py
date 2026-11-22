@@ -159,21 +159,34 @@ class EmojiSource(ABC):
         scan_limit = max(self.batch_size, int(self.config.sources.scan_batch_size))
         candidates = await self.collect_candidates(limit=scan_limit)
         handled = 0
-        for candidate in candidates:
-            if handled >= self.batch_size:
-                break
-            if await self._already_known(candidate):
-                continue
-            record = await self._ingest_candidate(candidate)
-            if record is None:
-                continue
-            handled += 1
-            try:
-                await self.after_register(candidate, record)
-            except Exception as e:
-                # 后处理（如移动源文件）失败不应让已注册的记录作废，
-                # 只记警告，下一轮扫描会按哈希认出它已存在而跳过
-                logger.warning(f"来源 {self.source_kind} 后处理失败: {e}")
+        # 下一个待处理候选的下标；循环结束（无论正常还是异常）后，从它开始的
+        # 候选都没进入过入库流程，必须退回来源——来源可能在取候选时就推动了
+        # 游标，丢掉它们会让这些候选永远轮不到
+        consumed = 0
+        try:
+            for index, candidate in enumerate(candidates):
+                if handled >= self.batch_size:
+                    break
+                consumed = index + 1
+                if await self._already_known(candidate):
+                    continue
+                record = await self._ingest_candidate(candidate)
+                if record is None:
+                    continue
+                handled += 1
+                try:
+                    await self.after_register(candidate, record)
+                except Exception as e:
+                    # 后处理（如移动源文件）失败不应让已注册的记录作废，
+                    # 只记警告，下一轮扫描会按哈希认出它已存在而跳过
+                    logger.warning(f"来源 {self.source_kind} 后处理失败: {e}")
+        finally:
+            remaining = candidates[consumed:]
+            if remaining:
+                try:
+                    await self.requeue(remaining)
+                except Exception as e:
+                    logger.warning(f"来源 {self.source_kind} 退回未消费候选失败: {e}")
 
     async def _already_known(self, candidate: EmojiCandidate) -> bool:
         """判断候选是否已注册或已抑制。
@@ -406,6 +419,19 @@ class EmojiSource(ABC):
         Args:
             candidate: 候选。
             record: 已注册记录。
+        """
+        return None
+
+    async def requeue(self, candidates: list[EmojiCandidate]) -> None:
+        """退回本轮未消费的候选。
+
+        基类按 ``batch_size`` 提前结束一轮时，``collect_candidates`` 可能已经
+        推进了自己的游标（例如按主键分页读取）。这些候选若不退回，就再也不会
+        被查询选中。默认实现什么也不做：自带完整游标语义的来源（如手动目录
+        按位置滚动）退回反而会造成重复与饥饿。
+
+        Args:
+            candidates: 本轮未交给入库流程的候选。
         """
         return None
 

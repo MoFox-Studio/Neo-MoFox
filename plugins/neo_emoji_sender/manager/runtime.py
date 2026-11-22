@@ -126,6 +126,10 @@ class EmojiRuntime:
         - 本库尚未写过迁移标记
 
         旧任务仍在时跳过而不写标记，下次加载（旧插件停用后）会重新尝试。
+
+        迁移失败（旧向量库读取失败、旧文件读取失败等）时同样不写标记：
+        底层读取失败返回的空响应和"真的一页都没有"无法区分，若此时写入
+        完成标记，漏掉的旧表情将永远不会再被补迁。
         """
         from .legacy_migration import (
             MIGRATION_MARKER,
@@ -156,12 +160,18 @@ class EmojiRuntime:
             )
             return
 
-        result = await migrate(
-            paths=paths,
-            target_root=self.data_dir,
-            repo=self.repo,
-            store=self.store,
-        )
+        try:
+            result = await migrate(
+                paths=paths,
+                target_root=self.data_dir,
+                repo=self.repo,
+                store=self.store,
+            )
+        except Exception as e:
+            # 不写标记：本次扫描不完整，下次加载（或手工脚本）会重试。
+            # migrate_entries 幂等，重复迁移不会产生重复记录
+            logger.error(f"旧数据迁移失败，已保留迁移标记等待下次重试: {e}")
+            return
         await self.state.set_migration(
             {
                 "marker": MIGRATION_MARKER,

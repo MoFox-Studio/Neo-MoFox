@@ -22,6 +22,7 @@ from src.kernel.logger import get_logger
 from src.kernel.scheduler import get_unified_scheduler
 from src.kernel.vector_db import get_vector_db_service
 
+from .utils.vector_response import extract_ids
 from .repository import EmojiRepository
 from .service import compute_revision
 from .store import ALLOWED_SUFFIXES, EmojiStore, guess_mime, sha256_bytes
@@ -47,6 +48,10 @@ class LegacyMetadata(TypedDict, total=False):
     description: str
     source_cache_path: str
     created_at: float
+
+
+class LegacyReadError(RuntimeError):
+    """旧向量库读取失败，无法确认是否已扫描完整。"""
 
 
 @dataclass
@@ -116,11 +121,19 @@ def legacy_schedule_active() -> bool:
 async def read_legacy_entries(paths: LegacyPaths) -> list[LegacyEntry]:
     """读取旧向量集合并按 meme_id 聚合。
 
+    只能在完整扫描成功时返回。底层向量库读取失败时返回的 ``{}`` 与"没有
+    更多记录"的空页响应无法从数据本身区分，因此这里用 ``extract_ids``
+    判定：``None`` 视为读取失败并抛 :class:`LegacyReadError`，交给调用方
+    保留迁移标记、下次重试，而不是把不完整的扫描结果当成迁移完成。
+
     Args:
         paths: 旧插件数据位置。
 
     Returns:
         聚合后的旧记录列表，按 meme_id 排序。
+
+    Raises:
+        LegacyReadError: 旧向量库任一页读取失败时抛出。
     """
     vdb = get_vector_db_service(paths.vector_db)
     await vdb.get_or_create_collection(paths.collection)
@@ -135,7 +148,11 @@ async def read_legacy_entries(paths: LegacyPaths) -> list[LegacyEntry]:
             offset=offset,
             include=["metadatas"],
         )
-        ids: list[str] = list(data.get("ids") or [])
+        ids = extract_ids(data)
+        if ids is None:
+            raise LegacyReadError(
+                f"读取旧向量集合 {paths.collection!r} 失败（offset={offset}），无法确认扫描完整性"
+            )
         if not ids:
             break
         metadatas = cast(list[LegacyMetadata], data.get("metadatas") or [])
@@ -312,6 +329,7 @@ __all__ = [
     "LegacyEntry",
     "LegacyMetadata",
     "LegacyPaths",
+    "LegacyReadError",
     "MigrationResult",
     "legacy_schedule_active",
     "migrate",

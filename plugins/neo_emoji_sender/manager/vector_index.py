@@ -16,6 +16,7 @@ from src.app.plugin_system.api.llm_api import (
 from src.kernel.logger import get_logger
 from src.kernel.vector_db import VectorDBBase, get_vector_db_service
 
+from .utils.vector_response import extract_ids
 from .state import IndexMeta, StateStore
 from .types import VectorHit
 
@@ -166,8 +167,11 @@ class EmojiVectorIndex:
         except Exception as e:
             logger.warning(f"确认向量写入失败: {emoji_id[:8]}... - {e}")
             return False
-        stored = {str(item) for item in (data.get("ids") or [])}
-        return set(ids).issubset(stored)
+        stored = extract_ids(data)
+        if stored is None:
+            logger.warning(f"确认向量写入失败: {emoji_id[:8]}... 向量库响应无效")
+            return False
+        return set(ids).issubset(set(stored))
 
     async def delete(self, emoji_id: str) -> bool:
         """删除某个表情包的全部向量。
@@ -197,7 +201,12 @@ class EmojiVectorIndex:
         except Exception as e:
             logger.warning(f"确认向量删除失败: {emoji_id[:8]}... - {e}")
             return False
-        return not bool(data.get("ids"))
+        # 回查失败时包装层返回 {}，不能当成"已无残留"确认成功
+        ids = extract_ids(data)
+        if ids is None:
+            logger.warning(f"确认向量删除失败: {emoji_id[:8]}... 向量库响应无效")
+            return False
+        return not ids
 
     async def search(
         self,
@@ -269,11 +278,17 @@ class EmojiVectorIndex:
         ordered = sorted(best.values(), key=lambda item: item.distance)
         return ordered[: max(0, int(limit))]
 
-    async def scan(self) -> dict[str, list[EmojiVectorMetadata]]:
+    async def scan(self) -> dict[str, list[EmojiVectorMetadata]] | None:
         """扫描全部向量 metadata，按 emoji_id 分组。
 
+        底层向量库读取失败时返回的 ``{}`` 与"没有更多记录"的空页无法区分，
+        因此任一页判定为失败就整体返回 None。调用方（对账器）据此中止本轮
+        向量修复：拿部分扫描结果做依据会把 N 条健康记录误判成缺向量，
+        恢复后触发 N 次 embedding 请求。
+
         Returns:
-            emoji_id 到该表情包全部向量 metadata 的映射。
+            emoji_id 到该表情包全部向量 metadata 的映射；
+            任一页读取失败时返回 None。
         """
         vdb = self._vdb()
         await vdb.get_or_create_collection(self.collection)
@@ -288,7 +303,10 @@ class EmojiVectorIndex:
                 offset=offset,
                 include=["metadatas"],
             )
-            ids: list[str] = list(data.get("ids") or [])
+            ids = extract_ids(data)
+            if ids is None:
+                logger.warning(f"扫描向量集合失败（offset={offset}），本轮不做向量修复")
+                return None
             if not ids:
                 break
             metadatas = cast(list[EmojiVectorMetadata], data.get("metadatas") or [])
@@ -302,6 +320,11 @@ class EmojiVectorIndex:
                 if emoji_id:
                     grouped.setdefault(emoji_id, []).append(dict(meta))
             offset += len(ids)
+        else:
+            logger.warning(
+                f"向量集合扫描超过 {_MAX_SCAN_PAGES} 页仍未结束，本轮不做向量修复"
+            )
+            return None
         return grouped
 
     async def count(self) -> int:

@@ -6,6 +6,7 @@ import time
 from collections.abc import Iterable
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src.app.plugin_system.api.storage_api import PluginDatabase
 
@@ -36,6 +37,42 @@ def _to_record(row: EmojiRecordModel, tags: Iterable[str]) -> EmojiRecord:
         created_at=float(row.created_at),
         updated_at=float(row.updated_at),
     )
+
+
+def _with_tags_stmt():
+    """构造"记录 + 标签"单语句查询。
+
+    主表与标签表用一条 outer join 一次读出：SQLite 的 SELECT 不会开启真正的
+    读事务，分成两条 SELECT 时中间若发生 update，就会拼出"旧描述 + 新标签"
+    这种从未存在过的混合记录。
+
+    Returns:
+        ``select(EmojiRecordModel, EmojiTagModel.tag)`` 语句（未加条件）。
+    """
+    return select(EmojiRecordModel, EmojiTagModel.tag).outerjoin(
+        EmojiTagModel, EmojiTagModel.emoji_id == EmojiRecordModel.emoji_id
+    )
+
+
+def _rows_to_records(rows: Iterable[tuple[EmojiRecordModel, str | None]]) -> list[EmojiRecord]:
+    """把 join 结果按记录聚合。
+
+    Args:
+        rows: ``(记录行, 标签或 None)`` 序列；无标签记录的标签列为 None。
+
+    Returns:
+        聚合后的记录列表，保持首次出现的顺序。
+    """
+    order: list[str] = []
+    rows_by_id: dict[str, EmojiRecordModel] = {}
+    tags_by_id: dict[str, list[str]] = {}
+    for row, tag in rows:
+        if row.emoji_id not in rows_by_id:
+            rows_by_id[row.emoji_id] = row
+            order.append(row.emoji_id)
+        if tag is not None:
+            tags_by_id.setdefault(row.emoji_id, []).append(str(tag))
+    return [_to_record(rows_by_id[emoji_id], tags_by_id.get(emoji_id, [])) for emoji_id in order]
 
 
 class EmojiRepository:
@@ -73,14 +110,13 @@ class EmojiRepository:
             记录；不存在时返回 None。
         """
         async with self._db.session() as session:
-            row = await session.get(EmojiRecordModel, emoji_id)
-            if row is None:
-                return None
-            result = await session.execute(
-                select(EmojiTagModel.tag).where(EmojiTagModel.emoji_id == emoji_id)
-            )
-            tags = [str(item) for item in result.scalars().all()]
-            return _to_record(row, tags)
+            rows = (
+                await session.execute(
+                    _with_tags_stmt().where(EmojiRecordModel.emoji_id == emoji_id)
+                )
+            ).all()
+        records = _rows_to_records(rows)
+        return records[0] if records else None
 
     async def get_many(self, emoji_ids: list[str]) -> dict[str, EmojiRecord]:
         """批量获取记录。
@@ -98,18 +134,10 @@ class EmojiRepository:
         async with self._db.session() as session:
             rows = (
                 await session.execute(
-                    select(EmojiRecordModel).where(EmojiRecordModel.emoji_id.in_(emoji_ids))
+                    _with_tags_stmt().where(EmojiRecordModel.emoji_id.in_(emoji_ids))
                 )
-            ).scalars().all()
-            tag_rows = (
-                await session.execute(
-                    select(EmojiTagModel).where(EmojiTagModel.emoji_id.in_(emoji_ids))
-                )
-            ).scalars().all()
-        tags_by_id: dict[str, list[str]] = {}
-        for tag_row in tag_rows:
-            tags_by_id.setdefault(tag_row.emoji_id, []).append(tag_row.tag)
-        return {row.emoji_id: _to_record(row, tags_by_id.get(row.emoji_id, [])) for row in rows}
+            ).all()
+        return {record.emoji_id: record for record in _rows_to_records(rows)}
 
     async def exists(self, emoji_id: str) -> bool:
         """判断记录是否存在。
@@ -137,25 +165,30 @@ class EmojiRepository:
             唯一匹配到的记录；无匹配或前缀有歧义时返回 None。
         """
         async with self._db.session() as session:
-            row = await session.get(EmojiRecordModel, prefix)
-            if row is None:
-                matched = (
-                    await session.execute(
-                        select(EmojiRecordModel)
-                        .where(EmojiRecordModel.emoji_id.like(f"{prefix}%"))
-                        .limit(2)
-                    )
-                ).scalars().all()
-                if len(matched) != 1:
-                    return None
-                row = matched[0]
-            if row is None:
+            rows = (
+                await session.execute(
+                    _with_tags_stmt().where(EmojiRecordModel.emoji_id == prefix)
+                )
+            ).all()
+            records = _rows_to_records(rows)
+            if records:
+                return records[0]
+            matched = (
+                await session.execute(
+                    select(EmojiRecordModel.emoji_id)
+                    .where(EmojiRecordModel.emoji_id.like(f"{prefix}%"))
+                    .limit(2)
+                )
+            ).scalars().all()
+            if len(matched) != 1:
                 return None
-            result = await session.execute(
-                select(EmojiTagModel.tag).where(EmojiTagModel.emoji_id == row.emoji_id)
-            )
-            tags = [str(item) for item in result.scalars().all()]
-            return _to_record(row, tags)
+            rows = (
+                await session.execute(
+                    _with_tags_stmt().where(EmojiRecordModel.emoji_id == matched[0])
+                )
+            ).all()
+        records = _rows_to_records(rows)
+        return records[0] if records else None
 
     async def list_records(
         self,
@@ -179,7 +212,7 @@ class EmojiRepository:
         page = max(1, int(page))
         page_size = max(1, int(page_size))
         async with self._db.session() as session:
-            stmt = select(EmojiRecordModel)
+            stmt = select(EmojiRecordModel.emoji_id)
             count_stmt = select(func.count()).select_from(EmojiRecordModel)
             if tag:
                 id_subquery = select(EmojiTagModel.emoji_id).where(EmojiTagModel.tag == tag)
@@ -189,23 +222,24 @@ class EmojiRepository:
                 stmt = stmt.where(EmojiRecordModel.source_kind == source_kind)
                 count_stmt = count_stmt.where(EmojiRecordModel.source_kind == source_kind)
             total = int((await session.execute(count_stmt)).scalar_one())
-            rows = (
+            page_ids = (
                 await session.execute(
                     stmt.order_by(EmojiRecordModel.created_at.desc())
                     .offset((page - 1) * page_size)
                     .limit(page_size)
                 )
             ).scalars().all()
-            ids = [row.emoji_id for row in rows]
-            tag_rows = (
+            # 本页记录与标签用一条 join 语句取回，避免与并发 update 拼出混合记录
+            rows = (
                 await session.execute(
-                    select(EmojiTagModel).where(EmojiTagModel.emoji_id.in_(ids))
+                    _with_tags_stmt().where(EmojiRecordModel.emoji_id.in_(page_ids))
                 )
-            ).scalars().all() if ids else []
-        tags_by_id: dict[str, list[str]] = {}
-        for tag_row in tag_rows:
-            tags_by_id.setdefault(tag_row.emoji_id, []).append(tag_row.tag)
-        return [_to_record(row, tags_by_id.get(row.emoji_id, [])) for row in rows], total
+            ).all() if page_ids else []
+        order = {emoji_id: index for index, emoji_id in enumerate(page_ids)}
+        records = sorted(
+            _rows_to_records(rows), key=lambda record: order.get(record.emoji_id, len(order))
+        )
+        return records, total
 
     async def list_all(self) -> list[EmojiRecord]:
         """列出全部记录。
@@ -216,12 +250,8 @@ class EmojiRepository:
             全部记录。
         """
         async with self._db.session() as session:
-            rows = (await session.execute(select(EmojiRecordModel))).scalars().all()
-            tag_rows = (await session.execute(select(EmojiTagModel))).scalars().all()
-        tags_by_id: dict[str, list[str]] = {}
-        for tag_row in tag_rows:
-            tags_by_id.setdefault(tag_row.emoji_id, []).append(tag_row.tag)
-        return [_to_record(row, tags_by_id.get(row.emoji_id, [])) for row in rows]
+            rows = (await session.execute(_with_tags_stmt())).all()
+        return _rows_to_records(rows)
 
     async def list_source_refs(self, source_kind: str) -> set[str]:
         """列出某来源已注册的 source_ref。
@@ -440,6 +470,10 @@ class EmojiRepository:
 
         同一内容哈希重复写入会覆盖旧记录，因此可幂等调用。
 
+        多个来源任务以及"来源拒收"与"删除"可以并发写同一内容哈希
+        （来源拒收不持 ``mutation_lock``），先查后插会在提交时撞主键。
+        因此使用 ``INSERT ... ON CONFLICT DO UPDATE`` 由 SQLite 原子完成。
+
         Args:
             content_hash: 内容哈希。
             reason: 抑制原因（如 ``user_deleted`` / ``vlm_rejected``）。
@@ -447,16 +481,28 @@ class EmojiRepository:
             source_ref: 来源稳定标识。
             note: 备注。
         """
+        now = time.time()
+        values = {
+            "content_hash": content_hash,
+            "reason": reason,
+            "source_kind": source_kind,
+            "source_ref": source_ref,
+            "note": note,
+            "created_at": now,
+        }
+        stmt = sqlite_insert(EmojiSuppressionModel).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[EmojiSuppressionModel.content_hash],
+            set_={
+                "reason": reason,
+                "source_kind": source_kind,
+                "source_ref": source_ref,
+                "note": note,
+                "created_at": now,
+            },
+        )
         async with self._db.session() as session:
-            row = await session.get(EmojiSuppressionModel, content_hash)
-            if row is None:
-                row = EmojiSuppressionModel(content_hash=content_hash)
-                session.add(row)
-            row.reason = reason
-            row.source_kind = source_kind
-            row.source_ref = source_ref
-            row.note = note
-            row.created_at = time.time()
+            await session.execute(stmt)
 
     async def remove_suppression(self, content_hash: str) -> bool:
         """移除抑制记录。

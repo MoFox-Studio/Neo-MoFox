@@ -76,6 +76,16 @@ class EmojiReconciler:
         # 3) 向量检查：以 DB 为锚，逐个校验 tags 集合与 revision 是否一致。
         # 缺口、多余 tag、描述改过但没重建，这三种漂移都由这一步统一修复
         vector_map = await runtime.vector.scan()
+        if vector_map is None:
+            # 扫描不完整时不能基于部分结果重建：会把健康记录误判成缺向量，
+            # 恢复后触发整库 embedding。孤儿向量清理同样依赖完整快照，一并跳过
+            logger.warning("对账：向量扫描失败，跳过本轮向量修复与孤儿向量清理")
+            logger.info(
+                "对账完成（跳过向量阶段）: "
+                f"records={len(db_by_id)} files={len(files)} "
+                f"db_missing={db_missing} orphan_files={orphan_files}"
+            )
+            return
         reindexed = 0
         for record in db_by_id.values():
             if await self._vector_ok(record, vector_map.get(record.emoji_id, [])):
