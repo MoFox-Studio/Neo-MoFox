@@ -22,10 +22,12 @@ import pytest
 from plugins.neo_emoji_sender import plugin as plugin_module
 from plugins.neo_emoji_sender.config import NeoEmojiSenderConfig
 from plugins.neo_emoji_sender.manager import state as state_module
+from plugins.neo_emoji_sender.manager.events import EmojiPublisher
 from plugins.neo_emoji_sender.manager.reconciler import EmojiReconciler
 from plugins.neo_emoji_sender.manager.runtime import EmojiRuntime
 from plugins.neo_emoji_sender.manager.service import EmojiService
 from plugins.neo_emoji_sender.manager.state import IndexMeta, StateStore
+from plugins.neo_emoji_sender.manager.store import sha256_bytes
 from plugins.neo_emoji_sender.manager.types import EmojiRecord
 from plugins.neo_emoji_sender.manager.vector_index import EmojiVectorIndex
 
@@ -43,6 +45,7 @@ def _record(
     *,
     rel_path: str | None = None,
     created_at: float = 1.0,
+    tags: tuple[str, ...] = ("开心",),
 ) -> EmojiRecord:
     """构造测试记录。"""
     return EmojiRecord(
@@ -52,7 +55,7 @@ def _record(
         size_bytes=1,
         description="desc",
         revision="rev",
-        tags=("开心",),
+        tags=tags,
         source_kind="media_cache",
         source_ref="1",
         created_at=created_at,
@@ -212,6 +215,59 @@ async def test_reconciler_deletes_real_orphan_file(tmp_path: Path) -> None:
         await runtime.repo.close()
 
     assert exists is False
+
+
+# ----------------------------------------------------------------------
+# #11 检索：过期向量命中必须按当前标签丢弃
+# ----------------------------------------------------------------------
+
+
+async def test_search_drops_hits_whose_tag_is_no_longer_current(tmp_path: Path) -> None:
+    """标签改过而旧向量残留时，按旧标签检索不得返回该表情。"""
+    runtime = _runtime_for(tmp_path)
+    await runtime.store.initialize()
+    await runtime.repo.initialize()
+    data = b"phase1-emoji"
+    emoji_id = sha256_bytes(data)
+    _saved_id, rel_path = await runtime.store.save(data, ".png")
+    await runtime.repo.insert(
+        _record(emoji_id, rel_path=rel_path, tags=("难过",))
+    )
+    service = EmojiService(SimpleNamespace(config=runtime.config))
+    results = [
+        {"emoji_id": emoji_id, "tag": "开心", "distance": 0.1},  # 改标签前的旧向量
+        {"emoji_id": emoji_id, "tag": "难过", "distance": 0.2},
+    ]
+
+    try:
+        with patch.object(EmojiPublisher, "search", AsyncMock(return_value=results)):
+            hits = await service.search(query="开心", tags=["开心"], limit=5)
+    finally:
+        await runtime.repo.close()
+
+    assert [hit.tag for hit in hits] == ["难过"]
+
+
+async def test_search_keeps_hit_without_tag_metadata(tmp_path: Path) -> None:
+    """命中项缺少 tag 时退回记录首个标签，不应因此丢弃。"""
+    runtime = _runtime_for(tmp_path)
+    await runtime.store.initialize()
+    await runtime.repo.initialize()
+    data = b"phase1-emoji-2"
+    emoji_id = sha256_bytes(data)
+    _saved_id, rel_path = await runtime.store.save(data, ".png")
+    await runtime.repo.insert(_record(emoji_id, rel_path=rel_path, tags=("开心",)))
+    service = EmojiService(SimpleNamespace(config=runtime.config))
+    results = [{"emoji_id": emoji_id, "tag": "", "distance": 0.3}]
+
+    try:
+        with patch.object(EmojiPublisher, "search", AsyncMock(return_value=results)):
+            hits = await service.search(query="开心", tags=None, limit=5)
+    finally:
+        await runtime.repo.close()
+
+    assert len(hits) == 1
+    assert hits[0].tag == "开心"
 
 
 # ----------------------------------------------------------------------

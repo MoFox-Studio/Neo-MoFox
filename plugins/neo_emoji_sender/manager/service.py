@@ -429,17 +429,25 @@ class EmojiService(BaseService):
             emoji_id = str(item.get("emoji_id") or "").strip()
             if not emoji_id or emoji_id in exclude:
                 continue
+            raw_tag = str(item.get("tag") or "").strip()
             record = await self.runtime.repo.get(emoji_id)
             if record is None:
                 continue
             if not await self.runtime.store.exists(record.rel_path):
+                continue
+            # 改标签后 embedding 可能失败，旧 tag 的向量会留在库里。命中标签
+            # 必须仍是记录当前标签之一，否则按"开心"检索会返回已改成"难过"的表情
+            if raw_tag and raw_tag not in record.tags:
+                logger.debug(
+                    f"丢弃过期向量命中: {emoji_id[:8]}... tag={raw_tag} 已不在当前标签中"
+                )
                 continue
             raw_distance = item.get("distance")
             distance = float(raw_distance) if isinstance(raw_distance, (int, float)) else 999.0
             hits.append(
                 EmojiHit(
                     record=record,
-                    tag=str(item.get("tag") or (record.tags[0] if record.tags else "")),
+                    tag=raw_tag or (record.tags[0] if record.tags else ""),
                     distance=distance,
                 )
             )
