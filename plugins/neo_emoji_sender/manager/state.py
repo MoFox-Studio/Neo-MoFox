@@ -4,12 +4,15 @@
 业务数据不放这里——表情包记录、标签、抑制项一律走 SQLite。
 
 文件缺失或损坏时一律视为“没有任何已记录状态”，由调用方按首次运行处理。
+写入采用“临时文件 + 原子替换”，避免截断重写过程中断电留下半截 JSON。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+import uuid
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -55,6 +58,9 @@ class StateStore:
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
+        # 读-改-写需要串行：同一个实例的两个 set_* 并发时会各自读到旧内容，
+        # 后写入的一方会把先写入的分组丢掉
+        self._lock = asyncio.Lock()
 
     @property
     def path(self) -> Path:
@@ -82,14 +88,27 @@ class StateStore:
     def _write(self, data: PluginState) -> None:
         """线程内整体写回状态文件。
 
+        先写同目录临时文件再 ``os.replace``：直接截断重写时若进程中断，
+        文件会变成半截 JSON，下次读取按"空状态"处理，索引指纹因此丢失。
+
         Args:
             data: 待落盘的完整状态。
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        tmp_path = self._path.with_name(f"{self._path.name}.{uuid.uuid4().hex}.tmp")
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self._path)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
 
     async def read(self) -> PluginState:
         """读取完整状态。
@@ -115,9 +134,10 @@ class StateStore:
         Args:
             meta: 待落盘的指纹。
         """
-        data = await asyncio.to_thread(self._read)
-        data["index"] = meta
-        await asyncio.to_thread(self._write, data)
+        async with self._lock:
+            data = await asyncio.to_thread(self._read)
+            data["index"] = meta
+            await asyncio.to_thread(self._write, data)
 
     async def get_migration(self) -> MigrationMeta | None:
         """读取迁移标记。
@@ -135,9 +155,10 @@ class StateStore:
         Args:
             meta: 待落盘的迁移标记。
         """
-        data = await asyncio.to_thread(self._read)
-        data["migration"] = meta
-        await asyncio.to_thread(self._write, data)
+        async with self._lock:
+            data = await asyncio.to_thread(self._read)
+            data["migration"] = meta
+            await asyncio.to_thread(self._write, data)
 
 
 __all__ = [

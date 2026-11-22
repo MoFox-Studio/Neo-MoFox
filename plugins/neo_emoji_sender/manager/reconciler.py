@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from src.kernel.logger import get_logger
@@ -58,9 +59,6 @@ class EmojiReconciler:
         known_paths = {record.rel_path for record in db_by_id.values()}
         orphan_files = 0
         for rel_path in sorted(files - known_paths):
-            # 正在被注册流程写入的路径不算孤儿，放宽限期也无法覆盖这类竞争
-            if rel_path in runtime.pending_paths:
-                continue
             try:
                 mtime = await runtime.store.mtime(rel_path)
             except Exception:
@@ -68,8 +66,18 @@ class EmojiReconciler:
             if grace > 0 and now - mtime < grace:
                 continue
             try:
-                await runtime.store.delete(rel_path)
-                orphan_files += 1
+                async with runtime.mutation_lock:
+                    # 快照之后可能刚注册成功：注册流程全程持有 mutation_lock，
+                    # 因此锁内复核才是有效的。只靠 pending 或 mtime 不够——
+                    # 复用崩溃遗留文件时 mtime 很旧，宽限期拦不住
+                    if rel_path in runtime.pending_paths:
+                        continue
+                    emoji_id = Path(rel_path).stem
+                    owner = await runtime.repo.get(emoji_id)
+                    if owner is not None and owner.rel_path == rel_path:
+                        continue
+                    await runtime.store.delete(rel_path)
+                    orphan_files += 1
             except Exception as e:
                 logger.warning(f"对账：删除孤儿文件失败 {rel_path}: {e}")
 

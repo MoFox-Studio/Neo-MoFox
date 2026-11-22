@@ -158,17 +158,22 @@ class NeoEmojiSenderPlugin(BasePlugin):
 
         runtime = EmojiRuntime.create(config)
         await runtime.initialize()
-        # 迁移必须在注册本插件调度之前：判断依据是旧任务是否还在调度器里，
-        # 而注册本插件任务不影响该判断，但尽早迁移可让首批扫描看到完整数据
-        await runtime.migrate_legacy_if_needed()
         sync_actor_reminder(self)
         self._apply_custom_instructions()
 
-        # scheduler 在加载阶段尚未 start，create_schedule 不会因 _stopping 抛错，
-        # 因此可以直接 await 注册，不需要轮询等待就绪
+        # 先注册调度再迁移：迁移 guard 判断的是"旧插件任务是否还在调度器里"，
+        # 本插件自己的任务名不同，不会影响该判断。反过来，迁移若抛错就会
+        # 跳过后面全部任务注册，插件却仍被标记 ACTIVE，入库与对账都不再运行
         runtime.reconciler = EmojiReconciler(runtime)
         runtime.sources = self._build_sources()
         await self._register_schedules()
+
+        # 迁移失败只记录、不阻断加载：migrate_legacy_if_needed 自己不会写完成
+        # 标记，下次加载会重试；已注册的任务保证插件的基本功能仍然可用
+        try:
+            await runtime.migrate_legacy_if_needed()
+        except Exception as e:
+            logger.error(f"旧数据迁移异常，本次跳过（下次加载重试）: {e}")
 
     async def on_plugin_unloaded(self) -> None:
         """插件卸载前清理调度与资源。"""

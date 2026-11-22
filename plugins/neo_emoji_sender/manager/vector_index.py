@@ -345,25 +345,53 @@ class EmojiVectorIndex:
     # ------------------------------------------------------------------
 
     async def _ensure_index_meta(self) -> None:
-        """校验 embedding 模型指纹；不一致时清空集合并重建。"""
+        """校验 embedding 模型指纹；不一致或缺失时清空集合并重建。
+
+        指纹缺失（首次运行或 ``state.json`` 损坏）时不能直接认领已有集合：
+        集合里可能是旧模型的向量，而对账只比对标签与 revision、不比对模型，
+        认领后这些向量会被永久当成当前模型的结果。
+
+        只有确认集合为空、或确认已成功清空后才落盘指纹；读取失败、清空失败
+        时保留原状态，下次启动重试。
+        """
         current = await self._state.get_index_meta()
         expected = self._current_meta()
         # 首次运行只需落盘指纹；此后模型一换就必须整体重建——
         # 不同 embedding 模型的向量不可比，混在一个集合里检索结果会失真
-        if current is None:
-            await self._state.set_index_meta(expected)
+        if current is not None and current.get("embedding_model") == expected.get("embedding_model"):
             return
-        if current.get("embedding_model") == expected.get("embedding_model"):
-            return
-        logger.warning(
-            "embedding 模型已变化，清空向量集合并重建: "
-            f"{current.get('embedding_model')!r} -> {expected.get('embedding_model')!r}"
-        )
-        # 重建只清集合不重建向量：清空后对账器会按 DB 逐条补齐，
-        # 这样加载阶段不必发起大量 embedding 请求、拖慢启动
+
         vdb = self._vdb()
-        await vdb.delete_collection(self.collection)
-        await vdb.get_or_create_collection(self.collection)
+        # 读取失败时 extract_ids 返回 None，不能当成"空集合"继续认领
+        existing = extract_ids(
+            await vdb.get(collection_name=self.collection, limit=1, include=["metadatas"])
+        )
+        if existing is None:
+            logger.warning("无法确认向量集合状态，暂不写入索引指纹，下次启动重试")
+            return
+        if current is None:
+            if not existing:
+                await self._state.set_index_meta(expected)
+                return
+            logger.warning("索引指纹缺失但集合非空，清空后重建，避免沿用旧模型向量")
+        else:
+            logger.warning(
+                "embedding 模型已变化，清空向量集合并重建: "
+                f"{current.get('embedding_model')!r} -> {expected.get('embedding_model')!r}"
+            )
+        if existing:
+            # 重建只清集合不重建向量：清空后对账器会按 DB 逐条补齐，
+            # 这样加载阶段不必发起大量 embedding 请求、拖慢启动
+            await vdb.delete_collection(self.collection)
+            await vdb.get_or_create_collection(self.collection)
+            # delete_collection 失败时只记日志、不抛错，必须回查确认真的清空了，
+            # 否则旧模型向量会带着新指纹继续被使用
+            remaining = extract_ids(
+                await vdb.get(collection_name=self.collection, limit=1, include=["metadatas"])
+            )
+            if remaining is None or remaining:
+                logger.warning("清空向量集合失败，保留旧索引指纹等待下次重试")
+                return
         await self._state.set_index_meta(expected)
 
     def _current_meta(self) -> IndexMeta:

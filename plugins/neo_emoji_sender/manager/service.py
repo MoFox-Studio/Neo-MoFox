@@ -208,7 +208,6 @@ class EmojiService(BaseService):
             runtime.pending_paths.add(rel_path)
             try:
                 emoji_id, rel_path = await runtime.store.save(data, suffix)
-                runtime.pending_paths.discard(rel_path)
                 record = EmojiRecord(
                     emoji_id=emoji_id,
                     rel_path=rel_path,
@@ -227,12 +226,16 @@ class EmojiService(BaseService):
                     return await runtime.repo.get(emoji_id)
             except Exception:
                 # DB 写入失败时回滚已落盘的文件，避免留下永远对不上账的孤儿
-                runtime.pending_paths.discard(runtime.store.rel_path_for(emoji_id, suffix))
                 try:
-                    await runtime.store.delete(runtime.store.rel_path_for(emoji_id, suffix))
+                    await runtime.store.delete(rel_path)
                 except Exception:
                     pass
                 raise
+            finally:
+                # pending 必须保留到 DB 提交结束：文件落盘后、记录插入前若提前
+                # 移除，对账会在这个窗口里看到"有文件、无记录、不在 pending"
+                # 并把它当孤儿删掉（复用崩溃遗留文件时 mtime 很旧，宽限期也拦不住）
+                runtime.pending_paths.discard(rel_path)
 
         # 默认: event_handlers/vectorizer.py::_handle_upsert
         await self._publish_registered(record, is_update=False)
