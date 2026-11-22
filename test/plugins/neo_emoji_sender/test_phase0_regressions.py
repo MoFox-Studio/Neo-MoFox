@@ -20,13 +20,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from plugins.neo_emoji_sender.config import NeoEmojiSenderConfig
-from plugins.neo_emoji_sender.manager import legacy_migration as lm
 from plugins.neo_emoji_sender.manager.reconciler import EmojiReconciler
 from plugins.neo_emoji_sender.manager.repository import EmojiRepository
 from plugins.neo_emoji_sender.manager.runtime import EmojiRuntime
 from plugins.neo_emoji_sender.manager.types import EmojiCandidate, EmojiRecord
-from plugins.neo_emoji_sender.manager.vector_index import EmojiVectorIndex
+from plugins.neo_emoji_sender.manager.utils import legacy_migration as lm
 from plugins.neo_emoji_sender.manager.utils.vector_response import extract_ids
+from plugins.neo_emoji_sender.manager.vector_index import EmojiVectorIndex
 from plugins.neo_emoji_sender.sources.media_cache import MediaCacheSource
 
 
@@ -65,10 +65,15 @@ def _runtime_for(tmp_path: Path, legacy_root: Path | None = None) -> EmojiRuntim
     """构造指向临时目录的运行时。"""
     config = NeoEmojiSenderConfig()
     config.storage.data_dir = str(tmp_path / "data")
+    runtime = EmojiRuntime.create(config)
     if legacy_root is not None:
-        config.migration.legacy_root = str(legacy_root)
-        config.migration.legacy_vector_db = str(legacy_root / "vector_db")
-    return EmojiRuntime.create(config)
+        # 旧数据路径现在来自旧插件配置；这里直接替换解析结果，专注验证迁移流程
+        runtime._legacy_paths = lambda: lm.LegacyPaths(  # type: ignore[method-assign]
+            memes_dir=legacy_root / "memes",
+            vector_db=str(legacy_root / "vector_db"),
+            collection="emoji_sender",
+        )
+    return runtime
 
 
 # ----------------------------------------------------------------------
@@ -121,7 +126,7 @@ def _page(meme_ids: list[str], tags: tuple[str, ...] = ("开心",)) -> dict[str,
 def _legacy_paths(tmp_path: Path) -> lm.LegacyPaths:
     """构造旧数据位置。"""
     return lm.LegacyPaths(
-        root=tmp_path / "legacy",
+        memes_dir=tmp_path / "legacy" / "memes",
         vector_db=str(tmp_path / "legacy" / "vector_db"),
         collection="emoji_sender",
     )

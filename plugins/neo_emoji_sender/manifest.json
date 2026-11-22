@@ -54,7 +54,8 @@
     "service_api": "1.0.0",
     "event_api": "1.1.0",
     "database_api": "1.0.0",
-    "storage_api": "1.0.0"
+    "storage_api": "1.0.0",
+    "config_api": "1.1.0"
   },
   "python_dependencies": ["pillow"],
   "dependencies_required": true

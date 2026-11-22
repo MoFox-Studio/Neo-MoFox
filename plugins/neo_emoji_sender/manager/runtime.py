@@ -21,6 +21,7 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.app.plugin_system.api.config_api import get_config, load_config
 from src.kernel.logger import get_logger
 
 from .repository import EmojiRepository
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from ..config import NeoEmojiSenderConfig
     from ..sources.base import EmojiSource
     from .reconciler import EmojiReconciler
+    from .utils.legacy_migration import LegacyPaths
 
 
 class EmojiRuntime:
@@ -117,6 +119,42 @@ class EmojiRuntime:
         await self.repo.initialize()
         await self.vector.initialize()
 
+    def _legacy_paths(self) -> "LegacyPaths | None":
+        """通过插件系统读取旧 ``emoji_sender`` 配置并推导旧数据位置。
+
+        旧插件停用后其实例可能已不存在，但配置通常仍留在 ConfigManager 缓存
+        中；缓存缺失时按插件名读取 ``config/plugins/emoji_sender/config.toml``，
+        并禁止自动生成 / 回写，避免为了迁移反而改动旧插件配置。
+
+        Returns:
+            旧数据位置；配置不可读或字段缺失时返回 None。
+        """
+        # 延迟导入：utils 模块反向依赖 service/compute_revision，模块级导入会成环
+        from .utils.legacy_migration import paths_from_legacy_config
+
+        config = get_config("emoji_sender")
+        if config is None:
+            try:
+                from plugins.emoji_sender.config import EmojiSenderConfig
+            except Exception as e:
+                logger.warning(f"旧插件配置模块不可用，跳过数据迁移: {e}")
+                return None
+            try:
+                config = load_config(
+                    "emoji_sender",
+                    EmojiSenderConfig,
+                    auto_generate=False,
+                    auto_update=False,
+                )
+            except Exception as e:
+                logger.warning(f"读取旧插件配置失败，跳过数据迁移: {e}")
+                return None
+        try:
+            return paths_from_legacy_config(config)
+        except ValueError as e:
+            logger.warning(f"旧插件配置不完整，跳过数据迁移: {e}")
+            return None
+
     async def migrate_legacy_if_needed(self) -> None:
         """在满足条件时把旧 emoji_sender 数据并入本插件。
 
@@ -131,9 +169,8 @@ class EmojiRuntime:
         底层读取失败返回的空响应和"真的一页都没有"无法区分，若此时写入
         完成标记，漏掉的旧表情将永远不会再被补迁。
         """
-        from .legacy_migration import (
+        from .utils.legacy_migration import (
             MIGRATION_MARKER,
-            LegacyPaths,
             legacy_schedule_active,
             migrate,
         )
@@ -148,12 +185,11 @@ class EmojiRuntime:
             logger.info("检测到 emoji_sender 定时任务仍在注册，跳过数据迁移")
             return
 
-        paths = LegacyPaths(
-            root=Path(cfg.migration.legacy_root),
-            vector_db=str(cfg.migration.legacy_vector_db),
-            collection=str(cfg.migration.legacy_collection),
-        )
-        if not paths.root.exists() and not Path(paths.vector_db).exists():
+        # 路径只从旧插件自己的配置推导，新插件不再重复维护一份副本
+        paths = self._legacy_paths()
+        if paths is None:
+            return
+        if not paths.memes_dir.exists() and not Path(paths.vector_db).exists():
             # 没有旧数据可迁，写标记避免每次加载都做无谓探测
             await self.state.set_migration(
                 {"marker": MIGRATION_MARKER, "migrated": 0, "skipped": 0}

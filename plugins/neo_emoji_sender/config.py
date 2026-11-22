@@ -88,17 +88,11 @@ class NeoEmojiSenderConfig(BaseConfig):
 
         enabled: bool = Field(
             default=True,
-            description="是否在插件加载时自动接管旧 emoji_sender 数据",
+            description=(
+                "是否在插件加载时自动接管旧 emoji_sender 数据；"
+                "旧数据路径直接读取旧插件自己的配置"
+            ),
         )
-        legacy_root: str = Field(
-            default="data/emoji_sender",
-            description="旧插件数据根目录（读取其下的 memes/）",
-        )
-        legacy_vector_db: str = Field(
-            default="data/emoji_sender/vector_db",
-            description="旧插件向量库路径",
-        )
-        legacy_collection: str = Field(default="emoji_sender", description="旧插件向量集合名")
 
     @config_section("picker")
     class PickerSection(SectionBase):

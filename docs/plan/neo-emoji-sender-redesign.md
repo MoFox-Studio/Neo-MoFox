@@ -139,7 +139,7 @@ plugins/neo_emoji_sender/
     └── __init__.py
 
 scripts/
-└── migrate_neo_emoji_sender.py   # CLI 外壳，复用 manager/legacy_migration.py
+└── migrate_neo_emoji_sender.py   # CLI 外壳，复用 manager/utils/legacy_migration.py
 ```
 
 ### 4.3 数据目录
@@ -976,7 +976,7 @@ VLM 逻辑从现有 `_vlm_decide_and_label` 迁移：
 
 ### 14.2 触发条件
 
-迁移实现在 `plugins/neo_emoji_sender/manager/legacy_migration.py`，插件加载时自动调用，
+迁移实现在 `plugins/neo_emoji_sender/manager/utils/legacy_migration.py`，插件加载时自动调用，
 同时满足以下两条才执行：
 
 1. 调度器中不存在旧插件任务 `emoji_sender_ingest_once` / `emoji_sender_ingest_recurring`

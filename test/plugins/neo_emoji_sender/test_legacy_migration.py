@@ -10,12 +10,14 @@ from unittest.mock import patch
 
 import pytest
 
+from plugins.emoji_sender.config import EmojiSenderConfig
 from plugins.neo_emoji_sender.config import NeoEmojiSenderConfig
-from plugins.neo_emoji_sender.manager import legacy_migration as lm
+from plugins.neo_emoji_sender.manager import runtime as runtime_module
 from plugins.neo_emoji_sender.manager.repository import EmojiRepository
 from plugins.neo_emoji_sender.manager.runtime import EmojiRuntime
 from plugins.neo_emoji_sender.manager.state import StateStore
 from plugins.neo_emoji_sender.manager.store import EmojiStore
+from plugins.neo_emoji_sender.manager.utils import legacy_migration as lm
 
 
 @pytest.fixture(autouse=True)
@@ -93,13 +95,86 @@ def _rows_for(
     return rows
 
 
+def _legacy_config(tmp_path: Path) -> EmojiSenderConfig:
+    """构造旧插件配置，指向临时目录中的自定义路径。"""
+    config = EmojiSenderConfig()
+    config.storage.data_dir = str(tmp_path / "legacy" / "custom_memes")
+    config.vector.db_path = str(tmp_path / "legacy" / "vector_db")
+    config.vector.collection_name = "emoji_sender"
+    return config
+
+
+def test_paths_from_legacy_config_uses_old_plugin_fields(tmp_path: Path) -> None:
+    """旧数据位置应完全来自旧插件的 storage / vector 配置。"""
+    paths = lm.paths_from_legacy_config(_legacy_config(tmp_path))
+
+    assert paths.memes_dir == tmp_path / "legacy" / "custom_memes"
+    assert paths.vector_db == str(tmp_path / "legacy" / "vector_db")
+    assert paths.collection == "emoji_sender"
+    assert paths.root == tmp_path / "legacy"
+
+
+def test_paths_from_legacy_config_rejects_empty_fields(tmp_path: Path) -> None:
+    """旧插件配置字段为空时不能拼出半截路径。"""
+    config = _legacy_config(tmp_path)
+    config.vector.collection_name = ""
+
+    with pytest.raises(ValueError):
+        lm.paths_from_legacy_config(config)
+
+
+def test_runtime_legacy_paths_reads_cached_plugin_config(tmp_path: Path) -> None:
+    """插件系统已缓存旧配置时直接复用，不重复读文件。"""
+    runtime = EmojiRuntime.create(_config_for(tmp_path / "target"))
+    legacy = _legacy_config(tmp_path)
+
+    with patch.object(runtime_module, "get_config", return_value=legacy) as getter:
+        paths = runtime._legacy_paths()
+
+    getter.assert_called_once_with("emoji_sender")
+    assert paths == lm.paths_from_legacy_config(legacy)
+
+
+def test_runtime_legacy_paths_loads_old_config_without_writing(
+    tmp_path: Path,
+) -> None:
+    """旧插件未加载时按文件名补读配置，且禁止生成 / 回写旧配置。"""
+    runtime = EmojiRuntime.create(_config_for(tmp_path / "target"))
+    legacy = _legacy_config(tmp_path)
+
+    with (
+        patch.object(runtime_module, "get_config", return_value=None),
+        patch.object(runtime_module, "load_config", return_value=legacy) as loader,
+    ):
+        paths = runtime._legacy_paths()
+
+    assert paths == lm.paths_from_legacy_config(legacy)
+    loader.assert_called_once()
+    assert loader.call_args.args[0] == "emoji_sender"
+    assert loader.call_args.kwargs["auto_generate"] is False
+    assert loader.call_args.kwargs["auto_update"] is False
+
+
+def test_runtime_legacy_paths_returns_none_when_config_unreadable(
+    tmp_path: Path,
+) -> None:
+    """旧插件配置不可读时跳过迁移，而不是用空路径误判为"没有旧数据"。"""
+    runtime = EmojiRuntime.create(_config_for(tmp_path / "target"))
+
+    with (
+        patch.object(runtime_module, "get_config", return_value=None),
+        patch.object(runtime_module, "load_config", side_effect=FileNotFoundError("no config")),
+    ):
+        assert runtime._legacy_paths() is None
+
+
 async def test_read_legacy_entries_groups_by_meme_id(tmp_path: Path) -> None:
     """同一表情包的多条向量应聚合成一条记录。"""
     payloads = [b"img-a", b"img-b"]
     files = _write_legacy_files(tmp_path / "legacy" / "memes", payloads)
     rows = _rows_for(list(files))
     paths = lm.LegacyPaths(
-        root=tmp_path / "legacy",
+        memes_dir=tmp_path / "legacy" / "memes",
         vector_db=str(tmp_path / "legacy" / "vector_db"),
         collection="emoji_sender",
     )
@@ -122,7 +197,7 @@ async def test_read_legacy_entries_falls_back_to_id_prefix(tmp_path: Path) -> No
         {"key": f"{meme_id}:开心", "meme_id": "", "tag": "开心", "description": "d"}
     ]
     paths = lm.LegacyPaths(
-        root=tmp_path / "legacy",
+        memes_dir=tmp_path / "legacy" / "memes",
         vector_db=str(tmp_path / "legacy" / "vector_db"),
         collection="emoji_sender",
     )
@@ -138,7 +213,7 @@ async def test_read_legacy_entries_without_memes_dir(tmp_path: Path) -> None:
     """旧目录不存在时条目的 file_path 为 None。"""
     rows = _rows_for(["a" * 64])
     paths = lm.LegacyPaths(
-        root=tmp_path / "legacy",
+        memes_dir=tmp_path / "legacy" / "memes",
         vector_db=str(tmp_path / "legacy" / "vector_db"),
         collection="emoji_sender",
     )
@@ -286,10 +361,14 @@ def _build_runtime(tmp_path: Path, legacy_root: Path) -> EmojiRuntime:
     """
     config = NeoEmojiSenderConfig()
     config.storage.data_dir = str(tmp_path / "target")
-    config.migration.legacy_root = str(legacy_root)
-    config.migration.legacy_vector_db = str(legacy_root / "vector_db")
-    config.migration.legacy_collection = "emoji_sender"
-    return EmojiRuntime.create(config)
+    runtime = EmojiRuntime.create(config)
+    # 旧数据路径现在来自旧插件配置；这里直接替换解析结果，专注验证迁移流程
+    runtime._legacy_paths = lambda: lm.LegacyPaths(  # type: ignore[method-assign]
+        memes_dir=legacy_root / "memes",
+        vector_db=str(legacy_root / "vector_db"),
+        collection="emoji_sender",
+    )
+    return runtime
 
 
 async def test_runtime_migration_skips_when_legacy_schedule_active(

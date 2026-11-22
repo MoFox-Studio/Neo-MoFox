@@ -8,8 +8,11 @@
 - 新插件自有 SQLite 中的 ``emoji_records`` / ``emoji_tags``
 
 迁移只读取旧数据，不会修改或删除旧目录。插件加载时会自动完成同一件事
-（见 ``neo_emoji_sender.manager.legacy_migration``），本脚本供运维手工排查
-或强制重建时使用，两者共用同一份实现。
+（见 ``neo_emoji_sender.manager.utils.legacy_migration``），本脚本供运维手工
+排查或强制重建时使用，两者共用同一份实现。
+
+旧数据路径直接读取旧插件的配置文件（默认
+``config/plugins/emoji_sender/config.toml``），不再由本脚本重复声明。
 
 用法::
 
@@ -37,20 +40,34 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from src.kernel.logger import get_logger  # noqa: E402
 
-from plugins.neo_emoji_sender.manager.legacy_migration import (  # noqa: E402
-    MIGRATION_MARKER,
-    LegacyPaths,
-    migrate_entries,
-    read_legacy_entries,
-    summarize,
-)
+from plugins.emoji_sender.config import EmojiSenderConfig  # noqa: E402
 from plugins.neo_emoji_sender.manager.repository import EmojiRepository  # noqa: E402
 from plugins.neo_emoji_sender.manager.state import StateStore  # noqa: E402
 from plugins.neo_emoji_sender.manager.store import EmojiStore  # noqa: E402
 from plugins.neo_emoji_sender.manager.types import EmojiRecord  # noqa: E402
+from plugins.neo_emoji_sender.manager.utils.legacy_migration import (  # noqa: E402
+    MIGRATION_MARKER,
+    migrate_entries,
+    paths_from_legacy_config,
+    read_legacy_entries,
+    summarize,
+)
 from plugins.neo_emoji_sender.manager.vector_index import EmojiVectorIndex  # noqa: E402
 
 logger = get_logger("neo_emoji_sender.migrate")
+
+
+def _resolve_config_path(value: str) -> Path:
+    """把配置路径解析为绝对路径。
+
+    Args:
+        value: 命令行传入的路径。
+
+    Returns:
+        绝对路径；相对路径按项目根目录解析。
+    """
+    path = Path(value)
+    return path if path.is_absolute() else _PROJECT_ROOT / path
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -66,19 +83,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="迁移 emoji_sender 数据到 neo_emoji_sender",
     )
     parser.add_argument(
-        "--legacy-root",
-        default="data/emoji_sender",
-        help="旧插件数据根目录（默认 data/emoji_sender）",
-    )
-    parser.add_argument(
-        "--legacy-db",
-        default="data/emoji_sender/vector_db",
-        help="旧向量库路径（默认 data/emoji_sender/vector_db）",
-    )
-    parser.add_argument(
-        "--legacy-collection",
-        default="emoji_sender",
-        help="旧向量集合名（默认 emoji_sender）",
+        "--config",
+        default="config/plugins/emoji_sender/config.toml",
+        help="旧插件配置文件（默认 config/plugins/emoji_sender/config.toml）",
     )
     parser.add_argument(
         "--target-root",
@@ -135,11 +142,17 @@ async def _run(args: argparse.Namespace) -> int:
         进程退出码。
     """
     target_root = Path(args.target_root)
-    paths = LegacyPaths(
-        root=Path(args.legacy_root),
-        vector_db=str(args.legacy_db),
-        collection=str(args.legacy_collection),
-    )
+    config_path = _resolve_config_path(str(args.config))
+    if not config_path.is_file():
+        logger.error(f"旧插件配置文件不存在: {config_path}")
+        return 2
+    try:
+        # 直接读文件而不是走插件系统：脚本在插件框架之外运行
+        legacy_config = EmojiSenderConfig.load(config_path, auto_update=False)
+        paths = paths_from_legacy_config(legacy_config)
+    except Exception as e:
+        logger.error(f"读取旧插件配置失败: {e}")
+        return 2
     entries = await read_legacy_entries(paths)
     usable, missing = summarize(entries)
     logger.info(

@@ -8,6 +8,10 @@
 
 迁移只读取旧数据，不会修改或删除旧目录。本模块是迁移的唯一实现，
 ``scripts/migrate_neo_emoji_sender.py`` 只是套在其上的命令行外壳。
+
+旧数据的位置不再由新插件重复配置：插件加载时通过插件系统读取旧
+``emoji_sender`` 的配置，命令行脚本则直接读取它的配置文件，两者都传给
+:func:`paths_from_legacy_config` 做同一份映射。
 """
 
 from __future__ import annotations
@@ -22,11 +26,11 @@ from src.kernel.logger import get_logger
 from src.kernel.scheduler import get_unified_scheduler
 from src.kernel.vector_db import get_vector_db_service
 
-from .utils.vector_response import extract_ids
-from .repository import EmojiRepository
-from .service import compute_revision
-from .store import ALLOWED_SUFFIXES, EmojiStore, guess_mime, sha256_bytes
-from .types import EmojiRecord
+from ..repository import EmojiRepository
+from ..service import compute_revision
+from ..store import ALLOWED_SUFFIXES, EmojiStore, guess_mime, sha256_bytes
+from ..types import EmojiRecord
+from .vector_response import extract_ids
 
 logger = get_logger("neo_emoji_sender.migrate")
 
@@ -68,20 +72,56 @@ class LegacyEntry:
 
 @dataclass
 class LegacyPaths:
-    """旧插件数据的目录与向量库位置。"""
+    """旧插件数据的目录与向量库位置。
 
-    root: Path
+    ``memes_dir`` 直接对应旧插件配置的 ``storage.data_dir``，不再假设其
+    目录名一定叫 ``memes``；向量库与集合名分别来自 ``vector.db_path`` /
+    ``vector.collection_name``。
+    """
+
+    memes_dir: Path
     vector_db: str
     collection: str
 
     @property
-    def memes_dir(self) -> Path:
-        """旧插件图片目录。
+    def root(self) -> Path:
+        """旧插件数据根目录。
 
         Returns:
-            ``<root>/memes`` 路径。
+            图片目录的父目录，仅用于日志展示。
         """
-        return self.root / "memes"
+        return self.memes_dir.parent
+
+
+def paths_from_legacy_config(config: object) -> LegacyPaths:
+    """从旧 ``emoji_sender`` 配置对象推导旧数据位置。
+
+    插件加载时传入插件系统缓存的配置实例，命令行脚本传入直接读取的配置
+    文件实例；两者结构一致，因此共用这一份映射。
+
+    Args:
+        config: 旧插件的配置实例（``EmojiSenderConfig``）。
+
+    Returns:
+        旧数据位置。
+
+    Raises:
+        ValueError: 配置缺少必要字段或字段值为空时抛出。
+    """
+    storage = getattr(config, "storage", None)
+    vector = getattr(config, "vector", None)
+    memes_dir = str(getattr(storage, "data_dir", "") or "").strip()
+    vector_db = str(getattr(vector, "db_path", "") or "").strip()
+    collection = str(getattr(vector, "collection_name", "") or "").strip()
+    if not memes_dir or not vector_db or not collection:
+        raise ValueError(
+            "旧插件配置缺少 storage.data_dir / vector.db_path / vector.collection_name"
+        )
+    return LegacyPaths(
+        memes_dir=Path(memes_dir),
+        vector_db=vector_db,
+        collection=collection,
+    )
 
 
 @dataclass
@@ -334,6 +374,7 @@ __all__ = [
     "legacy_schedule_active",
     "migrate",
     "migrate_entries",
+    "paths_from_legacy_config",
     "read_legacy_entries",
     "summarize",
 ]

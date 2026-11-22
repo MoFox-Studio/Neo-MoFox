@@ -95,5 +95,7 @@ python scripts/migrate_neo_emoji_sender.py --vector
 ```
 
 迁移只读取旧数据，不修改旧目录；脚本可重复执行，已存在的记录会被跳过。
-相关路径可在 `[migration]` 配置节中调整（`legacy_root` / `legacy_vector_db` /
-`legacy_collection` / `enabled`）。
+旧数据路径直接读取旧插件自己的配置
+`config/plugins/emoji_sender/config.toml`（`storage.data_dir` / `vector.db_path` /
+`vector.collection_name`）；本插件 `[migration]` 只需要 `enabled`。配置文件不在
+默认位置时可用 `--config` 指定。
