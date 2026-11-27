@@ -63,7 +63,7 @@ async def _on_message_received(
                 # 分发出错时放行，避免消息丢失
 
     # 将消息分发逻辑放入后台任务，避免 EventBus 的 wait_for 超时取消关键操作
-    import asyncio
+    from src.kernel.concurrency import get_task_manager
     
     async def _do_dispatch() -> None:
         try:
@@ -119,7 +119,7 @@ async def _on_message_received(
         except Exception as e:
             logger.error(f"消息分发失败: {e}", exc_info=True)
     
-    asyncio.create_task(_do_dispatch())
+    get_task_manager().create_task(_do_dispatch(), name="message_dispatch", daemon=True)
     return EventDecision.SUCCESS, params
 
 

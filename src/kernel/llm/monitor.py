@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import TracebackType
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -163,22 +164,36 @@ class RequestTimer:
     """请求计时器（上下文管理器）。"""
 
     def __init__(self) -> None:
+        """创建未启动的计时器，保留公开起止时间的历史默认值。"""
         self.start_time: float = 0.0
         self.end_time: float = 0.0
+        self._started = False
+        self._finished = False
 
     def __enter__(self) -> RequestTimer:
+        """开始新的单调计时间隔，并清除上一次结束时间。"""
         self.start_time = time.perf_counter()
+        self.end_time = 0.0
+        self._started = True
+        self._finished = False
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self, exc_type: type[BaseException] | None,
+        exc_val: BaseException | None, exc_tb: TracebackType | None,
+    ) -> None:
+        """固定耗时，异常参数 exc_type、exc_val、exc_tb 保持向外传播。"""
         self.end_time = time.perf_counter()
+        self._finished = True
 
     @property
     def elapsed(self) -> float:
         """已用时间（秒）。"""
-        if self.end_time > 0:
-            return self.end_time - self.start_time
-        return time.perf_counter() - self.start_time
+        if not self._started:
+            return 0.0
+        if self._finished:
+            return max(0.0, self.end_time - self.start_time)
+        return max(0.0, time.perf_counter() - self.start_time)
 
 
 # 全局单例

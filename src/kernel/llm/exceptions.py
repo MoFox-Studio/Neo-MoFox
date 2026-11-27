@@ -1,3 +1,4 @@
+"""标准化模型调用异常并提供兼容的重试与安全日志决策。"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,6 +30,16 @@ class LLMContextError(LLMError):
 
 class LLMConfigurationError(LLMError):
     """配置错误。"""
+
+
+class LLMProviderUnavailableError(LLMConfigurationError):
+    """provider 不可用错误。
+
+    与普通的 :class:`LLMConfigurationError` 区分开来：这类错误只说明「当前
+    provider 无法提供服务」（未注册、协议不匹配等），换一个模型 / provider 之后
+    仍然有希望成功。因此它被判定为可重试，从而让上层 policy 走 failover，
+    而不是直接中断整条重试链。
+    """
 
 
 class LLMResponseConsumedError(LLMError):
@@ -107,6 +118,9 @@ def decide_retry(error: BaseException) -> RetryDecision:
         return RetryDecision(False, "token_limit")
     if isinstance(error, LLMContentFilterError):
         return RetryDecision(False, "content_filter")
+    if isinstance(error, LLMProviderUnavailableError):
+        # provider 不可用：换模型 / provider 之后仍可能成功，允许 failover。
+        return RetryDecision(True, "provider_unavailable")
     if isinstance(error, LLMConfigurationError):
         return RetryDecision(False, "configuration_error")
     if isinstance(error, LLMRateLimitError):
@@ -187,13 +201,82 @@ def _extract_retry_after(error: BaseException) -> float | None:
     return _valid_retry_after(getattr(error, "retry_after", None))
 
 
+def parse_retry_after(headers: Any) -> float | None:
+    """从 HTTP 响应头解析服务端建议的重试等待时间。
+
+    与 :func:`_extract_retry_after` 使用同一套解析规则（``retry-after-ms``、
+    ``Retry-After`` 数值秒、``Retry-After`` HTTP-date），供直接发 HTTP 请求的
+    provider 客户端复用——这类客户端拿不到 SDK 异常对象，只能自己解析响应头。
+
+    Args:
+        headers: 响应头映射对象，例如 ``httpx.Response.headers``；可为 ``None``。
+
+    Returns:
+        解析后的非负等待秒数；没有合法值时返回 ``None``。
+    """
+    if headers is None:
+        return None
+
+    retry_after_ms = _valid_retry_after(_get_header(headers, "retry-after-ms"))
+    if retry_after_ms is not None:
+        return retry_after_ms / 1000.0
+
+    retry_after_value = _get_header(headers, "retry-after")
+    retry_after = _valid_retry_after(retry_after_value)
+    if retry_after is not None:
+        return retry_after
+    if isinstance(retry_after_value, str):
+        try:
+            retry_at = parsedate_to_datetime(retry_after_value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            if math.isfinite(delay):
+                return max(0.0, delay)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return None
+
+
 def classify_exception(error: BaseException, model: str | None = None) -> BaseException:
     """将第三方 SDK 异常转换为标准化的 LLM 异常。
 
     这个函数尝试识别常见的 API 错误类型并转换为更具体的异常类型。
     如果无法识别，返回原始异常。
     """
+    # 标准异常的语义已经确定，不能再根据诊断消息中的模型名猜类型。
+    if isinstance(error, LLMError):
+        return error
     error_msg = str(error).lower()
+
+    # SDK 类型归一化同时负责安全日志标记，不依赖异常子类定义位置。
+    try:
+        from google.genai.errors import APIError as GeminiAPIError
+        if isinstance(error, GeminiAPIError):
+            code = error.code
+            message = f"Gemini API failed (HTTP {code})"
+            normalized: LLMError
+            if code in {401, 403}:
+                normalized = LLMAuthenticationError(message, model=model)
+            elif code == 429:
+                headers = getattr(getattr(error, "response", None), "headers", None)
+                normalized = LLMRateLimitError(message, retry_after=parse_retry_after(headers), model=model)
+            elif code == 404:
+                normalized = LLMProviderUnavailableError("Gemini model or endpoint is unavailable")
+            else:
+                normalized = LLMAPIError(message, status_code=code, error_code=getattr(error, "status", None), model=model)
+            setattr(normalized, "_suppress_provider_trace", True)
+            return normalized
+    except ImportError:
+        pass
+    try:
+        import httpx
+        if isinstance(error, httpx.TimeoutException):
+            return LLMTimeoutError("Provider HTTP timeout", model=model)
+        if isinstance(error, httpx.TransportError):
+            return ConnectionError("Provider transport failure: " + type(error).__name__)
+    except ImportError:
+        pass
 
     # OpenAI SDK 异常处理
     try:

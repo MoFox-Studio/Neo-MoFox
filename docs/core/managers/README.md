@@ -25,6 +25,8 @@
 - [stream_manager](./stream_manager.md): ChatStream 单例管理、消息持久化与 TTL 清理。
 - [tool_manager](./tool_manager.md): ToolUse、MCPManager、ToolManager 与工具历史缓存。
 
+- [llm_runtime 边界](../../llm/model_client/runtime.md): 复用领域模型合并入口准备非生成探测输入；不构造 SDK 或管理池。该轻量函数模块按需导入，不新增全局 manager 单例。
+
 ## 导出入口
 
 src/core/managers/__init__.py 统一导出：

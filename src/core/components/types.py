@@ -71,6 +71,7 @@ class EventType(str, Enum):
     BEFORE_LLM_REQUEST = "before_llm_request"
     AFTER_LLM_REQUEST = "after_llm_request"
     ON_LLM_REQUEST_FAILED = "on_llm_request_failed"
+    ON_LLM_STREAM_FINISHED = "on_llm_stream_finished"
 
     # 工具调用生命周期事件
     BEFORE_TOOL_CALL = "before_tool_call"

@@ -41,20 +41,18 @@ class AppConfig(ConfigBase):
 
 执行步骤：
 
-1. 将 `path` 转为 `Path`
-2. 若文件不存在：自动创建父目录与空文件
-3. 使用 `tomllib.load()` 读取 TOML
-4. `auto_update=False`：直接 `from_dict(raw)`
-5. `auto_update=True`：
-6. 调用 `_merge_with_model_defaults()` 生成合并结果
-7. 调用 `_render_toml_with_signature()` 生成标准化 TOML
-8. 仅当内容变更时写回
-9. 返回 `from_dict(merged)`
+1. 将 `path` 转为 `Path`。
+2. 文件已存在时，读取原始文本并使用 `tomllib.load()` 解析；文件缺失时，以空数据开始，此时不创建目录或文件。
+3. `auto_update=False`：先调用 `from_dict(raw)` 完成模型校验；成功后才为缺失路径创建父目录与空文件，并返回模型。
+4. `auto_update=True`：先调用 `_merge_with_model_defaults()` 合并数据，再调用 `_render_toml_with_signature()` 生成待写文本，然后调用 `from_dict(merged)` 完成完整模型校验。
+5. 只有完整模型校验成功，且文件缺失或规范化后的文本不同，才创建父目录并写回；返回已校验的模型。
 
 关键点：
 
-- 文件缺失不会抛 `FileNotFoundError`，会自动创建
-- 回写前会做换行规范化比较，避免无效写盘
+- 文件缺失本身不会抛 `FileNotFoundError`，但默认数据仍须通过模型校验后才能创建文件。
+- 完整模型校验失败时，加载流程不会创建缺失的目录或文件，也不会改写已有文件。
+- 回写前会做换行规范化比较，避免无效写盘。
+- 回写使用合并后渲染的文本，不把模型校验产生的运行时归一化结果反写为用户配置。
 
 ```python
 config = MyConfig.load("config/app.toml", auto_update=True)

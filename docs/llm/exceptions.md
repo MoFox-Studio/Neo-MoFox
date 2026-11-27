@@ -45,8 +45,12 @@ class LLMContextError(LLMError):
 
 当对话结构不合法时抛出。例如：
 - 对话以 `assistant` 开头（而不是 `user`）
-- `assistant` 前不是 `user` 或 `tool_result`
+- `assistant` 前不是 `user`、`tool_result` 或已完成的 `assistant`
 - 缺少必需的 `tool_result` 配对
+
+已完成的 `assistant` 可以直接续接另一个 `assistant`，无需插入虚构的 `user`。
+这不会放宽工具配对约束：带有工具调用的 `assistant` 仍须先取得所有对应的
+`tool_result`，不能用后续 `assistant` 跳过缺失、重复或不匹配的工具结果。
 
 **使用示例：**
 ```python

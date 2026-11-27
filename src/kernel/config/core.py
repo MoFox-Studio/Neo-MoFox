@@ -97,6 +97,7 @@ def Field(  # noqa: N802
     # === Pydantic 其他参数 ===
     title: str | None = None,
     examples: list[Any] | None = None,
+    strict_choices: bool = False,
     **extra: Any,
 ) -> Any:
     """增强的配置字段定义函数。
@@ -158,6 +159,11 @@ def Field(  # noqa: N802
         depends_on: 依赖的字段名（如 "use_proxy"）
         depends_value: 依赖字段的期望值（如 True）
 
+        # 严格取值校验
+        strict_choices: True 表示该字段是枚举字段，用户填了非法值时直接报错，
+            而不是静默回退到默认值。用于 ``client_type`` 这类「写错就等于换了一个
+            provider」的字段：静默回退会把请求发到完全错误的 provider。
+
     Returns:
         Pydantic FieldInfo 对象
 
@@ -218,6 +224,8 @@ def Field(  # noqa: N802
         "rows": rows,
         "step": step,
         "choices": choices,
+        # 严格取值校验：枚举字段非法时不静默回退默认值
+        "strict_choices": strict_choices,
         # 列表配置
         "item_type": item_type,
         "item_fields": item_fields,
@@ -395,19 +403,22 @@ class ConfigBase(BaseModel):
         """
 
         path = Path(path)
-        # 确保文件存在，若父目录不存在则递归创建
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.touch()
-        original_text = path.read_text(
-            encoding="utf-8"
-        )  # 保存原始文本，用于后续变更检测
-        with path.open("rb") as f:
-            raw = tomllib.load(f)
+        if path.exists():
+            # 保存原始文本，用于后续变更检测。
+            original_text = path.read_text(encoding="utf-8")
+            with path.open("rb") as f:
+                raw = tomllib.load(f)
+        else:
+            original_text = ""
+            raw = {}
 
         if not auto_update:
-            # 不需要签名同步，直接解析原始数据
-            return cls.from_dict(raw)
+            # 不需要签名同步，直接解析原始数据；校验通过后才创建缺失文件。
+            config = cls.from_dict(raw)
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+            return config
 
         # 合并用户值与模型默认值
         merged = _merge_with_model_defaults(cls, raw)
@@ -415,11 +426,15 @@ class ConfigBase(BaseModel):
             cls, merged
         )  # 按最新模型签名重新渲染 TOML 文本
 
-        # 仅当文本内容（规范化换行后）发生变化时才写回文件，避免不必要的磁盘操作和时间戳更新
-        if _normalize_newlines(original_text) != _normalize_newlines(new_text):
+        # 完整模型校验必须先于写回；渲染已保留用户原值，不写回运行时归一化结果。
+        config = cls.from_dict(merged)
+
+        # 仅当文件缺失或文本内容变化时才写回，避免不必要的磁盘操作和时间戳更新。
+        if not path.exists() or _normalize_newlines(original_text) != _normalize_newlines(new_text):
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(new_text, encoding="utf-8")
 
-        return cls.from_dict(merged)
+        return config
 
     @classmethod
     def default(cls) -> ConfigData:
@@ -453,14 +468,18 @@ def _type_repr(annotation: Any) -> str:
         return "unknown"
 
 
-def _toml_escape_string(value: str) -> str:
-    """对字符串进行 TOML 基本字符串最小转义并包裹双引号。
+_TOML_STRING_ESCAPES = str.maketrans({
+    **{chr(code): f"\\u{code:04X}" for code in (*range(0x20), 0x7F)},
+    "\b": r"\b", "\t": r"\t", "\n": r"\n", "\f": r"\f", "\r": r"\r",
+    "\\": r"\\", '"': r'\"',
+})
+# 多行字符串允许裸 LF 和单个双引号，连续三个双引号在写出时另行转义。
+_TOML_MULTILINE_ESCAPES = _TOML_STRING_ESCAPES | {ord("\n"): "\n", ord('"'): '"'}
 
-    仅转义反斜杠（``\\``）和双引号（``"``），其余字符保持原样。
-    """
-    # TOML 基本字符串，最小转义
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+
+def _toml_escape_string(value: str) -> str:
+    """转义控制字符、反斜杠与双引号，并包裹为 TOML 基本字符串。"""
+    return f'"{value.translate(_TOML_STRING_ESCAPES)}"'
 
 
 def _toml_format_key(key: str) -> str:
@@ -493,7 +512,7 @@ def _toml_format_value(value: Any) -> str:
     if isinstance(value, str):
         if "\n" in value:
             # 多行字符串使用三引号
-            escaped = value.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+            escaped = value.translate(_TOML_MULTILINE_ESCAPES).replace('"""', '\\"\\"\\"')
             return f'"""\n{escaped}"""'
         return _toml_escape_string(value)
     if isinstance(value, list):
@@ -532,6 +551,14 @@ def _eval_default_factory(factory: Any) -> Any:
         return factory()  # 大多数 Pydantic v2 default_factory 不需要参数
     except TypeError:
         return factory({})  # 部分旧形态的 factory 需要一个空字典作为 validated_data
+
+
+def _is_strict_choices_field(field: Any) -> bool:
+    """判断字段是否声明了 ``strict_choices=True``。"""
+    extra = getattr(field, "json_schema_extra", None)
+    if not isinstance(extra, dict):
+        return False
+    return bool(extra.get("strict_choices"))
 
 
 def _iter_sections(config_model: type[ConfigBase]) -> list[_SectionInfo]:
@@ -650,7 +677,8 @@ def _merge_section_fields(
 
     对每个字段：
     - 若字段为嵌套 ``SectionBase``（单个或列表），递归合并。
-    - 若 ``raw_section`` 中存在该字段且能通过类型校验，则保留用户值。
+    - 严格枚举字段保留原值，交由完整模型校验，不因裸类型校验失败回退。
+    - 若 ``raw_section`` 中存在其它字段且能通过类型校验，则保留用户值。
     - 否则使用字段的 ``default`` / ``default_factory``，最后回退到类型占位值。
 
     默认返回严格按模型字段顺序组装的字典，不含模型未定义的键。
@@ -724,6 +752,10 @@ def _merge_section_fields(
 
         if key in raw_section:
             candidate = raw_section[key]
+            if _is_strict_choices_field(field):
+                # 裸 TypeAdapter 不执行模型 validator；保留原值，由 load 在写回前校验。
+                section_out[key] = candidate
+                continue
             try:
                 # 用 TypeAdapter 做严格类型校验，校验通过则直接使用用户值
                 section_out[key] = TypeAdapter(annotation).validate_python(candidate)

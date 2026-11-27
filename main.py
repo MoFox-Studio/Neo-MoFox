@@ -24,9 +24,9 @@ async def main() -> None:
     await bot.start()
 
 
-if __name__ == "__main__":  
+if __name__ == "__main__":
     try:
-        # 运行异步主函数
+        # 资源关闭由 Bot 的完整生命周期统一负责。
         asyncio.run(main())
     except KeyboardInterrupt:
         # 用户中断（Ctrl+C）。强制退出路径可能已同步恢复终端，

@@ -927,6 +927,45 @@ wheels = [
 ]
 
 [[package]]
+name = "google-auth"
+version = "2.62.0"
+source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "pyasn1-modules" },
+]
+sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/f5/b9/4b2528f30114b106e3c3a7298ba38d85e682fd1f83fe7c4a5b77c7677082/google_auth-2.62.0.tar.gz", hash = "sha256:0bef0ce54bdf9ce226c5d66e4264413bd918141c31bbe49fb52eac882f513d69" }
+wheels = [
+    { url = "https://repo.huaweicloud.com/repository/pypi/packages/eb/a3/87fe9b7203ec2e56ea6a57c75e6d632eaf9487c7f7978cdad1d801bee0af/google_auth-2.62.0-py3-none-any.whl", hash = "sha256:4ff4319aeb4ad128409759d397a9fcafad126d0031d241cc0dd6b9a00b43e3f3" },
+]
+
+[package.optional-dependencies]
+requests = [
+    { name = "requests" },
+]
+
+[[package]]
+name = "google-genai"
+version = "2.33.0"
+source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "google-auth", extra = ["requests"] },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "requests" },
+    { name = "sniffio" },
+    { name = "tenacity" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/83/a4/b83b378b4a2fbbfb300c3fde0ff9f443f049c33e2accedf06bc0ad9bf393/google_genai-2.33.0.tar.gz", hash = "sha256:fced7f746da45264b34bcf6044a6fcdb91ebad1825e95c324ee48addb6e557ae" }
+wheels = [
+    { url = "https://repo.huaweicloud.com/repository/pypi/packages/ba/3b/9ae8e16c5b2177bfdec1c64769a93eea9093de684e0bbb95c10c77645fef/google_genai-2.33.0-py3-none-any.whl", hash = "sha256:f3f8ab696b35caf95c222e05268740c1ccd6934257890506be73b126150d3b14" },
+]
+
+[[package]]
 name = "googleapis-common-protos"
 version = "1.74.0"
 source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
@@ -1654,6 +1693,8 @@ dependencies = [
     { name = "asyncpg" },
     { name = "chromadb" },
     { name = "fastapi" },
+    { name = "google-genai" },
+    { name = "httpx" },
     { name = "json-repair" },
     { name = "mcp" },
     { name = "mofox-wire" },
@@ -1688,6 +1729,8 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "chromadb", specifier = ">=1.4.1" },
     { name = "fastapi", specifier = ">=0.128.0" },
+    { name = "google-genai", specifier = "==2.33.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "json-repair", specifier = ">=0.57.1" },
     { name = "mcp", specifier = ">=1.26.0" },
     { name = "mofox-wire", specifier = ">=0.1.7" },
@@ -2243,6 +2286,27 @@ wheels = [
     { url = "https://repo.huaweicloud.com/repository/pypi/packages/9b/ca/25afc144934014700c52e05103c2421997482d561f3101ff352e1292fb81/protobuf-6.33.6-cp39-abi3-manylinux2014_s390x.whl", hash = "sha256:c96c37eec15086b79762ed265d59ab204dabc53056e3443e702d2681f4b39ce3" },
     { url = "https://repo.huaweicloud.com/repository/pypi/packages/16/92/d1e32e3e0d894fe00b15ce28ad4944ab692713f2e7f0a99787405e43533a/protobuf-6.33.6-cp39-abi3-manylinux2014_x86_64.whl", hash = "sha256:e9db7e292e0ab79dd108d7f1a94fe31601ce1ee3f7b79e0692043423020b0593" },
     { url = "https://repo.huaweicloud.com/repository/pypi/packages/c4/72/02445137af02769918a93807b2b7890047c32bfb9f90371cbc12688819eb/protobuf-6.33.6-py3-none-any.whl", hash = "sha256:77179e006c476e69bf8e8ce866640091ec42e1beb80b213c3900006ecfba6901" },
+]
+
+[[package]]
+name = "pyasn1"
+version = "0.6.5"
+source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
+sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/88/7e/3c0da41061a2021cac7cd524fd57092adbe5b515e8bf9005702e366802e2/pyasn1-0.6.5.tar.gz", hash = "sha256:6b11616a6bcf3a40e635f082bb232fa57b5e0dd7f517bd7ddd69ec3794508a47" }
+wheels = [
+    { url = "https://repo.huaweicloud.com/repository/pypi/packages/19/1f/3eefd5c84c35cae44549ce1c7f7e58f7945b34f5a6bce07a135438522073/pyasn1-0.6.5-py3-none-any.whl", hash = "sha256:4017b0fce125096b8573b39c989fdb1a4b19cf761e683398184550fea0e66587" },
+]
+
+[[package]]
+name = "pyasn1-modules"
+version = "0.4.2"
+source = { registry = "https://repo.huaweicloud.com/repository/pypi/simple" }
+dependencies = [
+    { name = "pyasn1" },
+]
+sdist = { url = "https://repo.huaweicloud.com/repository/pypi/packages/e9/e6/78ebbb10a8c8e4b61a59249394a4a594c1a7af95593dc933a349c8d00964/pyasn1_modules-0.4.2.tar.gz", hash = "sha256:677091de870a80aae844b1ca6134f54652fa2c8c5a52aa396440ac3106e941e6" }
+wheels = [
+    { url = "https://repo.huaweicloud.com/repository/pypi/packages/47/8d/d529b5d697919ba8c11ad626e835d4039be708a35b0d22de83a269a6682c/pyasn1_modules-0.4.2-py3-none-any.whl", hash = "sha256:29253a9207ce32b64c3ac6600edc75368f98473906e8fd1043bd6b5b1de2c14a" },
 ]
 
 [[package]]

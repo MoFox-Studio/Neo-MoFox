@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, Self
 
+import httpx
 import pytest
 
 from src.kernel.llm import ROLE, LLMPayload, LLMRequest, Text, get_inspector
@@ -387,13 +388,22 @@ async def test_native_vector_calls(monkeypatch: pytest.MonkeyPatch, kind: str) -
             model_set=model(),
         )
     else:
+        def handle(request: httpx.Request) -> httpx.Response:
+            """让保留的 HTTP rerank 路线使用离线响应，不再伪造 SDK namespace。"""
+            assert request.url.path.endswith("/rerank")
+            return httpx.Response(200, json=response.model_dump())
+
+        monkeypatch.setattr(
+            "src.kernel.llm.model_client.openai_client.build_httpx_transport",
+            lambda **_: httpx.MockTransport(handle),
+        )
         await client.create_rerank(
             model_name="demo",
             query="query",
             documents=["doc"],
             top_n=1,
             request_name="vector",
-            model_set=model(),
+            model_set=model(extra_params={"trust_env": False}),
         )
     record = get_inspector().get_record(1)
     assert record["status"] == "succeeded"

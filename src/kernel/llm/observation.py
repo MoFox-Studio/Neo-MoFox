@@ -41,8 +41,10 @@ def capture_provider_request(
     payloads: list[LLMPayload] | None = None,
     request_name: str | None = None,
     token_counter: Callable[[list[LLMPayload], str], int] | None = None,
+    summary_only: bool = False,
+    request_only: bool = False,
 ) -> None:
-    """捕获 provider 请求输入，供调试和检查工具使用。"""
+    """捕获 provider 入参，摘要及独立入参采集不接管标准化结果观测。"""
     metadata: dict[str, Any] = {}
     if isinstance(model_set, Mapping):
         provider = model_set.get("api_provider") or model_set.get("base_url")
@@ -58,12 +60,21 @@ def capture_provider_request(
             )
         except Exception:
             pass
+    if summary_only:
+        metadata["capture_kind"] = "summary"
+    elif request_only:
+        metadata["capture_kind"] = "sdk_request"
     try:
         from .request_trace import current_attempt
         trace = current_attempt()
         if trace is not None:
-            # 提供商仅在最终流式参数确定后开始采集。
-            trace.annotate(metadata)
+            if summary_only:
+                trace.capture_summary(api_name, params, metadata=metadata)
+            elif request_only:
+                trace.capture_request(api_name, params, metadata=metadata)
+            else:
+                # 原生提供商仍在最终 SDK 参数确定后调用 start_provider。
+                trace.annotate(metadata)
         else:
             from .request_inspector import capture
             capture(api_name, params, metadata)
@@ -88,7 +99,8 @@ def make_stream_stats_recorder(
 ) -> Callable[[dict[str, Any] | None, float], None]:
     """构造一个在流式请求结束后记录最终统计信息的回调。"""
 
-    def recorder(final_usage: dict[str, Any] | None, final_latency: float) -> None:
+    def recorder(final_usage: dict[str, Any] | None, final_latency: float, *, error: BaseException | None = None) -> None:
+        """记录 final_usage、秒级 final_latency 与真实终态 error，失败不计成功。"""
         record_request_observation(
             RequestObservation(
                 model=model,
@@ -97,10 +109,11 @@ def make_stream_stats_recorder(
                 meta_data=meta_data,
                 latency=final_latency,
                 usage=final_usage,
-                success=True,
+                success=error is None,
                 stream=True,
                 retry_count=retry_count,
                 model_index=model_index,
+                error=error,
             )
         )
 

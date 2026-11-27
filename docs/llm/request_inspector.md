@@ -6,7 +6,7 @@ SDK 包装器、代理客户端或运行时猴子补丁。WebUI 只负责认证�
 
 ## 支持范围
 
-- OpenAI Chat Completions、OpenAI Responses、Anthropic Messages。
+- OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、Gemini Developer API。
 - 兼容 OpenAI 协议的嵌入调用，以及现有 SDK 原生重排序调用。
 - 聊天流式/非流式、框架重试、模型切换、流消费重试、取消及异常。
 - 工具定义、模型返回的调用 ID/名称/参数，以及请求中已有的工具结果。
@@ -90,6 +90,29 @@ result = inspector.clear_snapshot()
 外层超时记为 `failed`，调用方取消记为 `cancelled`。流错误/取消保留已收到的
 部分响应，清理资源不会吞掉原始异常。观测失败不改变业务返回或重试决策，最多
 按尝试记录一条只含错误类型的诊断，不输出异常正文或异常堆栈。
+
+## Gemini 最终 SDK 请求与标准结果
+
+Gemini 在最终生成配置完成、SDK 请求发出前，提交实际 `model`、`contents`、`config` 与
+`stream` 参数，记录 `capture_kind=sdk_request`。活动 Attempt 更新同一记录；标准化响应由
+统一执行层补记，原生 SDK 响应与流事件由适配器记录，不重复归并标准响应。
+
+`contents` 保留 SDK JSON 层级，`rendered.messages` 将 system instruction、文本、思考块、
+原生函数调用/结果及图片 MIME 转为可阅读结构；`rendered.tools` 从 `config.tools[].function_declarations`
+读取工具 schema。`rendered.overview` 展开 `GenerateContentConfig` 的生成参数。遇到新 SDK
+字段仍可从原始参数树查看。
+
+原生 Parts 中的 thought signature 与其他 SDK JSON 字段原样保留；不会额外采集内部
+`provider_state`、客户端配置的 API key、自动认证头或 transport 对象。
+原始响应或流事件按 2 MiB 公共预算保存。记录只在当前进程的有界内存中，
+不脱敏。经 WebUI 鉴权的用户可检查正文，但提示词、工具参数和模型响应仍可能含业务敏感数据；
+不要分享导出的完整记录。
+
+内部 `request_captured` 与 `native_result_observed` 分开：Gemini 入参捕获不接管结果归并，
+统一层继续补记 Gemini 的标准文本、工具、usage 与真实终态。OpenAI、Anthropic、
+Responses 的原生 start 同时接管请求和结果观测，通用层不重复归并。
+`bound` 作为内部兼容读取仅表示原生结果观测权，不再表示请求摘要是否存在。
+跨任务消费和框架多次 attempt 仍分别使用已持有句柄和同一 logical ID。
 
 ## 提前停止消费
 
