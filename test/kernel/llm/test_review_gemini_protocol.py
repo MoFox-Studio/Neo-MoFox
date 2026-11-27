@@ -209,6 +209,69 @@ def test_decode_intermediate_chunk_and_duplicate_validation() -> None:
 
 
 @pytest.mark.parametrize("stream", [False, True])
+async def test_adjacent_unnamed_parts_replay_parallel_same_name_calls_in_order(
+    stream: bool,
+) -> None:
+    """归并后的同名无 ID 调用续轮时保留 Part 与结果关联顺序。"""
+    original_parts = [
+        {"text": "Checking both sources."},
+        {"functionCall": {"name": "lookup", "args": {}}},
+        {"functionCall": {"name": "", "args": {"city": "Tokyo"}}},
+        {"functionCall": {"name": "lookup", "args": {}}},
+        {"functionCall": {"name": "", "args": {"city": "Osaka"}}},
+    ]
+    observed: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """返回拆分的并行工具轮，再返回文本终态。"""
+        observed.append(json.loads(request.content))
+        parts = original_parts if len(observed) == 1 else [{"text": "done"}]
+        return _wire_response(request, parts)
+
+    client = GeminiChatClient(transport=httpx.MockTransport(handler))
+    model = _model()
+    try:
+        response = await _request(model, client).send(stream=stream)
+        assert await response == "Checking both sources."
+        assert [call.name for call in response.call_list] == ["lookup", "lookup"]
+        assert [call.args for call in response.call_list] == [
+            {"city": "Tokyo"},
+            {"city": "Osaka"},
+        ]
+        state = response.provider_state
+        assert state is not None
+        assert state.schema_version == 1
+        assert state.replay_parts_json is not None
+        assert len(json.loads(state.parts_json)) == 5
+        assert len(json.loads(state.replay_parts_json or "[]")) == 3
+
+        for call in reversed(response.call_list):
+            response.add_payload(
+                LLMPayload(
+                    ROLE.TOOL_RESULT,
+                    ToolResult({"result_for": call.args["city"]}, call_id=call.id),
+                )
+            )
+        second = await response.send(stream=stream)
+
+        assert await second == "done"
+        replayed = observed[1]["contents"][1]["parts"]
+        assert replayed[0]["text"] == "Checking both sources."
+        assert [part["functionCall"]["args"] for part in replayed[1:]] == [
+            {"city": "Tokyo"},
+            {"city": "Osaka"},
+        ]
+        function_responses = observed[1]["contents"][2]["parts"]
+        assert [part["functionResponse"]["response"] for part in function_responses] == [
+            {"result_for": "Tokyo"},
+            {"result_for": "Osaka"},
+        ]
+        assert all("id" not in part["functionResponse"] for part in function_responses)
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("client_type", [
     "gemini", "gemini-v2", "aiohttp-gemini", " Gemini ",
     "GEMINI_V2", " aiohttp_GEMINI ", "GOOGLE",

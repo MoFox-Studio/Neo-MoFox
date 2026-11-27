@@ -36,14 +36,26 @@ class ProviderReplayState:
     content_fingerprint: str
     call_ids: tuple[tuple[str, str | None], ...] = ()
     schema_version: int = 1
+    replay_parts_json: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """验证快照形状，错误信息不暴露 Parts 或签名内容。"""
         try:
             parts = json.loads(self.parts_json)
+            replay_parts = (
+                json.loads(self.replay_parts_json)
+                if self.replay_parts_json is not None
+                else None
+            )
         except (ValueError, TypeError) as exc:
             raise ValueError("Invalid provider replay snapshot") from exc
-        if not isinstance(parts, list) or self.schema_version != 1 or len(self.target) != 3:
+        if (
+            not isinstance(parts, list)
+            or type(self.schema_version) is not int
+            or self.schema_version != 1
+            or len(self.target) != 3
+            or (replay_parts is not None and not isinstance(replay_parts, list))
+        ):
             raise ValueError("Unsupported provider replay snapshot")
 
     def matches(self, content: list[Any]) -> bool:

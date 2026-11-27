@@ -227,6 +227,19 @@ class TestTargetIdentity:
         )
         assert identity[2] == "gemini-2.5-pro"
 
+    @pytest.mark.parametrize("extra_params", [None, {"gemini": []}])
+    def test_invalid_endpoint_option_shapes_are_rejected(self, extra_params: Any) -> None:
+        """endpoint 来源解析拒绝非对象的 extra_params 或 Gemini 配置。"""
+        model = {
+            "api_provider": "gemini",
+            "base_url": None,
+            "model_identifier": "gemini-2.5-pro",
+            "extra_params": extra_params,
+        }
+
+        with pytest.raises(LLMConfigurationError):
+            target_identity(model)
+
     def test_api_version_option_is_applied(self) -> None:
         """``extra_params.gemini.api_version`` 决定版本段。"""
         identity = target_identity(
@@ -497,6 +510,345 @@ class TestDecodeResponseToolCalls:
         assert ids == ["gemini_call_0", "gemini_call_1"]
         assert len(set(ids)) == 2
 
+    def test_internal_id_avoids_native_id_from_later_call(self) -> None:
+        """生成的内部 ID 不得占用响应后部出现的原生 ID。"""
+        result = decode_response(
+            build_response(
+                [
+                    types.Part(text="prefix"),
+                    types.Part(function_call=types.FunctionCall(name="generated", args={})),
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            id="gemini_call_1", name="native", args={"ok": True}
+                        )
+                    ),
+                ]
+            ),
+            TARGET,
+        )
+
+        assert result.tool_calls == [
+            {"id": "gemini_call_1_1", "name": "generated", "args": {}},
+            {"id": "gemini_call_1", "name": "native", "args": {"ok": True}},
+        ]
+
+    def test_non_string_function_name_is_rejected(self) -> None:
+        """模型绕过 SDK 类型校验时，非字符串函数名仍作为协议错误拒绝。"""
+        call = types.FunctionCall.model_construct(name=123, args={"value": 1})
+        response = build_response([types.Part(function_call=call)])
+
+        with pytest.warns(UserWarning, match="Pydantic serializer warnings"):
+            with pytest.raises(LLMAPIError, match="Invalid Gemini function call"):
+                decode_response(response, TARGET)
+
+    def test_unnamed_empty_function_fragment_is_rejected(self) -> None:
+        """无名且无参数的 Part 不构成可归并的调用片段。"""
+        response = build_response(
+            [types.Part(function_call=types.FunctionCall(name="", args={}))]
+        )
+
+        with pytest.raises(LLMAPIError, match="Invalid Gemini function call"):
+            decode_response(response, TARGET)
+
+    def test_native_id_reuse_after_complete_call_is_rejected(self) -> None:
+        """已完成调用的原生 ID 不得被无名参数 Part 重用。"""
+        response = build_response(
+            [
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="native-complete", name="lookup", args={"city": "Tokyo"}
+                    )
+                ),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="native-complete", name="", args={"city": "Osaka"}
+                    )
+                ),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Duplicate Gemini function call ID"):
+            decode_response(response, TARGET)
+
+    def test_mismatched_native_fragment_id_is_rejected(self) -> None:
+        """相邻窗口不能覆盖具名调用和参数 Part 不同的原生 ID。"""
+        response = build_response(
+            [
+                types.Part(
+                    function_call=types.FunctionCall(id="native-a", name="lookup", args={})
+                ),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="native-b", name="", args={"city": "Tokyo"}
+                    )
+                ),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Conflicting Gemini function call IDs"):
+            decode_response(response, TARGET)
+
+    def test_adjacent_unnamed_args_assemble_parallel_calls_and_text(self) -> None:
+        """紧邻无名完整参数对象补全各自调用，正文和原始回放都保留。"""
+        response = build_response(
+            [
+                types.Part(text="Checking both sources."),
+                types.Part(function_call=types.FunctionCall(name="lookup", args={})),
+                types.Part(function_call=types.FunctionCall(name="", args={"city": "Tokyo"})),
+                types.Part(function_call=types.FunctionCall(name="lookup", args={})),
+                types.Part(function_call=types.FunctionCall(name="", args={"city": "Osaka"})),
+            ]
+        )
+
+        result = decode_response(response, TARGET)
+
+        assert result.message == "Checking both sources."
+        assert result.tool_calls is not None
+        assert [call["name"] for call in result.tool_calls] == ["lookup", "lookup"]
+        assert [call["args"] for call in result.tool_calls] == [
+            {"city": "Tokyo"},
+            {"city": "Osaka"},
+        ]
+        assert len({call["id"] for call in result.tool_calls}) == 2
+        assert result.provider_state.call_ids == tuple(
+            (call["id"], None) for call in result.tool_calls
+        )
+        assert result.provider_state.schema_version == 1
+        assert result.provider_state.replay_parts_json is not None
+
+        raw_parts = [
+            types.Part.model_validate(part)
+            for part in json.loads(result.provider_state.parts_json)
+        ]
+        replay_parts = [
+            types.Part.model_validate(part)
+            for part in json.loads(result.provider_state.replay_parts_json or "[]")
+        ]
+        assert len(raw_parts) == 5
+        assert [part.function_call.name for part in raw_parts[1:]] == [
+            "lookup", "", "lookup", ""
+        ]
+        assert len(replay_parts) == 3
+        assert replay_parts[0].text == "Checking both sources."
+        assert [part.function_call.args for part in replay_parts[1:]] == [
+            {"city": "Tokyo"},
+            {"city": "Osaka"},
+        ]
+
+    def test_native_ids_disambiguate_interleaved_fragments(self) -> None:
+        """原生 ID 可在多个待配调用间交错时唯一识别参数归属。"""
+        response = build_response(
+            [
+                types.Part(function_call=types.FunctionCall(id="native-a", name="lookup", args={})),
+                types.Part(function_call=types.FunctionCall(id="native-b", name="lookup", args={})),
+                types.Part(function_call=types.FunctionCall(id="native-a", name="", args={"city": "Tokyo"})),
+                types.Part(function_call=types.FunctionCall(id="native-b", name="", args={"city": "Osaka"})),
+            ]
+        )
+
+        result = decode_response(response, TARGET)
+
+        assert result.tool_calls is not None
+        assert [call["id"] for call in result.tool_calls] == ["native-a", "native-b"]
+        assert [call["args"] for call in result.tool_calls] == [
+            {"city": "Tokyo"},
+            {"city": "Osaka"},
+        ]
+        assert result.provider_state.call_ids == (
+            ("native-a", "native-a"),
+            ("native-b", "native-b"),
+        )
+        assert result.provider_state.schema_version == 1
+        assert result.provider_state.replay_parts_json is not None
+        replay_parts = [
+            types.Part.model_validate(part)
+            for part in json.loads(result.provider_state.replay_parts_json or "[]")
+        ]
+        assert [part.function_call.id for part in replay_parts] == ["native-a", "native-b"]
+        assert [part.function_call.args for part in replay_parts] == [
+            {"city": "Tokyo"},
+            {"city": "Osaka"},
+        ]
+
+    def test_unnamed_args_are_rejected_when_multiple_calls_are_pending(self) -> None:
+        """无 ID 的交错片段不得按顺序猜测归属。"""
+        response = build_response(
+            [
+                types.Part(function_call=types.FunctionCall(name="a", args={})),
+                types.Part(function_call=types.FunctionCall(name="b", args={})),
+                types.Part(function_call=types.FunctionCall(name="", args={"value": 1})),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Ambiguous Gemini function call fragments"):
+            decode_response(response, TARGET)
+
+    def test_text_breaks_unnamed_args_adjacency(self) -> None:
+        """文本打断无 ID 配对窗口后，孤立参数必须拒绝而非错配。"""
+        response = build_response(
+            [
+                types.Part(function_call=types.FunctionCall(name="lookup", args={})),
+                types.Part(text="interleaved text"),
+                types.Part(function_call=types.FunctionCall(name="", args={"city": "Tokyo"})),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Unmatched Gemini function call arguments"):
+            decode_response(response, TARGET)
+
+    def test_complete_call_closes_idless_adjacency_window(self) -> None:
+        """另一完整具名调用会关闭旧窗口，后续参数不得补给旧调用。"""
+        response = build_response(
+            [
+                types.Part(function_call=types.FunctionCall(name="first", args={})),
+                types.Part(function_call=types.FunctionCall(name="complete", args={"ready": True})),
+                types.Part(function_call=types.FunctionCall(name="", args={"value": 1})),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Unmatched Gemini function call arguments"):
+            decode_response(response, TARGET)
+
+    def test_native_id_selects_matching_call_among_mixed_pending_fragments(self) -> None:
+        """带原生 ID 的参数优先归入 ID 匹配项，不消耗无 ID 待配调用。"""
+        result = decode_response(
+            build_response(
+                [
+                    types.Part(function_call=types.FunctionCall(name="idless", args={})),
+                    types.Part(function_call=types.FunctionCall(id="native-b", name="identified", args={})),
+                    types.Part(function_call=types.FunctionCall(id="native-b", name="", args={"b": 2})),
+                ]
+            ),
+            TARGET,
+        )
+
+        assert result.tool_calls == [
+            {"id": "gemini_call_0", "name": "idless", "args": {}},
+            {"id": "native-b", "name": "identified", "args": {"b": 2}},
+        ]
+        assert result.provider_state.call_ids == (
+            ("gemini_call_0", None),
+            ("native-b", "native-b"),
+        )
+
+    def test_id_matched_fragment_breaks_idless_adjacency(self) -> None:
+        """原生 ID 调用 Part 会打断此前无 ID 调用的相邻配对窗口。"""
+        response = build_response(
+            [
+                types.Part(function_call=types.FunctionCall(name="idless", args={})),
+                types.Part(
+                    function_call=types.FunctionCall(id="native-b", name="identified", args={})
+                ),
+                types.Part(
+                    function_call=types.FunctionCall(id="native-b", name="", args={"b": 2})
+                ),
+                types.Part(function_call=types.FunctionCall(name="", args={"a": 1})),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Unmatched Gemini function call arguments"):
+            decode_response(response, TARGET)
+
+    def test_mixed_id_fragments_are_rejected_when_native_id_is_unmatched(self) -> None:
+        """混合 ID 的待配调用遇到未匹配 ID 时不得按顺序猜配。"""
+        response = build_response(
+            [
+                types.Part(function_call=types.FunctionCall(name="idless", args={})),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="native-existing", name="identified", args={}
+                    )
+                ),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="native-unmatched", name="", args={"city": "Tokyo"}
+                    )
+                ),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Conflicting Gemini function call IDs"):
+            decode_response(response, TARGET)
+
+    def test_unknown_native_id_is_rejected_without_pending_candidate(self) -> None:
+        """无原生 ID 匹配项且无相邻候选时报告孤立 ID 参数。"""
+        response = build_response(
+            [
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="native-orphan", name="", args={"value": 1}
+                    )
+                )
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Unmatched Gemini function call ID"):
+            decode_response(response, TARGET)
+
+    def test_unknown_native_id_is_rejected_when_idless_candidates_are_ambiguous(self) -> None:
+        """未知原生 ID 不得从多个待配无 ID 调用中任取一个。"""
+        response = build_response(
+            [
+                types.Part(function_call=types.FunctionCall(name="first", args={})),
+                types.Part(function_call=types.FunctionCall(name="second", args={})),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="native-orphan", name="", args={"value": 1}
+                    )
+                ),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Ambiguous Gemini function call fragments"):
+            decode_response(response, TARGET)
+
+    def test_unknown_native_id_never_falls_back_to_idless_adjacency(self) -> None:
+        """未知原生 ID 参数不能回退为唯一无 ID 邻接调用的候选。"""
+        response = build_response(
+            [
+                types.Part(function_call=types.FunctionCall(name="idless", args={})),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id="native-unmatched", name="", args={"value": 1}
+                    )
+                ),
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Unmatched Gemini function call ID"):
+            decode_response(response, TARGET)
+
+    def test_empty_args_call_without_fragment_remains_zero_argument_call(self) -> None:
+        """没有参数续片的具名空对象调用仍是合法零参数调用。"""
+        result = decode_response(
+            build_response([types.Part(function_call=types.FunctionCall(name="ping", args={}))]),
+            TARGET,
+        )
+
+        assert result.tool_calls == [
+            {"id": "gemini_call_0", "name": "ping", "args": {}}
+        ]
+        assert result.provider_state.schema_version == 1
+        assert result.provider_state.replay_parts_json is None
+
+    @pytest.mark.parametrize("signature_index", [0, 1])
+    def test_signed_fragment_pair_is_rejected_without_roundtrip_contract(
+        self, signature_index: int,
+    ) -> None:
+        """未验证跨 Part 签名续轮契约前，任一配对 Part 带签名都必须失败。"""
+        parts = [
+            types.Part(function_call=types.FunctionCall(name="lookup", args={})),
+            types.Part(function_call=types.FunctionCall(name="", args={"city": "Tokyo"})),
+        ]
+        parts[signature_index] = parts[signature_index].model_copy(
+            update={"thought_signature": b"signature"}
+        )
+
+        with pytest.raises(
+            LLMAPIError, match="Signed Gemini function call fragments cannot be merged"
+        ):
+            decode_response(build_response(parts), TARGET)
+
     def test_function_call_without_name_is_rejected(self) -> None:
         """缺少函数名的调用属于协议错误。"""
         response = build_response(
@@ -533,6 +885,21 @@ class TestDecodeResponseToolCalls:
             ]
         )
         with pytest.raises(LLMAPIError):
+            decode_response(response, TARGET)
+
+    def test_will_continue_function_call_is_rejected(self) -> None:
+        """供应商标记仍会继续的函数参数不得作为完整调用发布。"""
+        response = build_response(
+            [
+                types.Part(
+                    function_call=types.FunctionCall(
+                        name="t", args={"a": 1}, will_continue=True
+                    )
+                )
+            ]
+        )
+
+        with pytest.raises(LLMAPIError, match="Incomplete Gemini function arguments"):
             decode_response(response, TARGET)
 
     def test_function_call_under_max_tokens_is_rejected(self) -> None:
@@ -869,6 +1236,14 @@ class TestEncodePayloadsRoles:
         assert system[0].text == "你是助手"
         assert tools == []
 
+    def test_empty_system_text_is_omitted(self) -> None:
+        """空系统文本不转换为未初始化 Part。"""
+        _contents, system, _tools = encode_payloads(
+            [LLMPayload(ROLE.SYSTEM, Text(""))], TARGET, []
+        )
+
+        assert system == []
+
     def test_system_requires_text(self) -> None:
         """SYSTEM 指令只接受文本。"""
         image = Image(base64.b64encode(base64.b64decode(PNG_BASE64)).decode())
@@ -884,6 +1259,19 @@ class TestEncodePayloadsRoles:
         assert len(contents) == 1
         assert contents[0].role == "user"
         assert contents[0].parts[0].text == "hi"
+
+    def test_empty_user_and_assistant_text_are_omitted(self) -> None:
+        """空 user/assistant 文本不生成空 Part。"""
+        contents, _system, _tools = encode_payloads(
+            [
+                LLMPayload(ROLE.USER, Text("")),
+                LLMPayload(ROLE.ASSISTANT, Text("")),
+            ],
+            TARGET,
+            [],
+        )
+
+        assert contents == []
 
     def test_assistant_text_becomes_model_content(self) -> None:
         """ASSISTANT 文本映射为 model 角色。"""

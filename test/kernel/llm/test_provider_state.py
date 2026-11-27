@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -36,7 +37,8 @@ def make_state(
     content: list[object] | None = None,
     *,
     parts_json: str = PARTS_JSON,
-    schema_version: int = 1,
+    schema_version: object = 1,
+    replay_parts_json: str | None = None,
     target: tuple[str, str, str] = TARGET,
 ) -> ProviderReplayState:
     """构造一个用于测试的 ``ProviderReplayState``。
@@ -45,19 +47,23 @@ def make_state(
         content: 用于计算 ``content_fingerprint`` 的标准内容视图。
         parts_json: 供应商 part 的 JSON 快照。
         schema_version: 快照结构版本号。
+        replay_parts_json: 可选规范回放 Part 快照。
         target: ``(api_provider, endpoint, model_identifier)`` 三元组。
 
     Returns:
         构造好的 ``ProviderReplayState`` 实例。
     """
     parts = content if content is not None else [Text(text="hello")]
-    return ProviderReplayState(
-        provider="gemini",
-        target=target,
-        parts_json=parts_json,
-        content_fingerprint=payload_fingerprint(parts),
-        schema_version=schema_version,
-    )
+    state_fields: dict[str, Any] = {
+        "provider": "gemini",
+        "target": target,
+        "parts_json": parts_json,
+        "content_fingerprint": payload_fingerprint(parts),
+        "schema_version": schema_version,
+    }
+    if replay_parts_json is not None:
+        state_fields["replay_parts_json"] = replay_parts_json
+    return ProviderReplayState(**state_fields)
 
 
 # ============================================================================
@@ -111,6 +117,23 @@ class TestProviderReplayStateRepr:
         )
         assert state.call_ids == (("call_1", "native_1"),)
 
+    def test_legacy_snapshot_without_replay_parts_keeps_original_version(self) -> None:
+        """旧快照不含规范回放 Parts，仍使用原有版本号。"""
+        state = make_state()
+
+        assert state.schema_version == 1
+        assert state.replay_parts_json is None
+
+    def test_canonical_replay_snapshot_keeps_original_version(self) -> None:
+        """新增规范回放字段不把运行时归并事实编码成版本号。"""
+        replay = json.dumps([{"text": "canonical"}])
+        state = make_state(replay_parts_json=replay)
+
+        assert state.schema_version == 1
+        assert state.replay_parts_json == replay
+        assert replay not in repr(state)
+        assert "replay_parts_json" not in repr(state)
+
 
 class TestProviderReplayStateValidation:
     """``ProviderReplayState`` 的非法输入拒绝行为。"""
@@ -125,10 +148,21 @@ class TestProviderReplayStateValidation:
         with pytest.raises(ValueError):
             make_state(parts_json='{"text": "hello"}')
 
-    def test_unsupported_schema_version_rejected(self) -> None:
-        """未知结构版本必须被拒绝。"""
+    @pytest.mark.parametrize("schema_version", [2, True, 1.0, "1"])
+    def test_unsupported_schema_version_or_type_rejected(self, schema_version: object) -> None:
+        """未知版本及 bool/float/str 伪装的版本值都必须被拒绝。"""
         with pytest.raises(ValueError):
-            make_state(schema_version=2)
+            make_state(schema_version=schema_version)
+
+    def test_invalid_canonical_replay_json_rejected(self) -> None:
+        """非法规范回放 JSON 必须被拒绝且不泄露其内容。"""
+        with pytest.raises(ValueError, match="Invalid provider replay snapshot"):
+            make_state(replay_parts_json="{secret")
+
+    def test_canonical_replay_parts_must_be_a_list(self) -> None:
+        """规范回放快照必须是 JSON 数组。"""
+        with pytest.raises(ValueError):
+            make_state(replay_parts_json='{"text": "x"}')
 
     def test_invalid_target_length_rejected(self) -> None:
         """target 必须是三元组。"""
@@ -174,6 +208,13 @@ class TestPayloadFingerprint:
         first = payload_fingerprint([ReasoningText(text="think", signature="sig-a")])
         second = payload_fingerprint([ReasoningText(text="think", signature="sig-b")])
         assert first == second
+
+    def test_adjacent_reasoning_parts_are_combined_in_fingerprint(self) -> None:
+        """相邻 reasoning 片段按语义文本合并计算指纹。"""
+        first = [ReasoningText(text="think"), ReasoningText(text="ing")]
+        second = [ReasoningText(text="thinking")]
+
+        assert payload_fingerprint(first) == payload_fingerprint(second)
 
     def test_order_matters(self) -> None:
         """内容顺序变化必须改变指纹。"""

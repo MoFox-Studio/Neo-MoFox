@@ -97,7 +97,7 @@ model = {
 | USER / ASSISTANT `Text` | `Content(role="user" / "model")` 的文本 Part |
 | `Image` | 解码现有 base64 内容并用 Pillow 识别 MIME，编码 inline bytes |
 | `LLMUsable.to_schema()` / ROLE.TOOL | 转 `FunctionDeclaration(parameters_json_schema=...)`；保留项目 schema 规范化与 reason 参数注入，冲突的同名声明拒绝 |
-| `ToolCall` | `function_call`；要求对象参数与稳定内部 ID |
+| `ToolCall` | 将 candidate 内可唯一关联的 `function_call` Part 归一成逻辑调用；要求对象参数与稳定内部 ID |
 | `ToolResult` | `function_response`；按历史 call ID 找名称及原生 ID，无匹配则 `LLMContextError` |
 | `ReasoningText` | 返回的 thought 文本可读；没有对应 Gemini replay state 的外来 reasoning 不作为签名思考重新发送 |
 | `Audio` / `Video` / 通用 `File` 等其他输入 | 明确 `LLMConfigurationError`，不转字符串、不静默丢弃 |
@@ -107,6 +107,8 @@ model = {
 非流响应逐 Part 读取文本、thought 和工具调用；不依赖 SDK 的 `.text` 快捷视图。流式先预取首 chunk，使真实建连纳入 attempt 超时，再输出文本/推理增量；**工具调用只在流正常结束并验证参数完整后发布**，不提供可执行的半成品参数增量。消费完成后再读取 `response.call_list`、`stop_reason` 和 usage。
 
 内部工具 ID 在单份响应内保证唯一，省略原生 ID 的调用会避让整份响应中已有的原生 ID；原生 ID（包括省略值）单独保存用于工具结果回传。重复非空原生 ID 无法无歧义续接时明确拒绝，不会把两套工具参数按同一 ID 归并。
+
+同一 candidate 的函数调用 Part 会按原生调用 ID 归并。只有在缺少 ID 时，才兼容唯一且紧邻的“具名 `args={}` Part → 无名、非空、完整参数 Part”；正文或其他 Part 会关闭这个无 ID 配对窗口。并行交错时若没有可靠 ID，适配器拒绝猜配。原始 Part 继续保存在快照中；无签名的组装调用另存规范回放 Part，带签名的跨 Part 组装则 fail-closed，完整单 Part 签名调用仍按原样回放。同名且无原生 ID 的工具结果按原始调用顺序回传。
 
 `STOP` 与文本 `MAX_TOKENS` 可返回；后者表示截断。截断工具参数、`partial_args` / `will_continue`、未知或缺失结束原因拒绝，不执行工具；安全阻断转为 `LLMContentFilterError`，无候选等协议异常转为 `LLMAPIError`。usage 分开记录输出与 thought token，不将 reasoning 重复计入 completion。
 

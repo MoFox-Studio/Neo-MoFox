@@ -211,6 +211,140 @@ def _is_empty_gemini_part(part: types.Part) -> bool:
     return not fields
 
 
+@dataclass(slots=True)
+class _LogicalFunctionCall:
+    """在单个 candidate 内收集一项逻辑调用及其原始 Part 位置。"""
+
+    first_index: int
+    call: types.FunctionCall
+    has_signature: bool
+
+
+def _assemble_function_call_parts(
+    parts: list[types.Part],
+    finish: str | None,
+) -> tuple[list[_LogicalFunctionCall], list[types.Part], bool]:
+    """组装可唯一关联的 Gemini 调用片段，并保留独立回放视图。
+
+    无 ID 的兼容只接受紧邻的具名空 ``args`` 调用和无名非空完整参数对象。
+    多个待配调用时必须以原生调用 ID 消歧；不会根据候选/Part 索引猜测身份。
+
+    Args:
+        parts: 首个 candidate 的原始有序 Part。
+        finish: Gemini candidate 的终止原因。
+
+    Returns:
+        按首次出现顺序排列的逻辑调用、回放用 Part 顺序，以及是否生成规范回放视图。
+
+    Raises:
+        LLMAPIError: 调用片段无法唯一关联、字段冲突或当前不支持参数增量协议。
+    """
+    groups: list[_LogicalFunctionCall] = []
+    pending_by_id: dict[str, _LogicalFunctionCall] = {}
+    native_id_owners: dict[str, _LogicalFunctionCall] = {}
+    adjacent_pending: list[_LogicalFunctionCall] = []
+    replacement_by_index: dict[int, types.Part] = {}
+    removed_indices: set[int] = set()
+
+    for index, part in enumerate(parts):
+        call = part.function_call
+        if call is None:
+            # 非调用 Part 会关闭仅限无 ID 的相邻配对窗口；ID 匹配仍有效。
+            adjacent_pending.clear()
+            continue
+        if call.partial_args or call.will_continue or finish == "MAX_TOKENS":
+            raise LLMAPIError("Incomplete Gemini function arguments", status_code=502)
+        if call.name is not None and not isinstance(call.name, str):
+            raise LLMAPIError("Invalid Gemini function call", status_code=502)
+        if not isinstance(call.args, dict):
+            raise LLMAPIError("Invalid Gemini function call", status_code=502)
+
+        if call.name:
+            if call.id:
+                adjacent_pending.clear()
+            if call.id and call.id in native_id_owners:
+                raise LLMAPIError("Duplicate Gemini function call ID", status_code=502)
+            group = _LogicalFunctionCall(
+                first_index=index,
+                call=call,
+                has_signature=part.thought_signature is not None,
+            )
+            groups.append(group)
+            if call.id:
+                native_id_owners[call.id] = group
+            if call.args:
+                # 完整调用关闭无 ID 相邻窗口；此前零参数调用仍有效。
+                adjacent_pending.clear()
+            else:
+                if call.id:
+                    pending_by_id[call.id] = group
+                adjacent_pending.append(group)
+            continue
+
+        if not call.args:
+            raise LLMAPIError("Invalid Gemini function call", status_code=502)
+
+        previous_adjacent = list(adjacent_pending)
+        if call.id:
+            adjacent_pending.clear()
+        group = pending_by_id.get(call.id) if call.id else None
+        if group is None:
+            if call.id and call.id in native_id_owners:
+                raise LLMAPIError("Duplicate Gemini function call ID", status_code=502)
+            if call.id and previous_adjacent:
+                if len(previous_adjacent) > 1:
+                    raise LLMAPIError(
+                        "Ambiguous Gemini function call fragments", status_code=502
+                    )
+                previous_group = previous_adjacent[0]
+                if previous_group.call.id:
+                    raise LLMAPIError(
+                        "Conflicting Gemini function call IDs", status_code=502
+                    )
+                raise LLMAPIError("Unmatched Gemini function call ID", status_code=502)
+            if len(adjacent_pending) > 1:
+                raise LLMAPIError(
+                    "Ambiguous Gemini function call fragments", status_code=502
+                )
+            if len(adjacent_pending) == 1:
+                group = adjacent_pending[0]
+            elif call.id:
+                raise LLMAPIError("Unmatched Gemini function call ID", status_code=502)
+            else:
+                raise LLMAPIError(
+                    "Unmatched Gemini function call arguments", status_code=502
+                )
+
+        if group.has_signature or part.thought_signature is not None:
+            raise LLMAPIError(
+                "Signed Gemini function call fragments cannot be merged",
+                status_code=502,
+            )
+        native_id = group.call.id or call.id
+        group.call = types.FunctionCall(
+            id=native_id,
+            name=group.call.name,
+            args=call.args,
+        )
+        if call.id:
+            native_id_owners[call.id] = group
+        if group.call.id:
+            pending_by_id.pop(group.call.id, None)
+        adjacent_pending[:] = [pending for pending in adjacent_pending if pending is not group]
+
+        replacement_by_index[group.first_index] = parts[group.first_index].model_copy(
+            update={"function_call": group.call}
+        )
+        removed_indices.add(index)
+
+    replay_parts = [
+        replacement_by_index.get(index, part)
+        for index, part in enumerate(parts)
+        if index not in removed_indices
+    ]
+    return groups, replay_parts, bool(replacement_by_index)
+
+
 def encode_payloads(
     payloads: list[LLMPayload],
     target: tuple[str, str, str],
@@ -220,7 +354,8 @@ def encode_payloads(
 
     Args:
         payloads: 按对话顺序排列的消息；系统文本单独收集，签名消息原样回放，
-            工具结果通过内部调用 ID 关联原生调用 ID（原生 ID 可以为 None）。
+            工具结果通过内部调用 ID 关联原生调用 ID（原生 ID 可以为 None）；同名无
+            原生 ID 的并行调用结果按原始调用顺序写回。
         target: 当前 provider、规范端点及 API 版本、模型标识组成的来源锁；
             必须与签名消息保存的来源一致，不包含凭据。
         tools: 具有 to_schema 接口的 MoFox 工具声明，与消息中的工具声明合并去重；
@@ -239,6 +374,36 @@ def encode_payloads(
     system: list[types.Part] = []
     declarations: dict[str, types.FunctionDeclaration] = {}
     calls: dict[str, tuple[str, str | None]] = {}
+    call_order: list[str] = []
+    pending_tool_results: list[tuple[str | None, types.Part]] = []
+
+    def flush_tool_results() -> None:
+        """仅为同名且无原生 ID 的调用保持原始请求顺序。"""
+        if not pending_tool_results:
+            return
+        order = {call_id: index for index, call_id in enumerate(call_order)}
+        ordered_results = list(pending_tool_results)
+        ambiguous_names: dict[str, list[int]] = {}
+        for index, (call_id, _part) in enumerate(ordered_results):
+            call_info = calls.get(call_id or "")
+            if call_info is not None and call_info[1] is None:
+                ambiguous_names.setdefault(call_info[0], []).append(index)
+        for indexes in ambiguous_names.values():
+            if len(indexes) < 2:
+                continue
+            values = sorted(
+                (ordered_results[index] for index in indexes),
+                key=lambda result: order.get(result[0] or "", len(order)),
+            )
+            for index, value in zip(indexes, values):
+                ordered_results[index] = value
+        contents.append(
+            types.Content(
+                role="user",
+                parts=[part for _, part in ordered_results],
+            )
+        )
+        pending_tool_results.clear()
 
     def add_tool(tool: Any) -> None:
         """转换并按名称收集工具声明，不把 Python 可调用对象交给 SDK 执行。
@@ -271,6 +436,10 @@ def encode_payloads(
     for tool in tools:
         add_tool(tool)
     for payload in payloads:
+        if payload.role != ROLE.TOOL_RESULT:
+            flush_tool_results()
+        if payload.role == ROLE.ASSISTANT:
+            call_order = []
         if payload.role == ROLE.TOOL:
             for tool in payload.content:
                 add_tool(tool)
@@ -288,8 +457,9 @@ def encode_payloads(
                 raise LLMContextError(
                     "Gemini signed content was changed or belongs to another target"
                 )
+            replay_json = state.replay_parts_json or state.parts_json
             parts: list[types.Part] = []
-            for item in json.loads(state.parts_json):
+            for item in json.loads(replay_json):
                 part = types.Part.model_validate(item)
                 if not _is_empty_gemini_part(part):
                     parts.append(part)
@@ -297,6 +467,7 @@ def encode_payloads(
             for part in payload.content:
                 if isinstance(part, ToolCall) and part.id:
                     calls[part.id] = (part.name, native_ids.get(part.id))
+                    call_order.append(part.id)
             contents.append(types.Content(role="model", parts=parts))
             continue
         parts: list[types.Part] = []
@@ -314,6 +485,7 @@ def encode_payloads(
                         "Gemini function call needs object arguments and a stable ID"
                     )
                 calls[part.id] = (part.name, part.id)
+                call_order.append(part.id)
                 parts.append(
                     types.Part(
                         function_call=types.FunctionCall(
@@ -332,15 +504,19 @@ def encode_payloads(
                     if isinstance(part.value, dict)
                     else {"result": part.to_text()}
                 )
-                parts.append(
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            name=name,
-                            id=native_id,
-                            response=value,
-                        )
+                pending_tool_results.append(
+                    (
+                        part.call_id,
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                name=name,
+                                id=native_id,
+                                response=value,
+                            )
+                        ),
                     )
                 )
+                continue
             elif isinstance(part, Image):
                 try:
                     data = base64.b64decode(part.value, validate=True)
@@ -370,6 +546,7 @@ def encode_payloads(
                     parts=parts,
                 )
             )
+    flush_tool_results()
     declared = (
         [types.Tool(function_declarations=list(declarations.values()))]
         if declarations
@@ -450,8 +627,8 @@ def decode_response(
 
     Returns:
         包含文本、思考片段、工具调用、用量及终止原因的 ModelClientResult。
-        provider_state 保存原始 Part 顺序、签名字节、标准内容指纹，以及唯一
-        内部调用 ID 到原生 ID（包括 None）的映射；函数不持有网络资源。
+        provider_state 保存原始 Part、可选规范回放 Part、签名字节、标准内容指纹，
+        以及唯一内部调用 ID 到原生 ID（包括 None）的映射；函数不持有网络资源。
 
     Raises:
         LLMContentFilterError: 提示词或候选结果被供应商安全规则拦截。
@@ -483,20 +660,7 @@ def decode_response(
         )
     parts = list(candidate.content.parts or []) if candidate.content else []
     parts = [part for part in parts if not _is_empty_gemini_part(part)]
-    texts: list[str] = []
-    thoughts: list[ReasoningText] = []
-    tool_calls: list[dict[str, Any]] = []
-    mapping: list[tuple[str, str | None]] = []
-    # 先预留所有非空原生 ID，避免前面的省 ID 调用占用后面的原生身份。
-    reserved_ids: set[str] = set()
     for part in parts:
-        if part.function_call and part.function_call.id:
-            native_id = part.function_call.id
-            if native_id in reserved_ids:
-                raise LLMAPIError("Duplicate Gemini function call ID", status_code=502)
-            reserved_ids.add(native_id)
-    used_ids = set(reserved_ids)
-    for index, part in enumerate(parts):
         unsupported = set(part.model_dump(exclude_none=True)) - {
             "text",
             "thought",
@@ -505,27 +669,35 @@ def decode_response(
         }
         if unsupported:
             raise LLMAPIError("Unsupported Gemini response Part", status_code=422)
+
+    logical_calls, replay_parts, canonicalized_replay = _assemble_function_call_parts(
+        parts, finish
+    )
+    texts: list[str] = []
+    thoughts: list[ReasoningText] = []
+    for part in parts:
         if part.text:
             if part.thought:
                 thoughts.append(ReasoningText(part.text))
             else:
                 texts.append(part.text)
-        if part.function_call:
-            call = part.function_call
-            if call.partial_args or call.will_continue or finish == "MAX_TOKENS":
-                raise LLMAPIError("Incomplete Gemini function arguments", status_code=502)
-            if not call.name or not isinstance(call.args, dict):
-                raise LLMAPIError("Invalid Gemini function call", status_code=502)
-            internal_id = call.id
-            if not internal_id:
-                internal_id = f"gemini_call_{index}"
-                suffix = 1
-                while internal_id in used_ids:
-                    internal_id = f"gemini_call_{index}_{suffix}"
-                    suffix += 1
-                used_ids.add(internal_id)
-            tool_calls.append({"id": internal_id, "name": call.name, "args": call.args})
-            mapping.append((internal_id, call.id))
+
+    tool_calls: list[dict[str, Any]] = []
+    mapping: list[tuple[str, str | None]] = []
+    reserved_ids = {group.call.id for group in logical_calls if group.call.id}
+    used_ids = set(reserved_ids)
+    for group in logical_calls:
+        call = group.call
+        internal_id = call.id
+        if not internal_id:
+            internal_id = f"gemini_call_{group.first_index}"
+            suffix = 1
+            while internal_id in used_ids:
+                internal_id = f"gemini_call_{group.first_index}_{suffix}"
+                suffix += 1
+            used_ids.add(internal_id)
+        tool_calls.append({"id": internal_id, "name": call.name, "args": call.args})
+        mapping.append((internal_id, call.id))
     if (
         require_finish
         and not texts
@@ -544,12 +716,23 @@ def decode_response(
     if not standard:
         # 与公开响应 to_payload() 的空占位一致；仅签名的原生 Part 仍原样保存。
         standard.append(Text(""))
+    raw_parts_json = json.dumps(
+        [part.model_dump(mode="json", exclude_none=True) for part in parts]
+    )
     replay = ProviderReplayState(
         provider="gemini",
         target=target,
-        parts_json=json.dumps([p.model_dump(mode="json", exclude_none=True) for p in parts]),
+        parts_json=raw_parts_json,
         content_fingerprint=payload_fingerprint(standard),
         call_ids=tuple(mapping),
+        schema_version=1,
+        replay_parts_json=(
+            json.dumps(
+                [part.model_dump(mode="json", exclude_none=True) for part in replay_parts]
+            )
+            if canonicalized_replay
+            else None
+        ),
     )
     return ModelClientResult(
         message=message,
